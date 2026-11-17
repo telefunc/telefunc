@@ -1,8 +1,9 @@
-export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload, isWant }
+export { parseJsonPayload, parsePreparePayload, parseReconcilePayload, parseBarrierPayload, isWant, isCallWant }
 export type {
   ReconcileOpenEntry,
   AttachState,
   Want,
+  CallWant,
   ReconcilePayload,
   BarrierPayload,
   PreparePayload,
@@ -20,6 +21,9 @@ import { hasProp } from '../../utils/hasProp.js'
 /** What a page wants to hear on a broadcast: `version` counts the changes the page made to it, so the server applies a
  *  want only over an older one, whichever way each came. */
 type Want = { version: number; text: boolean; binary: boolean }
+
+/** A want a telefunction call carries, for the broadcast `channel` names. */
+type CallWant = Want & { channel: string }
 
 type ReconcileOpenEntry = {
   id: string
@@ -126,6 +130,10 @@ function assertOpenList(open: unknown): asserts open is ReconcileOpenEntry[] {
     assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'open entry probe')
     assertProtocol(entry.want === undefined || isWant(entry.want), 'open entry want')
   }
+}
+
+function isCallWant(value: unknown): value is CallWant {
+  return isWant(value) && hasProp(value, 'channel', 'string')
 }
 
 function isWant(value: unknown): value is Want {

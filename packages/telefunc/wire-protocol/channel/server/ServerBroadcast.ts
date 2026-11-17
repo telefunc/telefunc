@@ -102,6 +102,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
+  /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
+   *  those its page still wants. */
+  private beforeAttach: PublishBody[] = []
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -235,10 +238,27 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private forwardPublish(body: PublishBody): void {
     if (this.overflowed !== null) return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    if (this.lastPeer === null) return this.holdBeforeAttach(body)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
     this.lastPeer!.sendPublish(body)
     const most = maxPendingBytesOf()
     if (this.heldBytes > most) this.shed(most, this.owner)
+  }
+
+  /** Holds a publish for the page's first attach: a lossy one only the newest; past `maxPendingBytes`, none, and the
+   *  page ends as one that missed them. */
+  private holdBeforeAttach(body: PublishBody): void {
+    if (this.lossy) this.dropBeforeAttach()
+    this.beforeAttach.push(body)
+    hold(this, body)
+    if (this.heldBytes <= maxPendingBytesOf()) return
+    this.dropBeforeAttach()
+    this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+  }
+
+  private dropBeforeAttach(): void {
+    for (const body of this.beforeAttach) letGo(this, body)
+    this.beforeAttach = []
   }
 
   /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
@@ -274,6 +294,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
   protected override dropUnhanded(): void {
     if (this._phase === 'ended') return
+    this.dropBeforeAttach()
     if (this.peer) this.peer.dropUnhanded()
     else this._replayBuffer?.dropNewestPublishes(this.unhanded())
   }
@@ -356,21 +377,23 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Tells the page its want is in effect: at once where its backend delivers what any server publishes to the key
    *  already, else once it does. A page that never asked for one has nothing to confirm. */
-  override _confirmWant(): void {
-    const want = this.pageWant
-    if (want.version === 0) return
+  override _confirmWant(): Promise<unknown> | undefined {
+    const { version, text, binary } = this.pageWant
+    if (version === 0) return undefined
     const adapter = this.broadcastAdapter()
-    const listening = [
-      want.text && adapter.listening?.(this.key, false),
-      want.binary && adapter.listening?.(this.key, true),
-    ]
-    if (listening.some((each) => each)) void this.confirmWhenListening(want.version, listening)
-    else this.peer?.sendWanted(want.version)
+    const pending = [text && adapter.listening?.(this.key, false), binary && adapter.listening?.(this.key, true)]
+    if (!pending.some((each) => each)) {
+      this.peer?.sendWanted(version)
+      return undefined
+    }
+    const listening = Promise.all(pending)
+    void this.confirmWhenListening(version, listening)
+    return listening
   }
 
-  private async confirmWhenListening(version: number, listening: unknown[]): Promise<void> {
+  private async confirmWhenListening(version: number, listening: Promise<unknown>): Promise<void> {
     try {
-      await Promise.all(listening)
+      await listening
     } catch {
       // A backend that can't listen says so itself: Redis fails this server's publishes.
       return
@@ -389,8 +412,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     }
   }
 
+  /** What it held for its first attach goes first, of the kinds the attach's want keeps. */
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
     this.lastPeer = peer
+    if (state?.want) this.onPeerWant(state.want)
+    const held = this.beforeAttach
+    this.dropBeforeAttach()
+    for (const body of held)
+      if (this.pageWant[body.frame[0] === TAG.PUBLISH ? 'text' : 'binary']) peer.sendPublish(body)
     super._attachPeer(peer, state)
     this.endOverflowed()
   }
@@ -408,6 +437,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+    this.dropBeforeAttach()
     this.lossyPublishes?.dispose()
     this.lastPeer = null
     this.unsubBroadcast?.()

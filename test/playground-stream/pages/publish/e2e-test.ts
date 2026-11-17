@@ -15,6 +15,7 @@ import {
   serverRuntime,
   expectServerError,
 } from '../../e2e-utils'
+import { newCDPSession } from '../../../utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -499,6 +500,27 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** When a page's subscription takes effect. */
 function testSubscribeOrder() {
+  test('broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too', async () => {
+    const cdp = await newCDPSession()
+    // A slow page's wire declares the subscription late, which a call made right after it doesn't wait for.
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 })
+    try {
+      for (let run = 0; run < 4; run++) {
+        await navigate(`${getServerUrl()}/publish`)
+        await page.click('#test-broadcast-subscribe-then-call')
+        await autoRetry(
+          async () => {
+            expect(await getResult('#publish-result')).deep.equal({ received: ['after-subscribe'] })
+          },
+          { timeout: 20_000 },
+        )
+      }
+    } finally {
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
+      await cdp.detach()
+    }
+  })
+
   test("broadcast: once a subscriber's `ready` resolves, a publish from a telefunction reaches it, and `ready` rejects with the error its broadcast ends with first", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-ready')

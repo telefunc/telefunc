@@ -121,6 +121,28 @@ function Publish() {
       </button>
 
       <button
+        id="test-broadcast-subscribe-then-call"
+        onClick={async () => {
+          try {
+            const { room, key } = await onBroadcastToSubscribe()
+            const received: string[] = []
+            room.subscribe((text) => {
+              received.push(text)
+            })
+            await onPublishTo(key, 'after-subscribe')
+            for (let i = 0; i < 25 && received.length === 0; i++)
+              await new Promise((resolve) => setTimeout(resolve, 200))
+            await room.close()
+            setResult(JSON.stringify({ received }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        Subscribe, then call a telefunction that publishes
+      </button>
+
+      <button
         id="test-broadcast-slow-loop"
         onClick={async () => {
           try {

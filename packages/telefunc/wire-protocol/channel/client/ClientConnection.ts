@@ -19,7 +19,7 @@ import {
 import type { Urgency } from '../../flowControl/credit.js'
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
-import type { ReconciledPayload, Want } from '../../wire/payloads.js'
+import type { CallWant, ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
@@ -154,6 +154,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   private readonly cacheKey: string
+  private readonly telefuncUrl: string
   /** True if its transports include a WebSocket, whose runtime may accept smaller frames than the wire's limit. */
   private readonly usesWebSocket: boolean
   private readonly lifecycle: WireLifecycle
@@ -170,10 +171,25 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     cacheKey,
   }: { telefuncUrl: string; options: ClientConnectionOptions; cacheKey: string }) {
     this.cacheKey = cacheKey
+    this.telefuncUrl = telefuncUrl
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
     this.channels = this.lifecycle.channels
     this.gate = this.lifecycle.gate
+  }
+
+  /** The wants of the page's broadcasts on `telefuncUrl` that the server hasn't confirmed: a call to it carries them, so
+   *  its server applies them before the telefunction runs. */
+  static unconfirmedWants(telefuncUrl: string): CallWant[] {
+    const wants: CallWant[] = []
+    for (const connection of globalObject.connections.values()) {
+      if (connection.telefuncUrl !== telefuncUrl) continue
+      for (const { channel } of connection.channels.values()) {
+        const want = channel.isClosed ? null : channel._attach.unconfirmedWant
+        if (want !== null) wants.push({ channel: channel.id, ...want })
+      }
+    }
+    return wants
   }
 
   /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */

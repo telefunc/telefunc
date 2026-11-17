@@ -24,7 +24,13 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
-import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
+import type {
+  BarrierPayload,
+  CallWant,
+  PreparePayload,
+  ReconcileOpenEntry,
+  ReconcilePayload,
+} from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
@@ -174,6 +180,20 @@ class ChannelMux implements UpgradeStagesOwner {
     for (const awaited of this.registrationWaits.take(channel.id)) {
       if (this.registrationWaits.stop(awaited)) this.attachAwaited(awaited, channel)
     }
+  }
+
+  /** Applies the wants a call carries to the channels its session's earlier calls returned, and settles once they are in
+   *  effect, or after `connectTtl`, whichever comes first. A want of a channel another session holds, or none, changes
+   *  nothing. Undefined where nothing has to happen first. */
+  applyCallWants(session: string | undefined, wants: CallWant[]): Promise<void> | undefined {
+    const pending: Promise<unknown>[] = []
+    for (const want of wants) {
+      const channel = this.channels.get(want.channel)
+      if (channel === undefined || session === undefined || channel._session !== session) continue
+      const listening = channel._applyCallWant(want)
+      if (listening) pending.push(listening)
+    }
+    return pending.length === 0 ? undefined : settledWithin(Promise.all(pending), this.options.connectTtl)
   }
 
   private unregisterChannel(channelId: string): void {
@@ -926,4 +946,13 @@ function resolveMuxServerOptions(): MuxServerOptions {
 // `ChannelMux` fully initialized, so defer until first access.
 function getGlobals(): { mux: ChannelMux } {
   return getGlobalObject('wire-protocol/channel/server/ChannelMux.ts', () => ({ mux: new ChannelMux() }))
+}
+
+/** Settles once `pending` does, or after `ms`. */
+async function settledWithin(pending: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise((resolve) => (timer = setTimeout(resolve, ms)))
+  // A backend that can't listen says so itself: Redis fails the publishes made on this server.
+  await Promise.race([pending.catch(() => {}), timeout])
+  clearTimeout(timer)
 }

@@ -8,6 +8,7 @@ import { createRequestReplacer } from '../../wire-protocol/values/client/request
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/channel/client/ClientChannel.js'
+import { ClientConnection } from '../../wire-protocol/channel/client/ClientConnection.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
@@ -57,6 +58,9 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
   if (callContext.extensions) {
     dataMain.extensions = callContext.extensions
   }
+
+  const wants = ClientConnection.unconfirmedWants(callContext.telefuncUrl)
+  if (wants.length > 0) dataMain.wants = wants
 
   const connection = getConnectionOptions(callContext)
   const abortSignal = callContext.abortController.signal

@@ -20,7 +20,12 @@ import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
+import {
+  MAX_CHANNELS_PER_CONNECTION,
+  STREAM_TRANSPORT,
+  type StreamTransport,
+} from '../../../wire-protocol/constants.js'
+import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
@@ -65,6 +70,8 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      /** The wants of the page's broadcasts the server hasn't confirmed to it. */
+      wants: CallWant[]
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
       isSseRequest: false
       isMalformedRequest: false
@@ -111,10 +118,17 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
+  const wants = wantsOf(envelope.raw)
+  if (wants === null) {
+    logParseError('Telefunc request body has unexpected `wants`', runContext)
+    return { isMalformedRequest: true }
+  }
+
   return {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    wants,
     isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
@@ -250,6 +264,13 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
         ? (parsed.extensions as Record<string, Record<string, unknown>>)
         : {},
   }
+}
+
+/** The call's `wants`, none where it carries none, null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | null {
+  if (!hasProp(raw, 'wants')) return []
+  const { wants } = raw
+  return Array.isArray(wants) && wants.length <= MAX_CHANNELS_PER_CONNECTION && wants.every(isCallWant) ? wants : null
 }
 
 function logParseException(err: unknown, runContext: RunContext) {

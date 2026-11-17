@@ -132,6 +132,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected peer: IndexedPeer | null = null
   /** The request that opened the wire the page last attached on. */
   protected wireRequest: Request | undefined = undefined
+  /** @internal The session token of the call that carried it: only that session's calls change what its page wants. */
+  _session: string | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
@@ -618,9 +620,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** `ServerBroadcast` overrides it; a plain channel ignores wants. */
   protected onPeerWant(_want: Want): void {}
 
-  /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does:
-   *  `ServerBroadcast` overrides it. */
-  _confirmWant(): void {}
+  /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does, and
+   *  returns what it waits for first: `ServerBroadcast` overrides it. */
+  _confirmWant(): Promise<unknown> | undefined {
+    return undefined
+  }
+
+  /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what has yet to happen
+   *  before it is in effect. */
+  _applyCallWant(want: Want): Promise<unknown> | undefined {
+    this.onPeerWant(want)
+    return this._confirmWant()
+  }
 
   protected onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()

@@ -1,0 +1,99 @@
+// A page's want reaches its broadcast both ways, on its wire and with its telefunction calls: the broadcast applies the
+// newest whichever comes first, and a call changes only the wants of the broadcasts its own session's calls returned.
+// The real ChannelMux, ServerBroadcast and in-memory Broadcast run; the page's wire is a sender that records frames.
+
+import { expect, test } from 'vitest'
+
+import { getChannelMux } from './ChannelMux.js'
+import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
+import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
+import { decode } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
+import type { Want } from '../../wire/payloads.js'
+
+/** A broadcast that the call of `session` returned, its page attached at index 0 and wanting nothing yet. */
+function attachedBroadcast(session: string) {
+  const key = crypto.randomUUID()
+  const broadcast = new ServerBroadcast<string>({ key })
+  // As `carryChannel` stamps it.
+  broadcast._session = session
+  getChannelMux().registerChannel(broadcast)
+  const frames: Uint8Array[] = []
+  const sender: PeerSender = {
+    send: (frame) => frames.push(frame),
+    carry() {},
+    bufferedAmount: () => 0,
+    behindAfter: () => Number.POSITIVE_INFINITY,
+    deliveredBefore: () => 0,
+    sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+  }
+  broadcast._attachPeer(new IndexedPeer({ sender, index: 0, replay: broadcast._replayBuffer! }))
+  return {
+    key,
+    broadcast,
+    /** The page's WANT frame arrives. */
+    wire: (want: Want) => broadcast._dispatchFrame({ tag: TAG.WANT, index: 0, want }),
+    /** A call of `from` carries the want. */
+    call: (want: Want, from = session) => getChannelMux().applyCallWants(from, [{ channel: broadcast.id, ...want }]),
+    /** Whether a publish to the key now reaches the page. */
+    async hears(): Promise<boolean> {
+      const before = frames.filter((frame) => frame[0] === TAG.PUBLISH).length
+      await Broadcast.publish(key, 'probe')
+      return frames.filter((frame) => frame[0] === TAG.PUBLISH).length > before
+    },
+    wanted: () => frames.filter((frame) => frame[0] === TAG.WANTED).map((frame) => decode(frame)),
+  }
+}
+
+const on = (version: number): Want => ({ version, text: true, binary: false })
+const off = (version: number): Want => ({ version, text: false, binary: false })
+
+test("a call that names another session's broadcast changes nothing", async () => {
+  const page = attachedBroadcast('session-a')
+  await page.call(on(1), 'session-b')
+  expect(await page.hears()).toBe(false)
+  expect(page.wanted()).toEqual([])
+  await page.call(on(1))
+  expect(await page.hears()).toBe(true)
+  expect(page.wanted()).toEqual([{ tag: TAG.WANTED, index: 0, version: 1 }])
+  page.broadcast.abort()
+})
+
+test('a call of a session that names a broadcast no session holds changes nothing', async () => {
+  const page = attachedBroadcast('session-a')
+  expect(getChannelMux().applyCallWants('session-a', [{ channel: crypto.randomUUID(), ...on(1) }])).toBe(undefined)
+  expect(await page.hears()).toBe(false)
+  page.broadcast.abort()
+})
+
+// Subscribe (1), unsubscribe (2), each reaching the server on the wire and with a call, in every order.
+const ORDERS: Record<string, { steps: ((page: ReturnType<typeof attachedBroadcast>) => unknown)[]; hears: boolean }> = {
+  'the wire, then the call, of a subscribe': { steps: [(p) => p.wire(on(1)), (p) => p.call(on(1))], hears: true },
+  'the call, then the wire, of a subscribe': { steps: [(p) => p.call(on(1)), (p) => p.wire(on(1))], hears: true },
+  'an unsubscribe by call ahead of the subscribe by wire': {
+    steps: [(p) => p.call(off(2)), (p) => p.wire(on(1))],
+    hears: false,
+  },
+  'an unsubscribe by wire ahead of the subscribe by call': {
+    steps: [(p) => p.wire(off(2)), (p) => p.call(on(1))],
+    hears: false,
+  },
+  'a subscribe, an unsubscribe and a subscribe again, the last by call ahead of the rest': {
+    steps: [(p) => p.call(on(3)), (p) => p.wire(on(1)), (p) => p.wire(off(2))],
+    hears: true,
+  },
+  'a subscribe and an unsubscribe by wire, then the call of the subscribe': {
+    steps: [(p) => p.wire(on(1)), (p) => p.wire(off(2)), (p) => p.call(on(1))],
+    hears: false,
+  },
+}
+
+for (const [order, { steps, hears }] of Object.entries(ORDERS)) {
+  test(`the newest want holds: ${order}`, async () => {
+    const page = attachedBroadcast('session-a')
+    for (const step of steps) await step(page)
+    expect(await page.hears()).toBe(hears)
+    page.broadcast.abort()
+  })
+}

@@ -33,6 +33,8 @@ import {
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
+import { getSessionToken } from '../../wire-protocol/wire/requestKind.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -331,6 +333,8 @@ async function runTelefunc_(
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
+      // The page's wants take effect before the telefunction runs, whatever it causes and wherever.
+      wantsInEffect: getChannelMux().applyCallWants(getSessionToken(request), parsed.wants),
     })
   }
 
@@ -370,6 +374,8 @@ async function runTelefunc_(
       return createHttpResponse({ ...shieldValidationError })
     }
   }
+
+  await runContext.wantsInEffect
 
   {
     assert(runContext.isValidRequest)

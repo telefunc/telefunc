@@ -1,4 +1,4 @@
-export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind, namesWireVersion }
+export { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl, getRequestKind, namesWireVersion, getSessionToken }
 export type { RequestKind }
 
 import { WIRE_VERSION } from '../constants.js'
@@ -43,4 +43,9 @@ function getRequestKind(
 /** Whether a channel request names this server's `WIRE_VERSION`, as the page's `getWireUrl` does. */
 function namesWireVersion(request: Pick<Request, 'url'>): boolean {
   return new URL(request.url, 'http://localhost').searchParams.get('wire') === String(WIRE_VERSION)
+}
+
+/** The session token the page's `getSessionUrl` names on its calls and its wire. */
+function getSessionToken(request: Pick<Request, 'url'>): string | undefined {
+  return new URL(request.url, 'http://localhost').searchParams.get('session') ?? undefined
 }
