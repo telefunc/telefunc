@@ -1,6 +1,6 @@
-export { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure }
+export { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure, onPublishBesideRefusedSubscribe }
 
-import { BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel } from 'telefunc'
 import { redis } from '../../redis'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
@@ -25,7 +25,7 @@ async function onRedisSubscribeFailure() {
   const received: string[] = []
   let stop = transport.listen(user, (value) => received.push(value)).unsubscribe
   try {
-    const pending = await Promise.allSettled([
+    const [text, binary] = await Promise.allSettled([
       transport.send(user, 'text'),
       transport.sendBinary(user, new Uint8Array(1)),
     ])
@@ -51,11 +51,43 @@ async function onRedisSubscribeFailure() {
       }
     }
     await delivered
-    return { rejected: [...pending, ...later].every((result) => result.status === 'rejected'), received }
+    return {
+      rejected: [text, ...later].every((result) => result.status === 'rejected'),
+      binary: binary.status,
+      received,
+    }
   } finally {
     stop()
     publisher.disconnect()
     // Also closes the transport's subscriber connection, which runs as `user` too.
     await redis!.acl('DELUSER', user)
+  }
+}
+
+/** While Redis refuses the SUBSCRIBE of one key, which a subscriber the app hasn't removed keeps, this server publishes on
+ *  another key. */
+async function onPublishBesideRefusedSubscribe() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:?:{[^!]*')
+  const refused = Broadcast.subscribe(`!refused:${crypto.randomUUID()}`, () => {})
+  const key = `room:beside-refused:${crypto.randomUUID()}`
+  const received: string[] = []
+  const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
+  try {
+    const refusedReady = await refused.ready.then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    await subscribed.ready
+    const published = await Promise.resolve(Broadcast.publish(key, 'beside')).then(
+      () => 'sent',
+      (err: unknown) => String(err),
+    )
+    for (let i = 0; i < 25 && received.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    return { refusedReady, published, received }
+  } finally {
+    refused()
+    subscribed()
+    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
   }
 }

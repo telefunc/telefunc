@@ -1,10 +1,15 @@
 export { RedisReconnect }
 
 import React, { useRef, useState } from 'react'
-import { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure } from './RedisReconnect.telefunc'
+import {
+  onBinaryBroadcastAcrossReconnect,
+  onRedisSubscribeFailure,
+  onPublishBesideRefusedSubscribe,
+} from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
+  const [beside, setBeside] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
@@ -18,6 +23,14 @@ function RedisReconnect() {
         onClick={async () => setReadiness(await onRedisSubscribeFailure())}
       >
         Fail and restore Redis subscriptions
+      </button>
+      <pre id="redis-beside-refused-result">{JSON.stringify(beside)}</pre>
+      <button
+        type="button"
+        id="test-redis-beside-refused"
+        onClick={async () => setBeside(await onPublishBesideRefusedSubscribe())}
+      >
+        Publish on one key while Redis refuses another key's subscription
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

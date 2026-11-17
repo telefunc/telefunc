@@ -4,11 +4,30 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
 
 function testRedisReconnect() {
-  test('broadcast: failed Redis subscriptions reject publishes and a new subscription restores delivery', async () => {
+  test("broadcast: while Redis refuses one key's subscription, a publish on another key from the same server reaches its subscribers", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-beside-refused')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-beside-refused-result')).deep.equal({
+          refusedReady: 'rejected',
+          published: 'sent',
+          received: ['beside'],
+        })
+      },
+      { timeout: 20_000 },
+    )
+  })
+
+  test("broadcast: a failed Redis subscription rejects the publishes of its key and kind, not the key's other kind, and a new subscription restores delivery", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-readiness')
     await autoRetry(async () => {
-      expect(await getResult('#redis-readiness-result')).deep.equal({ rejected: true, received: ['recovered'] })
+      expect(await getResult('#redis-readiness-result')).deep.equal({
+        rejected: true,
+        binary: 'fulfilled',
+        received: ['recovered'],
+      })
     })
   })
 

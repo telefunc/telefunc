@@ -477,7 +477,7 @@ chat.publish({ user: 'Alice', text: 'Hello!' })
 
 > The page gets what is published from its `subscribe()` on, and every telefunction the page calls after `subscribe()` runs with the subscription in effect, so a publish that telefunction makes reaches the page. A publish made before the page subscribes isn't delivered to it: return what came before along with the broadcast, as in `return { chat, history }`.
 
-> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike: it resolves once the subscription gets what any server publishes to the key, or once you unsubscribe, and it rejects if the broadcast ends first. While Redis is unreachable, `ready` waits; where Redis gives the subscription up (once ioredis stops retrying it, after 20 reconnections or about 10 s by default), the broadcast closes with that error. Await it only where you need that moment itself, such as before the page asks another user to publish: `await unsubscribe.ready`.
+> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike: it resolves once the subscription gets what any server publishes to the key, or once you unsubscribe, and it rejects if the broadcast ends first. While Redis is unreachable, `ready` waits; where Redis gives the subscription up (once ioredis stops retrying it, after 20 reconnections or about 10 s by default), the broadcast closes with that error, and a `Broadcast.subscribe()` that Redis gave up makes the server's publishes to its key fail with it until you unsubscribe it. Await it only where you need that moment itself, such as before the page asks another user to publish: `await unsubscribe.ready`.
 
 ### Receive broadcast messages in a loop
 
