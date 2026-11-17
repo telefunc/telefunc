@@ -31,6 +31,9 @@ function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8A
   let seq = 0
   const dispatch = (frame: Uint8Array<ArrayBuffer>) => channel._dispatchFrame(decode(frame) as ChannelFrame)
   return {
+    text(text: string) {
+      dispatch(encode.text(7, text, ++seq))
+    },
     ackRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK) {
       dispatch(encode.ackRes(7, ++seq, ackedSeq, result, status))
     },
@@ -535,5 +538,42 @@ describe('stopping an onOpen or onClose callback', () => {
     channel._attachPeer(createPeer(frames))
     fromPage(channel, frames).closeRequest(100)
     expect(didFire).toBe(false)
+  })
+})
+
+// ── A listen() callback that an earlier one stopped ──
+
+describe('a listen() callback that an earlier one stopped during the same message', () => {
+  test('is not called with it', () => {
+    const channel = new ServerChannel<string, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    const got: string[] = []
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    channel.listen(() => stopSecond())
+    const stopSecond = channel.listen((value) => {
+      got.push(value)
+    })
+    fromPage(channel, frames).text('"hi"')
+
+    expect(got).toEqual([])
+  })
+
+  test('is not asked for the answer to an acknowledged send', async () => {
+    const channel = new ServerChannel<(v: string) => string, never>({ id: crypto.randomUUID() })
+    const frames: Uint8Array[] = []
+    const asked: string[] = []
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer(frames))
+    channel.listen(() => stopSecond())
+    const stopSecond = channel.listen((value) => {
+      asked.push(value)
+      return 'answer'
+    })
+    await fromPage(channel, frames).ackReq('"q"')
+
+    expect(asked).toEqual([])
   })
 })

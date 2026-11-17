@@ -13,7 +13,7 @@ import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire
 import { TAG } from '../../wire/tags.js'
 import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
 import { HEADER } from '../../wire/header.js'
-import { Listeners } from '../../../utils/Listeners.js'
+import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -128,15 +128,16 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** Calls each listener with its value, `valueFor` its index; an `Abort` stops the rest and leaves the publish
    *  unconsumed. A listener's promise isn't awaited. */
   private deliverPublish<V>(
-    listeners: readonly ((value: V, info: ChannelPublishInfo) => unknown)[],
+    listeners: readonly Registration<(value: V, info: ChannelPublishInfo) => unknown>[],
     valueFor: (i: number) => V,
     wireInfo: WirePublishInfo,
     bytes: number,
   ): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const [i, cb] of listeners.entries()) {
+    for (const [i, { listener }] of listeners.entries()) {
+      if (!listener) continue
       try {
-        const result = cb(valueFor(i), info)
+        const result = listener(valueFor(i), info)
         if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
         if (this.lifecycle.handleCallbackError(err)) return

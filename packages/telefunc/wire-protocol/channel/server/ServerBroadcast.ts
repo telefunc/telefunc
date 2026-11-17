@@ -186,8 +186,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this.broadcastListeners.list()) {
-      if (this.callListener(cb, data, info)) return
+    for (const { listener } of this.broadcastListeners.list()) {
+      if (!listener) continue
+      if (this.callListener(listener, data, info)) return
     }
     if (!this.takesPublish(this.peerSubscribedText)) return this.endOverflowed()
     const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
@@ -196,9 +197,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
+    for (const { listener } of this.broadcastBinaryListeners.list()) {
+      if (!listener) continue
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-      if (this.callListener(cb, new Uint8Array(data), info)) return
+      if (this.callListener(listener, new Uint8Array(data), info)) return
     }
     if (!this.takesPublish(this.peerSubscribedBinary)) return this.endOverflowed()
     const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))

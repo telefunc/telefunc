@@ -117,8 +117,9 @@ class ChannelLifecycle {
     if (this.didFireOpen) return
     this.didFireOpen = true
     this.resolveOpened?.()
-    for (const cb of this.openListeners.list()) {
-      if (this.invokeOpenCallback(cb)) break
+    for (const { listener } of this.openListeners.list()) {
+      if (!listener) continue
+      if (this.invokeOpenCallback(listener)) break
     }
     this.openListeners.clear()
   }
@@ -221,8 +222,9 @@ class ChannelLifecycle {
   private fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
-    for (const callback of this.closeListeners.list()) {
-      const pending = this.invokeCloseCallback(callback, err)
+    for (const { listener } of this.closeListeners.list()) {
+      if (!listener) continue
+      const pending = this.invokeCloseCallback(listener, err)
       if (pending !== undefined) void this.trackCloseListener(pending)
     }
     this.closeListeners.clear()
