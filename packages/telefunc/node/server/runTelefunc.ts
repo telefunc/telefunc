@@ -34,7 +34,6 @@ import {
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
-import { getSessionToken } from '../../wire-protocol/wire/requestKind.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -375,7 +374,7 @@ async function runTelefunc_(
   }
 
   // The subscriptions the page made before this call are in effect before its telefunction runs.
-  if (runContext.wants) await getChannelMux().applyCallWants(getSessionToken(request), runContext.wants, request.signal)
+  if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
 
   {
     assert(runContext.isValidRequest)

@@ -352,8 +352,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     )
   }
 
+  /** The request whose server its page is on: its wire's, else, till its page attaches, the call's that carried it. */
+  private get ownerRequest(): Request | undefined {
+    return this.wireRequest ?? this._callRequest
+  }
+
   private get owner(): string | undefined {
-    return this.adapter?.ownerOf?.(this.wireRequest)
+    return this.adapter?.ownerOf?.(this.ownerRequest)
   }
 
   /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
@@ -527,7 +532,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       this.broadcastAdapter().subscribe(
         this.key,
         (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
-        this.wireRequest,
+        this.ownerRequest,
       ),
     )
     this.textListening = listening
@@ -540,7 +545,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       this.broadcastAdapter().subscribeBinary(
         this.key,
         (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
-        this.wireRequest,
+        this.ownerRequest,
       ),
     )
     this.binaryListening = listening

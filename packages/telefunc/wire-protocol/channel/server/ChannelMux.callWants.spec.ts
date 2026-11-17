@@ -32,7 +32,7 @@ function returnedBroadcast(session: string, lossy = false) {
   const key = crypto.randomUUID()
   const broadcast = new ServerBroadcast<string>({ key, lossy })
   // As `carryChannel` stamps it.
-  broadcast._session = session
+  broadcast._callRequest = callOf(session)
   getChannelMux().registerChannel(broadcast)
   const frames: Uint8Array[] = []
   const sender: PeerSender = {
@@ -60,7 +60,7 @@ function returnedBroadcast(session: string, lossy = false) {
     wire: (want: Want) => broadcast._dispatchFrame({ tag: TAG.WANT, index: 0, want }),
     /** A call of `from` carries the want; `callAborted` aborts where its request goes. */
     call: (want: Want, from = session, callAborted = new AbortController().signal) =>
-      getChannelMux().applyCallWants(from, [{ channel: broadcast.id, ...want }], callAborted),
+      getChannelMux().applyCallWants(callOf(from, callAborted), [{ channel: broadcast.id, ...want }]),
     /** Whether a publish to the key now reaches the page. */
     async hears(): Promise<boolean> {
       const before = frames.filter((frame) => frame[0] === TAG.PUBLISH).length
@@ -69,6 +69,11 @@ function returnedBroadcast(session: string, lossy = false) {
     },
     wanted: () => frames.filter((frame) => frame[0] === TAG.WANTED).map((frame) => decode(frame)),
   }
+}
+
+/** A telefunction call of `session`'s page, as `getSessionUrl` names it. */
+function callOf(session: string, signal?: AbortSignal) {
+  return new Request(`https://example.test/_telefunc?session=${session}`, { method: 'POST', signal })
 }
 
 const on = (version: number): Want => ({ version, text: true, binary: false })
@@ -88,7 +93,7 @@ test("a call that names another session's broadcast changes nothing", async () =
 test('a call of a session that names a broadcast no session holds changes nothing', async () => {
   const page = attachedBroadcast('session-a')
   const call = [{ channel: crypto.randomUUID(), ...on(1) }]
-  expect(getChannelMux().applyCallWants('session-a', call, new AbortController().signal)).toBe(undefined)
+  expect(getChannelMux().applyCallWants(callOf('session-a'), call)).toBe(undefined)
   expect(await page.hears()).toBe(false)
   page.broadcast.abort()
 })
@@ -273,7 +278,7 @@ test(
     const refused = attachedBroadcast('session-a')
     const healthy = attachedBroadcast('session-a')
     const wants = [refused, healthy].map((page) => ({ channel: page.broadcast.id, ...on(1) }))
-    const call = getChannelMux().applyCallWants('session-a', wants, new AbortController().signal)
+    const call = getChannelMux().applyCallWants(callOf('session-a'), wants)
     listening(refused.key).reject(new Error('NOPERM'))
     await expect(refused.broadcast.closed).rejects.toThrow('NOPERM')
     expect(await settled(call)).toBe(false)

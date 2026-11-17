@@ -21,6 +21,7 @@ import {
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
+import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
@@ -182,19 +183,16 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** Applies the wants a call carries to the channels its session's earlier calls returned, and settles once each is in
+  /** Applies the wants `call` carries to the channels its session's earlier calls returned, and settles once each is in
    *  effect or its channel ended (`_applyCallWant`). A want of a channel another session holds, or none, changes nothing.
    *  Undefined where nothing has to happen first. */
-  applyCallWants(
-    session: string | undefined,
-    wants: CallWant[],
-    callAborted: AbortSignal,
-  ): Promise<unknown> | undefined {
+  applyCallWants(call: Request, wants: CallWant[]): Promise<unknown> | undefined {
+    const session = getSessionToken(call)
     const pending: Promise<void>[] = []
     for (const want of wants) {
       const channel = this.channels.get(want.channel)
-      if (channel === undefined || session === undefined || channel._session !== session) continue
-      const inEffect = channel._applyCallWant(want, callAborted)
+      if (session === undefined || !channel?._callRequest || getSessionToken(channel._callRequest) !== session) continue
+      const inEffect = channel._applyCallWant(want, call.signal)
       if (inEffect) pending.push(inEffect)
     }
     return pending.length === 0 ? undefined : Promise.all(pending)

@@ -25,6 +25,7 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
+import { getChannelMux } from '../../channel/server/ChannelMux.js'
 import { Telefunc } from '../../../serve/cloudflare.js'
 import type { BroadcastDeliverRequest } from './broadcast.js'
 import type { CloudflareScale } from './routing.js'
@@ -721,6 +722,28 @@ describe('cloudflare broadcast routing', () => {
       // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
       'add "nodejs_als" to the compatibility_flags',
     )
+  })
+
+  // The page subscribes and calls at once, so its call brings the subscription before its wire attaches.
+  it("a page's subscription its call brings before its first attach, on a Worker without AsyncLocalStorage, is the Durable Object's that the call reached", async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kvWrites: string[] = []
+    const previousTransport = getBroadcastAdapter()
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachKV(createMockKV(kvWrites))
+    transport.attachIsolateInfo('weur')
+    _resetBroadcastAdapterForTesting(transport)
+    const call = new Request('https://telefunc.test/_telefunc?session=page', { method: 'POST' })
+    transport.attachRequest(call, 'telefunc-shard-weur-0')
+    const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
+    // As `carryChannel` stamps the broadcast a call returns.
+    broadcast._callRequest = call
+    getChannelMux().registerChannel(broadcast)
+    await getChannelMux().applyCallWants(call, [{ channel: broadcast.id, version: 1, text: true, binary: false }])
+    expect(broadcast.isClosed).toBe(false)
+    expect(kvWrites).toEqual([`put tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`])
+    broadcast.abort()
+    _resetBroadcastAdapterForTesting(previousTransport)
   })
 
   it('a subscriber with no page, outside the code of any Durable Object, throws an error that says where to subscribe', () => {

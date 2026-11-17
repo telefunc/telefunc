@@ -132,8 +132,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected peer: IndexedPeer | null = null
   /** The request that opened the wire the page last attached on. */
   protected wireRequest: Request | undefined = undefined
-  /** @internal The session token of the call that carried it: only that session's calls change what its page wants. */
-  _session: string | undefined = undefined
+  /** @internal The request of the call that carried it: only calls of its session change what its page wants. */
+  _callRequest: Request | undefined = undefined
   private readonly listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(this)
