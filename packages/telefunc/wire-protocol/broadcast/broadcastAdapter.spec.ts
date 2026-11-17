@@ -420,6 +420,79 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
   }
 })
 
+// A broker's subscribe can throw, as NATS's does while its connection is closed or draining; the app retries.
+describe("a transport's listen() that throws", () => {
+  type Info = { seq: number; timestamp: number }
+  /** A transport whose first `listen()` and first `listenBinary()` throw, counting the listeners it holds. */
+  const failingFirst = () => {
+    const state = {
+      attempts: 0,
+      active: 0,
+      text: (_payload: string, _info: Info) => {},
+      binary: (_payload: Uint8Array, _info: Info) => {},
+    }
+    const hold = () => {
+      if (++state.attempts === 1) throw new Error('broker connection closed')
+      state.active++
+      return () => {
+        state.active--
+      }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({
+        send: sent,
+        sendBinary: sent,
+        listen: (_key, onMessage) => {
+          const stop = hold()
+          state.text = onMessage
+          return stop
+        },
+        listenBinary: (_key, onMessage) => {
+          const stop = hold()
+          state.binary = onMessage
+          return stop
+        },
+      }),
+    )
+    return state
+  }
+
+  it('Broadcast.subscribe(): keeps no callback of the call that threw; the retry hears its own messages only', async () => {
+    const transport = failingFirst()
+    const heard: string[] = []
+    expect(() => Broadcast.subscribe<string>('room:throws', (text) => heard.push(`failed ${text}`))).toThrow(
+      'broker connection closed',
+    )
+    const stop = Broadcast.subscribe<string>('room:throws', (text) => heard.push(`retry ${text}`))
+    await stop.ready
+    transport.text('"hello"', { seq: 1, timestamp: 1 })
+    stop()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['retry hello'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+
+  it('Broadcast.subscribeBinary(): keeps no callback of the call that threw; the retry hears its own messages only', async () => {
+    const transport = failingFirst()
+    const heard: string[] = []
+    expect(() => Broadcast.subscribeBinary('room:throws', (data) => heard.push(`failed ${data}`))).toThrow(
+      'broker connection closed',
+    )
+    const stop = Broadcast.subscribeBinary('room:throws', (data) => heard.push(`retry ${data}`))
+    await stop.ready
+    transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
+    stop()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['retry 1,2,3'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

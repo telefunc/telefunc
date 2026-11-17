@@ -119,13 +119,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
-    let subs = this.subscriptions.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.subscriptions.set(key, subs)
-    }
-    subs.add(onMessage)
-
+    // The transport first: where its listen() throws, this subscriber is left with nothing registered.
     let listening = this.transportUnsubs.get(key)
     if (this.transport && !listening) {
       listening = listeningOf(
@@ -135,6 +129,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       )
       this.transportUnsubs.set(key, listening)
     }
+
+    let subs = this.subscriptions.get(key)
+    if (!subs) {
+      subs = new Set()
+      this.subscriptions.set(key, subs)
+    }
+    subs.add(onMessage)
 
     const unsubscribe = () => {
       const s = this.subscriptions.get(key)
@@ -159,13 +160,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
-    let subs = this.binarySubscriptions.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.binarySubscriptions.set(key, subs)
-    }
-    subs.add(onMessage)
-
+    // As in `subscribe()`.
     let listening = this.transportBinaryUnsubs.get(key)
     if (this.transport && !listening) {
       listening = listeningOf(
@@ -175,6 +170,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       )
       this.transportBinaryUnsubs.set(key, listening)
     }
+
+    let subs = this.binarySubscriptions.get(key)
+    if (!subs) {
+      subs = new Set()
+      this.binarySubscriptions.set(key, subs)
+    }
+    subs.add(onMessage)
 
     const unsubscribe = () => {
       const s = this.binarySubscriptions.get(key)
