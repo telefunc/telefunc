@@ -7,7 +7,7 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { makePublishInfo, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -77,6 +77,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     options: { signal?: AbortSignal },
   ): Unsubscribe {
     if (options.signal?.aborted) return withReady(() => {})
+    // A closing one sends no want any more.
+    if (this.stopped) return neverInEffect(this.endError())
     const removed = createDeferred()
     const remove = listeners.add(callback, {
       ...options,

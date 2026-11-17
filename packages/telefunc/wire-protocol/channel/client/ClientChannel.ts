@@ -12,7 +12,7 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, stringifyMessage, withReady } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyMessage, withReady } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -228,13 +228,20 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
 
-  /** In effect at once: the server sends whether the page listens or not. */
+  /** In effect at once: the server sends whether the page listens or not. One added once the channel ended never is. */
   listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): Unsubscribe {
+    if (this.lifecycle.ended) return neverInEffect(this.endError())
     return withReady(this.listeners.add(callback, options))
   }
 
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
+    if (this.lifecycle.ended) return neverInEffect(this.endError())
     return withReady(this.binaryListeners.add(callback, options))
+  }
+
+  /** What it ended with, as its `closed` rejects. */
+  protected endError(): Error {
+    return this.lifecycle.closeError ?? new ChannelClosedError()
   }
 
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {

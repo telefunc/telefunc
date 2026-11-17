@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
+import { ClientChannel } from './ClientChannel.js'
 
 /** An SSE downstream that never sends a byte. */
 const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
@@ -41,6 +42,38 @@ describe('ClientBroadcast delivery', () => {
     expect(bytes).toEqual([])
   })
 })
+
+// One added once its channel ended registers nothing, and its `ready` rejects with what the channel ended with.
+describe('a listener added once its channel ended on the page', () => {
+  it('of a broadcast whose earlier subscription the server confirmed never takes effect', async () => {
+    const page = new ClientBroadcast(channelOptions())
+    page.subscribe(() => {})
+    page._dispatchFrame(received(encode.wanted(0, 1)))
+    page.abort('gone')
+    const closedWith = await page.closed.catch((err: unknown) => err)
+    await expect(page.subscribe(() => {}).ready).rejects.toBe(closedWith)
+    await expect(page.subscribeBinary(() => {}).ready).rejects.toBe(closedWith)
+  })
+
+  it('of a plain channel never takes effect', async () => {
+    const page = new ClientChannel(channelOptions())
+    page.abort('gone')
+    const closedWith = await page.closed.catch((err: unknown) => err)
+    await expect(page.listen(() => {}).ready).rejects.toBe(closedWith)
+    await expect(page.listenBinary(() => {}).ready).rejects.toBe(closedWith)
+  })
+})
+
+function channelOptions() {
+  return {
+    channelId: crypto.randomUUID(),
+    connection: {
+      transports: [CHANNEL_TRANSPORT.SSE],
+      telefuncUrl: 'http://test.local/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
+  }
+}
 
 /** `frame` as the page's connection hands it to its channel. */
 function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {

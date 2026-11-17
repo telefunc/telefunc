@@ -1,4 +1,4 @@
-export { makePublishInfo, stringifyMessage, withReady, LOSSY_WITH_ACK_TEXT }
+export { makePublishInfo, stringifyMessage, withReady, neverInEffect, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -146,4 +146,9 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
 function withReady(remove: () => void, ready: Promise<void> = Promise.resolve()): Unsubscribe {
   ready.catch(() => {})
   return Object.assign(remove, { ready })
+}
+
+/** The remover of a listener added once its channel ended, which registered nothing: its `ready` rejects with `err`. */
+function neverInEffect(err: Error): Unsubscribe {
+  return withReady(() => {}, Promise.reject(err))
 }

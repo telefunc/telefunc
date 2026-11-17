@@ -11,7 +11,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -168,7 +168,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     options: { signal?: AbortSignal },
   ): Unsubscribe {
     if (options.signal?.aborted) return withReady(() => {})
-    if (this._phase === 'ended') return withReady(() => {}, Promise.reject(this.endError()))
+    if (this._phase === 'ended') return neverInEffect(this.endError())
     if (binary) this.subscribeBinaryBroadcast()
     else this.subscribeBroadcast()
     const removed = createDeferred()
@@ -508,10 +508,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.ending = createDeferred()
     this.ending.promise.catch(() => {})
     return this.ending
-  }
-
-  private endError(): Error {
-    return this.lifecycle.closeError ?? new ChannelClosedError()
   }
 
   /** The installed adapter, which the channel keeps from its first use. */
