@@ -664,7 +664,7 @@ function Room() {
         room.subscribeBinary((data) => frames.push([...data]))
         const dms: unknown[] = []
         me.listen((data) => dms.push(data))
-        await me.updateMeta({}) // same-channel ack orders the declarations before the server's writes
+        await me.updateMeta({ ready: true }) // same-channel ack orders the declarations before the server's writes
 
         const first = { n: 10 }
         const second = { n: 11 }
@@ -1558,7 +1558,7 @@ function Room() {
           lobby.subscribe((data, { from }) => published.push({ data, fromRoom: from === null }))
           const system: Array<{ data: unknown; fromRoom: boolean }> = []
           me.listen((data, { from }) => system.push({ data, fromRoom: from === null }))
-          await me.updateMeta({}) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
+          await me.updateMeta({ ready: true }) // same-channel ack orders the declarations before the HTTP-triggered broadcasts
 
           let kicked = false
           let kickCause: unknown = null
@@ -1938,7 +1938,7 @@ function Room() {
           created: subscribe(created),
           plain: subscribe(plain),
         }
-        await me.updateMeta({}) // same-channel ack orders the subscriptions before the live publish
+        await me.updateMeta({ ready: true }) // same-channel ack orders the subscriptions before the live publish
         await me.publish({ t: 'after' })
 
         await pollUntil(() => ({
@@ -2975,7 +2975,7 @@ function Room() {
         await new Promise((resolve) => setTimeout(resolve, 61_000))
         const received: string[] = []
         tailed.subscribe((data) => received.push(data as string))
-        await me.updateMeta({}) // same-channel ack orders the subscription before the live publish
+        await me.updateMeta({ ready: true }) // same-channel ack orders the subscription before the live publish
         await me.publish('live')
         await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
       })}
