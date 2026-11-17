@@ -36,7 +36,7 @@ type BroadcastBackpressureState = {
     reconnected: { receipts: number; last: string }
   } | null
   lossyKeepsUp: { fromServer: number; fromPage: number; last: string } | null
-  lossyBeforePlain: { received: unknown[]; seqsAhead: number[] } | null
+  lossyBeforePlain: 'listening' | { received: unknown[]; seqsAhead: number[] } | null
   lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
   broadcastBehindCloses: {
     seqsAhead: number[]
@@ -264,7 +264,8 @@ function LossyBeforePlain({ show }: { show: Show }) {
       void broadcast.publish('plain')
       for (let n = 11; n <= 20; n++) void broadcast.publish(n, { lossy: true })
     })
-    await control.send('cut', { ack: true })
+    // The test takes the page offline now.
+    show({ lossyBeforePlain: 'listening' })
     await newestArrived
     show({ lossyBeforePlain: { received, seqsAhead } })
     control.close()

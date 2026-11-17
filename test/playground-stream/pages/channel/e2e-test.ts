@@ -1170,20 +1170,28 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 
   // The page publishes as its connection drops: the server gets the newest of ten lossy ones, the plain one after them,
-  // and the newest of the ten after that.
-  test('channel: a lossy publish from a page that is away waits as the newest, and a plain one arrives after it', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#channel-test-lossy-before-plain')
-    await autoRetry(
-      async () => {
-        const { lossyBeforePlain } = await getResult<{
-          lossyBeforePlain: { received: unknown[]; seqsAhead: number[] } | null
-        }>('#channel-state')
-        expect(lossyBeforePlain).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] })
-      },
-      { timeout: 30_000 },
-    )
-  })
+  // and the newest of the ten after that. Preview only, as the other offline tests.
+  if (!isDev)
+    test('channel: a lossy publish from a page that is away waits as the newest, and a plain one arrives after it', async () => {
+      const lossyBeforePlain = async () =>
+        (
+          await getResult<{
+            lossyBeforePlain: 'listening' | { received: unknown[]; seqsAhead: number[] } | null
+          }>('#channel-state')
+        ).lossyBeforePlain
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-lossy-before-plain')
+      await autoRetry(async () => expect(await lossyBeforePlain()).toBe('listening'))
+      if (inDocker) stopProxy()
+      else await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+      if (inDocker) startProxy()
+      else await page.context().setOffline(false)
+      await autoRetry(
+        async () => expect(await lossyBeforePlain()).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] }),
+        { timeout: 30_000 },
+      )
+    })
 
   test('channel: the page lets go of a channel and a broadcast it closed and a generator it read to the end', async () => {
     await navigate(`${getServerUrl()}/channel`)
