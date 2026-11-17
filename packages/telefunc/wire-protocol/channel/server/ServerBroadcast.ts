@@ -54,6 +54,8 @@ assertIsNotBrowser()
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
 const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
+const NOT_IN_EFFECT =
+  'Broadcast closed: its client subscribed, then made a telefunction call that ended before the subscription took effect'
 
 class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -110,6 +112,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private beforeAttach: PublishBody[] = []
   /** Rejects as it ends, ahead of clearing its subscribers: the `ready` of each of them that waits rejects. */
   private ending: Deferred<void> | null = null
+  /** What waits for its page's want to take effect, which its end settles too. */
+  private readonly endWaits = new Set<() => void>()
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -394,27 +398,46 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Tells the page its want is in effect: at once where its backend delivers what any server publishes to the key
    *  already, else once it does. A page that never asked for one has nothing to confirm. */
-  override _confirmWant(): Promise<unknown> | undefined {
+  override _confirmWant(): Promise<void> | undefined {
     const { version, text, binary } = this.pageWant
     if (version === 0) return undefined
-    const pending = [text && this.textListening?.ready, binary && this.binaryListening?.ready]
-    if (!pending.some((each) => each)) {
+    const pending = [text && this.textListening?.ready, binary && this.binaryListening?.ready].filter(isPromise)
+    if (pending.length === 0) {
       this.peer?.sendWanted(version)
       return undefined
     }
-    const listening = Promise.all(pending)
-    void this.confirmWhenListening(version, listening)
-    return listening
+    return this.confirmWhenListening(version, Promise.all(pending))
   }
 
+  /** Settles once the want is in effect, or once the broadcast ended, whose end tells the page instead. */
   private async confirmWhenListening(version: number, listening: Promise<unknown>): Promise<void> {
+    const ended = createDeferred()
+    this.endWaits.add(ended.resolve)
     try {
-      await listening
+      await Promise.race([listening, ended.promise])
     } catch {
-      // The broadcast ends instead (`endUnlessListening`).
+      // Its backend failed it: the broadcast ended (`endUnlessListening`).
       return
+    } finally {
+      this.endWaits.delete(ended.resolve)
     }
-    this.peer?.sendWanted(version)
+    if (this._phase !== 'ended') this.peer?.sendWanted(version)
+  }
+
+  /** The call waits until the want it carries is in effect, or the broadcast ended. Where the call's request goes first
+   *  (its page left, or aborted the call), the broadcast ends now: its telefunction runs without the subscription. */
+  override _applyCallWant(want: Want, callAborted: AbortSignal): Promise<void> | undefined {
+    this.onPeerWant(want)
+    const inEffect = this._confirmWant()
+    return inEffect && this.inEffectUnlessAborted(inEffect, callAborted)
+  }
+
+  private async inEffectUnlessAborted(inEffect: Promise<void>, callAborted: AbortSignal): Promise<void> {
+    const end = () => this.endWithError(ERROR_REASON.BUG, new ChannelClosedError(NOT_IN_EFFECT))
+    if (callAborted.aborted) end()
+    else callAborted.addEventListener('abort', end, { once: true })
+    await inEffect
+    callAborted.removeEventListener('abort', end)
   }
 
   private unsubscribeUnusedBroadcasts(): void {
@@ -473,6 +496,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.binaryListening = null
     super.shutdown(err, options)
     this.ending?.reject(this.endError())
+    for (const ended of this.endWaits) ended()
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
   }

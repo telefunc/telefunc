@@ -334,7 +334,7 @@ async function runTelefunc_(
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
       // The page's wants take effect before the telefunction runs, whatever it causes and wherever.
-      wantsInEffect: getChannelMux().applyCallWants(getSessionToken(request), parsed.wants),
+      wantsInEffect: getChannelMux().applyCallWants(getSessionToken(request), parsed.wants, request.signal),
     })
   }
 

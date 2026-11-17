@@ -621,16 +621,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerWant(_want: Want): void {}
 
   /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does, and
-   *  returns what it waits for first: `ServerBroadcast` overrides it. */
-  _confirmWant(): Promise<unknown> | undefined {
+   *  returns what it waits for first, which settles once the want is in effect or the channel ended: `ServerBroadcast`
+   *  overrides it. */
+  _confirmWant(): Promise<void> | undefined {
     return undefined
   }
 
-  /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what has yet to happen
-   *  before it is in effect. */
-  _applyCallWant(want: Want): Promise<unknown> | undefined {
-    this.onPeerWant(want)
-    return this._confirmWant()
+  /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what the call waits for
+   *  before its telefunction runs: `ServerBroadcast` overrides it; a plain channel has no want. */
+  _applyCallWant(_want: Want, _callAborted: AbortSignal): Promise<void> | undefined {
+    return undefined
   }
 
   protected onPeerMessage(text: string, bytes: number): void {

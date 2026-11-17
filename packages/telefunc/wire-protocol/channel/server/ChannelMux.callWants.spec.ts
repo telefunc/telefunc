@@ -15,6 +15,7 @@ import {
 } from '../../broadcast/broadcastAdapter.js'
 import { TAG } from '../../wire/tags.js'
 import type { Want } from '../../wire/payloads.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 
 /** A broadcast that the call of `session` returned, its page attached at index 0 and wanting nothing yet. */
 function attachedBroadcast(session: string) {
@@ -54,8 +55,9 @@ function returnedBroadcast(session: string) {
     tags: () => frames.map((frame) => frame[0]),
     /** The page's WANT frame arrives. */
     wire: (want: Want) => broadcast._dispatchFrame({ tag: TAG.WANT, index: 0, want }),
-    /** A call of `from` carries the want. */
-    call: (want: Want, from = session) => getChannelMux().applyCallWants(from, [{ channel: broadcast.id, ...want }]),
+    /** A call of `from` carries the want; `callAborted` aborts where its request goes. */
+    call: (want: Want, from = session, callAborted = new AbortController().signal) =>
+      getChannelMux().applyCallWants(from, [{ channel: broadcast.id, ...want }], callAborted),
     /** Whether a publish to the key now reaches the page. */
     async hears(): Promise<boolean> {
       const before = frames.filter((frame) => frame[0] === TAG.PUBLISH).length
@@ -82,7 +84,8 @@ test("a call that names another session's broadcast changes nothing", async () =
 
 test('a call of a session that names a broadcast no session holds changes nothing', async () => {
   const page = attachedBroadcast('session-a')
-  expect(getChannelMux().applyCallWants('session-a', [{ channel: crypto.randomUUID(), ...on(1) }])).toBe(undefined)
+  const call = [{ channel: crypto.randomUUID(), ...on(1) }]
+  expect(getChannelMux().applyCallWants('session-a', call, new AbortController().signal)).toBe(undefined)
   expect(await page.hears()).toBe(false)
   page.broadcast.abort()
 })
@@ -207,3 +210,70 @@ for (const kind of KINDS) {
     })
   }
 }
+
+/** A broker that confirms or refuses each key's listener when the test says so. */
+function confirmingLater(run: (listening: (key: string) => Deferred<void>) => Promise<void>) {
+  return async () => {
+    const waits = new Map<string, Deferred<void>>()
+    const listen = (key: string) => {
+      const ready = createDeferred()
+      waits.set(key, ready)
+      return { unsubscribe() {}, ready: ready.promise }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    const previous = getBroadcastAdapter()
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+    )
+    try {
+      await run((key) => {
+        const ready = waits.get(key)
+        if (ready === undefined) throw new Error(`Nothing listens to ${key}`)
+        return ready
+      })
+    } finally {
+      _resetBroadcastAdapterForTesting(previous)
+    }
+  }
+}
+
+/** Whether `pending` settled by the time the timers due now ran. */
+async function settled(pending: Promise<unknown> | undefined): Promise<boolean> {
+  let done = false
+  void pending?.finally(() => (done = true))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  return done
+}
+
+test(
+  'a call waits for each subscription it carries by itself: one its backend refuses leaves it waiting for the other',
+  confirmingLater(async (listening) => {
+    const refused = attachedBroadcast('session-a')
+    const healthy = attachedBroadcast('session-a')
+    const wants = [refused, healthy].map((page) => ({ channel: page.broadcast.id, ...on(1) }))
+    const call = getChannelMux().applyCallWants('session-a', wants, new AbortController().signal)
+    listening(refused.key).reject(new Error('NOPERM'))
+    await expect(refused.broadcast.closed).rejects.toThrow('NOPERM')
+    expect(await settled(call)).toBe(false)
+    listening(healthy.key).resolve()
+    expect(await settled(call)).toBe(true)
+    expect(healthy.wanted()).toEqual([{ tag: TAG.WANTED, index: 0, version: 1 }])
+    healthy.broadcast.abort()
+  }),
+)
+
+test(
+  "a call whose request goes while a subscription it carries is on its way ends that broadcast, before the call's telefunction would run",
+  confirmingLater(async () => {
+    const page = attachedBroadcast('session-a')
+    const request = new AbortController()
+    const call = page.call(on(1), 'session-a', request.signal)
+    expect(await settled(call)).toBe(false)
+    request.abort()
+    await call
+    expect(page.broadcast.isClosed).toBe(true)
+    await expect(page.broadcast.closed).rejects.toThrow('before the subscription took effect')
+    expect(page.tags()).toContain(TAG.ERROR)
+    expect(page.wanted()).toEqual([])
+  }),
+)

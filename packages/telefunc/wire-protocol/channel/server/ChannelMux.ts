@@ -182,18 +182,22 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** Applies the wants a call carries to the channels its session's earlier calls returned, and settles once they are in
-   *  effect, or after `connectTtl`, whichever comes first. A want of a channel another session holds, or none, changes
-   *  nothing. Undefined where nothing has to happen first. */
-  applyCallWants(session: string | undefined, wants: CallWant[]): Promise<void> | undefined {
-    const pending: Promise<unknown>[] = []
+  /** Applies the wants a call carries to the channels its session's earlier calls returned, and settles once each is in
+   *  effect or its channel ended (`_applyCallWant`). A want of a channel another session holds, or none, changes nothing.
+   *  Undefined where nothing has to happen first. */
+  applyCallWants(
+    session: string | undefined,
+    wants: CallWant[],
+    callAborted: AbortSignal,
+  ): Promise<unknown> | undefined {
+    const pending: Promise<void>[] = []
     for (const want of wants) {
       const channel = this.channels.get(want.channel)
       if (channel === undefined || session === undefined || channel._session !== session) continue
-      const listening = channel._applyCallWant(want)
-      if (listening) pending.push(listening)
+      const inEffect = channel._applyCallWant(want, callAborted)
+      if (inEffect) pending.push(inEffect)
     }
-    return pending.length === 0 ? undefined : settledWithin(Promise.all(pending), this.options.connectTtl)
+    return pending.length === 0 ? undefined : Promise.all(pending)
   }
 
   private unregisterChannel(channelId: string): void {
@@ -946,14 +950,4 @@ function resolveMuxServerOptions(): MuxServerOptions {
 // `ChannelMux` fully initialized, so defer until first access.
 function getGlobals(): { mux: ChannelMux } {
   return getGlobalObject('wire-protocol/channel/server/ChannelMux.ts', () => ({ mux: new ChannelMux() }))
-}
-
-/** Settles once `pending` does, or after `ms`. */
-async function settledWithin(pending: Promise<unknown>, ms: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise((resolve) => (timer = setTimeout(resolve, ms)))
-  // A subscription its backend fails, at once or later, ends its broadcast with that error (`endUnlessListening`), which
-  // the page reads; the call goes on.
-  await Promise.race([pending.catch(() => {}), timeout])
-  clearTimeout(timer)
 }
