@@ -29,14 +29,13 @@ export {
   onBroadcastPublishingAfterReturn,
   onBroadcastRedisRefuses,
   onRedisAllowsEveryKey,
-  onPublishFromAnotherServer,
 }
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { anotherServer, redis } from '../../redis'
+import { redis } from '../../redis'
 
 type TextMsg = { text: string; from: string }
 
@@ -647,10 +646,4 @@ async function onBroadcastRedisRefuses() {
 
 async function onRedisAllowsEveryKey() {
   await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
-}
-
-/** A publish to `key` from another server: it waits for none of this server's subscriptions. */
-async function onPublishFromAnotherServer(key: string, text: string) {
-  if (!anotherServer) return void (await Broadcast.publish(key, text))
-  await anotherServer.send(key, JSON.stringify(text))
 }

@@ -431,27 +431,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _confirmWant(): Promise<unknown> | undefined {
     const { version, text, binary } = this.pageWant
     if (version === 0) return undefined
-    const listening = this.listeningFor(text, binary)
-    if (listening === undefined) {
+    const adapter = this.broadcastAdapter()
+    const pending = [text && adapter.listening?.(this.key, false), binary && adapter.listening?.(this.key, true)]
+    if (!pending.some((each) => each)) {
       this.peer?.sendWanted(version)
       return undefined
     }
+    const listening = Promise.all(pending)
     void this.confirmWhenListening(version, listening)
     return listening
-  }
-
-  /** Returned before its page said what it wants, it takes both kinds of the key's publishes for the page: the response
-   *  waits until its backend delivers them, so another server's publish right after the return reaches the page. */
-  override _listening(): Promise<unknown> | undefined {
-    return this.undeclared ? this.listeningFor(true, true) : undefined
-  }
-
-  /** Settles once its backend delivers what any server publishes to the key, of the kinds asked; undefined where it does
-   *  already. */
-  private listeningFor(text: boolean, binary: boolean): Promise<unknown> | undefined {
-    const adapter = this.broadcastAdapter()
-    const pending = [text && adapter.listening?.(this.key, false), binary && adapter.listening?.(this.key, true)]
-    return pending.some((each) => each) ? Promise.all(pending) : undefined
   }
 
   private async confirmWhenListening(version: number, listening: Promise<unknown>): Promise<void> {

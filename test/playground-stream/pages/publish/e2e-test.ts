@@ -528,17 +528,6 @@ function testSubscribeOrder(inDocker = false) {
       )
       expectServerError('NOPERM', inDocker)
     })
-
-    test("broadcast: a page hears another server's publish made right after its broadcast was returned", async () => {
-      await navigate(`${getServerUrl()}/publish`)
-      await page.click('#test-broadcast-another-server-after-return')
-      await autoRetry(
-        async () => {
-          expect(await getResult('#publish-result')).deep.equal({ received: ['from-another-server'] })
-        },
-        { timeout: 20_000 },
-      )
-    })
   }
 
   test('broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too', async () => {
