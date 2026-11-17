@@ -1,7 +1,7 @@
 export { RoomView, RoomRemotes, remoteBacking }
 
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { type ChannelPublishInfo, untether, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
+import { type ChannelPublishInfo, tetherTo, untether, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import type { ListenerOptions } from './disposer.js'
 import type { MemberEntry, ResolvedSender } from './RoomModel.js'
 import type { Adder, MessageListener, RoomState, TrackListenerOptions } from './RoomState.js'
@@ -51,6 +51,8 @@ type RoomRemotesOptions = { state: RoomState; adder: Adder }
 class RoomRemotes {
   readonly state: RoomState
   readonly adder: Adder
+  /** The room read through these, which a listener added on one of them holds open, as one added on the room does. */
+  room: RoomView | null = null
   private readonly remotes = new WeakMap<MemberEntry, RemoteParticipant>()
   private readonly shown = new WeakMap<MemberEntry, ShownParticipant>()
   private latestSnapshot: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
@@ -143,22 +145,28 @@ class RoomRemotes {
         return model.isConnected(entry)
       },
       subscribe: (cb: MessageListener<[]>, opts?: TrackListenerOptions) =>
-        state.subscribeMember(entry, this.taking(cb), opts, adder),
-      subscribeBinary: (cb, opts) => state.subscribeMemberBinary(entry, this.taking(cb), opts, adder),
-      onChange: (cb, opts) => state.onMember(entry, 'change', cb, opts, adder),
-      onDisconnect: (cb, opts) => state.onMember(entry, 'disconnect', cb, opts, adder),
-      onReconnect: (cb, opts) => state.onMember(entry, 'reconnect', cb, opts, adder),
-      onLeave: (cb: (cause: LeaveCause) => void, opts?: ListenerOptions) => state.onMemberLeave(entry, cb, opts, adder),
+        this.holding(state.subscribeMember(entry, this.taking(cb), opts, adder)),
+      subscribeBinary: (cb, opts) => this.holding(state.subscribeMemberBinary(entry, this.taking(cb), opts, adder)),
+      onChange: (cb, opts) => this.holding(state.onMember(entry, 'change', cb, opts, adder)),
+      onDisconnect: (cb, opts) => this.holding(state.onMember(entry, 'disconnect', cb, opts, adder)),
+      onReconnect: (cb, opts) => this.holding(state.onMember(entry, 'reconnect', cb, opts, adder)),
+      onLeave: (cb: (cause: LeaveCause) => void, opts?: ListenerOptions) =>
+        this.holding(state.onMemberLeave(entry, cb, opts, adder)),
     }
     for (const name of participantFields().keys()) {
       Object.defineProperty(remote, name, { get: () => fieldValue(entry.fields, name), enumerable: true })
     }
     this.remotes.set(entry, remote)
     remoteBackings.set(remote, { state, entry })
-    // A read through the page's room wrapper tethers what it returns to it, but only the member `join()` returns holds
-    // its room open.
+    // Holding a remote doesn't hold its room open: a listener added on it does, until it is removed.
     untether(remote)
     return remote
+  }
+
+  /** `stop` removes a listener: it holds the room open until it runs, as the stop of a listener added on the room does. */
+  private holding(stop: () => void): () => void {
+    if (this.room) tetherTo(stop, this.room)
+    return stop
   }
 
   /** The member's remote with its fields as they are now, the same object until they change. */
@@ -194,6 +202,7 @@ class RoomView {
 
   constructor(remotes: RoomRemotes) {
     this._remotes = remotes
+    remotes.room = this
   }
 
   /** The remotes a read answers from; a server's room checks first how old its view is. */

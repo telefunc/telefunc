@@ -162,6 +162,8 @@ let removeByIdentity: (() => void) | null = null
 let publishUpgradedSelf: (() => void) | null = null
 /** The check the `watchers-upgrade` card runs when its second button is clicked. */
 let checkUpgradedWatch: (() => void) | null = null
+/** The publish the `member-resub` card makes when its second button is clicked. */
+let publishToResubscribed: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
 let checkLetGo: (() => void) | null = null
 /** The chat the `ack-dm-close` card closes when its second button is clicked. */
@@ -2028,10 +2030,17 @@ function Room() {
         // What a React effect over `[remoteX]` does when it runs again.
         off()
         remoteX.subscribe((data) => second.push(data as string))
+        const { promise: published, resolve } = Promise.withResolvers<void>()
+        publishToResubscribed = resolve
+        setResult(JSON.stringify({ ready: true }))
+        await published
         await x.publish('live')
         await pollUntil(() => ({ result: { first, second }, done: second.includes('live') }))
         releaseRoom()
       })}
+      <button id="test-room-member-resub-publish" onClick={() => publishToResubscribed?.()}>
+        Publish to the member's listener
+      </button>
 
       {scenario('member-sub-order', null, 'Follow one member and publish in one task', async () => {
         const [roomId, room] = await createRoom('membersuborder')

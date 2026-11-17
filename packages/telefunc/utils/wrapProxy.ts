@@ -1,4 +1,4 @@
-export { wrapProxy, untether }
+export { wrapProxy, untether, tetherTo }
 
 import { isObjectOrFunction } from './isObjectOrFunction.js'
 
@@ -13,6 +13,8 @@ import { isObjectOrFunction } from './isObjectOrFunction.js'
  *  wrapper (value) is held strongly, so FinalizationRegistry won't collect it. */
 const keepWrapperAlive = new WeakMap<object, unknown>()
 const untethered = new WeakSet<object>()
+/** Each wrapped value's wrapper, which only its user's references keep alive. */
+const wrappers = new WeakMap<object, WeakRef<object>>()
 
 /** Wrap a value in a transparent proxy so it can be GC'd independently.
  *
@@ -27,6 +29,7 @@ function wrapProxy<T extends object>(target: T): T {
       return result
     }
     Object.assign(wrapper, target)
+    wrappers.set(target, new WeakRef(wrapper))
     return wrapper as unknown as T
   }
 
@@ -64,6 +67,7 @@ function wrapProxy<T extends object>(target: T): T {
       return Reflect.getPrototypeOf(target)
     },
   })
+  wrappers.set(target, new WeakRef(wrapper))
   return wrapper
 }
 
@@ -74,6 +78,12 @@ function tether(derived: unknown, wrapper: unknown): void {
   keepWrapperAlive.set(derived, wrapper)
   // A synchronous array return, such as `tee()`'s branches, hands out each element.
   if (Array.isArray(derived)) for (const value of derived) tether(value, wrapper)
+}
+
+/** Pin the wrapper over `target`, if it has one, to live as long as `derived` does, as a value a method of it returns. */
+function tetherTo(derived: object, target: object): void {
+  const wrapper = wrappers.get(target)?.deref()
+  if (wrapper) tether(derived, wrapper)
 }
 
 /** `derived` never pins a wrapper: a terminal child no longer owns its parent's lifetime. */

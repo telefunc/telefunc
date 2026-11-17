@@ -767,14 +767,26 @@ function testRoom() {
       expect(r.xBin).deep.equal(['X:7'])
     },
   )
-  testRoomScenario<{ first: string[]; second: string[] }>(
-    'member-resub',
-    "room: a member's subscription turned off and on again in one task gets what follows, not the member's retained message again",
-    (r) => {
-      expect(r.first).deep.equal(['pinned'])
-      expect(r.second).deep.equal(['live'])
-    },
-  )
+  test("room: a member's subscription turned off and on again in one task gets what follows, not the member's retained message again, and holds the room the page read the member from through a GC pass", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-member-resub')
+    await autoRetry(async () => {
+      expect((await getResult<{ ready: boolean }>('#room-result')).ready).toBe(true)
+    })
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    // A room the pass collected closes right after it, so it would have closed by now.
+    await sleep(1000)
+    await page.click('#test-room-member-resub-publish')
+    try {
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ first: ['pinned'], second: ['live'] })
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
   testRoomScenario<{ received: string[] }>(
     'member-sub-order',
     "room: a member's subscription made right before a publish in the same task gets that publish",
