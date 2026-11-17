@@ -2031,11 +2031,11 @@ function testRoomStaleRead() {
 }
 
 function testRoomRedisPublishLimit() {
-  testRoomScenario<{ refused: string }>(
+  testRoomScenario<{ refused: string; received: number[] }>(
     'over-redis-limit',
-    "room: a publish over the Redis backend's ceiling rejects",
+    "room: a member's publish of the Redis backend's ceiling, binary or text, arrives, and one byte past it rejects",
     (r) => {
-      expect(r).deep.equal({ refused: 'ChannelOverflowError' })
+      expect(r).deep.equal({ refused: 'ChannelOverflowError', received: [28 * 1024 * 1024, 28 * 1024 * 1024 - 2] })
     },
   )
 }

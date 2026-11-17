@@ -2,6 +2,7 @@ export { getRoomPlane, ROOM_PLANE }
 
 import { backendPlane, planeKey, type PlaneDefinition } from 'telefunc/__internal'
 import { reportLaneLost } from '../server/config.js'
+import { publishedBytes } from '../server/lanes/lanes.js'
 import type { RoomDriver, RoomPlaneKey, RoomPlaneKit } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from './laneKey.js'
@@ -23,6 +24,7 @@ const kit: RoomPlaneKit = {
   recordOperation,
   OPERATION_COMMIT_LANE,
   reportLaneLost,
+  publishedBytes,
 }
 
 const roomPlane: PlaneDefinition<RoomPlaneKit, RoomDriver, RoomPlane> = {
