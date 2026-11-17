@@ -2,6 +2,7 @@
 // an SSE wire that never sends a byte, so each publish is the frame the test hands the page.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHook } from 'node:async_hooks'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
@@ -78,6 +79,25 @@ it("a call carries the page's wants the server hasn't confirmed", () => {
   expect(carried()).toEqual([{ channel: page.id, version: 2, text: true, binary: true }])
   page.abort()
   expect(carried()).toEqual([])
+})
+
+// A `ready` nobody reads makes no promise: subscribers that come and go while the server hasn't confirmed leave nothing.
+it("1,000 page subscribers added and removed while the server hasn't confirmed make no promise", () => {
+  const page = new ClientBroadcast(channelOptions())
+  page.subscribe(() => {})
+  let made = 0
+  const hook = createHook({
+    init(_id, type) {
+      if (type === 'PROMISE') made++
+    },
+  }).enable()
+  try {
+    for (let i = 0; i < 1_000; i++) page.subscribe(() => {})()
+  } finally {
+    hook.disable()
+  }
+  expect(made).toBe(0)
+  page.abort()
 })
 
 function channelOptions() {

@@ -7,7 +7,7 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { Readiness, makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -17,7 +17,6 @@ import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { createDeferred } from '../../../utils/createDeferred.js'
 import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, type ClientChannelOptions } from './ClientChannel.js'
 
@@ -79,17 +78,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (options.signal?.aborted) return withReady(() => {})
     // A closing one sends no want any more.
     if (this.stopped) return neverInEffect(this.endError())
-    const removed = createDeferred()
+    const readiness = new Readiness()
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        removed.resolve()
+        this._attach.stopWaiting(readiness)
         if (listeners.size === 0) this.setSubscribed(kind, false)
       },
     })
     if (listeners.size === 1) this.setSubscribed(kind, true)
-    const confirmed = this._attach.wantConfirmed(this._attach.wants?.version ?? 0)
-    return withReady(remove, Promise.race([confirmed, removed.promise]))
+    this._attach.waitFor(readiness, this._attach.wants?.version ?? 0)
+    return withReady(remove, readiness)
   }
 
   protected override dispatchCtrl(frame: ChannelCtrlFrame): void {

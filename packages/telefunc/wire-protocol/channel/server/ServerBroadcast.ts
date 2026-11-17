@@ -11,7 +11,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { Readiness, makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -38,7 +38,7 @@ import {
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
@@ -74,6 +74,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Its subscription to the key's publishes on its backend, while its page or a subscriber of it wants them. */
   private textListening: Listening | null = null
   private binaryListening: Listening | null = null
+  /** Its subscribers waiting for their kind's subscription to take effect. */
+  private readonly textWaiting = new Set<Readiness>()
+  private readonly binaryWaiting = new Set<Readiness>()
   /** The page's want it applied last: which of the key's publishes go to the page. */
   private pageWant: Readonly<Want> = { version: 0, text: false, binary: false }
 
@@ -110,10 +113,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
    *  those its page still wants, ahead of the close where the broadcast closed meanwhile, as a plain channel does. */
   private beforeAttach: PublishBody[] = []
-  /** Rejects as it ends, ahead of clearing its subscribers: the `ready` of each of them that waits rejects. */
-  private ending: Deferred<void> | null = null
-  /** What waits for its page's want to take effect, which its end settles too. */
-  private readonly endWaits = new Set<() => void>()
+  /** The calls waiting for its page's want to take effect, which go on once it does or the broadcast ends. */
+  private readonly callWaits = new Set<() => void>()
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -171,17 +172,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (this._phase === 'ended') return neverInEffect(this.endError())
     if (binary) this.subscribeBinaryBroadcast()
     else this.subscribeBroadcast()
-    const removed = createDeferred()
+    const waiting = binary ? this.binaryWaiting : this.textWaiting
+    const readiness = new Readiness()
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        removed.resolve()
+        waiting.delete(readiness)
+        readiness.settle(true)
         this.unsubscribeUnusedBroadcasts()
       },
     })
     this.unsubscribeUnusedBroadcasts()
-    const listening = binary ? this.binaryListening : this.textListening
-    return withReady(remove, Promise.race([this.ended().promise, listening?.ready, removed.promise]))
+    if ((binary ? this.binaryListening : this.textListening)?.ready) waiting.add(readiness)
+    else readiness.settle(true)
+    return withReady(remove, readiness)
   }
 
   // --- Transport callbacks ---
@@ -396,47 +400,36 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.unsubscribeUnusedBroadcasts()
   }
 
-  /** Tells the page its want is in effect: at once where its backend delivers what any server publishes to the key
-   *  already, else once it does. A page that never asked for one has nothing to confirm. */
-  override _confirmWant(): Promise<void> | undefined {
-    const { version, text, binary } = this.pageWant
-    if (version === 0) return undefined
-    const pending = [text && this.textListening?.ready, binary && this.binaryListening?.ready].filter(isPromise)
-    if (pending.length === 0) {
-      this.peer?.sendWanted(version)
-      return undefined
-    }
-    return this.confirmWhenListening(version, Promise.all(pending))
+  /** Tells the page its want is in effect, and the calls waiting for it, where its backend delivers what any server
+   *  publishes to the key already; else that waits for the backend (`whenListening`). A page that never asked for one has
+   *  nothing to confirm. */
+  override _confirmWant(): void {
+    if (this.pageWant.version === 0 || !this.pageWantInEffect()) return
+    this.peer?.sendWanted(this.pageWant.version)
+    for (const goOn of this.callWaits) goOn()
+    this.callWaits.clear()
   }
 
-  /** Settles once the want is in effect, or once the broadcast ended, whose end tells the page instead. */
-  private async confirmWhenListening(version: number, listening: Promise<unknown>): Promise<void> {
-    const ended = createDeferred()
-    this.endWaits.add(ended.resolve)
-    try {
-      await Promise.race([listening, ended.promise])
-    } catch {
-      // Its backend failed it: the broadcast ended (`endUnlessListening`).
-      return
-    } finally {
-      this.endWaits.delete(ended.resolve)
-    }
-    if (this._phase !== 'ended') this.peer?.sendWanted(version)
+  private pageWantInEffect(): boolean {
+    const { text, binary } = this.pageWant
+    return !(text && this.textListening?.ready) && !(binary && this.binaryListening?.ready)
   }
 
   /** The call waits until the want it carries is in effect, or the broadcast ended. Where the call's request goes first
    *  (its page left, or aborted the call), the broadcast ends now: its telefunction runs without the subscription. */
   override _applyCallWant(want: Want, callAborted: AbortSignal): Promise<void> | undefined {
     this.onPeerWant(want)
-    const inEffect = this._confirmWant()
-    return inEffect && this.inEffectUnlessAborted(inEffect, callAborted)
+    this._confirmWant()
+    return this.pageWantInEffect() ? undefined : this.inEffectUnlessAborted(callAborted)
   }
 
-  private async inEffectUnlessAborted(inEffect: Promise<void>, callAborted: AbortSignal): Promise<void> {
+  private async inEffectUnlessAborted(callAborted: AbortSignal): Promise<void> {
+    const inEffect = createDeferred()
+    this.callWaits.add(inEffect.resolve)
     const end = () => this.endWithError(ERROR_REASON.BUG, new ChannelClosedError(NOT_IN_EFFECT))
     if (callAborted.aborted) end()
     else callAborted.addEventListener('abort', end, { once: true })
-    await inEffect
+    await inEffect.promise
     callAborted.removeEventListener('abort', end)
   }
 
@@ -495,20 +488,18 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.binaryListening?.unsubscribe()
     this.binaryListening = null
     super.shutdown(err, options)
-    this.ending?.reject(this.endError())
-    for (const ended of this.endWaits) ended()
+    // Ahead of clearing its subscribers, which settles their `ready` as removed.
+    const endError = this.endError()
+    for (const readiness of [...this.textWaiting, ...this.binaryWaiting]) readiness.settle(endError)
+    this.textWaiting.clear()
+    this.binaryWaiting.clear()
+    for (const goOn of this.callWaits) goOn()
+    this.callWaits.clear()
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
   }
 
   // --- Internal broadcast helpers ---
-
-  private ended(): Deferred<void> {
-    if (this.ending) return this.ending
-    this.ending = createDeferred()
-    this.ending.promise.catch(() => {})
-    return this.ending
-  }
 
   /** The installed adapter, which the channel keeps from its first use. */
   private broadcastAdapter(): BroadcastAdapter {
@@ -528,7 +519,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       ),
     )
     this.textListening = listening
-    void this.endUnlessListening(listening, () => this.textListening === listening)
+    if (listening.ready) void this.whenListening(listening, listening.ready, this.textWaiting)
   }
 
   private subscribeBinaryBroadcast(forPage = false): void {
@@ -541,20 +532,27 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       ),
     )
     this.binaryListening = listening
-    void this.endUnlessListening(listening, () => this.binaryListening === listening)
+    if (listening.ready) void this.whenListening(listening, listening.ready, this.binaryWaiting)
   }
 
-  /** A subscription its backend failed stays failed (Redis doesn't try it again), so the broadcast ends: with the
-   *  backend's error on the server, reported as a server error, and as a server error on its page. Every `ready` waiting
-   *  for the subscription rejects with that end. One removed meanwhile ends nothing. */
-  private async endUnlessListening(listening: Listening, current: () => boolean): Promise<void> {
+  /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
+   *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
+   *  broadcast ends: with the backend's error on the server, reported as a server error, and as a server error on its
+   *  page; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
+  private async whenListening(listening: Listening, ready: Promise<void>, waiting: Set<Readiness>): Promise<void> {
+    const current = () => this.textListening === listening || this.binaryListening === listening
     try {
-      await listening.ready
+      await ready
     } catch (err) {
       if (!current()) return
       handleCallbackBug(err)
-      this.endWithError(ERROR_REASON.BUG, err instanceof Error ? err : new Error(String(err)))
+      return this.endWithError(ERROR_REASON.BUG, err instanceof Error ? err : new Error(String(err)))
     }
+    if (!current()) return
+    listening.ready = undefined
+    for (const readiness of waiting) readiness.settle(true)
+    waiting.clear()
+    this._confirmWant()
   }
 
   private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -744,16 +742,18 @@ function listeningOrFailure(orFailure: boolean, subscribe: () => BroadcastUnsubs
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
  *  `ready` resolves once the subscription is in effect or removed. */
 function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal | undefined): Unsubscribe {
-  const removed = createDeferred()
+  const readiness = ready && new Readiness(ready)
   let current: (() => void) | undefined = unsubscribe
   const remove = () => {
     const pending = current
     current = undefined
     signal?.removeEventListener('abort', remove)
+    // Ahead of the transport's remover, which may fail the wait it abandons.
+    readiness?.settle(true)
     pending?.()
-    removed.resolve()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()
-  return withReady(remove, Promise.race([ready, removed.promise]))
+  return withReady(remove, readiness)
 }
+

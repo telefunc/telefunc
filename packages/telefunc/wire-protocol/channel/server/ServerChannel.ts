@@ -627,12 +627,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** `ServerBroadcast` overrides it; a plain channel ignores wants. */
   protected onPeerWant(_want: Want): void {}
 
-  /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does, and
-   *  returns what it waits for first, which settles once the want is in effect or the channel ended: `ServerBroadcast`
-   *  overrides it. */
-  _confirmWant(): Promise<void> | undefined {
-    return undefined
-  }
+  /** @internal Tells the page which of its wants is in effect, as the answer to its attach or to a WANT frame does:
+   *  `ServerBroadcast` overrides it. */
+  _confirmWant(): void {}
 
   /** @internal Applies a want a call of the page's carries, as one the wire brings, and returns what the call waits for
    *  before its telefunction runs: `ServerBroadcast` overrides it; a plain channel has no want. */

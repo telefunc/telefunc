@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { createHook } from 'node:async_hooks'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
+import { Channel } from '../channel/server/ServerChannel.js'
 import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -15,6 +17,7 @@ import type { BroadcastTransport, BroadcastUnsubscribe } from './broadcastAdapte
 /** The adapter's subscription as the function that stops it. */
 const stopOf = (subscription: BroadcastUnsubscribe) => listeningOf(subscription).unsubscribe
 import { ChannelOverflowError } from '../channel/channelErrors.js'
+import type { Unsubscribe } from '../channel/channel.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -416,6 +419,67 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const subscriber = subscribe(new AbortController().signal)
       subscriber.end?.()
       expect(await settled(subscriber.ready)).toBe('rejected')
+    })
+  }
+})
+
+// A `ready` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
+describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
+  const pending = new Promise<void>(() => {})
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  /** How many promises `run` made. */
+  const promisesMadeBy = (run: () => void) => {
+    let made = 0
+    const hook = createHook({
+      init(_id, type) {
+        if (type === 'PROMISE') made++
+      },
+    }).enable()
+    try {
+      run()
+    } finally {
+      hook.disable()
+    }
+    return made
+  }
+  const broadcasts = new Map<string, ServerBroadcast<string>>()
+  const broadcastOf = (key: string) => {
+    let broadcast = broadcasts.get(key)
+    if (broadcast === undefined) broadcasts.set(key, (broadcast = new ServerBroadcast<string>({ key })))
+    return broadcast
+  }
+  const channels = new Map<string, Channel<never, string>>()
+  const channelOf = (key: string) => {
+    let channel = channels.get(key)
+    if (channel === undefined) channels.set(key, (channel = new Channel<never, string>()))
+    return channel
+  }
+  const CHURN: Record<string, (key: string) => Unsubscribe> = {
+    'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
+    'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
+    // In effect at once: its `ready`, read, is one promise every such listener shares.
+    "a channel's listen(), its `ready` read": (key) => {
+      const remove = channelOf(key).listen(() => {})
+      void remove.ready
+      return remove
+    },
+  }
+  for (const [name, subscribe] of Object.entries(CHURN)) {
+    it(`${name}: 1,000 subscribers added and removed make no promise`, () => {
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+      )
+      const key = crypto.randomUUID()
+      // Holds the key's subscription, which waits for its backend.
+      const holder = subscribe(key)
+      const made = promisesMadeBy(() => {
+        for (let i = 0; i < 1_000; i++) subscribe(key)()
+      })
+      expect(made).toBe(0)
+      holder()
+      broadcasts.get(key)?.abort()
+      channels.get(key)?.abort()
     })
   }
 })

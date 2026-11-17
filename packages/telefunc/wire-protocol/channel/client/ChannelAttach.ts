@@ -1,6 +1,7 @@
 export { ChannelAttach }
 
 import type { AttachState, Want } from '../../wire/payloads.js'
+import type { Readiness } from '../channel.js'
 import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { SendCredit } from '../../flowControl/SendCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
@@ -22,10 +23,8 @@ class ChannelAttach {
   private want: Readonly<Want> | null = null
   /** The newest version of the want the server confirmed is in effect. */
   private confirmed = 0
-  /** The waits for a version the server hasn't confirmed yet. */
-  private confirming: { version: number; resolve: () => void; reject: (err: Error) => void }[] = []
-  /** What the channel ended with, after which no want takes effect. */
-  private ended: Error | null = null
+  /** The listeners waiting for a version the server hasn't confirmed yet, each with that version. */
+  private readonly confirming = new Map<Readiness, number>()
 
   constructor({ channel, sendCredit, receiveCredit }: ChannelAttachOptions) {
     this.channel = channel
@@ -61,27 +60,32 @@ class ChannelAttach {
     return this.want
   }
 
-  /** Settles once the server confirmed the want at `version`, or a newer one. */
-  wantConfirmed(version: number): Promise<void> {
-    if (version <= this.confirmed) return Promise.resolve()
-    if (this.ended) return Promise.reject(this.ended)
-    return new Promise((resolve, reject) => this.confirming.push({ version, resolve, reject }))
+  /** A listener is in effect once the server confirmed the want at `version`, or a newer one. */
+  waitFor(readiness: Readiness, version: number): void {
+    if (version <= this.confirmed) readiness.settle(true)
+    else this.confirming.set(readiness, version)
+  }
+
+  /** The listener was removed: it waits no more. */
+  stopWaiting(readiness: Readiness): void {
+    this.confirming.delete(readiness)
+    readiness.settle(true)
   }
 
   confirmWant(version: number): void {
     if (version <= this.confirmed) return
     this.confirmed = version
-    const settled = this.confirming.filter((wait) => wait.version <= version)
-    this.confirming = this.confirming.filter((wait) => wait.version > version)
-    for (const { resolve } of settled) resolve()
+    for (const [readiness, waitsFor] of this.confirming) {
+      if (waitsFor > version) continue
+      this.confirming.delete(readiness)
+      readiness.settle(true)
+    }
   }
 
   /** The channel ended: no want of it will take effect. */
   failWants(err: Error): void {
-    const { confirming } = this
-    this.ended = err
-    this.confirming = []
-    for (const { reject } of confirming) reject(err)
+    for (const readiness of this.confirming.keys()) readiness.settle(err)
+    this.confirming.clear()
   }
 
   /** Caps both credit windows at what the server's `maxMemory` allows. */

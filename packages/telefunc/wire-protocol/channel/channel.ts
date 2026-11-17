@@ -1,4 +1,4 @@
-export { makePublishInfo, stringifyMessage, withReady, neverInEffect, LOSSY_WITH_ACK_TEXT }
+export { makePublishInfo, stringifyMessage, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -22,6 +22,7 @@ export type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
@@ -142,13 +143,60 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
 > &
   ChannelShield<ClientToServer, ServerToClient>
 
-/** `remove` with `ready`: a failure nobody reads raises no unhandled rejection. */
-function withReady(remove: () => void, ready: Promise<void> = Promise.resolve()): Unsubscribe {
-  ready.catch(() => {})
-  return Object.assign(remove, { ready })
+/** A listener's way to being in effect, settled at its first outcome: `true` once it is in effect or removed, or the
+ *  error it never will be with. Its promise is made only where its `ready` is read. */
+class Readiness {
+  private outcome: true | Error | undefined = undefined
+  private waiting: Deferred<void> | undefined = undefined
+  /** In effect once `until` resolves, never where it rejects: followed only once `ready` is read. */
+  private readonly until: Promise<void> | undefined
+
+  constructor(until?: Promise<void>) {
+    this.until = until
+  }
+
+  settle(outcome: true | Error): void {
+    if (this.outcome !== undefined) return
+    this.outcome = outcome
+    if (outcome === true) this.waiting?.resolve()
+    else this.waiting?.reject(outcome)
+  }
+
+  get promise(): Promise<void> {
+    if (this.outcome === true) return IN_EFFECT
+    if (this.waiting === undefined) {
+      this.waiting = createDeferred()
+      // A failure nobody reads raises no unhandled rejection.
+      this.waiting.promise.catch(() => {})
+      if (this.outcome !== undefined) this.waiting.reject(this.outcome)
+      else if (this.until) void this.follow(this.until)
+    }
+    return this.waiting.promise
+  }
+
+  private async follow(until: Promise<void>): Promise<void> {
+    try {
+      await until
+    } catch (err) {
+      return this.settle(err instanceof Error ? err : new Error(String(err)))
+    }
+    this.settle(true)
+  }
+}
+
+/** What the `ready` of every listener in effect at once is. */
+const IN_EFFECT = Promise.resolve()
+
+/** `remove` with `ready`: in effect at once without `readiness`. */
+function withReady(remove: () => void, readiness?: Readiness): Unsubscribe {
+  const unsubscribe = Object.assign(remove, { ready: IN_EFFECT })
+  if (readiness) Object.defineProperty(unsubscribe, 'ready', { get: () => readiness.promise })
+  return unsubscribe
 }
 
 /** The remover of a listener added once its channel ended, which registered nothing: its `ready` rejects with `err`. */
 function neverInEffect(err: Error): Unsubscribe {
-  return withReady(() => {}, Promise.reject(err))
+  const readiness = new Readiness()
+  readiness.settle(err)
+  return withReady(() => {}, readiness)
 }
