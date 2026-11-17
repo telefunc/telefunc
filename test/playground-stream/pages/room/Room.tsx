@@ -70,6 +70,7 @@ import {
   onPing,
   onSystemPublish,
   onSystemSend,
+  onSystemSendToUser,
   onUpdateRoom,
   onListRooms,
   onKick,
@@ -158,6 +159,8 @@ let goAway: (() => void) | null = null
 let checkKeptMember: (() => void) | null = null
 /** The removal the `removed-identity` card makes when its second button is clicked. */
 let removeByIdentity: (() => void) | null = null
+/** The sends the `send-identity` card makes when its second button is clicked. */
+let sendToMulti: (() => void) | null = null
 /** The publish the `self-upgrade` card makes when its second button is clicked. */
 let publishUpgradedSelf: (() => void) | null = null
 /** The check the `watchers-upgrade` card runs when its second button is clicked. */
@@ -1583,6 +1586,32 @@ function Room() {
           })
         },
       )}
+
+      {scenario('send-identity', null, 'Send to every tab of a user', async () => {
+        const roomId = await createRoomId('send-identity')
+        const { promise: sending, resolve } = Promise.withResolvers<void>()
+        sendToMulti = resolve
+        setResult(JSON.stringify({ roomId }))
+        await sending
+        const receipts = await onSystemSendToUser(roomId, 'user:Multi', 'hello')
+        await onSystemSendToUser(roomId, 'user:Multi', 'bye')
+        const toNoTab = await onSystemSendToUser(roomId, 'user:Nobody', 'hello')
+        setResult(JSON.stringify({ receipts, toNoTab }))
+      })}
+      <button id="test-room-send-identity-send" onClick={() => sendToMulti?.()}>
+        Send to Multi
+      </button>
+      {scenario('send-identity-held', null, 'Hold Multi and hear what it is sent', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId') ?? ''
+        const me = await onJoinAsServer(roomId, 'Multi')
+        keepReachable(me)
+        const received: Array<{ data: unknown; fromServer: boolean }> = []
+        me.listen((data, { from }) => {
+          received.push({ data, fromServer: from === null })
+          setResult(JSON.stringify(received))
+        })
+        setResult(JSON.stringify(received))
+      })}
 
       {scenario('attributes', 'updateMeta (partial merge)', 'Merge & delete attributes', async () => {
         const [roomId, lobby] = await createRoom('attr')

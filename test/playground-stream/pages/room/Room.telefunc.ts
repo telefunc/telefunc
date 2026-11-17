@@ -65,6 +65,7 @@ export {
   onPing,
   onSystemPublish,
   onSystemSend,
+  onSystemSendToUser,
   onUpdateRoom,
   onListRooms,
   onKick,
@@ -817,6 +818,10 @@ async function onSystemPublish(roomId: string, data: unknown) {
 
 async function onSystemSend(roomId: string, participantId: string, data: unknown) {
   return await Room.send(roomId, { id: participantId }, data)
+}
+
+async function onSystemSendToUser(roomId: string, identity: string, data: unknown) {
+  return await Room.send(roomId, { identity }, data)
 }
 
 async function onUpdateRoom(roomId: string, meta: Record<string, unknown>) {

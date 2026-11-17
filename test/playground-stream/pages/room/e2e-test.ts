@@ -673,6 +673,51 @@ function testRoom() {
       expect(result.count).toBe(0)
     },
   )
+  test("room: the server's send to a user reaches each of its tabs once, and resolves to one receipt per tab", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-send-identity')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-send-identity:/)
+    })
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('The test page has no browser to open tabs in')
+    const context = await browser.newContext()
+    const tabs = [await context.newPage(), await context.newPage()]
+    const tabResult = async (tab: (typeof tabs)[number]) => JSON.parse(await tab.innerText('#room-result'))
+    try {
+      for (const tab of tabs) {
+        await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, tab)
+        await tab.click('#test-room-send-identity-held')
+        await autoRetry(async () => expect(await tabResult(tab)).deep.equal([]))
+      }
+      await page.click('#test-room-send-identity-send')
+      await autoRetry(async () => {
+        const r = await getResult<{ receipts: Array<{ seq: number; timestamp: number }>; toNoTab: unknown[] }>(
+          '#room-result',
+        )
+        expect(r.receipts).length(2)
+        for (const receipt of r.receipts) {
+          expect(receipt.seq).greaterThan(0) // its place in that tab's inbox
+          expect(receipt.timestamp).greaterThan(0)
+        }
+        expect(r.toNoTab).deep.equal([]) // a user with no tab in the room
+      })
+      for (const tab of tabs) {
+        // `bye`, sent after `hello`, shows that `hello` came once.
+        await autoRetry(async () =>
+          expect(await tabResult(tab)).deep.equal([
+            { data: 'hello', fromServer: true },
+            { data: 'bye', fromServer: true },
+          ]),
+        )
+      }
+    } finally {
+      await context.close()
+      await page.goto('about:blank')
+    }
+  })
   testRoomScenario<{
     name: string | null
     title: string | null
