@@ -631,21 +631,14 @@ function testPublishFailingBackend() {
 
 /** Runs on Redis. */
 function testPublishHold() {
-  test('broadcast: publishes held while a subscription establishes fit 2 MiB by their bytes, and the one past it rejects with ChannelOverflowError', async () => {
+  test("broadcast: publishes made in a new subscription's turn, past 2 MiB together, wait for it and all reach it", async () => {
     await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-hold-overflow')
+    await page.click('#test-broadcast-hold')
     await autoRetry(async () => {
       expect(await getResult('#publish-result')).deep.equal({
-        outcomes: ['sent', 'sent', 'ChannelOverflowError'],
-        seen: ['1', '2'],
+        outcomes: ['sent', 'sent', 'sent'],
+        seen: ['1', '2', '3'],
       })
-    })
-  })
-  test('broadcast: a publish held alone goes through past 2 MiB, and a second one rejects with ChannelOverflowError', async () => {
-    await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-hold-alone')
-    await autoRetry(async () => {
-      expect(await getResult('#publish-result')).deep.equal({ outcomes: ['sent', 'ChannelOverflowError'], seen: ['1'] })
     })
   })
 }

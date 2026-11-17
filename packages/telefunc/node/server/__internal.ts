@@ -7,6 +7,8 @@ export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { reconnectWindow } from './serverConfig.js'
 export { MAX_CHANNELS_PER_CONNECTION, PUBLISH_HOLD_BYTES } from '../../wire-protocol/constants.js'
+export { HELD_SEND_OVERHEAD_BYTES, queueMemory } from '../../wire-protocol/channel/server/channelMemory.js'
+export type { QueueMemory } from '../../wire-protocol/channel/channelMessages.js'
 
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'

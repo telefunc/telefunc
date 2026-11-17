@@ -260,8 +260,8 @@ export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 export const WIRE_QUEUE_DELAY_MS = 300
 /** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
 export const LOSSY_CONFIRM_SLACK_MS = 300
-/** The most a broadcast's or a Room's `messages()` loop holds behind, a participant holds before its first `listen()`,
- *  and a Redis publish waits behind on a new subscription: publishes can't be awaited. */
+/** The most a broadcast's or a Room's `messages()` loop holds behind, and a participant holds before its first
+ *  `listen()`: publishes don't wait for their listeners. */
 export const PUBLISH_HOLD_BYTES = 2 * 1024 * 1024
 /** The most one server channel holds for its page, however large `config.channel.maxMemory`: a sender that awaits each
  *  send holds one, so only sends nobody awaits reach it. */

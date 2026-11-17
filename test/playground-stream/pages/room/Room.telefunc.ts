@@ -1406,9 +1406,8 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a
- *  new subscription holds: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready, so the commits
- *  wait until it is. */
+/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn: Redis's SUBSCRIBE round
+ *  trip keeps the view's new subscription short of ready, so the commits wait until it is. */
 async function onPublishWhileEstablishing(roomId: string, count: number, bytes: number) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)

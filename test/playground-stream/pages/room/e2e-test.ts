@@ -1968,19 +1968,11 @@ function testRoomTracksBehind(scenario: 'cursor' | 'drawing', name: string, vali
 /** Runs on Redis. */
 function testRoomPublishHold() {
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
-    'hold-overflow',
-    'room: publishes held while a subscription establishes fit 2 MiB by their bytes, and the one past it rejects with ChannelOverflowError',
+    'hold',
+    "room: publishes made in a new subscription's turn, past 2 MiB together, wait for it and all reach it",
     (r) => {
-      expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'ChannelOverflowError'])
-      expect(r.seen).deep.equal(['1', '2'])
-    },
-  )
-  testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
-    'hold-alone',
-    'room: a publish held alone goes through past 2 MiB, and a second one rejects with ChannelOverflowError',
-    (r) => {
-      expect(r.serverOutcomes).deep.equal(['sent', 'ChannelOverflowError'])
-      expect(r.seen).deep.equal(['1'])
+      expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'sent'])
+      expect(r.seen).deep.equal(['1', '2', '3'])
     },
   )
 }

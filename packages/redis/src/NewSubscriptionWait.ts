@@ -1,14 +1,21 @@
 export { NewSubscriptionWait }
 export type { WaitingSend, WaitRule }
 
-import { ChannelOverflowError, createDeferred, PUBLISH_HOLD_BYTES, unrefTimer } from 'telefunc/__internal'
+import {
+  ChannelOverflowError,
+  createDeferred,
+  HELD_SEND_OVERHEAD_BYTES,
+  queueMemory,
+  unrefTimer,
+  type QueueMemory,
+} from 'telefunc/__internal'
 import type { RedisSubscriptions } from './RedisSubscriptions.js'
 
 /** How long a send waits for our own new subscriptions on its channels. */
 const SEND_WAIT_MS = 60_000
 
 /** A send waits while one of our subscriptions on `channels` is new, behind the waiting sends of its `queue` (what one
- *  seq counts). Its bytes count against `budget`, within `PUBLISH_HOLD_BYTES`. */
+ *  seq counts). Its bytes count against `budget`, on the server's memory ledger. */
 type WaitRule = {
   queue: string
   channels: readonly string[]
@@ -17,6 +24,9 @@ type WaitRule = {
 
 /** The sends of one queue, waiting for our new subscriptions on their channels. */
 type Wait = { readonly ready: Promise<void>; sends: number }
+
+/** The bytes of one budget's waiting sends, and the ledger's holder for them. */
+type WaitingBytes = { bytes: number; readonly memory: QueueMemory }
 
 /** A send's place in its queue's wait: `await turn` for its own copy of the payload, send that, then `sent()`. A turn
  *  that rejects has left the wait already. */
@@ -28,17 +38,17 @@ type NewSubscriptionWaitOptions = { subscriptions: RedisSubscriptions }
  * Our PUBLISH and COMMIT go out on the command connection, so one can reach Redis before the SUBSCRIBE our subscriber
  * connection sent just before it, and our own new subscription would miss it. So a send waits, at most SEND_WAIT_MS,
  * until our subscriptions on its channels were ready once, and a later send of its queue waits behind it. Each budget's
- * waiting payload bytes are bounded by `PUBLISH_HOLD_BYTES`, though one send alone waits
- * whatever its size. When Redis refuses a subscription it waits for, a send fails with that reason rather than go out
- * unseen by our own subscription; a send made after it has no subscription of ours to miss. A subscription that ends any
- * other way only ends the wait.
+ * waiting sends are held on the server's memory ledger, within what `config.channel.maxMemory` admits, though one send
+ * alone waits whatever its size. When Redis refuses a subscription it waits for, a send fails with that reason rather
+ * than go out unseen by our own subscription; a send made after it has no subscription of ours to miss. A subscription
+ * that ends any other way only ends the wait.
  */
 class NewSubscriptionWait {
   private readonly subscriptions: RedisSubscriptions
   /** By queue. */
   private readonly waits = new Map<string, Wait>()
-  /** Bytes waiting, by budget. */
-  private readonly waitingBytes = new Map<string, number>()
+  /** By budget. */
+  private readonly waitingBytes = new Map<string, WaitingBytes>()
 
   constructor({ subscriptions }: NewSubscriptionWaitOptions) {
     this.subscriptions = subscriptions
@@ -50,23 +60,28 @@ class NewSubscriptionWait {
   }
 
   /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
-   *  Throws `ChannelOverflowError` when its bytes would take those waiting past `PUBLISH_HOLD_BYTES`. */
+   *  Throws `ChannelOverflowError` when others wait and the server's memory ledger doesn't admit it. */
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
     const { queue, channels, budget } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
-    // An empty send counts as 1 B, so a flood of them stays bounded.
-    const bytes = Math.max(typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength, 1)
-    const waiting = this.waitingBytes.get(budget) ?? 0
-    if (waiting > 0 && waiting + bytes > PUBLISH_HOLD_BYTES) {
-      throw new ChannelOverflowError(`Redis send waiting for a new subscription, past ${PUBLISH_HOLD_BYTES} bytes`)
+    const bytes =
+      (typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    const others = this.waitingBytes.get(budget)
+    if (others !== undefined && !others.memory.admit(bytes)) {
+      throw new ChannelOverflowError(
+        "Publish rejected: the publishes waiting for this server's new Redis subscription would pass the most it holds for one channel, or config.channel.maxMemory; await each publish",
+      )
     }
+    const waiting = others ?? { bytes: 0, memory: queueMemory() }
     wait ??= this.openWait(queue, channels)
     this.waits.set(queue, wait)
     wait.sends++
-    this.waitingBytes.set(budget, waiting + bytes)
+    waiting.bytes += bytes
+    waiting.memory.hold(bytes)
+    this.waitingBytes.set(budget, waiting)
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
-    const sent = () => this.endWait(queue, wait, budget, bytes)
+    const sent = () => this.endWait(queue, wait, budget, waiting, bytes)
     return { turn: this.turnOf(wait, owned, sent), sent }
   }
 
@@ -83,11 +98,11 @@ class NewSubscriptionWait {
 
   /** A waiting send went out: the last of its wait's sends unmaps it, so a send made before then still queues behind
    *  the rest. */
-  private endWait(queue: string, wait: Wait, budget: string, bytes: number): void {
+  private endWait(queue: string, wait: Wait, budget: string, waiting: WaitingBytes, bytes: number): void {
     if (--wait.sends === 0 && this.waits.get(queue) === wait) this.waits.delete(queue)
-    const left = this.waitingBytes.get(budget)! - bytes
-    if (left === 0) this.waitingBytes.delete(budget)
-    else this.waitingBytes.set(budget, left)
+    waiting.bytes -= bytes
+    waiting.memory.letGo(bytes)
+    if (waiting.bytes === 0) this.waitingBytes.delete(budget)
   }
 
   /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails when Redis refuses one; a
