@@ -1,7 +1,7 @@
-export { makeDisposer }
+export { makeDisposer, replayToLateListener }
 export type { ListenerOptions }
 
-import { untether } from 'telefunc/__internal'
+import { invokeChannelListener, untether } from 'telefunc/__internal'
 
 /** A listener registration's options: aborting `signal` unregisters it, as its returned function does. */
 type ListenerOptions = { signal?: AbortSignal }
@@ -23,4 +23,16 @@ function makeDisposer(dispose?: () => void, group?: Set<() => void>, signal?: Ab
     signal?.addEventListener('abort', token, { once: true })
   } else untether(token)
   return token
+}
+
+/** A listener added after the terminal event it listens for (a close, a leave) hears it at once, unless `signal`
+ *  aborted; there is nothing left to unregister. */
+function replayToLateListener<Args extends unknown[]>(
+  cb: (...args: Args) => unknown,
+  args: Args,
+  options: ListenerOptions | undefined,
+  reportError: (error: unknown) => void,
+): () => void {
+  if (!options?.signal?.aborted) invokeChannelListener(cb, args, reportError)
+  return makeDisposer()
 }

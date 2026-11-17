@@ -1,6 +1,7 @@
 export {
   onRoomRoundTrip,
   onOrderChannels,
+  onJoinRoom,
   onSubscribeThenPublish,
   onListen,
   onPublishFrom,
@@ -18,7 +19,7 @@ export {
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
-import { Room } from '@telefunc/room'
+import { Room, type LeaveCause } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
 
 async function onRoomRoundTrip() {
@@ -40,6 +41,12 @@ async function onOrderChannels(id: string) {
   const room = await Room.getOrCreate<Record<string, never>, { name: string }, Numbered>(`order:${id}`)
   Room.guard(room, { anyoneCanJoin: true })
   return { channel: new BroadcastChannel<Numbered>({ key: `order:${id}` }), room }
+}
+
+async function onJoinRoom(id: string) {
+  const room = await Room.getOrCreate(`join:${id}`)
+  await room.join()
+  return 'joined'
 }
 
 /** Subscribes, then publishes at once. */
@@ -144,7 +151,7 @@ async function onCloseHeld(id: string) {
 async function onSubscribeHeld(id: string) {
   bugs = []
   const room = heldViews.get(id)!
-  const { promise, resolve } = Promise.withResolvers<void>()
+  const { promise, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   room.subscribe(() => {})
   room.subscribeBinary(() => {}, { track: 'cam' })
@@ -157,7 +164,7 @@ async function onSubscribeHeld(id: string) {
 async function onMetaKeyOrder() {
   const id = `meta-order:${crypto.randomUUID()}`
   await Room.create(id, { meta: { b: 1, a: 2 } })
-  await Room.setAttributes(id, { c: 3, a: 4 })
+  await Room.updateMeta(id, { c: 3, a: 4 })
   const merged = (await Room.get(id)).meta
   await Room.setMeta(id, { z: 1, y: 2 })
   const replaced = (await Room.get(id)).meta

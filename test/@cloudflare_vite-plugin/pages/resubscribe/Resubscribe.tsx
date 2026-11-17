@@ -1,7 +1,7 @@
 export { Resubscribe }
 
 import React, { useEffect, useState } from 'react'
-import { onPublish, onResubscribe } from './Resubscribe.telefunc'
+import { onPublish, onReceived, onResubscribe } from './Resubscribe.telefunc'
 
 function Resubscribe() {
   const [key] = useState(() => `resubscribe:${Math.random()}`)
@@ -15,6 +15,11 @@ function Resubscribe() {
   const resubscribe = async () => {
     await onResubscribe(key)
     setState((s) => ({ ...s, subscribed: true }))
+  }
+
+  const read = async () => {
+    const received = await onReceived(key)
+    setState((s) => ({ ...s, received }))
   }
 
   const publish = async () => {
@@ -31,6 +36,9 @@ function Resubscribe() {
       </button>
       <button type="button" id="publish" onClick={publish}>
         Publish
+      </button>
+      <button type="button" id="read" onClick={read}>
+        Read
       </button>
     </div>
   )

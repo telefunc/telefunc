@@ -1,11 +1,12 @@
 export { roomRemoteReviver, roomTypes }
 
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
-import { ClientRoom, ClientStandaloneParticipant } from './room.js'
+import { ClientRoom } from './room.js'
+import { LoneMember } from './LoneMember.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { assert } from '../utils/assert.js'
-import { untether, type ClientBroadcast } from 'telefunc/__internal'
+import type { ClientBroadcast } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -24,20 +25,18 @@ const roomReviver = channelReviver<RoomReviverContract>(
 
 const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  (end, metadata) => new ClientStandaloneParticipant({ end, metadata }),
+  (end, metadata) => new LoneMember({ end, metadata }).participant,
 )
 
-/** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its
- *  lifecycle. */
+/** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m` while the member is
+ *  in it, and sharing its lifecycle. */
 const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata, context) {
     assert(metadata.room instanceof ClientRoom)
     const room = metadata.room
-    const remote = room._state.ensureRemoteFromSnapshot(metadata)
-    // A call through the room's wrapper tethers the result to it, but only the member `join()` returns holds its room
-    // open.
-    untether(remote)
+    // `room` is core's tether proxy over the room (`wrapProxy`): a read goes through to it, an identity doesn't.
+    const remote = room._remotes.fromSnapshot(metadata)
     context.shareLifecycle(remote, room)
     return {
       value: remote,

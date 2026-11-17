@@ -1,10 +1,10 @@
 export { ChannelTable }
 export type { ChannelRecord, ClosedState }
 
-import type { ReplayBuffer } from '../ReplayBuffer.js'
+import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
-import { seqThrough } from '../../wire/seq.js'
+import { seqNear, seqThrough } from '../../wire/seq.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -31,6 +31,9 @@ type ChannelRecord = {
   readonly replay: ReplayBuffer
   /** The newest seq the server sent on it. */
   lastSeq: number
+  /** Each stream's lossy frame that a newer one may take the place of while it waits to go, by its seq: made at the
+   *  channel's first lossy frame. */
+  replaceable: Map<string, number> | null
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
 }
@@ -78,8 +81,9 @@ class ChannelTable {
     return new Set([...this.undeclared, ...this.closed])
   }
 
-  isUndeclared(record: ChannelRecord): boolean {
-    return this.undeclared.has(record)
+  isUndeclared(ix: number): boolean {
+    const record = this.records.get(ix)
+    return record !== undefined && this.undeclared.has(record)
   }
 
   /** A RECONCILE declared `record` to the server. */
@@ -99,9 +103,24 @@ class ChannelTable {
     return seqThrough(lastSeq, this.records.get(ix)?.replay.seq ?? 0)
   }
 
+  /** The full seq of a frame the server sent on a channel, or null for a frame to drop. */
+  receivedSeq({ index, seq: bits }: { index: number; seq: number }): number | null {
+    const record = this.records.get(index)
+    // A channel this page let go.
+    if (record === undefined) return null
+    const prev = record.lastSeq
+    // The header holds a seq's low 32 bits: the full seq is the one nearest the next, as no wire holds 2^31 frames.
+    const seq = seqNear(bits, prev + 1)
+    // A seq already seen: a replay resends what arrived.
+    if (seq <= prev) return null
+    record.lastSeq = seq
+    return seq
+  }
+
   /** The server has what the page sent on channel `ix` through `lastSeq`, which its replay lets go. */
   serverHasThrough(ix: number, lastSeq: number): void {
-    this.records.get(ix)?.replay.acknowledge(lastSeq)
+    const record = this.records.get(ix)
+    if (record !== undefined) this.acknowledged(record, lastSeq)
   }
 
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
@@ -114,6 +133,7 @@ class ChannelTable {
       replay,
       lastSeq: 0,
       awaited: false,
+      replaceable: null,
     }
     this.records.set(ix, record)
     this.byChannel.set(channel, record)
@@ -135,10 +155,18 @@ class ChannelTable {
   }
 
   /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
-  serverHas({ replay }: ChannelRecord, state: ClosedState, lastSeq: number): void {
+  serverHas(record: ChannelRecord, state: ClosedState, lastSeq: number): void {
     state.initial = false
-    replay.acknowledge(lastSeq)
-    if (lastSeq >= replay.seq) state.delivered = true
+    this.acknowledged(record, lastSeq)
+    if (lastSeq >= record.replay.seq) state.delivered = true
+  }
+
+  /** The server has every frame of `record`'s channel through `lastSeq`: none of them waits, so none is replaced. */
+  private acknowledged(record: ChannelRecord, lastSeq: number): void {
+    record.replay.acknowledge(lastSeq)
+    const { replaceable } = record
+    if (replaceable === null) return
+    for (const [stream, seq] of replaceable) if (seq <= lastSeq) replaceable.delete(stream)
   }
 
   /** The server ended the closed channel. */

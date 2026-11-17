@@ -1,5 +1,5 @@
 // Room wire envelopes, requests and notices, shared by client and server.
-export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire }
+export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire, watchStates }
 export type {
   MemberSnapshot,
   RoomSnapshotMetadata,
@@ -9,6 +9,9 @@ export type {
   RoomRosterEvent,
   RoomJoinedEvent,
   RoomDemandEvent,
+  DemandChange,
+  TrackWatch,
+  TrackWatchState,
   RoomCtrlEnvelope,
   RoomMetaEntry,
   RoomMetaUpdate,
@@ -23,6 +26,7 @@ export type {
   RoomStubRequest,
   ParticipantStubRequest,
   MemberMutationRequest,
+  MemberRequest,
   ParticipantStubNotice,
   MemberWants,
   InboxMessage,
@@ -31,6 +35,7 @@ export type {
 
 import { isRecord, ownLeaveCause, removedCause } from './arguments.js'
 import type { TrackKey } from './binary.js'
+import type { SetChange } from '../utils/sets.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 
 type MemberSnapshot = {
@@ -44,18 +49,16 @@ type MemberSnapshot = {
   disconnected?: true
 }
 
-/** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
+/** A room as the response carries it, with its visible members; every later change relays on its channel. */
 type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
   meta: RoomMetaEntry[]
   closed: boolean
-  count: number
+  /** The visible members, as of the response. */
+  members: MemberSnapshot[]
   /** How many meta writes `meta` reflects, which orders later updates. */
   metaSeq: number
-  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first
-   *  `listen()`. */
-  bufferLimit: number
   maxFrameBytes?: number
 }
 
@@ -70,8 +73,6 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   selfDelivery: boolean
   identity: string | null
-  /** As `RoomSnapshotMetadata.bufferLimit`. */
-  bufferLimit: number
   maxFrameBytes?: number
 }
 
@@ -85,7 +86,8 @@ type RoomCtrlEnvelope =
   // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed
   // a page of another's asks that one (`of`).
   | { __r: 'demand-ask'; instance: string; of?: string }
-  | { __r: 'closed' }
+  // The room closed, or, with `cause: 'removed'`, the page's last participant of it was removed.
+  | ({ __r: 'closed' } & WireLeaveCause)
 
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
@@ -100,30 +102,35 @@ type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed' | 'unknown
 /** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
  *  client. */
 type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string; fromDisconnected?: true }
-/** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
+/** A message as a client gets it: a member's, stamped only while the client can't name the sender yet, or the
+ *  server's (`Room.publish()`), whose `from` is `''`. */
 type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
 /** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
-/** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
-type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
-type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
+type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent
 
-/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it;
- *  `more` on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover
- *  rewound the room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
-type RoomRosterEvent =
-  | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
-  | { __r: 'roster-error' }
-  | { __r: 'rewound' }
+/** Sent once a roster read corrected a drift, a part per frame, numbered from 0, each part reflecting every event
+ *  relayed before it; `more` on all but the last. `rewound`: a failover rewound the room's meta seqs, so the next whole
+ *  meta of the room and of each member applies, whatever its seq. */
+type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true } | { __r: 'rewound' }
 
 /** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
-/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a client that attaches
- *  again gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+/** Who receives one of a member's tracks changed: the participants it names from now on (`add`) and no longer
+ *  (`remove`), and likewise the pages that receive it with nobody to name (`pages`). Nobody receives it once it names
+ *  no participant and no page. */
+type DemandChange = SetChange<string> & { pages?: SetChange<string> }
+/** Who receives one of a member's tracks: the participants named, by id, and the pages with nobody to name, by token. */
+type TrackWatch = { readonly watchers: ReadonlySet<string>; readonly pages: ReadonlySet<string> }
+/** A track's `TrackWatch`, as a client that attaches is sent it. */
+type TrackWatchState = { track: TrackKey; watchers: string[]; pages: string[] }
+
+/** Who receives each of a member's own tracks, told as it changes; a client that attaches again gets the whole state,
+ *  since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
-  | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
-  | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
+  | ({ __r: 'demand'; member: string; track: TrackKey } & DemandChange)
+  | { __r: 'demand-state'; member: string; tracks: TrackWatchState[] }
 
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
  *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
@@ -137,6 +144,8 @@ type RoomDmEnvelope = {
   fromDisconnected?: true
   data: unknown
   ackId?: string
+  /** A package's message: for the field of that name (`defineParticipantField()`), never the app's `listen()`. */
+  field?: string
 }
 
 /** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
@@ -159,36 +168,44 @@ type RoomResult = { ok: true; value: unknown } | RoomFailure
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */
 type MemberMutationRequest =
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
-  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
+  | { __r: 'req-update-meta'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
+  | { __r: 'req-private'; to: string; field: string; data: unknown }
+
+/** What a member asks of its room: the requests both stubs take, and what a server participant does itself. */
+type MemberRequest = MemberMutationRequest | { __r: 'req-leave' }
 
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
  *  subscription, which attaches again before `onOpen`. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
-  | { __r: 'req-leave'; id: string }
-  | (MemberMutationRequest & { id: string })
+  | (MemberRequest & { id: string })
   | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
   /** A `BinaryWantChange`, with `null` for `EVERY_MEMBER` and `EVERY_TRACK`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
-  /** Changes only: announcements, and each member whose own want changed. */
-  | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
+  /** Changes only: each member whose own want changed. */
+  | { __r: 'sub-text'; members: Record<string, boolean> }
 
 /** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
-type ParticipantStubRequest =
-  | { __r: 'req-publish'; data: unknown; retain?: boolean }
-  | MemberMutationRequest
-  | { __r: 'req-leave' }
+type ParticipantStubRequest = { __r: 'req-publish'; data: unknown; retain?: boolean } | MemberRequest
 
-/** Server→client notices on a participant stub. `rewound`: a failover rewound the participant's meta seq, so its next
- *  whole meta applies, whatever its seq. */
+/** Server→client notices on a participant stub. Its participant's own meta is a `p-meta` with its id, as on a room's
+ *  channel. Once someone receives one of its tracks, the room's roster and presence events follow, which name them. */
 type ParticipantStubNotice =
   | ({ __r: 'left' } & WireLeaveCause)
-  | ({ __r: 'p-meta' } & MemberMetaUpdate)
-  | { __r: 'rewound' }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
-  | { __r: 'demand'; track: TrackKey; wanted: boolean }
-  | { __r: 'demand-state'; tracks: TrackKey[] }
+  | RoomRosterEvent
+  | Extract<RoomCtrlEnvelope, { __r: 'join' | 'leave' | 'p-meta' | 'update' }>
+  | {
+      __r: 'dm'
+      from: string
+      fromMeta: ParticipantMeta | null
+      fromIdentity?: string
+      data: unknown
+      ackId?: string
+      field?: string
+    }
+  | ({ __r: 'demand'; track: TrackKey } & DemandChange)
+  | { __r: 'demand-state'; tracks: TrackWatchState[] }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for
  *  participant-scoped ones. */
@@ -202,6 +219,8 @@ type InboxMessage = {
   fromIdentity: string | null
   data: unknown
   ackId?: string
+  /** A package's message, for the field of that name: it never reaches the app's `listen()`. */
+  field?: string
 }
 
 type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
@@ -214,7 +233,13 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
     data: dm.data,
   }
   if (dm.ackId) msg.ackId = dm.ackId
+  if (dm.field !== undefined) msg.field = dm.field
   return msg
+}
+
+/** Who receives each track, whole, as a client that attaches is sent it. */
+function watchStates(watches: ReadonlyMap<TrackKey, TrackWatch>): TrackWatchState[] {
+  return Array.from(watches, ([track, { watchers, pages }]) => ({ track, watchers: [...watchers], pages: [...pages] }))
 }
 
 function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {
@@ -226,6 +251,7 @@ function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm'
   }
   if (msg.fromIdentity !== null) notice.fromIdentity = msg.fromIdentity
   if (msg.ackId) notice.ackId = msg.ackId
+  if (msg.field !== undefined) notice.field = msg.field
   return notice
 }
 

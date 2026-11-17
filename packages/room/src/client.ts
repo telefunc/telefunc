@@ -1,22 +1,21 @@
 export type {
-  ClientRoom as Room,
+  Room,
   RoomInfo,
   RoomMeta,
-  ClientJoinOptions as JoinOptions,
+  JoinOptions,
   PublishOptions,
   ParticipantMeta,
   ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
+  TrackDemand,
   Sender,
   RoomSendReceipt,
-  RoomAckReceipt,
   LeaveCause,
   BinaryFrameInfo,
   BinaryPublishOptions,
   RoomMessage,
   RoomSnapshotView,
-  ParticipantSnapshotView,
 } from './types.js'
 
 import { config } from 'telefunc/client'

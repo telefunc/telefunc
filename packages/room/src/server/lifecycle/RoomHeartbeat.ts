@@ -22,7 +22,7 @@ type RoomHeartbeatOptions = {
   hosting: Pick<RoomHosting, 'maintain'>
   incarnation: RoomIncarnation
   model: Pick<RoomModel, 'closed'>
-  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
+  lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox'>
   outgoingDemand: Pick<DemandReport, 'reporting'>
   /** Renews what this process told of its demand. */
   demandExchange: Pick<DemandExchange, 'renew'>
@@ -36,6 +36,7 @@ class RoomHeartbeat {
   private timer: ReturnType<typeof setInterval> | null = null
   /** A slow backend must not pile up overlapping ticks. */
   private ticking = false
+  private checkingCoverage = false
 
   private readonly hosting: RoomHeartbeatOptions['hosting']
   private readonly incarnation: RoomIncarnation
@@ -79,25 +80,32 @@ class RoomHeartbeat {
     if (this.ticking) return
     this.ticking = true
     try {
-      await this.demandExchange.renew()
-      let renewalFailure: { error: unknown } | null = null
-      try {
-        await this.hosting.maintain()
-      } catch (error) {
-        renewalFailure = { error }
+      const [renewal, reconciled] = await Promise.allSettled([
+        Promise.all([this.demandExchange.renew(), this.hosting.maintain()]),
+        this.model.closed ? null : this.authority.reconcileMeta(),
+      ])
+      const head = reconciled.status === 'fulfilled' ? reconciled.value : null
+      if (head !== null) {
+        const { id, inc } = this.incarnation
+        await Promise.all([dropReplacedMetaGenerations(id, inc), reapLapsedLeases(this.incarnation)])
+        // Each reads what the reap left.
+        if (!this.checkingCoverage) void this.checkCoverage().catch(reportRoomError)
+        await maintainHold(this.incarnation, head)
       }
-      this.lanePlan.resumeDropped()
-      if (!this.model.closed && (await this.authority.reconcileMeta())) {
-        const incarnation = this.incarnation
-        await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
-        await reapLapsedLeases(incarnation)
-        await this.authority.checkCoverage()
-      }
-      if (!this.model.closed) await maintainHold(this.incarnation)
       sweepLapsedRoomsSoon()
-      if (renewalFailure) throw renewalFailure.error
+      for (const result of [renewal, reconciled]) if (result.status === 'rejected') throw result.reason
     } finally {
       this.ticking = false
+    }
+  }
+
+  /** One at a time, beside the ticks: the roster refresh it may wait for can outlast many. */
+  private async checkCoverage(): Promise<void> {
+    this.checkingCoverage = true
+    try {
+      await this.authority.checkCoverage()
+    } finally {
+      this.checkingCoverage = false
     }
   }
 }

@@ -21,10 +21,7 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   idleTimeout: 2,
   pingInterval: 3,
   maxFrameBytes: 10,
-  serverReplayBuffer: 8,
-  serverReplayBufferBinary: 9,
-  clientReplayBuffer: 4,
-  clientReplayBufferBinary: 5,
+  creditWindow: 8,
   sseFlushThrottle: 6,
   ssePostIdleFlushDelay: 7,
   transports: [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS],
@@ -152,8 +149,9 @@ describe('decodeClientFrame — direction', () => {
     ['FIN', encode.fin()],
     ['READY', encode.ready({ upgradeId: 'u' })],
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
-    ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
-    ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
+    ['PUBLISH', encode.publish(JSON.stringify(1), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_BINARY', encode.publishBinary(new Uint8Array(14), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_TO', encode.publishTo(0, 1)],
     ['RECONCILED', encode.reconciled(reconciled())],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {

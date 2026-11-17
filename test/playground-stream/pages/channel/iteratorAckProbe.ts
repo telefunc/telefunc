@@ -16,12 +16,10 @@ function prepareIteratorAck(channel: ProbeChannel, { binary, mode, answer }: Ite
   const held = new Promise<void>((resolve) => {
     release = resolve
   })
-  const responder = new AbortController()
   const listen = binary ? channel.listenBinary.bind(channel) : channel.listen.bind(channel)
   const isPrime = (data: string | Uint8Array) => (data instanceof Uint8Array ? data[0] === 0 : data === 'prime')
   listen(async (data: string | Uint8Array) => {
     if (isPrime(data)) return
-    responder.abort()
     enter()
     await held
   })
@@ -30,14 +28,17 @@ function prepareIteratorAck(channel: ProbeChannel, { binary, mode, answer }: Ite
   const read = iterator.next()
   void read.catch(() => {})
   let answers = 0
+  // Answers the request the iterator held, then leaves: the control request after it gets no answer.
+  const answered = new AbortController()
   if (answer)
     listen(
       (data: string | Uint8Array) => {
         if (isPrime(data)) return
         answers++
+        answered.abort()
         return 'answer'
       },
-      { signal: responder.signal },
+      { signal: answered.signal },
     )
   return {
     async primed() {

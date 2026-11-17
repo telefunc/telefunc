@@ -2,8 +2,8 @@
 export type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shieldKey.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../wire-protocol/channel/channel.js'
 export { invokeChannelListener } from '../wire-protocol/channel/channel.js'
-export { untether } from '../utils/wrapProxy.js'
-export { MAX_CHANNELS_PER_CONNECTION } from '../wire-protocol/constants.js'
+export { tetherTo, untether } from '../utils/wrapProxy.js'
+export { MAX_CHANNELS_PER_CONNECTION, PUBLISH_HOLD_BYTES } from '../wire-protocol/constants.js'
 export { isChannelOverflowError } from '../wire-protocol/channel/channelErrors.js'
 
 // Utilities the add-ons share with core.

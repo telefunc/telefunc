@@ -10,9 +10,15 @@ export {
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinRoomAsServer,
   onJoinRoomAsServerSelf,
+  onJoinAsServerSelf,
+  onJoinAsServerSelfPublishing,
+  onJoinTailAsServerSelfGreeting,
   onGetRoomWithMember,
+  onGetRoomWithSnapshotMember,
   onWatchRoom,
+  onWatchRoomAsSelf,
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
@@ -21,7 +27,13 @@ export {
   onReleaseRetainedReads,
   onWatchEveryFrame,
   onGetEveryFrame,
+  onIterateMessages,
+  onGetIteratedMessages,
+  onKeepRoom,
+  onCountKeptRoom,
+  onCountRoom,
   onJoinHiddenAndHand,
+  onReturnDeparted,
   onHiddenSetMeta,
   onHiddenLeave,
   onHiddenAfterPlayers,
@@ -36,16 +48,22 @@ export {
   onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
+  onRoomFlood,
+  onRoomMetaFlood,
+  onRoomTracks,
+  onRoomLossyNearBudget,
+  onRoomTextCursor,
+  onOpenReliableGapRoom,
   onGetWatchedCount,
   onRoomRelease,
   onFailBackend,
-  onEndBackendSubscriptions,
+  onDropBackendSubscriptions,
   onListParticipantNames,
   onCreateRoomClosingAfter,
   onSeedRoom,
   onSeedChurn,
   onPing,
-  onAnnounce,
+  onSystemPublish,
   onSystemSend,
   onUpdateRoom,
   onListRooms,
@@ -56,6 +74,7 @@ export {
   onGetWatchedBinary,
   onPublishBufferAsServer,
   onSendReusingObjects,
+  onSendPackageMessage,
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
   onConcurrentMetaWrites,
@@ -82,6 +101,7 @@ export {
   onThrowingReceiver,
   onPublishLoop,
   onSubscriberDropped,
+  onPublishOverRedisLimit,
   onBusyLanes,
   onLanesAfterDrop,
   onLanesBeforeRewind,
@@ -90,19 +110,32 @@ export {
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
+  onCutWire,
+  onPublishOnServer,
+  onServerPublisherReads,
+  onJoinHiddenHeld,
+  onWatchAsServer,
+  onRenameWatcher,
+  onWatcherLeaves,
 }
 
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
-import { Room, roomConfig, type LeaveCause, type LocalParticipant } from '@telefunc/room'
+import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
+import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
+import { dropRedisSubscribers } from '../../redis'
+import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
+import { cutWireSockets } from '../../wire-sockets'
+import { demandNames, type NamedDemand } from './demandNames'
+import { publishMine } from './publishMine'
 import {
   addBackendFault,
-  endBackendSubscriptions,
+  dropBackendSubscriptions,
   holdCellPages,
   holdRetainedReads,
   type BackendFault,
@@ -199,6 +232,12 @@ async function onJoinAsServer(roomId: string, name: string) {
   return await Room.join(roomId, { meta: { name }, identity: `user:${name}` })
 }
 
+/** The room and `me`, joined in the same call. */
+async function onJoinRoomAsServer(roomId: string, name: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  return { room, me: await room.join({ meta: { name } }) }
+}
+
 /** Co-returned `{ room, me }` suppresses `me`'s echo while preserving other-member delivery. */
 async function onJoinRoomAsServerSelf(roomId: string, name: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
@@ -206,9 +245,36 @@ async function onJoinRoomAsServerSelf(roomId: string, name: string) {
   return { room, me }
 }
 
+/** `me` alone, joined with `selfDelivery: false`. */
+async function onJoinAsServerSelf(roomId: string, name: string) {
+  return await Room.join(roomId, { meta: { name }, selfDelivery: false })
+}
+
+/** `onJoinAsServerSelf()`, and `me` publishes (`publishMine()`) right after it is returned, before its page has it. */
+async function onJoinAsServerSelfPublishing(roomId: string, name: string) {
+  const me = await onJoinAsServerSelf(roomId, name)
+  setTimeout(() => void publishMine(me))
+  return me
+}
+
+/** The room with its tail and `me`, joined with `selfDelivery: false`, which greets the room before it is returned. */
+async function onJoinTailAsServerSelfGreeting(roomId: string, name: string) {
+  const room = anyoneCanJoin(await Room.get(roomId, { tail: true }))
+  const me = await room.join({ meta: { name }, selfDelivery: false })
+  await me.publish('greeting')
+  return { room, me }
+}
+
 async function onGetRoomWithMember(roomId: string, memberId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
-  const member = await room.getParticipant(memberId)
+  const member = room.getParticipant(memberId)
+  return { room, member }
+}
+
+/** The room with one of its participants as `room.snapshot()` lists it. */
+async function onGetRoomWithSnapshotMember(roomId: string, memberId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const member = room.snapshot().participants.find((participant) => participant.id === memberId) ?? null
   return { room, member }
 }
 
@@ -217,33 +283,47 @@ const watched = new Map<string, unknown[]>()
 const watchedRooms = new Map<string, unknown>()
 
 async function onWatchRoom(roomId: string) {
+  await watchRoom(roomId)
+}
+
+/** `onWatchRoom()`, and the watching room joins `me` with `selfDelivery: false`, which publishes before it is returned. */
+async function onWatchRoomAsSelf(roomId: string) {
+  const me = await (await watchRoom(roomId)).join({ meta: { name: 'Me' }, selfDelivery: false })
+  await me.publish('mine on the server')
+  return me
+}
+
+async function watchRoom(roomId: string) {
   const room = await Room.get(roomId)
   const list: unknown[] = []
   watched.set(roomId, list)
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
+  return room
 }
 
 async function onGetWatched(roomId: string) {
   return watched.get(roomId) ?? []
 }
 
-const watchedTracks = new Map<string, number[]>()
+const watchedTracks = new Map<string, { frames: number[]; lossy: number[] }>()
 
-/** A server-side view's subscribers, text and one binary track, kept like `onWatchRoom()`'s. */
+/** A server-side view's subscribers, text, one binary track and the lossy track `cursor`, kept like `onWatchRoom()`'s. */
 async function onWatchRoomTrack(roomId: string, track: string) {
   const room = await Room.get(roomId)
   const list: unknown[] = []
   const frames: number[] = []
+  const lossy: number[] = []
   watched.set(roomId, list)
-  watchedTracks.set(roomId, frames)
+  watchedTracks.set(roomId, { frames, lossy })
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
   room.subscribeBinary((data) => frames.push(data[0]!), { track })
+  room.subscribeBinary((data) => lossy.push(data[0]!), { track: 'cursor' })
 }
 
 async function onGetWatchedTrack(roomId: string) {
-  return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
+  return { text: watched.get(roomId) ?? [], ...(watchedTracks.get(roomId) ?? { frames: [], lossy: [] }) }
 }
 
 const retainedReads = new Map<string, ReturnType<typeof holdRetainedReads>>()
@@ -270,11 +350,46 @@ async function onWatchEveryFrame(roomId: string) {
   const frames: Array<[number, unknown]> = []
   everyFrame.set(roomId, frames)
   watchedRooms.set(roomId, room)
-  room.subscribeBinary((data, _info, from) => frames.push([data[0]!, from.meta.name ?? null]))
+  room.subscribeBinary((data, { from }) => frames.push([data[0]!, from.meta.name ?? null]))
 }
 
 async function onGetEveryFrame(roomId: string) {
   return everyFrame.get(roomId) ?? []
+}
+
+const iterated = new Map<string, string[]>()
+
+/** A server's `for await` loop over the room's messages: each message's type, sender and data. */
+async function onIterateMessages(roomId: string) {
+  const room = await Room.get<{}, { name: string }, string>(roomId)
+  const received: string[] = []
+  iterated.set(roomId, received)
+  void iterateMessages(room, received)
+}
+
+async function iterateMessages(room: Room<{}, { name: string }, string>, received: string[]) {
+  for await (const message of room.messages())
+    received.push(`${message.type} ${message.info.from?.meta.name}: ${message.data}`)
+}
+
+async function onGetIteratedMessages(roomId: string) {
+  return iterated.get(roomId) ?? []
+}
+
+/** Handles kept across calls, on rooms no page holds, so nothing follows them. */
+const keptRooms = new Map<string, Room>()
+
+async function onKeepRoom(roomId: string) {
+  await Room.create(roomId)
+  keptRooms.set(roomId, await Room.get(roomId))
+}
+
+async function onCountKeptRoom(roomId: string) {
+  return keptRooms.get(roomId)!.count
+}
+
+async function onCountRoom(roomId: string) {
+  return (await Room.get(roomId)).count
 }
 
 const hiddenBots = new Map<string, LocalParticipant>()
@@ -284,7 +399,24 @@ async function onJoinHiddenAndHand(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
   hiddenBots.set(roomId, bot)
-  return { room, member: await room.getParticipant(bot.id) }
+  return { room, member: room.getParticipant(bot.id) }
+}
+
+/** Members read, then gone before the response: one held across an await, one from an older snapshot, and a hidden one
+ *  handed to the page. */
+async function onReturnDeparted(roomId: string) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const held = await room.join({ meta: { name: 'Held' } })
+  const old = await room.join({ meta: { name: 'Old' } })
+  const hidden = await room.join({ hidden: true, meta: { name: 'Hidden' } })
+  const before = room.snapshot()
+  const members = [
+    room.getParticipant(held.id),
+    before.participants.find(({ id }) => id === old.id),
+    room.getParticipant(hidden.id),
+  ]
+  await Promise.all([held.leave(), old.leave(), hidden.leave()])
+  return { room, members }
 }
 
 async function onHiddenSetMeta(roomId: string, name: string) {
@@ -317,8 +449,8 @@ async function onGetHiddenAfterPlayers(roomId: string) {
 /** Returns a room closed under its member, as a page gets one that closed while the call ran. */
 async function onCloseRoomWithMember(roomId: string) {
   const room = anyoneCanJoin(await Room.create(roomId))
-  const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
-  const { promise: closed, resolve } = Promise.withResolvers<void>()
+  const member = room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
+  const { promise: closed, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   await Room.close(roomId)
   await closed
@@ -382,7 +514,7 @@ async function onCloseWhileSubscribing() {
     Array.from({ length: 10 }, async (_, i) => {
       await Room.create(prefix + i)
       const room = await Room.get(prefix + i)
-      const { promise, resolve } = Promise.withResolvers<void>()
+      const { promise, resolve } = Promise.withResolvers<LeaveCause>()
       room.onClose(resolve)
       room.subscribe(() => {})
       room.subscribeBinary(() => {}, { track: 'cam' })
@@ -414,7 +546,7 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
 }
 
 /** Run by the test with `runServerAction()` while the page is away, once per absence: the room's meta changes, then a
- *  member's meta changes past the page's 512 KiB bufferLimit for text, which drops the room's change from its buffer. */
+ *  member's meta changes. */
 async function onRoomMetaWhileAway(roomId: string) {
   const srv = await (await Room.get(roomId)).join({ meta: { name: 'Srv' } })
   awayMembers.set(roomId, [srv])
@@ -439,8 +571,8 @@ async function onRoomLeaveWhileJoining(roomId: string) {
 
 const overflows = new Map<string, { leaves: string[]; refs: unknown[] }>()
 
-/** A speaker says 'before', then, run by the test while the page is offline, 1 MiB: more than the page's 512 KiB
- *  bufferLimit for text holds. */
+/** A speaker says 'before', then, run by the test while the page is offline, 2 MiB: more than its lane's `maxMemory` lets
+ *  the server hold. */
 async function onRoomOverflow(roomId: string) {
   const room = await Room.get(roomId)
   const speaker = await room.join({ meta: { name: 'Speaker' } })
@@ -448,21 +580,21 @@ async function onRoomOverflow(roomId: string) {
   room.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
   overflows.set(roomId, { leaves, refs: [room, speaker] })
   onServerAction(`roomOverflow_${roomId}`, async () => {
-    for (let n = 0; n < 8; n++) await speaker.publish(String(n).padEnd(128 * 1024))
+    for (let n = 0; n < 16; n++) await speaker.publish(String(n).padEnd(128 * 1024))
     cleanupState[`roomOverflow_${roomId}`] = 'done'
   })
   await speaker.publish('before')
 }
 
 /** A sender DMs 'before' to the page's server-joined participant `memberId`, then, run by the test while the page is
- *  offline, 1 MiB: more than the page's 512 KiB bufferLimit for text holds. */
+ *  offline, 2 MiB: more than its lane's `maxMemory` lets the server hold. */
 async function onParticipantOverflow(roomId: string, memberId: string) {
   const sender = await (await Room.get(roomId)).join({ meta: { name: 'Sender' } })
   awayMembers.set(roomId, [sender])
   onServerAction(`participantOverflow_${roomId}`, async () => {
-    // Sent at once: the DMs after the one its page's buffer drops reach the participant before it leaves.
+    // Sent at once: the DMs after the one that closes its channel reach the participant before it leaves.
     await Promise.all(
-      Array.from({ length: 8 }, (_, n) => sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})),
+      Array.from({ length: 16 }, (_, n) => sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})),
     )
     cleanupState[`participantOverflow_${roomId}`] = 'done'
   })
@@ -471,6 +603,108 @@ async function onParticipantOverflow(roomId: string, memberId: string) {
 
 async function onGetRoomOverflow(roomId: string) {
   return overflows.get(roomId)!.leaves
+}
+
+/** A speaker publishes `count` numbered messages of `size` bytes in one go, faster than a wire takes them. */
+async function onRoomFlood(roomId: string, count: number, size: number) {
+  const speaker = await (await Room.get(roomId)).join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  await Promise.all(Array.from({ length: count }, (_, n) => speaker.publish(String(n).padEnd(size))))
+}
+
+/** 16 members each set a 256 KiB meta at once: more events than the page's wire takes, and than its lane's `maxMemory`
+ *  holds. */
+async function onRoomMetaFlood(roomId: string) {
+  const room = await Room.get(roomId)
+  const members = await Promise.all(Array.from({ length: 16 }, (_, n) => room.join({ meta: { name: `M${n}` } })))
+  awayMembers.set(roomId, members)
+  await Promise.all(members.map((member, n) => member.setMeta({ name: `M${n}`, filler: ''.padEnd(256 * 1024) })))
+}
+
+/** A speaker says 'before', then, run by the test while the page is offline, sends 8 lossy `pointer` frames of 256 KiB
+ *  and goes quiet on that track, then 16 rounds of a lossy `cursor` frame, a reliable `drawing` frame, and a message. The `heavy` track's frames are 256 KiB each, 4 MiB in all: twice what its
+ *  lane's `maxMemory` lets the server hold. */
+async function onRoomTracks(roomId: string, heavy: 'cursor' | 'drawing') {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  const frame = (track: string) => new Uint8Array(track === heavy ? 256 * 1024 : 1024)
+  onServerAction(`roomTracks_${roomId}`, async () => {
+    for (let n = 0; n < 8; n++)
+      await speaker.publishBinary(new Uint8Array(256 * 1024), { track: 'pointer', meta: { n }, lossy: true })
+    for (let n = 0; n < 16; n++) {
+      await speaker.publishBinary(frame('cursor'), { track: 'cursor', meta: { n }, lossy: true })
+      await speaker.publishBinary(frame('drawing'), { track: 'drawing', meta: { n } })
+      await speaker.publish(String(n))
+    }
+    cleanupState[`roomTracks_${roomId}`] = 'done'
+  })
+  await speaker.publish('before')
+}
+
+/** A room whose guard holds the publish `'held'` until a speaker sent, run by the test while the page is offline, 14
+ *  reliable messages of 132 KiB: past 7/8 of the lane's 2 MiB, so the server frees what it holds for the page, and
+ *  within it. */
+async function onOpenReliableGapRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  const released = createDeferred()
+  Room.guard(room, {
+    anyoneCanJoin: true,
+    onBeforePublish: async (_from, data) => {
+      if (data === 'held') await released.promise
+    },
+  })
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomReliableGap_${roomId}`, async () => {
+    const padding = 'x'.repeat(132 * 1024)
+    for (let n = 0; n < 14; n++) await speaker.publish(`${n} ${padding}`)
+    cleanupState[`roomReliableGap_${roomId}`] = 'done'
+    released.resolve()
+  })
+  return room
+}
+
+/** A speaker sends, run by the test while the page is offline, 16 positions of 256 KiB on a lossy text track: 4 MiB.
+ *  Halfway, a publish on the track without `lossy`, whose outcome the test reads. */
+async function onRoomTextCursor(roomId: string) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomTextCursor_${roomId}`, async () => {
+    const padding = ' '.repeat(256 * 1024)
+    for (let n = 0; n < 16; n++) {
+      if (n === 8) cleanupState[`roomTextCursorPlain_${roomId}`] = await publishPlain(speaker, { n: 'plain' })
+      await speaker.publish({ n, padding }, { track: 'cursor', lossy: true })
+    }
+    cleanupState[`roomTextCursor_${roomId}`] = 'done'
+  })
+  await speaker.publish({ n: -1 }, { track: 'cursor', lossy: true })
+}
+
+/** A publish on the `cursor` track without `lossy`: 'published', or the error it threw. */
+async function publishPlain(speaker: LocalParticipant, message: unknown): Promise<string> {
+  try {
+    await speaker.publish(message, { track: 'cursor' })
+    return 'published'
+  } catch (err) {
+    return (err as Error).message
+  }
+}
+
+/** A speaker sends, run by the test while the page is offline, one lossy 600 KiB frame on each of three tracks: past 7/8 of
+ *  its lane's 2 MiB, so the server tries to free what it holds, and within it, so it needn't let the page go. */
+async function onRoomLossyNearBudget(roomId: string) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker])
+  onServerAction(`roomLossyNearBudget_${roomId}`, async () => {
+    for (const track of ['a', 'b', 'c']) {
+      await speaker.publishBinary(new Uint8Array(600 * 1024), { track, lossy: true })
+    }
+    cleanupState[`roomLossyNearBudget_${roomId}`] = 'done'
+  })
+  await speaker.publish('before')
 }
 
 /** A server member publishes `count` messages of `size` bytes, each awaited. */
@@ -505,15 +739,15 @@ async function releaseRefs(roomId: string) {
   const left = await room.join({ meta: { name: 'Left' } })
   left.listen(() => {})
   left.onLeave(() => {})
-  left.onDemand(() => {})
+  left.onChange(() => {})
   const view = await Room.get(roomId)
-  const departed = (await view.getParticipant(left.id))!
-  departed.onUpdate(() => {})
+  const departed = view.getParticipant(left.id)!
+  departed.onChange(() => {})
   await left.leave()
   // Listeners added to a member that left, then the view's own, all gone.
   departed.subscribe(() => {})
   departed.subscribeBinary(() => {})
-  departed.onUpdate(() => {})
+  departed.onChange(() => {})
   const offs = [view.subscribe(() => {}), view.subscribeBinary(() => {}), view.onJoin(() => {}), view.onLeave(() => {})]
   for (const off of offs) off()
 
@@ -533,13 +767,16 @@ async function onFailBackend(fault: BackendFault) {
   addBackendFault(fault)
 }
 
-async function onEndBackendSubscriptions(roomId: string) {
-  return endBackendSubscriptions({ roomId })
+async function onDropBackendSubscriptions(roomId: string) {
+  return dropBackendSubscriptions({ roomId })
 }
 
 async function onListParticipantNames(roomId: string) {
   const room = await Room.get(roomId)
-  return (await room.getParticipants()).map((member) => member.meta.name).sort()
+  return room
+    .getParticipants()
+    .map((member) => member.meta.name)
+    .sort()
 }
 
 /** A room that closes `emptyTimeout` ms after nothing holds it, if nobody joined it. */
@@ -574,12 +811,12 @@ async function onPing() {
   return 'pong'
 }
 
-async function onAnnounce(roomId: string, data: unknown) {
-  await Room.announce(roomId, data)
+async function onSystemPublish(roomId: string, data: unknown) {
+  await Room.publish(roomId, data)
 }
 
 async function onSystemSend(roomId: string, participantId: string, data: unknown) {
-  await Room.send(roomId, { id: participantId }, data)
+  return await Room.send(roomId, { id: participantId }, data)
 }
 
 async function onUpdateRoom(roomId: string, meta: Record<string, unknown>) {
@@ -632,7 +869,7 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   message.n = 2
   const sent = me.send(memberId, message)
   message.n = 3
-  const announced = Room.announce(roomId, message)
+  const systemPublished = Room.publish(roomId, message)
   message.n = 4
   const systemSent = Room.send(roomId, { id: memberId }, message)
   message.n = 5
@@ -645,8 +882,15 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   const bytes = new Uint8Array([1, 2, 3])
   const binary = me.publishBinary(bytes)
   bytes.fill(0)
-  await Promise.all([published, sent, announced, systemSent, metaSet, roomMetaSet, binary])
+  await Promise.all([published, sent, systemPublished, systemSent, metaSet, roomMetaSet, binary])
   return me.id
+}
+
+/** A package's message to the member, then the app's: the member's side gets the package's on another route. */
+async function onSendPackageMessage(roomId: string, memberId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Package' } })
+  await sendPrivate(me, memberId, 'e2e-field', 'from the package')
+  await me.send(memberId, 'from the app')
 }
 
 /** While another member's publishes commit, a view subscribes and a member publishes at once; a member DMs one who just
@@ -659,10 +903,10 @@ async function onPublishRightAfterSubscribe(roomId: string) {
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
   for (let i = 0; i < 100; i++) void busy.publish(i)
-  room.subscribe((data, _info, from) => {
-    if (from.id === me.id) seen.push(data)
+  room.subscribe((data, { from }) => {
+    if (from?.id === me.id) seen.push(data)
   })
-  room.subscribeBinary((data, _info, from) => {
+  room.subscribeBinary((data, { from }) => {
     if (from.id === me.id) seen.push([...data])
   })
   await Promise.all([me.publish('t1'), me.publishBinary(new Uint8Array([1])), me.publish('t2')])
@@ -684,21 +928,21 @@ async function onOpenSlowGuardRoom(roomId: string) {
   return room
 }
 
-/** 200 concurrent Room.setAttributes() calls, then 20 concurrent Room.setMeta() calls, and a member's 100 concurrent
- *  setAttributes() and setMeta() calls; returns the room meta and the member's meta as a fresh view reads them. */
+/** 200 concurrent Room.updateMeta() calls, then 20 concurrent Room.setMeta() calls, and a member's 100 concurrent
+ *  updateMeta() and setMeta() calls; returns the room meta and the member's meta as a fresh view reads them. */
 async function onConcurrentMetaWrites(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Writer', round: -1 } })
   const keys = Array.from({ length: 200 }, (_, i) => i)
-  await Promise.all(keys.map((i) => Room.setAttributes(roomId, { [`k${i}`]: i })))
+  await Promise.all(keys.map((i) => Room.updateMeta(roomId, { [`k${i}`]: i })))
   const afterAttributes = Object.keys((await Room.get(roomId)).meta)
   await Promise.all(keys.slice(0, 20).map((i) => Room.setMeta(roomId, { winner: i, [`w${i}`]: true })))
   await Promise.all(
     keys
       .slice(0, 100)
-      .map((i) => (i % 10 === 0 ? me.setMeta({ name: 'Writer', round: i }) : me.setAttributes({ [`a${i}`]: i }))),
+      .map((i) => (i % 10 === 0 ? me.setMeta({ name: 'Writer', round: i }) : me.updateMeta({ [`a${i}`]: i }))),
   )
   const view = await Room.get(roomId)
-  const member = await view.getParticipant(me.id)
+  const member = view.getParticipant(me.id)
   return {
     afterAttributes,
     roomMeta: Object.entries(view.meta),
@@ -745,7 +989,7 @@ async function onStopReplacingMeta(roomId: string) {
  *  roster while `write` commits between the read's first and second page: 'before', 'after', or the keys the read got. */
 async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace with no keys' | 'merge', gen: number) {
   const member = await Room.join(roomId, { meta: {} })
-  for (let seq = 1; seq < gen; seq++) await member.setAttributes({ seq })
+  for (let seq = 1; seq < gen; seq++) await member.updateMeta({ seq })
   await member.setMeta(bigMeta('a'))
   const held = holdCellPages(roomId, 'pm:', 1)
   const reading = Room.getParticipants(roomId)
@@ -754,7 +998,7 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
   if (write === 'merge') {
     delete after.a0
     after.zz = 'new'
-    await member.setAttributes({ a0: undefined, zz: 'new' })
+    await member.updateMeta({ a0: undefined, zz: 'new' })
   } else {
     await member.setMeta(after)
   }
@@ -768,11 +1012,11 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
 async function onReadSplitMetaAcrossMerge(roomId: string) {
   const member = await Room.join<Record<string, string>>(roomId, { meta: { k0: 'a', k1: 'a' } })
   await Room.join(roomId, { meta: bigMeta('b') })
-  await member.setAttributes({ k2: 'a' })
+  await member.updateMeta({ k2: 'a' })
   const held = holdCellPages(roomId, 'pm:', 1)
   const reading = Room.getParticipants(roomId)
   await held.reached
-  await member.setAttributes({ k0: undefined, k2: undefined, zz: 'new' })
+  await member.updateMeta({ k0: undefined, k2: undefined, zz: 'new' })
   held.release()
   const read = (await reading).find((participant) => participant.id === member.id)!
   return metaName(read.meta, { before: { k0: 'a', k1: 'a', k2: 'a' }, after: { k1: 'a', zz: 'new' } })
@@ -786,27 +1030,38 @@ function metaName(meta: Record<string, unknown>, named: Record<string, Record<st
   return `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
 }
 
-const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean }>>()
+const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }>>()
 
 /** Guards that record what they were handed: a `slow` publish waits 100 ms, a binary one is refused, and
  *  `onAfterPublish` throws for an `after` publish. */
 async function onOpenRecordingGuardRoom(roomId: string) {
   const room = await Room.get(roomId)
-  const calls: Array<{ hook: string; name: unknown; frozen: boolean }> = []
+  const calls: Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }> = []
   guardCalls.set(roomId, calls)
   Room.guard(room, {
     onBeforeJoin: (member) => {
       calls.push({ hook: 'join', name: member.meta.name, frozen: Object.isFrozen(member.meta) })
     },
-    onBeforePublish: async (from, data) => {
-      calls.push({ hook: 'publish', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(from.meta) })
+    onBeforePublish: async (from, data, { track }) => {
+      calls.push({
+        hook: 'publish',
+        name: from.meta.name,
+        frozen: Object.isFrozen(from) && Object.isFrozen(from.meta),
+        track,
+      })
       if (data === 'slow') await new Promise((resolve) => setTimeout(resolve, 100))
       if (data instanceof Uint8Array) throw Abort('no frames')
     },
     onBeforeSend: (from, to) => {
       calls.push({ hook: 'send', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(to) })
     },
-    onAfterPublish: (_from, data) => {
+    onAfterPublish: (from, data, { track }) => {
+      calls.push({
+        hook: 'after-publish',
+        name: from.meta.name,
+        frozen: Object.isFrozen(from) && Object.isFrozen(from.meta),
+        track,
+      })
       if (data === 'after') throw new Error('server-listener-bug')
     },
   })
@@ -911,36 +1166,56 @@ async function onJoinAnswering(roomId: string) {
   return me.id
 }
 
-/** The page drops this server's connections to Redis during these publishes: each arrives, is reported or rejects. */
+/** This server's subscriber connection drops during these publishes: each arrives or is reported. */
 async function onSubscriberDropped(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   let received = 0
   room.subscribe(() => received++)
   const me = await room.join({ meta: { name: 'Publisher' } })
   let reported = 0
-  reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
+  const stopReporting = reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
   const published: Promise<unknown>[] = []
   for (let i = 0; i < 600; i++) {
+    if (i === 100) {
+      await Promise.all(published)
+      await dropRedisSubscribers()
+    }
     published.push(me.publish(i))
     await sleep(1)
   }
-  const rejected = (await Promise.allSettled(published)).filter(({ status }) => status === 'rejected').length
+  await Promise.all(published)
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
-  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
-    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
-  return { published: published.length, received, reported, rejected }
+  stopReporting()
+  return { published: published.length, received, reported }
 }
 
-/** What a drop reports of this room: `onDeliveryLost` hears every room on the server, and another test's room may commit
- *  its heartbeat's demand page while the connections are down, which is a true report of that room. */
+/** One byte more than the largest message Telefunc's Redis backend takes. */
+async function onPublishOverRedisLimit(roomId: string) {
+  const me = await anyoneCanJoin(await Room.get(roomId)).join({ meta: { name: 'Publisher' } })
+  return { refused: await me.publishBinary(new Uint8Array(28 * 1024 * 1024 + 1)).catch((error: Error) => error.name) }
+}
+
+/** What a drop reports of this room, read from Room's log until the returned function gives the log back: Room logs
+ *  every room on the server, and another test's room may lose a commit of its own while the connections are down, which
+ *  is a true report of that room. */
 function reportOf(roomId: string, report: (reason: string) => void) {
-  roomConfig.onDeliveryLost = ({ roomId: lost, reason }) => {
-    if (lost === roomId) report(reason)
+  const logError = console.error
+  const lost = `Room delivery handoff of '${roomId}' lost: `
+  console.error = (...args: unknown[]) => {
+    const [line] = args
+    if (typeof line === 'string' && line.startsWith(lost)) report(line.slice(lost.length))
+    else logError(...args)
+  }
+  return () => {
+    console.error = logError
   }
 }
 
-const atRest = new Map<string, { reported: string[]; arrived: () => number; send: () => Promise<void> }>()
+const atRest = new Map<
+  string,
+  { reported: string[]; arrived: () => number; send: () => Promise<void>; stopReporting: () => void }
+>()
 
 /** A subscription of each kind this server makes, and a commit on each lane, before the page drops its connections to
  *  Redis. */
@@ -950,14 +1225,14 @@ async function onBusyLanes(roomId: string) {
   const bob = await room.join({ meta: { name: 'Bob' } })
   const view = await Room.get(roomId)
   const reported: string[] = []
-  reportOf(roomId, (reason) => reported.push(reason))
+  const stopReporting = reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
   room.subscribe(arrives)
   room.subscribeBinary(arrives, { track: 'shared' })
-  ;(await view.getParticipant(alice.id))!.subscribeBinary(arrives)
-  ;(await view.getParticipant(bob.id))!.subscribeBinary(arrives, { track: 'named' })
+  view.getParticipant(alice.id)!.subscribeBinary(arrives)
+  view.getParticipant(bob.id)!.subscribeBinary(arrives, { track: 'named' })
   alice.listen(() => 'read')
   const key = `room:at-rest:${roomId}`
   Broadcast.subscribe(key, arrives)
@@ -977,19 +1252,18 @@ async function onBusyLanes(roomId: string) {
   const carol = await room.join({ meta: { name: 'Carol' } })
   await carol.publishBinary(bytes, { track: 'shared' })
   await carol.leave()
-  atRest.set(roomId, { reported, arrived: () => arrived, send })
+  atRest.set(roomId, { reported, arrived: () => arrived, send, stopReporting })
 }
 
 /** Nothing was published while the connections were down, so nothing is reported, and the lanes deliver again. */
 async function onLanesAfterDrop(roomId: string) {
-  const { reported, arrived, send } = atRest.get(roomId)!
+  const { reported, arrived, send, stopReporting } = atRest.get(roomId)!
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
   const before = arrived()
   await send()
   await sleep(200)
-  roomConfig.onDeliveryLost = ({ roomId, reason }) =>
-    console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+  stopReporting()
   config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
   return { reported, arrivedAfter: arrived() - before }
 }
@@ -1000,7 +1274,7 @@ async function onLanesBeforeRewind(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   const alice = await room.join({ meta: { name: 'Alice' } })
   const reported: string[] = []
-  reportOf(roomId, (reason) => reported.push(reason))
+  const stopReporting = reportOf(roomId, (reason) => reported.push(reason))
   config.broadcast.onDeliveryLost = ({ reason }) => reported.push(reason)
   let arrived = 0
   const arrives = () => arrived++
@@ -1018,7 +1292,7 @@ async function onLanesBeforeRewind(roomId: string) {
     await alice.publishBinary(bytes, { track: 'shared' })
     await Broadcast.publish(key, 'text')
   }
-  atRest.set(roomId, { reported, arrived: () => arrived, send })
+  atRest.set(roomId, { reported, arrived: () => arrived, send, stopReporting })
 }
 
 /** This server delivers past what the page's snapshot holds. */
@@ -1058,8 +1332,8 @@ async function onThrowingReceiver(roomId: string) {
     driver.subscribe(source, { deliver: () => void healthy++ }),
   ]
   while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
-  await Room.announce(roomId, 'first')
-  await Room.announce(roomId, 'second')
+  await Room.publish(roomId, 'first')
+  await Room.publish(roomId, 'second')
   await sleep(300)
   await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
   return { thrower, healthy }
@@ -1112,7 +1386,7 @@ async function onSeedAndChurn(roomId: string) {
   const churn: (Promise<unknown> | undefined)[] = []
   const timer = setInterval(() => {
     tick++
-    void members[tick % members.length]!.setAttributes({ n: tick })
+    void members[tick % members.length]!.updateMeta({ n: tick })
     if (tick % 2 === 0) {
       churn.push(Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member)))
     } else {
@@ -1132,17 +1406,17 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the
- *  4,096-byte bufferLimit of the lane that runs it: Redis's SUBSCRIBE round trip keeps the view's new subscription short
- *  of ready, so the commits wait until it is. */
+/** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn, the last past the 2 MiB a
+ *  new subscription holds: Redis's SUBSCRIBE round trip keeps the view's new subscription short of ready, so the commits
+ *  wait until it is. */
 async function onPublishWhileEstablishing(roomId: string, count: number, bytes: number) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)
   const seen: string[] = []
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
-  room.subscribe((data, _info, from) => {
-    if (from.id === me.id) seen.push((data as string)[0]!)
+  room.subscribe((data, { from }) => {
+    if (from?.id === me.id) seen.push((data as string)[0]!)
   })
   const publishes = Array.from({ length: count }, (_, i) =>
     me.publish(`${i + 1}`.padEnd(bytes, '.')).then(
@@ -1151,4 +1425,51 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
     ),
   )
   return await Promise.all(publishes)
+}
+
+/** The page's wire drops right after this answer, as a failing network would drop it. */
+async function onCutWire() {
+  setTimeout(cutWireSockets, 50)
+}
+
+const serverPublishers = new Map<string, { refs: unknown[]; reads: NamedDemand[][] }>()
+
+/** A participant on the server, `Pub`, and its `demand` as each of its `onChange` calls read it. */
+async function onPublishOnServer(roomId: string) {
+  const room = await Room.get(roomId)
+  const pub = await room.join({ meta: { name: 'Pub' } })
+  const reads: NamedDemand[][] = []
+  pub.onChange(() => reads.push(demandNames(pub)))
+  serverPublishers.set(roomId, { refs: [room, pub], reads })
+  return pub.id
+}
+
+async function onServerPublisherReads(roomId: string) {
+  return serverPublishers.get(roomId)!.reads
+}
+
+/** A hidden participant the page holds. */
+async function onJoinHiddenHeld(roomId: string) {
+  return await (await Room.get(roomId)).join({ hidden: true, meta: { name: 'Ghost' } })
+}
+
+const serverWatchers = new Map<string, LocalParticipant>()
+
+/** A server-side room, `names` joined through it one after the other, that receives `tracks` of every member, all in
+ *  one task. */
+async function onWatchAsServer(roomId: string, names: string[], tracks: string[]) {
+  const room = await Room.get(roomId)
+  for (const name of names) serverWatchers.set(`${roomId} ${name}`, await room.join({ meta: { name } }))
+  for (const track of tracks) room.subscribeBinary(() => {}, { track })
+  watchedRooms.set(`${roomId} ${names.join()} ${tracks.join()}`, room)
+}
+
+/** The participant `onWatchAsServer()` joined as `name` takes the name `newName`. */
+async function onRenameWatcher(roomId: string, name: string, newName: string) {
+  await serverWatchers.get(`${roomId} ${name}`)!.setMeta({ name: newName })
+}
+
+async function onWatcherLeaves(roomId: string, name: string) {
+  await serverWatchers.get(`${roomId} ${name}`)!.leave()
+  serverWatchers.delete(`${roomId} ${name}`)
 }

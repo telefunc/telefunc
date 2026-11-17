@@ -24,6 +24,7 @@ type SubscriberSocket = {
   connect(): Promise<void>
   subscribe(...channels: string[]): Promise<unknown>
   unsubscribe(...channels: string[]): Promise<unknown>
+  ping(): Promise<unknown>
   disconnect(): void
   on(event: 'messageBuffer', listener: (channel: Buffer, frame: Buffer) => void): unknown
   on(event: 'error', listener: (error: unknown) => void): unknown

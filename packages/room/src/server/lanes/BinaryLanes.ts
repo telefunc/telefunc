@@ -67,7 +67,7 @@ class BinaryLanes {
   /** The lanes not ready yet, so a readiness wait never visits the ready ones. */
   private readonly pending = new Set<LaneSubscription>()
   /** The wait for `pending`, until another lane starts pending. */
-  private allReadyWait: Promise<void> | null = null
+  private allReadyWait: Promise<unknown> | null = null
   private readonly replans: Replans = { members: new Set(), tracks: new Set(), pairs: new Map() }
 
   private readonly laneOwner: LaneSubscriptionOwner
@@ -132,13 +132,11 @@ class BinaryLanes {
     return { delivery: own ? 'own' : null, named: kept !== null }
   }
 
-  /** While `served`, the member's every-track lane serves it: it opens, or is subscribed again if its recovery gave
-   *  up; `releaseEveryTrack` stops it. */
+  /** While `served`, the member's every-track lane serves it: it opens; `releaseEveryTrack` stops it. */
   serveEveryTrack(member: string, served: boolean): MemberCoverage {
     if (served) {
       this.establishingEveryMember.waiting.delete(member)
-      const all = this.everyTrack.get(member) ?? this.openFanIn({ kind: 'binary-all', member }, this.everyTrack, member)
-      all.resume()
+      if (!this.everyTrack.has(member)) this.openFanIn({ kind: 'binary-all', member }, this.everyTrack, member)
     }
     return { delivers: this.everyTrack.get(member)?.delivering === true, fetching: this.fetchedByMember.size > 0 }
   }
@@ -147,7 +145,6 @@ class BinaryLanes {
   keepEveryMember(track: string): TrackCoverage {
     this.establishingEveryTrack.waiting.delete(track)
     const lane = this.everyMember.get(track) ?? this.openFanIn({ kind: 'binary-track', track }, this.everyMember, track)
-    lane.resume()
     if (lane.delivering) this.fetchedByMember.delete(track)
     return lane.delivering ? 'every-member' : this.fetchedByMember.has(track) ? 'by-member' : null
   }
@@ -201,14 +198,19 @@ class BinaryLanes {
   async allReady(): Promise<void> {
     if (this.pending.size === 0) return
     if (this.allReadyWait === null) {
-      const ready = withinRoomHorizon(Promise.all(Array.from(this.pending, (lane) => lane.ready))).then(() => {})
-      const clear = () => {
-        if (this.allReadyWait === ready) this.allReadyWait = null
-      }
-      ready.then(clear, clear)
-      this.allReadyWait = ready
+      this.allReadyWait = withinRoomHorizon(Promise.all(Array.from(this.pending, (lane) => lane.ready)))
+      void this.forgetWhenSettled(this.allReadyWait)
     }
     await this.allReadyWait
+  }
+
+  private async forgetWhenSettled(wait: Promise<unknown>): Promise<void> {
+    try {
+      await wait
+    } catch {
+      // its callers get the failure
+    }
+    if (this.allReadyWait === wait) this.allReadyWait = null
   }
 
   /** A binary lane went pending, or ready; once a wanted one delivers, it replans what it serves. */
@@ -245,9 +247,7 @@ class BinaryLanes {
     const lane = this.named.get(key)
     const taking = shape === 'every-track' ? this.everyTrack.get(member) : this.everyMember.get(track)
     if (shape === 'named' || (lane !== undefined && shape !== null && taking?.delivering !== true)) {
-      const kept = lane ?? this.openNamed(member, track)
-      kept.resume()
-      return kept
+      return lane ?? this.openNamed(member, track)
     }
     if (lane === undefined) return null
     lane.stop()

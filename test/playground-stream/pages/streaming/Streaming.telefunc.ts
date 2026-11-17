@@ -16,19 +16,21 @@ export {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onGeneratorThrowsNonObject,
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnFileBesideLargeStream,
+  onReturnManyTinyChunks,
   onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
-  onReturnTwoEndless,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
 }
 
-import { Abort, Channel, download, getContext } from 'telefunc'
+import { Abort, Channel, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
 import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
@@ -51,7 +53,8 @@ async function* onReturnDelayedGenerator(): AsyncGenerator<string> {
 
 const onReturnReadableStream = async (): Promise<ReadableStream<Uint8Array>> => {
   const encoder = new TextEncoder()
-  const chunks = ['hello', ' ', 'stream']
+  // An empty chunk says nothing about the stream's end.
+  const chunks = ['', 'hello', ' ', 'stream']
   let i = 0
   return new ReadableStream({
     pull(controller) {
@@ -234,6 +237,11 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   throw new Error('Unexpected generator error')
 }
 
+async function* onGeneratorThrowsNonObject(): AsyncGenerator<string> {
+  yield 'before-bug'
+  throw 'not-an-error'
+}
+
 const onAbortOneOfManyStreamingValues = async () => {
   // The test asserts that every sibling delivered at least one value to the
   // client before the abort error. Gating the Abort on server-side emission is
@@ -395,6 +403,28 @@ const onReturnTwoLargeStreams = async () => {
   return { first: byteStream(32), second: byteStream(32) }
 }
 
+/** Stays open once `chunks` tiny chunks went, for a test to look at the server while the stream is still running. */
+const onReturnManyTinyChunks = async (chunks: number) => {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ < chunks) controller.enqueue(new Uint8Array(8))
+      else return new Promise<void>(() => {})
+    },
+  })
+}
+
+/** The page has neither until the file's bytes have arrived, so it can't read the stream to make way for them. */
+const onReturnFileBesideLargeStream = async () => {
+  return {
+    stream: byteStream(32),
+    file: new File(
+      Array.from({ length: 32 }, () => new Uint8Array(64 * 1024)),
+      'large.bin',
+    ),
+  }
+}
+
 function filledStream(byte: number) {
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -432,43 +462,6 @@ const onReturnFinishedAndEndlessStreams = async () => {
     },
   })
   return { key, finished, endless }
-}
-
-type EndlessKind = 'stream' | 'generator' | 'download'
-
-/** Endless, each chunk carrying its number, and `cleanupState[name]` says how many chunks its producer made. */
-function endlessValue(kind: EndlessKind, name: string) {
-  let made = 0
-  const end = () => {
-    cleanupState[`${name}_end`] = 'cancelled'
-  }
-  if (kind === 'generator') {
-    return (async function* () {
-      try {
-        while (true) {
-          cleanupState[name] = String(made + 1)
-          yield { n: made++, pad: 'x'.repeat(64 * 1024) }
-        }
-      } finally {
-        end()
-      }
-    })()
-  }
-  const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
-    pull(controller) {
-      const chunk = new Uint8Array(64 * 1024)
-      new DataView(chunk.buffer).setUint32(0, made++)
-      cleanupState[name] = String(made)
-      controller.enqueue(chunk)
-    },
-    cancel: end,
-  })
-  return kind === 'download' ? download(stream, { name: 'endless.bin' }) : stream
-}
-
-const onReturnTwoEndless = async (firstKind: EndlessKind, secondKind: EndlessKind) => {
-  const key = crypto.randomUUID()
-  return { key, first: endlessValue(firstKind, `first_${key}`), second: endlessValue(secondKind, `second_${key}`) }
 }
 
 const onReturnFailingStream = async (chunksBeforeFailure: number) => {

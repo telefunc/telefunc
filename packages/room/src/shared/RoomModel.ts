@@ -1,12 +1,12 @@
-export { RoomModel }
-export type { MemberEntry, MembershipEvent, RosterRead, RoomModelOwner, ServerModelOwner }
+export { RoomModel, departureCause }
+export type { MemberEntry, MembershipEvent, ResolvedSender, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert } from '../utils/assert.js'
-import { untether, getOrCreate } from 'telefunc/__internal'
 import { Slice } from './Slice.js'
 import { RoomMetaState } from './RoomMetaState.js'
-import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
+import { MemberMeta, sameValue, type MetaRewinds } from './MemberMeta.js'
 import { ownLeaveCause, senderSnapshot, unknownLeaveCause } from './arguments.js'
+import { fieldValue, ownFieldValue } from './participantFields.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
@@ -15,8 +15,8 @@ import type {
   SenderStamp,
   WholeMemberUpdate,
 } from './protocol.js'
-import type { LeaveCause, ParticipantMeta, RoomMeta, RoomSnapshotView, Sender } from '../types.js'
-import type { RoomState } from './state.js'
+import type { LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
+import type { RoomState } from './RoomState.js'
 
 /** A membership event as this model got it, whether it applied it or not. */
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
@@ -37,14 +37,29 @@ type MemberEntry = {
   hidden: boolean
   left: boolean
   leaveCause?: LeaveCause
+  /** The values packages set on the member (`defineParticipantField()`), replaced whole on each set. */
+  fields: Readonly<Record<string, unknown>>
+}
+
+/** A message's sender: the member's entry, or the snapshot of a sender this model doesn't have. */
+type ResolvedSender = { entry: MemberEntry } | { sender: Sender }
+
+const NO_FIELDS: Readonly<Record<string, unknown>> = Object.freeze({})
+/** A member's leave when its room closed, and how a room closes by default. */
+const CLOSED: LeaveCause = ownLeaveCause({ type: 'closed' })
+
+/** How the members a close takes leave: as the room closed, but a page's room that closed because its participant was
+ *  removed takes the others as `closed`, since none of them was. */
+function departureCause(closed: LeaveCause): LeaveCause {
+  return closed.type === 'removed' ? CLOSED : closed
 }
 
 type RoomModelOptions = {
   roomId: string
   /** In key order. */
   meta: readonly RoomMetaEntry[]
-  /** Either the authoritative roster, or just its member count. A lazy model seeds with `{ count }` and learns the
-   *  members from its first roster (read on the server, streamed to the client). */
+  /** Either the authoritative roster, or just its member count: a server's view made for a join alone seeds with
+   *  `{ count: 0 }` and learns the members from its first roster read. */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
   metaSeq: number
@@ -63,16 +78,15 @@ interface RoomModelOwner {
   /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
    *  doesn't hold. */
   heldConnection?(id: string): boolean | null
-  // Only a server acts on these (see `ServerModelOwner`): a client's local participants take their meta where it
-  // arrives, and the server repairs the meta.
-  onMemberMeta?(id: string, update: MemberMetaUpdate): void
+  /** A known member's meta update applied, from an event, an accepted write, a stamp or a roster: the side hands it to
+   *  the participant it holds of that member. */
+  onMemberMeta(id: string, update: MemberMetaUpdate): void
+  // Only a server acts on this (see `ServerModelOwner`): on a client, the server repairs the meta.
   onMemberMetaGap?(): void
 }
 
 /** What a server's model also tells its replica. */
 interface ServerModelOwner extends RoomModelOwner {
-  /** A known member's meta update applied, from an event, a stamp or a roster read. */
-  onMemberMeta(id: string, update: MemberMetaUpdate): void
   /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
   onMemberMetaGap(): void
 }
@@ -86,22 +100,19 @@ class RoomModel {
   /** Bumped on every observable change (membership, participant meta, room config, closure). Drives
    *  `onChange`/`snapshot()` cache invalidation. */
   private stateVersion = 0
-  private snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   /** The membership events the in-flight roster read has seen so far. */
   private recording: MembershipEvent[] | null = null
   private readonly members = new Map<string, MemberEntry>()
   private hiddenMembers = 0
-  /** The views with a listener: one without has nothing to fire. */
-  private readonly views = new Set<RoomState>()
+  /** The states with a listener: one without has nothing to fire. */
+  private readonly states = new Set<RoomState>()
   private readonly owner: RoomModelOwner
   private readonly metaState: RoomMetaState
   /** Shared by the members' metas here and by the local participants of this view. */
   readonly metaRewinds: MetaRewinds = { count: 0 }
   private _rosterKnown: boolean
-  private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
+  private _closedCause: LeaveCause = CLOSED
   private seedCount = 0
-  /** The meta changes per member that reached this model before its first roster, in order. */
-  private readonly preRosterMeta = new Map<string, MemberMetaUpdate[]>()
 
   constructor(opts: RoomModelOptions) {
     this.roomId = opts.roomId
@@ -181,6 +192,11 @@ class RoomModel {
     return this.members.values()
   }
 
+  /** Every member's entry but the hidden ones', which no presence read lists. */
+  visibleEntries(): MemberEntry[] {
+    return [...this.members.values()].filter((entry) => !entry.hidden)
+  }
+
   /** A member `memberIds()` listed, as a roster carries it. */
   memberSnapshot(id: string): MemberSnapshot {
     const { meta, joinedAt, identity, hidden } = this.members.get(id)!
@@ -195,58 +211,34 @@ class RoomModel {
     return this.stateVersion
   }
 
-  /** The entry of a revived `RemoteParticipant`: the live one if known, else seeded silently from the
-   *  snapshot (its seed count already includes it). */
+  /** The entry of a revived `RemoteParticipant`: the member's, where this room has it. A room arrives with its whole
+   *  roster, so a member it doesn't have had left before the response: it revives as one that left. Only a hidden
+   *  member handed to this side, which no roster lists, is added. */
   entryFromSnapshot(snap: MemberSnapshot): MemberEntry {
     const existing = this.members.get(snap.id)
     if (existing) return existing
-    if (this.closed) {
-      // A closed room has no members: one it hands out left with it.
-      const entry = newEntry(snap, this.metaRewinds)
-      entry.left = true
-      entry.leaveCause = this._closedCause
+    if (snap.hidden && !this.closed) {
+      const entry = this.createEntry(snap)
+      this.bumpState()
       return entry
     }
-    const entry = this.createEntry(snap)
-    this.bumpState()
+    const entry = newEntry(snap, this.metaRewinds)
+    entry.left = true
+    // A closed room has no members: one it hands out left with it.
+    entry.leaveCause = this.closed ? departureCause(this._closedCause) : unknownLeaveCause()
     return entry
   }
 
-  /** A view's listeners start or stop: only a view with one hears the changes. */
-  listen(view: RoomState, on: boolean): void {
-    if (on) this.views.add(view)
-    else this.views.delete(view)
-  }
-
-  /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually
-   *  changes (the `useSyncExternalStore` contract). */
-  snapshot(): RoomSnapshotView {
-    const cached = this.snapshotCache?.version === this.stateVersion ? this.snapshotCache.value.deref() : undefined
-    if (cached) return cached
-    const participants = Object.freeze(
-      [...this.members.values()]
-        .filter((entry) => !entry.hidden)
-        .map((entry) => {
-          const { id, identity, meta, joinedAt } = entry
-          return Object.freeze({ id, identity, meta: meta.object, joinedAt, isConnected: this.isConnected(entry) })
-        }),
-    )
-    const value = Object.freeze({
-      id: this.roomId,
-      meta: this.meta,
-      count: this.count,
-      isClosed: this.closed,
-      participants,
-    })
-    untether(value) // plain data: holding a snapshot must not keep the room's wrapper alive
-    this.snapshotCache = { version: this.stateVersion, value: new WeakRef(value) }
-    return value
+  /** A state's listeners start or stop: only a state with one hears the changes. */
+  listen(state: RoomState, on: boolean): void {
+    if (on) this.states.add(state)
+    else this.states.delete(state)
   }
 
   /** State changed observably: invalidate the snapshot and tell `onChange` subscribers. */
   private bumpState(): void {
     this.stateVersion++
-    for (const view of [...this.views]) view.changed()
+    for (const state of [...this.states]) state.changed()
   }
 
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
@@ -259,11 +251,27 @@ class RoomModel {
     const entry = this.members.get(id)
     if (!entry || this.isConnected(entry) === (wasConnected ?? entry.meta.connected)) return
     this.bumpState()
+    this.memberChanged(entry)
     this.connectionChanged(entry)
   }
 
+  /** A package's field of a member, kept as Room's own copy, frozen deeply. A value equal to the member's changes
+   *  nothing, and one for a member this model doesn't know is dropped: the package's source sets it again with the
+   *  member. */
+  setField(id: string, name: string, value: unknown): void {
+    const entry = this.members.get(id)
+    if (!entry || sameValue(fieldValue(entry.fields, name), value)) return
+    entry.fields = Object.freeze({ ...entry.fields, [name]: ownFieldValue(value) })
+    this.bumpState()
+    this.memberChanged(entry)
+  }
+
+  private memberChanged(entry: MemberEntry): void {
+    for (const state of [...this.states]) state.memberChanged(entry)
+  }
+
   private connectionChanged(entry: MemberEntry): void {
-    for (const view of [...this.views]) view.connectionChanged(entry)
+    for (const state of [...this.states]) state.connectionChanged(entry)
   }
 
   /** Records the membership events this model gets into the returned list, until `stopRecordingMembership()`. */
@@ -294,18 +302,8 @@ class RoomModel {
     }
     if (!this._rosterKnown) this.seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this.bumpState()
-    for (const view of [...this.views]) view.joined(entry)
+    for (const state of [...this.states]) state.joined(entry)
     return true
-  }
-
-  /** A leave a server relayed, which it does once for each member it knew: before the first roster, a visible member
-   *  this model has not seen is one its seed count holds. */
-  applyRelayedLeave(id: string, cause: LeaveCause, hidden: boolean): void {
-    if (!this._rosterKnown && !hidden && !this.closed && !this.members.has(id)) {
-      this.seedCount = Math.max(0, this.seedCount - 1)
-      this.bumpState()
-    }
-    this.applyLeave(id, cause)
   }
 
   applyLeave(id: string, cause: LeaveCause): void {
@@ -323,41 +321,34 @@ class RoomModel {
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this.seedCount = Math.max(0, this.seedCount - 1)
     this.bumpState()
-    for (const view of [...this.views]) view.left(entry, cause)
+    for (const state of [...this.states]) state.left(entry, cause)
   }
 
   /** Applies updates in seq order (see `MemberMeta.apply`): the origin's echo (same seq) and events arriving behind a
-   *  fresher reconcile are absorbed. Only a listener builds the meta object per update. */
+   *  fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, update: MemberMetaUpdate): boolean {
     this.record({ meta: { id, update } })
     const entry = this.members.get(id)
-    // Before the first roster every member is unknown, and the first roster applies the changes after its own.
-    if (!entry && !this._rosterKnown) getOrCreate(this.preRosterMeta, id, () => []).push(update)
     if (!entry) return false
-    const listening = 'connected' in update ? [] : [...this.views].filter((view) => view.listensToMeta(entry))
-    const prev = listening.length > 0 ? entry.meta.object : null
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this.owner.onMemberMetaGap?.()
-    if (applied !== 'applied') return false
-    this.owner.onMemberMeta?.(id, update)
+    if (applied === 'stale' || applied === 'gap') return false
+    this.owner.onMemberMeta(id, update)
+    // An equal value, as a write that raced another may bring, changes nothing anyone reads.
+    if (applied === 'unchanged') return true
     this.bumpState()
-    if (this.isConnected(entry) !== wasConnected) this.connectionChanged(entry)
-    if (prev === null) return true
-    const next = entry.meta.object
-    for (const view of listening) view.metaChanged(entry, next, prev)
+    const connectionChanged = this.isConnected(entry) !== wasConnected
+    // The room's record of a connection this side holds itself changes nothing it shows.
+    if (connectionChanged || !('connected' in update)) this.memberChanged(entry)
+    if (connectionChanged) this.connectionChanged(entry)
     return true
   }
 
-  /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every model converges; returns the ones applied.
-   *  `prev` is this model's own previous meta, which can differ per model. */
+  /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every model converges; returns the ones applied. */
   applyRoomUpdate(update: RoomMetaUpdate): RoomMetaUpdate[] {
-    const listening = [...this.views].filter((view) => view.listensToRoomMeta())
-    const prev = listening.length > 0 ? this.metaState.object : null
     const applied = this.metaState.apply(update)
-    if (applied.length === 0) return applied
-    this.bumpState()
-    if (prev !== null) for (const view of listening) view.roomMetaChanged(this.metaState.object, prev)
+    if (applied.length > 0) this.bumpState()
     return applied
   }
 
@@ -382,12 +373,13 @@ class RoomModel {
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty`
    *  intentionally don't fire: `onClose` is the signal. */
-  applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {
+  applyClosed(cause: LeaveCause = CLOSED): boolean {
     if (this.closed) return false
     cause = ownLeaveCause(cause)
     this._closedCause = cause
     const departed = [...this.members.values()]
     this.closed = true
+    const departure = departureCause(cause)
     this._rosterKnown = true // authoritatively empty
     this.members.clear()
     this.hiddenMembers = 0
@@ -395,9 +387,9 @@ class RoomModel {
     // State and snapshot are already closed-and-empty when cleanup callbacks run.
     for (const entry of departed) {
       entry.left = true
-      entry.leaveCause = cause
+      entry.leaveCause = departure
     }
-    for (const view of [...this.views]) view.closed(departed, cause)
+    for (const state of [...this.states]) state.closed(departed, cause, departure)
     return true
   }
 
@@ -409,7 +401,7 @@ class RoomModel {
     fromMetaSeq,
     fromIdentity,
     fromDisconnected,
-  }: { from: string } & Partial<SenderStamp>): { entry: MemberEntry } | { sender: Sender } {
+  }: { from: string } & Partial<SenderStamp>): ResolvedSender {
     const entry = this.members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
       if (!entry) return { sender: senderSnapshot(from, fromMeta, fromIdentity ?? null) }
@@ -426,10 +418,7 @@ class RoomModel {
       return { entry }
     }
     assert(pending !== undefined)
-    // With the meta changes relayed after the member's roster part.
-    const meta = new MemberMeta({ meta: pending.meta, seq: pending.metaSeq })
-    for (const update of this.preRosterMeta.get(from) ?? []) meta.apply(update)
-    return { sender: senderSnapshot(from, meta.object, pending.identity ?? null) }
+    return { sender: senderSnapshot(from, pending.meta, pending.identity ?? null) }
   }
 
   /** The first roster loads silently; later ones narrate the drift they correct as events. Runs `reconcilingRoster` a
@@ -471,7 +460,6 @@ class RoomModel {
     }
     if (!narrate) {
       this._rosterKnown = true
-      this.preRosterMeta.clear()
       this.bumpState()
     }
     for (const id of [...this.members.keys()]) {
@@ -508,7 +496,8 @@ class RoomModel {
       this.applyParticipantMeta(member.id, update)
       return true
     }
-    if (entry.meta.apply(update) === 'applied') this.owner.onMemberMeta?.(member.id, update)
+    const applied = entry.meta.apply(update)
+    if (applied !== 'stale' && applied !== 'gap') this.owner.onMemberMeta(member.id, update)
     return false
   }
 
@@ -531,6 +520,7 @@ function newEntry(
     identity: identity ?? null,
     hidden: hidden === true,
     left: false,
+    fields: NO_FIELDS,
   }
 }
 
@@ -549,7 +539,8 @@ function replayMembershipEvent(
     const member = members.get(id)
     if (member === undefined) return
     const meta = new MemberMeta({ meta: member.meta, seq: member.metaSeq, connected: member.disconnected !== true })
-    if (meta.apply(update) !== 'applied') return
+    const applied = meta.apply(update)
+    if (applied === 'stale' || applied === 'gap') return
     const { disconnected, ...rest } = member
     const next: MemberSnapshot = { ...rest, meta: meta.object, metaSeq: meta.seq }
     if (!meta.connected) next.disconnected = true

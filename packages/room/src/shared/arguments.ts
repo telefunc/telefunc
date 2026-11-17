@@ -1,5 +1,6 @@
 export {
   assertKnownOptions,
+  assertPublishOptions,
   isRecord,
   ownMessage,
   ownMetadata,
@@ -20,7 +21,21 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../utils/assert.js'
 import { assignAttributes } from './MemberMeta.js'
 import { freezeMeta } from './freezeMeta.js'
-import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from '../types.js'
+import type { JoinOptions, LeaveCause, ParticipantMeta, PublishOptions, RoomMeta, Sender } from '../types.js'
+
+function assertPublishOptions(options: PublishOptions | undefined): void {
+  assertKnownOptions(options, ['track', 'lossy', 'retain'], 'publish()')
+  for (const name of ['retain', 'lossy'] as const) {
+    assertUsage(
+      options?.[name] === undefined || typeof options[name] === 'boolean',
+      `publish() options.${name} should be a boolean`,
+    )
+  }
+  assertUsage(
+    options?.lossy !== true || options.track !== undefined,
+    "publish() options.lossy: true needs options.track: a message on no track reaches everyone, in the room's order",
+  )
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
@@ -49,7 +64,7 @@ function unknownLeaveCause(): LeaveCause {
 function removedCause(reason: unknown): LeaveCause {
   return ownLeaveCause(reason === undefined ? { type: 'removed' } : { type: 'removed', reason })
 }
-/** Validate and own a `setMeta()`/`setAttributes()` argument. */
+/** Validate and own a `setMeta()`/`updateMeta()` argument. */
 function ownMetaArgument(value: ParticipantMeta, what: string): ParticipantMeta {
   assertUsage(isRecord(value), `${what} should be an object`)
   return ownMetadata(value)
@@ -60,7 +75,7 @@ function recipientId(to: string | Sender): string {
   return id
 }
 
-/** Merge `attrs` into `meta`, returning a new object (the `setAttributes()` semantics). */
+/** Merge `attrs` into `meta`, returning a new object (the `updateMeta()` semantics). */
 function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
   const next: ParticipantMeta = { ...meta }
   assignAttributes(next, attrs)

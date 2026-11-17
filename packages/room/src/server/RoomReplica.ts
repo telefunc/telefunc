@@ -7,20 +7,20 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
+import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
 import { RoomDemand } from './lanes/RoomDemand.js'
 import { PublishedTracks } from './lanes/PublishedTracks.js'
+import { PageIndex, type PageEnd } from './lanes/PageIndex.js'
 import { DM_FAILURE, RoomError } from '../shared/errors.js'
-import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../shared/protocol.js'
+import { joinedMember, leaveCauseFromWire, leaveCauseToWire, watchStates } from '../shared/protocol.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,
   RoomCtrlEnvelope,
   RoomDmEnvelope,
-  RoomEnvelope,
   SenderStamp,
 } from '../shared/protocol.js'
 import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
@@ -35,10 +35,14 @@ import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { RoomHosting } from './lifecycle/RoomHosting.js'
 import type { StoredRoomMeta } from './store/meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './lifecycle/replay.js'
-import { type MetaMirror, type RoomHandle, ServerRoom } from './room.js'
+import { ServerRoom } from './room.js'
+import type { RoomHandle } from './RoomHandle.js'
 import { RosterStream } from './lifecycle/RosterStream.js'
+import { StaleReads } from './lifecycle/StaleReads.js'
 import { toggle } from '../utils/sets.js'
-import { MemberMessageTexts, type RoomStub, unorderedEventText } from './RoomStub.js'
+import type { RoomStub } from './RoomStub.js'
+import type { RoomParticipantStub } from './RoomParticipantStub.js'
+import { MemberMessageBodies, orderedBody, trackFrameBody, unorderedEventBody } from './publishBodies.js'
 import { LanePlan, type LaneDelivery, type LaneEvent, type LanePlanOwner } from './lanes/LanePlan.js'
 import { RoomHeartbeat } from './lifecycle/RoomHeartbeat.js'
 assertIsNotBrowser()
@@ -104,8 +108,11 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** This process's demand to the other processes, and theirs to `incomingDemand`. */
   private readonly demandExchange: DemandExchange
   private readonly lanePlan: LanePlan
+  /** Who is at each page holding the room here. */
+  private readonly pages: PageIndex
   private readonly authority: AuthoritySync
   private readonly heartbeat: RoomHeartbeat
+  private readonly staleReads: StaleReads
   private readonly roster: RosterStream
   /** Hosts the members the handles join and the pages' views. */
   private readonly hosting: RoomHosting
@@ -113,8 +120,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   private readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
   private readonly stubs = new Set<RoomStub>()
-  /** The meta of each participant a client holds, which the client mirrors. */
-  private readonly metaMirrors = new Set<MetaMirror>()
+  /** The clients the roster and the presence events reach: every attached stub, and each participant stub whose
+   *  participant someone receives a track of, so its page names them. */
+  private readonly rosterClients = new Set<RoomStub | RoomParticipantStub>()
   /** The handle holding each member it joined. */
   private readonly owners = new Map<string, RoomHandle>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
@@ -143,9 +151,11 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.demandExchange = new DemandExchange({ incarnation, incomingDemand: this.incomingDemand })
     const { model, demandExchange } = this
     const { outgoingDemand } = demandExchange
-    this.lanePlan = new LanePlan({ owner: this, roles: this.roles, incarnation, model, outgoingDemand, demandExchange })
+    const pages = (this.pages = new PageIndex({ model }))
+    const roles = this.roles
+    this.lanePlan = new LanePlan({ owner: this, roles, incarnation, model, outgoingDemand, demandExchange, pages })
     const lanePlan = this.lanePlan
-    this.roster = new RosterStream({ model, stubs: this.stubs })
+    this.roster = new RosterStream({ model, clients: this.rosterClients })
     this.authority = new AuthoritySync({ owner: this, incarnation, roster: this.roster, model, lanePlan })
     const authority = this.authority
     this.heartbeat = new RoomHeartbeat({
@@ -157,6 +167,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       demandExchange,
       authority,
     })
+    this.staleReads = new StaleReads({ roomId: incarnation.id, model, lanePlan })
   }
 
   /** A new handle on this view, given the parts of it a handle and its stubs, participants and writes use. */
@@ -164,19 +175,23 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     return new ServerRoom({
       replica: this,
       lanePlan: this.lanePlan,
-      authority: this.authority,
       roster: this.roster,
       incomingDemand: this.incomingDemand,
       acks: this.acks,
       hosting: this.hosting,
-      metaMirrors: this.metaMirrors,
     })
   }
 
   /** A new handle on a view other handles share, which catches up with the authority first unless it is current. */
   async sharedHandle(): Promise<ServerRoom> {
     await this.authority.catchUp()
+    this.staleReads.caughtUp()
     return this.handle()
+  }
+
+  /** A handle's read, which warns once if the view is a heartbeat older than its last `Room.get()` and unfollowed. */
+  read(): void {
+    this.staleReads.read()
   }
 
   /** A handle's listeners changed. */
@@ -187,9 +202,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   /** Keeps `served`, `receivers` and the roles the lane plan reads current with the handle. Every transition of a
    *  handle runs it after the handle changed (the rule is beside `RoomHandle`'s collections). */
   private reconsider(handle: RoomHandle): void {
+    handle.syncFields()
     const tailHeld = handle.holdsTail()
-    toggle(this.served, handle, handle.isObserved() || tailHeld)
+    const served = handle.isObserved() || tailHeld
+    toggle(this.served, handle, served)
     toggle(this.receivers, handle, handle.state.listenerCount > 0 || tailHeld)
+    // A server-side room is its own page while it is served.
+    if (served) this.placeAtPage(handle.local)
+    else this.leavePage(handle.local)
     const roles = this.roles
     roles.observed = roles.listened = roles.tailHeld = false
     for (const served of this.served) {
@@ -201,6 +221,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   own(member: string, handle: RoomHandle): void {
     this.reconsider(handle)
+    this.pageEndChanged(handle.local, member)
     this.owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
     this.inboxSeqs.set(member, 0)
@@ -223,30 +244,72 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.publishedTracks.forget(member)
   }
 
-  /** The handle's stub attached: its view is written and its wants planned. */
-  attachStub(handle: RoomHandle, stub: RoomStub): void {
+  /** The handle's stub attached at the page `page` names: its view is written and its wants planned. */
+  attachStub(handle: RoomHandle, stub: RoomStub, page: string): void {
     this.reconsider(handle)
     this.stubs.add(stub)
+    this.rosterClients.add(stub)
     this.hosting.hostView(stub)
+    this.placeAtPage(stub, page)
     this.lanePlan.holderChanged(stub)
   }
 
-  /** The stub's client attached: it gets the roster, the room's meta and the demand for the members it holds. */
+  /** The stub's client attached: the roster is read again unless the view is current, which tells every client its
+   *  drift, and the client gets the room's meta and the demand for the members it holds. */
   onStubAttached(stub: RoomStub): void {
-    void this.roster.sendTo(stub, this.authority.ensureRoster())
+    void this.authority.ensureRoster().catch(reportRoomError)
     stub.relayEvent({ __r: 'update', seq: this.model.metaSeq, meta: this.model.metaEntries() })
     for (const member of stub.heldMembers()) {
-      stub.relayEvent({ __r: 'demand-state', member, tracks: this.incomingDemand.wanted(member) })
+      stub.relayEvent({ __r: 'demand-state', member, tracks: watchStates(this.incomingDemand.watchesOf(member)) })
     }
   }
 
   /** The handle's stub detached: its view is removed and its wants dropped. */
   detachStub(handle: RoomHandle, stub: RoomStub): void {
     this.reconsider(handle)
+    this.leavePage(stub)
     this.stubs.delete(stub)
+    this.rosterClients.delete(stub)
     void this.hosting.dropView(stub)
-    this.roster.forget(stub)
     this.lanePlan.holderGone(stub)
+  }
+
+  /** The participant stub's client gets the roster as this view knows it, then each presence event, until
+   *  `unfollowRoster()`. */
+  async followRoster(stub: RoomParticipantStub): Promise<void> {
+    if (this.rosterClients.has(stub)) return
+    this.rosterClients.add(stub)
+    await this.authority.ensureRoster()
+    this.roster.sendTo(stub)
+  }
+
+  unfollowRoster(stub: RoomParticipantStub): void {
+    this.rosterClients.delete(stub)
+  }
+
+  /** The end is at the page `key` names, or at its own (`PageIndex.place`); its page's people and wants are told in the
+   *  next planning pass. */
+  placeAtPage(end: PageEnd, key?: string): void {
+    this.suppressionChanged(this.pages.place(end, key))
+  }
+
+  leavePage(end: PageEnd): void {
+    this.suppressionChanged(this.pages.remove(end))
+  }
+
+  /** Whether the end holds `member`, or doesn't get its own messages back, may have changed. */
+  pageEndChanged(end: PageEnd, member: string): void {
+    this.suppressionChanged(this.pages.endChanged(end, member))
+  }
+
+  /** A page's ends stopped or started getting `members`' own messages back: the next planning pass recounts them. */
+  private suppressionChanged(members: Set<string>): void {
+    for (const member of members) this.lanePlan.memberChanged(member)
+    this.attributionChanged()
+  }
+
+  private attributionChanged(): void {
+    if (this.pages.changed) this.lanePlan.attributionChanged()
   }
 
   /** A handle's tail started or ended: text ingestion follows it, ready once the returned promise resolves. */
@@ -267,9 +330,14 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
    *  null), within the member's named-track limit; a new track joins what its every-track readers cover. */
   admitTrack(member: string, track: string): Promise<void> | null {
     const planned = this.lanePlan.lanePlanned(member, track)
-    if (planned !== null) return planned.then(() => this.publishOnTrack(member, track))
+    if (planned !== null) return this.publishOnTrackAfter(planned, member, track)
     this.publishOnTrack(member, track)
     return null
+  }
+
+  private async publishOnTrackAfter(planned: Promise<void>, member: string, track: string): Promise<void> {
+    await planned
+    this.publishOnTrack(member, track)
   }
 
   private publishOnTrack(member: string, track: string): void {
@@ -283,17 +351,19 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
    *  `carried` is given, else as applied. A leave reaches them from `onMemberLeft`, whatever applied it, and an update
    *  as each one it let apply, in seq order. A failover's rewind of the control lane, and of the meta cells, which
    *  share its slot, makes the view forget its meta seqs. */
-  applyControl(event: PresenceEvent | AuthorityChange, carried?: () => string): void {
+  applyControl(event: PresenceEvent | AuthorityChange, carried?: () => PublishBody): void {
     if (event.__r === 'rewound') {
       this.model.forgetMetaSeqs()
-      for (const mirror of this.metaMirrors) mirror.rewound()
+      for (const [id, owner] of this.owners) owner.metaRewound(id)
       for (const stub of this.stubs) stub.relayEvent({ __r: 'rewound' })
       return
     }
-    const relay = () => this.relayControl(event, carried ?? (() => unorderedEventText(event)))
+    const relay = () => this.relayControl(event, carried ?? (() => unorderedEventBody(event)))
     switch (event.__r) {
       case 'join':
         if (!this.model.applyJoin(joinedMember(event))) return
+        this.pages.memberChanged(event.id)
+        this.attributionChanged()
         this.lanePlan.memberChanged(event.id)
         relay()
         return
@@ -305,7 +375,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
         return
       case 'update':
         for (const applied of this.model.applyRoomUpdate(event)) {
-          this.relayControl(applied, () => unorderedEventText(applied))
+          this.relayControl(applied, () => unorderedEventBody(applied))
         }
         // An update ahead of one before it waits for it, which a read repairs if it never arrives.
         if (this.model.metaWaiting) this.authority.metaWaiting()
@@ -332,7 +402,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     if (before.all) return
     // A live message from a sender another want's subscription already delivers would otherwise beat the retained one.
     const hold = holder.hold(null)
-    const reading = this.readRetainedText(holder, before, hold).finally(() => hold.end())
+    const reading = this.readRetainedText(holder, before, hold)
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -342,18 +412,22 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private async readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
-    await this.authority.ensureRoster()
-    // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
-    await withinRoomHorizon(this.lanePlan.semanticReady)
-    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
-    if (stored === null) return
-    const serialized = decodeRoomText(stored.payload)
-    const event = parse(serialized) as RoomDataEnvelope
-    // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
-    const had = before.members.get(event.from) ?? holder.textDemand().members.has(event.from)
-    if (had || !holder.wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
-    // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
-    holder.emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
+    try {
+      await this.authority.ensureRoster()
+      // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
+      await withinRoomHorizon(this.lanePlan.semanticReady)
+      const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
+      if (stored === null) return
+      const serialized = decodeRoomText(stored.payload)
+      const event = parse(serialized) as RoomDataEnvelope
+      // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
+      const had = before.members.get(event.from) ?? holder.textDemand().members.has(event.from)
+      if (had || !holder.wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
+      // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
+      holder.emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
+    } finally {
+      hold.end()
+    }
   }
 
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per (member,
@@ -363,7 +437,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
     const hold = holder.hold(change)
-    const reading = this.readRetainedBinary(holder, change, hold).finally(() => hold.end())
+    const reading = this.readRetainedBinary(holder, change, hold)
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -373,19 +447,23 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private async readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
-    await this.authority.ensureRoster()
-    await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
-    const plane = getRoomPlane()
-    const lanes: LaneId[] =
-      member !== EVERY_MEMBER && track !== EVERY_TRACK
-        ? [{ kind: 'binary', member, track }]
-        : await plane.driver.listRetained(
-            this.id,
-            this.incarnation.inc,
-            member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
-          )
-    // A frame is admitted by its member and track, so the reads may end in any order.
-    await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+    try {
+      await this.authority.ensureRoster()
+      await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
+      const plane = getRoomPlane()
+      const lanes: LaneId[] =
+        member !== EVERY_MEMBER && track !== EVERY_TRACK
+          ? [{ kind: 'binary', member, track }]
+          : await plane.driver.listRetained(
+              this.id,
+              this.incarnation.inc,
+              member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
+            )
+      // A frame is admitted by its member and track, so the reads may end in any order.
+      await eachInFlight(lanes, (lane) => this.replayRetainedLane(lane, holder, hold))
+    } finally {
+      hold.end()
+    }
   }
 
   private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {
@@ -425,6 +503,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       case 'deliveries-lost':
         return void this.authority.reconcileAuthority().catch(reportRoomError)
       case 'lanes-changed':
+        this.staleReads.lanesChanged()
         return this.heartbeat.update()
       case 'control-subscribed':
         return this.authority.controlSubscribed()
@@ -435,22 +514,16 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
-    this.applyControl(ctrl, () => encodePublish(serialized, info))
+    this.applyControl(ctrl, () => orderedBody(serialized, info))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
-    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
-    if (envelope.__r === 'announce') {
-      for (const handle of this.receivers) handle.local.relayAnnouncement(envelope.data, info)
-      const wireText = encodePublish(serialized, info)
-      for (const stub of this.stubs) stub.relayAnnouncement(wireText, info)
-      return
-    }
-    this.applyStamp(envelope.from, envelope)
+    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope
+    if (envelope.fromMetaSeq !== undefined) this.applyStamp(envelope.from, envelope)
     for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
-    const texts = new MemberMessageTexts(serialized, info, envelope)
-    for (const stub of this.stubs) stub.relayText(serialized, texts, envelope.from, info)
+    const bodies = new MemberMessageBodies({ serialized, info, envelope })
+    for (const stub of this.stubs) stub.relayText(serialized, bodies, envelope.from, info)
   }
 
   private onBinary(framed: Uint8Array, info: OrderingInfo): void {
@@ -458,8 +531,8 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     assert(unframed)
     for (const handle of this.receivers) handle.local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const wireData = encodePublish(framed, info)
-    for (const stub of this.stubs) stub.relayBinary(wireData, unframed.from, unframed.track, info)
+    const body = trackFrameBody(unframed, framed, info)
+    for (const stub of this.stubs) stub.relayBinary(body, unframed.from, unframed.track, info)
   }
 
   /** A DM for a member a handle here owns, routed to that handle. */
@@ -494,13 +567,11 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     void dropDmReply(this.id, this.incarnation.inc, envelope.to, envelope.ackId).catch(reportRoomError)
   }
 
-  private relayControl(event: PresenceEvent, wireText: () => string): void {
-    if (this.stubs.size === 0) return
-    const text = wireText()
+  private relayControl(event: PresenceEvent, carried: () => PublishBody): void {
+    if (this.rosterClients.size === 0) return
+    const body = carried()
     const hiddenMember = hiddenMemberOf(event)
-    // Each attach sends the roster and the room's meta again, which carry every event but the close.
-    const opts = { resentOnAttach: event.__r !== 'closed' }
-    for (const stub of this.stubs) stub.relayControl(text, hiddenMember, opts)
+    for (const client of this.rosterClients) client.relayControl(body, hiddenMember)
   }
 
   /** A local participant takes each update its member's meta takes here. */
@@ -512,27 +583,33 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     this.authority.memberMetaGap()
   }
 
-  /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
+  /** Every leave the model applies, event or reconcile, runs the member's cleanup. A removal then closes the room's
+   *  views at each page here it was held at, unless that page holds another of the room's participants. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
+    const removedFrom = cause.type === 'removed' ? this.pages.pagesHolding(id) : []
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
+    this.pages.memberChanged(id)
+    this.attributionChanged()
     for (const handle of this.receivers) handle.local.forgetMember(id)
     const owner = this.owners.get(id)
     if (owner !== undefined) {
       this.disown(id, owner)
       owner.memberLeft(id, cause)
+      this.pageEndChanged(owner.local, id)
       this.reconsider(owner)
     }
     // Every leave of a known member reaches the clients here, once, whatever applied it.
     if (hidden !== null) {
       const leave: Extract<PresenceEvent, { __r: 'leave' }> = { __r: 'leave', id, ...leaveCauseToWire(cause) }
       if (hidden) leave.hidden = true
-      this.relayControl(leave, () => unorderedEventText(leave))
+      this.relayControl(leave, () => unorderedEventBody(leave))
     }
     for (const stub of this.stubs) {
-      stub.forgetMember(id)
+      if (stub.forgetMember(id)) this.pageEndChanged(stub, id)
       if (stub.forgetWantsOf(id)) this.lanePlan.holderChanged(stub, [id])
     }
     this.lanePlan.memberReleased(id)
+    this.pages.closeRemoved(removedFrom, cause)
   }
 
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */

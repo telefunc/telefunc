@@ -1,4 +1,4 @@
-export { assert, assertUsage }
+export { assert, assertUsage, assertWarning }
 
 const projectName = '@telefunc/room'
 const version = '0.1.0'
@@ -17,4 +17,9 @@ function assert(condition: unknown, debugInfo?: unknown): asserts condition {
 function assertUsage(condition: unknown, errorMessage: string): asserts condition {
   if (condition) return
   throw new Error(`${errorPrefix}[Wrong Usage] ${errorMessage}`)
+}
+
+function assertWarning(condition: unknown, message: string): void {
+  if (condition) return
+  console.warn(`${errorPrefix}[Warning] ${message}`)
 }

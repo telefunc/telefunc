@@ -1,12 +1,12 @@
 // Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs`, `@telefunc/redis` and `@telefunc/live`.
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
-export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
-export { untether } from '../../utils/wrapProxy.js'
+export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js'
+export { tetherTo, untether } from '../../utils/wrapProxy.js'
 export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
-export { getChannelLimits } from './serverConfig.js'
-export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
+export { reconnectWindow } from './serverConfig.js'
+export { MAX_CHANNELS_PER_CONNECTION, PUBLISH_HOLD_BYTES } from '../../wire-protocol/constants.js'
 
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
@@ -25,7 +25,8 @@ export type { ServerBroadcastEnd, ClientBroadcast }
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
-export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
+export { publishBody, type PublishBody } from '../../wire-protocol/channel/server/PublishBody.js'
+export { publishedData } from '../../wire-protocol/channel/broadcastPayload.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export {
   ProtocolViolationError,
@@ -53,9 +54,14 @@ export type { BackendSubscription, SourceRules } from '../../wire-protocol/backe
 export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { reportBroadcastDeliveryLost } from '../../wire-protocol/backend/broadcast/reportBroadcastDeliveryLost.js'
-export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/MemoryBackend.js'
-export { MemoryPubSub, type Subscribers } from '../../wire-protocol/backend/memory/MemoryPubSub.js'
+export {
+  addSubscriber,
+  removeSubscriber,
+  deliverTo,
+  type Subscribers,
+} from '../../wire-protocol/backend/memory/memorySubscribers.js'
+export { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 // An add-on that sends messages of its own over the installed Broadcast: `@telefunc/live`'s changes.
@@ -94,7 +100,6 @@ type ServerBroadcastEnd = Pick<
   | 'isClosed'
   | 'isConnected'
   | 'deliver'
-  | 'deliverBinary'
   | 'listen'
   | 'onClose'
   | 'onDisconnect'
@@ -111,6 +116,7 @@ type ClientBroadcast = Pick<
   | '_setSubscribed'
   | '_sendReply'
   | '_subscribeLocal'
+  | '_confirmSoon'
   | 'isClosed'
   | 'isConnected'
   | 'send'

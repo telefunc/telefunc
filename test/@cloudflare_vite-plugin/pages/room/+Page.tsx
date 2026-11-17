@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   onRoomRoundTrip,
   onOrderChannels,
+  onJoinRoom,
   onSubscribeThenPublish,
   onListen,
   onPublishFrom,
@@ -75,6 +76,7 @@ function Page() {
         return 'published'
       })}
       {card('order-received', async () => order.current)}
+      {card('join', () => onJoinRoom(query().get('id')!))}
       {card('subscribe-then-publish', () => onSubscribeThenPublish())}
       {card('listen', () => onListen(query().get('id')!, query().get('page')!))}
       {card('publish', () => onPublishFrom(query().get('id')!, 'hello'))}

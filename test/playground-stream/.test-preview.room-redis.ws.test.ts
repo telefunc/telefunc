@@ -1,6 +1,13 @@
 import { runPlayground } from './.testRun'
-import { testBroadcastRedisSubscriberDropped } from './pages/publish/redis-e2e-test'
-import { testRoom, testRoomRedisSubscriberDropped } from './pages/room/e2e-test'
+import { testPublishHold } from './pages/publish/e2e-test'
+import { testBroadcastRedisPublishLimit, testBroadcastRedisSubscriberDropped } from './pages/publish/redis-e2e-test'
+import {
+  testRoom,
+  testRoomPublishHold,
+  testRoomRedisPublishLimit,
+  testRoomRedisSubscriberDropped,
+  testRoomStaleRead,
+} from './pages/room/e2e-test'
 
 process.env.PUBLIC_ENV__STREAM_TRANSPORT = 'channel'
 process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS = JSON.stringify(['ws'])
@@ -10,5 +17,10 @@ process.env.NO_HTTPS = 'true'
 // installs no failing backend to inject its store faults.
 runPlayground('pnpm preview:redis')
 testRoom()
+testPublishHold()
+testRoomPublishHold()
 testRoomRedisSubscriberDropped()
 testBroadcastRedisSubscriberDropped()
+testBroadcastRedisPublishLimit()
+testRoomRedisPublishLimit()
+testRoomStaleRead()

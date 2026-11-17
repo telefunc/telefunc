@@ -18,8 +18,6 @@ function RoomLost() {
         room.onJoin((member) => events.push(`join:${member.meta.name}`))
         room.onLeave((member) => events.push(`leave:${member.meta.name}`))
         room.onClose(() => events.push('close'))
-        // Before its roster a view has no member to tell a leave of.
-        await room.getParticipants()
         await lose(roomId)
         // Render every 200 ms, so the test sees how soon the view heals.
         for (let i = 0; i < 250; i++) {

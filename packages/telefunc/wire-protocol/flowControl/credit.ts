@@ -1,7 +1,7 @@
-export { replayWindow }
+export { creditWindowOf }
 export type { CreditOwner, Urgency }
 
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../wire/frame.js'
+import { CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 /** How soon a credit frame goes (`urgent-flow-control` at once, an `acknowledgement` rides); also its page frame kind. */
 type Urgency = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
@@ -16,9 +16,12 @@ interface CreditOwner {
   backlogBytes(): number | undefined
   /** The bytes the channel's wire delivered in the `ms` before the frame being handled arrived. */
   deliveredBefore(ms: number): number
+  /** On a server: whether it holds enough that this side grants no more credit. */
+  holdsEnough?(): boolean
 }
 
-/** The largest window a sender whose replay queues hold `text` and `binary` bytes gets: what it holds in flight fits. */
-function replayWindow(text: number, binary: number): number {
-  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
+/** The largest credit window, each way, of a server whose channels hold `maxMemory` together and `maxPendingBytes`
+ *  each: what a small host or channel holds is small. */
+function creditWindowOf(maxMemory: number, maxPendingBytes: number): number {
+  return Math.min(CREDIT_WINDOW_MAX_BYTES, Math.min(maxMemory, maxPendingBytes) / 2)
 }

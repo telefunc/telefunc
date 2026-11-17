@@ -54,7 +54,7 @@ function ChatView({ chat, me }: { chat: ChatRoom; me: Me }) {
     const unlisten = [
       me.onDisconnect(() => setIsConnected(me.isConnected)),
       me.onReconnect(() => setIsConnected(me.isConnected)),
-      chat.onAnnounce((text) => log(String(text))),
+      chat.subscribe((text) => log(String(text))),
       chat.onLeave((member) => log(`${member.meta.name} left`)),
     ]
     return () => unlisten.forEach((off) => off())
@@ -63,7 +63,7 @@ function ChatView({ chat, me }: { chat: ChatRoom; me: Me }) {
     <div>
       <h2>Chat</h2>
       <p id="chat-status">{isConnected ? 'Connected' : 'Reconnecting…'}</p>
-      <button id="chat-rename" onClick={() => me.setAttributes({ name: `${me.meta.name}!` })}>
+      <button id="chat-rename" onClick={() => me.updateMeta({ name: `${me.meta.name}!` })}>
         {me.meta.name}
       </button>
       <p id="chat-count">{count} in the chat</p>
@@ -101,17 +101,14 @@ function MemberActivity({
   log,
 }: { chat: ChatRoom; id: string; name: string; log: (line: string) => void }) {
   useEffect(() => {
-    let unlisten = () => {}
-    void chat.getParticipant(id).then((member) => {
-      if (!member) return
-      const offDisconnect = member.onDisconnect(() => log(`${name} lost connection`))
-      const offReconnect = member.onReconnect(() => log(`${name} is connected again`))
-      unlisten = () => {
-        offDisconnect()
-        offReconnect()
-      }
-    })
-    return () => unlisten()
+    const member = chat.getParticipant(id)
+    if (!member) return
+    const offDisconnect = member.onDisconnect(() => log(`${name} lost connection`))
+    const offReconnect = member.onReconnect(() => log(`${name} is connected again`))
+    return () => {
+      offDisconnect()
+      offReconnect()
+    }
   }, [chat, id])
   return null
 }

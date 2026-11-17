@@ -8,8 +8,9 @@ import { installAsyncContext } from '../node/server/context/async.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
-import { getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
+import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
@@ -42,9 +43,8 @@ import {
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
-import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
+import { REQUEST_KIND, getRequestKind, getSessionToken, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
-import { importBundledEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 
 // A subscription finds its session through AsyncLocalStorage, which a compatibility flag enables. A Worker without it
 // still serves telefunctions and channels; Broadcast and Room ask for the flag (session.ts). The specifier is a
@@ -55,8 +55,9 @@ const asyncHooks: typeof import('node:async_hooks') | null = await import(/* @vi
 )
 if (asyncHooks) installAsyncContext(asyncHooks.AsyncLocalStorage)
 
-// At Worker start, so that the extensions' server entries run before a Durable Object's first call
-await importBundledEntry()
+// At Worker start, so that the server entry (the build's config, the extensions' server entries) runs before the first
+// request and before a Durable Object's first call, which may be an alarm()
+await preloadServerProductionEntry()
 
 /** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
  *  eviction. */
@@ -64,6 +65,9 @@ const EXTENSION_STORAGE_KEY = 'telefunc:extension'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
+/** An isolate has 128 MB, heap included, and is replaced past it, with the channels it holds. A channel holds this and its
+ *  credit window, as much again: half an isolate at most, where the usual default would pass it with one channel. */
+const DURABLE_OBJECT_MAX_MEMORY = 64 * 1024 * 1024
 
 type CloudflareOptions = {
   bindingName?: string
@@ -93,6 +97,7 @@ class Telefunc {
 
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
+  setAdapterMaxMemory(DURABLE_OBJECT_MAX_MEMORY)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const scale = options?.scale
@@ -100,7 +105,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const hooks = getTelefuncChannelHooks()
+  const hooks = getTelefuncChannelHooks({ copiesOnSend: true })
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
@@ -264,16 +269,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
       }
 
-      const { searchParams } = new URL(request.url)
-      const token = searchParams.get('session') || crypto.randomUUID()
       // No lookup and nothing shared: each request names the home its session's responses gave its page.
       const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(
         baseInstanceName,
         scale,
         request,
         locationFallback,
-        token,
-        searchParams.get('home'),
+        getSessionToken(request) || crypto.randomUUID(),
+        new URL(request.url).searchParams.get('home'),
       )
 
       const forwardedHeaders = new Headers(request.headers as Headers)

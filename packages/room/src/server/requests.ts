@@ -4,6 +4,7 @@ export {
   decodeRoomDeclaration,
   decodeRoomPublish,
   decodeStubBinaryFrame,
+  pageFrameMessage,
   decodeParticipantRequest,
   decodeParticipantFrame,
   decodeParticipantDeclaration,
@@ -16,6 +17,7 @@ import {
   EVERY_MEMBER,
   EVERY_TRACK,
   decodeBinaryFrame,
+  decodeFrameMessage,
   isMemberId,
   isRoomTrack,
   type BinaryFrame,
@@ -33,7 +35,7 @@ assertIsNotBrowser()
 
 type RoomRequest = Extract<
   RoomStubRequest,
-  { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-set-attrs' | 'req-dm' }
+  { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-update-meta' | 'req-dm' | 'req-private' }
 >
 
 type RoomDeclaration =
@@ -41,7 +43,12 @@ type RoomDeclaration =
   | ({ __r: 'sub-binary' } & BinaryWantChange)
 
 /** A member's meta, attributes and DM requests, by the API call each serves. */
-const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
+const MEMBER_MUTATIONS = {
+  'req-set-meta': 'setMeta',
+  'req-update-meta': 'updateMeta',
+  'req-dm': 'send',
+  'req-private': 'sendPrivate',
+} as const
 
 /** A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer
  *  and ends its connection. */
@@ -97,8 +104,9 @@ function decodeRoomRequest(value: unknown): RoomRequest {
     case 'req-leave':
       return { __r: 'req-leave', id: memberId(req.id, 'leave') }
     case 'req-set-meta':
-    case 'req-set-attrs':
-    case 'req-dm': {
+    case 'req-update-meta':
+    case 'req-dm':
+    case 'req-private': {
       const id = memberId(req.id, MEMBER_MUTATIONS[req.__r])
       return { ...decodeMemberMutation(req.__r, req), id }
     }
@@ -123,11 +131,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
       }
     }
     case 'sub-text':
-      return {
-        __r: 'sub-text',
-        announce: flag(decl.announce, 'text wants'),
-        members: decodeTextWants(decl.members),
-      }
+      return { __r: 'sub-text', members: decodeTextWants(decl.members) }
   }
   return malformed('declaration')
 }
@@ -175,6 +179,16 @@ function decodeStubBinaryFrame(framed: Uint8Array): BinaryFrame {
   return decodeBinaryFrame(framed) ?? malformed('binary frame')
 }
 
+/** What a frame from a page shows its guards: its bytes, or a text frame's message. */
+function pageFrameMessage(frame: BinaryFrame): unknown {
+  if (!frame.text) return frame.payload
+  try {
+    return decodeFrameMessage(frame)
+  } catch {
+    return malformed('text frame')
+  }
+}
+
 function decodeParticipantFrame(framed: Uint8Array, participantId: string): BinaryFrame {
   const frame = decodeStubBinaryFrame(framed)
   if (frame.from !== participantId) malformed('binary frame sender')
@@ -190,8 +204,9 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
       return publish
     }
     case 'req-set-meta':
-    case 'req-set-attrs':
+    case 'req-update-meta':
     case 'req-dm':
+    case 'req-private':
       return decodeMemberMutation(req.__r, req)
     case 'req-leave':
       return { __r: 'req-leave' }
@@ -199,13 +214,13 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
   return malformed('participant request')
 }
 
-/** A member's meta, attributes or DM request, as both stubs decode it; a Room stub's also names the acting member. */
+/** A member's meta, attributes, DM or package message request, as both stubs decode it; a Room stub's also names the acting member. */
 function decodeMemberMutation(kind: MemberMutationRequest['__r'], req: Record<string, unknown>): MemberMutationRequest {
   switch (kind) {
     case 'req-set-meta':
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
-    case 'req-set-attrs':
-      return { __r: 'req-set-attrs', attrs: record(req.attrs, 'attributes') }
+    case 'req-update-meta':
+      return { __r: 'req-update-meta', attrs: record(req.attrs, 'updateMeta meta') }
     case 'req-dm': {
       const dm: Extract<MemberMutationRequest, { __r: 'req-dm' }> = {
         __r: 'req-dm',
@@ -215,5 +230,12 @@ function decodeMemberMutation(kind: MemberMutationRequest['__r'], req: Record<st
       if (optionalTrue(req.ack, 'send ack')) dm.ack = true
       return dm
     }
+    case 'req-private':
+      return {
+        __r: 'req-private',
+        to: text(req.to, 'sendPrivate recipient'),
+        field: text(req.field, 'sendPrivate field'),
+        data: req.data,
+      }
   }
 }

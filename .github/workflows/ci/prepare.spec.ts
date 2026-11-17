@@ -98,6 +98,22 @@ describe('prepare()', () => {
                   "job": "Vite",
                 },
               },
+              "testFilePath": "examples/room/.test-dev.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Vite",
+                },
+              },
+              "testFilePath": "examples/room/.test-preview.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Vite",
+                },
+              },
               "testFilePath": "examples/vike/.test-dev.test.ts",
             },
             {
@@ -123,6 +139,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground/.test-preview.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Vite",
+                },
+              },
+              "testFilePath": "test/standaloner_without-vike/test-preview.test.ts",
             },
           ],
           "splitFiles": false,
@@ -199,6 +223,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-docker.binary-inline.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-docker.redis-cluster.test.ts",
             },
             {
@@ -247,6 +279,14 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-preview.channel-short-reconnect.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.channel-slow-ping.ws.test.ts",
             },
             {
@@ -255,7 +295,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer-redis.ws.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-slow-post.sse.test.ts",
             },
             {
               "localConfig": {
@@ -263,7 +303,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.sse.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.sse.test.ts",
             },
             {
               "localConfig": {
@@ -271,39 +311,7 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel-zero-settings.ws.test.ts",
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-pending.ws.test.ts",
             },
             {
               "localConfig": {
@@ -352,6 +360,22 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.room-timeouts.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.room.bun.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.room.deno.test.ts",
             },
             {
               "localConfig": {
@@ -438,6 +462,22 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/@cloudflare_vite-plugin/test-preview.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Cloudflare",
+                },
+              },
+              "testFilePath": "test/@cloudflare_vite-plugin_without-vike/test-preview.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Cloudflare",
+                },
+              },
+              "testFilePath": "test/cloudflare-serve/test-dev.test.ts",
             },
           ],
           "splitFiles": false,

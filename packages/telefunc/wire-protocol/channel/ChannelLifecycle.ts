@@ -115,13 +115,10 @@ class ChannelLifecycle {
     return this.didReceiveCloseAck ? 0 : 1
   }
 
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void {
-    if (options?.signal?.aborted) return
-    if (this.didFireOpen) {
-      this.invokeCallback(callback)
-      return
-    }
-    this.openListeners.add(callback, options)
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
+    if (!this.didFireOpen) return this.openListeners.add(callback, options)
+    if (!options?.signal?.aborted) this.invokeCallback(callback)
+    return () => {}
   }
 
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void {
@@ -161,8 +158,9 @@ class ChannelLifecycle {
 
   /** Calls each of `listeners`, until one throws `Abort`. */
   private invokeAll(listeners: Listeners<() => void>): void {
-    for (const cb of listeners.list()) {
-      if (this.invokeCallback(cb)) return
+    for (const { listener } of listeners.list()) {
+      if (!listener) continue
+      if (this.invokeCallback(listener)) return
     }
   }
 
@@ -186,13 +184,10 @@ class ChannelLifecycle {
     return false
   }
 
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void {
-    if (options?.signal?.aborted) return
-    if (this.didFireClose) {
-      void this.invokeCloseCallback(callback, this.endError)
-      return
-    }
-    this.closeListeners.add(callback, options)
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void {
+    if (!this.didFireClose) return this.closeListeners.add(callback, options)
+    if (!options?.signal?.aborted) void this.invokeCloseCallback(callback, this.endError)
+    return () => {}
   }
 
   localCloseRequested({
@@ -268,8 +263,9 @@ class ChannelLifecycle {
     if (this.didFireClose) return
     this.didFireClose = true
     this.isConnected = false
-    for (const callback of this.closeListeners.list()) {
-      const pending = this.invokeCloseCallback(callback, err)
+    for (const { listener } of this.closeListeners.list()) {
+      if (!listener) continue
+      const pending = this.invokeCloseCallback(listener, err)
       if (pending !== undefined) void this.trackCloseListener(pending)
     }
     this.closeListeners.clear()

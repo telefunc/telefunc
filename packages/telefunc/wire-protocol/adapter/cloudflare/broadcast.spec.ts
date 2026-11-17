@@ -8,7 +8,7 @@ import {
   resolveSessionRoutingTarget,
 } from './routing.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
-import type { BroadcastCalls } from './broadcast.js'
+import type { BroadcastCalls, BroadcastPresenceRequest } from './broadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
 import type { TelefuncDurableObjectNamespace } from './namespace.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
@@ -37,6 +37,7 @@ function createBasicBinding(
     onPublish: (id: { name: string }, request: any) => any
     onForward: (id: { name: string }, request: any) => any
     onDeliver: (id: { name: string }, request: any) => any
+    onPresence: (id: { name: string }, request: BroadcastPresenceRequest) => Promise<boolean>
   }>,
 ) {
   return {
@@ -56,6 +57,9 @@ function createBasicBinding(
         },
         telefuncBroadcastDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
+        },
+        telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
+          return overrides?.onPresence?.(id, request) ?? Promise.resolve(false)
         },
       }
     },
@@ -232,6 +236,34 @@ describe('cloudflare broadcast routing', () => {
       'telefunc:broadcast:eeur:0',
       'telefunc:broadcast:weur:0',
     ])
+  })
+
+  it('a member that unsubscribes withdraws its presence, so the next publish forwards to no coordinator', async () => {
+    const authorityState = createAuthorityState()
+    const coordinators: string[] = []
+    const broadcast = createBroadcast(
+      createBasicBinding({
+        onForward(id) {
+          coordinators.push(id.name)
+          return Promise.resolve(0)
+        },
+        // The key's authority, as a member's presence reaches it.
+        onPresence: (_id, request) => Promise.resolve(authorityState.setPresence(request)),
+      }),
+    )
+    const member = broadcast.member('telefunc-shard-weur-0', new OrderedStubs())
+    member.locate('weur')
+    const attempt = member.openSubscription({ key: 'room:test', kind: 'text' }, { deliver() {} })
+    await flushMicrotasks()
+    const publish = (payload: string) =>
+      broadcast.publishToSubscribers(authorityState, new OrderedStubs(), { key: 'room:test', kind: 'text', payload })
+
+    await publish('"first"')
+    expect(coordinators).toEqual(['telefunc:broadcast:weur:0'])
+
+    await attempt.unsubscribe()
+    await publish('"second"')
+    expect(coordinators).toEqual(['telefunc:broadcast:weur:0'])
   })
 
   it('forwarded publish delivers to DO names listed in the request', async () => {

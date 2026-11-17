@@ -7,11 +7,11 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../shared/constants.js'
-import { ServerLocalParticipant, ServerRoom, handleOf } from './room.js'
+import { ServerRoom, handleOf, roomOf } from './room.js'
+import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
-import { ResponseRoomGrants } from './RoomStub.js'
-import { remoteBacking } from '../shared/state.js'
+import { remoteBacking } from '../shared/RoomView.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -19,12 +19,13 @@ type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata
 type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
-const ROOM_GRANTS = Symbol.for('telefunc.RoomResponseGrants')
+const RESPONSE_HIDDEN = Symbol.for('telefunc.RoomResponseHidden')
 
-/** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
-function responseRoomGrants(context: ServerReplacerContext, roomId: string): ResponseRoomGrants {
-  const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
-  return getOrCreate(byRoom, roomId, () => new ResponseRoomGrants())
+/** The hidden members a response hands its client, by room id: `Room.join(id)` and `Room.get(id)` build separate
+ *  instances of one room. */
+function responseHidden(context: ServerReplacerContext, roomId: string): Set<string> {
+  const byRoom = context.responseState(RESPONSE_HIDDEN, () => new Map<string, Set<string>>())
+  return getOrCreate(byRoom, roomId, () => new Set())
 }
 
 const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
@@ -37,7 +38,8 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
     const metadata = handleOf(serverRoom).openStub({
       end,
       publishShield: context.validators.get('data'),
-      grants: responseRoomGrants(context, serverRoom.id),
+      grantedHidden: responseHidden(context, serverRoom.id),
+      page: context.page,
     })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
@@ -57,23 +59,25 @@ const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = 
 const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
-    // A brand, not instanceof: a dev server can load two module graphs.
-    return ServerRoom.isServerRoom(remoteBacking(value)?.state.view)
+    // A global map, not instanceof: a dev server can load two module graphs.
+    const backing = remoteBacking(value)
+    return backing !== null && roomOf(backing.state) !== null
   },
   replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
-    // Returning a hidden member hands it to this client: its room stub relays that member's events.
-    if (entry.hidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
-    // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
+    // Returning a hidden member hands it to this client: its room stub relays that member's events. One that left is
+    // not handed: as any member its room's roster doesn't list, it revives on the page as one that left.
+    const handedHidden = entry.hidden && !entry.left
+    if (handedHidden) responseHidden(context, state.model.roomId).add(entry.id)
     const metadata: RemoteParticipantMetadata = {
-      room: state.view,
+      room: roomOf(state)!,
       id: entry.id,
       meta: entry.meta.object,
       joinedAt: entry.joinedAt,
       metaSeq: entry.meta.seq,
       identity: entry.identity,
     }
-    if (entry.hidden) metadata.hidden = true
+    if (handedHidden) metadata.hidden = true
     if (!entry.meta.connected) metadata.disconnected = true
     return {
       metadata,
@@ -90,9 +94,11 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Ser
   },
   replace(participant, context) {
     const end = context.createBroadcastChannel()
-    const metadata = participant._openStub({ end, publishShield: context.validators.get('data') })
-    // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
-    if (!participant.selfDelivery) responseRoomGrants(context, participant.room.id).suppress(participant.id)
+    const metadata = participant._openStub({
+      end,
+      publishShield: context.validators.get('data'),
+      page: context.page,
+    })
     if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,

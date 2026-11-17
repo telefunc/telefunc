@@ -16,8 +16,10 @@ export {
   encodeDemandPage,
   encodeRoomRecord,
   handoffLost,
+  lostReason,
   withinRoomHorizon,
 }
+export type { LaneCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -129,16 +131,23 @@ function inboxOf(roomId: string, inc: string, member: string): CommitTarget {
 /** Why `delivery` was lost, reported, or null once handed off. Delivery is at-most-once: a handoff that rejects or never
  *  settles is lost and never retried, and no bug (an authority a deploy evicts rejects it). */
 async function handoffLost(roomId: string, delivery: Promise<void>): Promise<string | null> {
-  const lost = await raceTimeout(
-    delivery.then(
-      () => null,
-      (reason: unknown) => String(reason),
-    ),
-    ROOM_HORIZON_MS,
-    () => 'unconfirmed within the horizon',
-  )
+  const lost = await lostReason(delivery)
   if (lost !== null) reportDeliveryLost(roomId, lost)
   return lost
+}
+
+/** Null once `delivery` was handed off, else why it was lost: a handoff unconfirmed within the horizon is. */
+function lostReason(delivery: Promise<void>): Promise<string | null> {
+  return raceTimeout(rejectionOf(delivery), ROOM_HORIZON_MS, () => 'unconfirmed within the horizon')
+}
+
+async function rejectionOf(delivery: Promise<void>): Promise<string | null> {
+  try {
+    await delivery
+    return null
+  } catch (reason) {
+    return String(reason)
+  }
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {

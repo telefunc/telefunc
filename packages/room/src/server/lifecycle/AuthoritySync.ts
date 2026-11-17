@@ -5,12 +5,13 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { createDeferred, unrefTimer } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomHead } from '../../backend/contract.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
 import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { CONTROL_LANE, readOpenConfig } from '../lanes/lanes.js'
+import { CONTROL_LANE, openConfig } from '../lanes/lanes.js'
 import { readLeaveCauses, reapAndReadRoster } from '../store/roster.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq } from '../store/meta.js'
 import type { LanePlan } from '../lanes/LanePlan.js'
@@ -36,7 +37,7 @@ type AuthoritySyncOptions = {
     RoomModel,
     'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'memberIds' | 'recordMembership' | 'stopRecordingMembership'
   >
-  lanePlan: Pick<LanePlan, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>
+  lanePlan: Pick<LanePlan, 'replan' | 'observing' | 'controlEstablished'>
 }
 
 /** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */
@@ -87,8 +88,7 @@ class AuthoritySync {
 
   async reconcileAuthority(): Promise<void> {
     if (this.model.closed || !(await this.reconcileMeta())) return
-    await dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc)
-    await this.refreshMembers()
+    await Promise.all([dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc), this.refreshMembers()])
   }
 
   /** The heartbeat's check, after the meta and the lapsed leases: the roster read again only once the control lane
@@ -96,6 +96,7 @@ class AuthoritySync {
   async checkCoverage(): Promise<void> {
     const before = this.covered
     const mark = await this.controlMark()
+    if (this.model.closed) return
     // The authority's seq never goes below what a view covered, unless a failover rewound it.
     if (mark < before) {
       this.onControlLaneRewound()
@@ -222,10 +223,16 @@ class AuthoritySync {
   /** The current subscription's baseline, read again after a failed read. */
   private subscriptionBaseline(): Promise<number> {
     const read = (this.baseline ??= this.controlMark())
-    read.catch(() => {
-      if (this.baseline === read) this.baseline = null
-    })
+    void this.forgetFailedBaseline(read)
     return read
+  }
+
+  private async forgetFailedBaseline(read: Promise<number>): Promise<void> {
+    try {
+      await read
+    } catch {
+      if (this.baseline === read) this.baseline = null
+    }
   }
 
   /** The roster is known, and the control lane delivers every change since. */
@@ -233,21 +240,23 @@ class AuthoritySync {
     return this.model.rosterKnown && this.lanePlan.observing && this.lanePlan.controlEstablished
   }
 
-  /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits; false
-   *  once the room is gone. */
-  async reconcileMeta(): Promise<boolean> {
-    const config = await readOpenConfig(this.incarnation)
-    if (config !== null && !this.model.metaWaiting) {
-      const seq = await readRoomMetaSeq(this.incarnation.id, config.inc)
-      if (seq !== null && seq <= this.model.metaSeq) return true
-    }
-    const stored = config === null ? null : await readRoomMeta(this.incarnation.id, config)
+  /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits. Returns
+   *  the head it read, null once the room is gone. */
+  async reconcileMeta(): Promise<RoomHead | null> {
+    const { id, inc } = this.incarnation
+    const [head, seq] = await Promise.all([
+      getRoomPlane().driver.readHead(id),
+      this.model.metaWaiting ? null : readRoomMetaSeq(id, inc),
+    ])
+    const config = openConfig(head, inc)
+    if (config !== null && seq !== null && seq <= this.model.metaSeq) return head
+    const stored = config === null ? null : await readRoomMeta(id, config)
     if (stored === null) {
       this.owner.applyControl({ __r: 'closed' })
-      return false
+      return null
     }
     this.owner.applyControl({ __r: 'update', seq: stored.seq, meta: stored.entries })
-    return true
+    return head
   }
 
   /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. It covers

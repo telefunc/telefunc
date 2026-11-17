@@ -1,4 +1,4 @@
-export { invokeChannelListener }
+export { invokeChannelListener, stringifyMessage, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -10,6 +10,7 @@ export type {
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
+  BroadcastPublishOptions,
   ChannelListenReturn,
   ChannelListener,
   ChannelBinaryListener,
@@ -20,6 +21,8 @@ export type {
 }
 
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
+import { stringify } from '@brillout/json-serializer/stringify'
+import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { Listeners } from '../../utils/Listeners.js'
 
@@ -28,14 +31,28 @@ type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infe
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
-  /** Per-key counter, one more than the key's previous publish. It starts at 1 (in memory, again after a restart); on
-   *  Redis a key starts at the Redis clock in microseconds, so a lost counter never goes backwards. Use for gap
-   *  detection. */
+  /** Per-key counter: 1 more per publish while the key has a subscriber. A jump means missed messages. It starts at 1 (in
+   *  memory, again after a restart); on Redis a key starts at the Redis clock in microseconds, so a lost counter never
+   *  goes backwards. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
 }
 type ChannelPublishAck = ChannelPublishInfo
+
+/** The options of a broadcast's `publish()` and `publishBinary()`. */
+type BroadcastPublishOptions = {
+  /**
+   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
+   * to the newest, with `info.seq` jumping over what it skipped. A message without it reaches every client, after the
+   * lossy ones published on the key before it.
+   *
+   * https://telefunc.com/channel#lossy-broadcast
+   *
+   * @default false
+   */
+  lossy?: boolean
+}
 
 /** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
  *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */
@@ -51,6 +68,22 @@ function invokeChannelListener<Args extends unknown[]>(
     return handleError(error)
   }
 }
+
+/** What `send(data, { lossy: true, ack: true })` throws, on either end. */
+const LOSSY_WITH_ACK_TEXT =
+  "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
+
+/** `data` as JSON, for `send()` and `publish()` on either end. Bytes are refused: JSON turns them into an object. */
+function stringifyMessage(data: unknown, method: 'send' | 'publish'): string {
+  if (ArrayBuffer.isView(data) || data instanceof ArrayBuffer) {
+    assertUsage(
+      false,
+      `\`${method}()\` serializes its data as JSON, which turns this \`${data.constructor.name}\` into a plain object. Bytes go through \`${method}Binary()\`, which takes a \`Uint8Array\`.`,
+    )
+  }
+  return stringify(data)
+}
+
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
@@ -86,20 +119,33 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
     { type: 'text'; data: ChannelData<TIn> } | { type: 'binary'; data: Uint8Array }
   >
-  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
+  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`.
+   *  Serializes `data` as JSON: bytes go through `sendBinary()`. */
   send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
   send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
   /** Per-send ack opt-out — always returns `Promise<void>`. */
   send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
+  /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
+   *  the newest. It resolves at once, and can't be combined with `ack: true`.
+   *
+   *  https://telefunc.com/channel#skip-to-the-newest */
+  send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
+  /** Send binary where only the newest matters: a receiver that keeps up gets every message, and one that falls behind
+   *  skips to the newest. It resolves at once, and can't be combined with `ack: true`.
+   *
+   *  https://telefunc.com/channel#skip-to-the-newest */
+  sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  /** Called when the channel closes. Returns a function that removes the callback. */
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  /** Called when the channel opens. Returns a function that removes the callback. */
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The other side became unreachable: the channel stays open, and what it sends waits. */
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void
   /** The other side is back, and what waited is sent. */

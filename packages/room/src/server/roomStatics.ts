@@ -1,10 +1,10 @@
 export { roomStatics }
-export type { RoomGuardHooks, RoomGuards, RoomStatic }
+export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
-import { DIRECTORY_PAGE_SIZE } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -15,8 +15,8 @@ import {
   ownMetadata,
   removedCause,
 } from '../shared/arguments.js'
-import type { MemberSnapshot, RoomEnvelope } from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomIncarnation } from './protocol.js'
+import type { MemberSnapshot } from '../shared/protocol.js'
+import type { RoomConfigRecord, RoomDataEnvelope, RoomIncarnation } from './protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -26,8 +26,8 @@ import type {
   LocalParticipant,
   ParticipantMeta,
   ParticipantRef,
-  ParticipantSnapshotView,
   PublishGuard,
+  RemoteParticipant,
   Room,
   RoomGetOptions,
   RoomInfo,
@@ -46,7 +46,16 @@ import {
   reapAndReadRoster,
   reapAndResolveIdentity,
 } from './store/roster.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes/lanes.js'
+import {
+  SEMANTIC_LANE,
+  acceptedOrThrow,
+  commitLane,
+  configFromHead,
+  inboxOf,
+  openConfig,
+  encodeRoomRecord,
+  type LaneCommit,
+} from './lanes/lanes.js'
 import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
@@ -55,6 +64,12 @@ import { closeIncarnation } from './lifecycle/close.js'
 import { cancelClose } from './lifecycle/hold.js'
 import { repairRoomIndex } from './store/directory.js'
 import { ROOM_GUARD_USAGE } from './constants.js'
+
+/** A participant as `Room.getParticipants(id)` reads it from the store: its fields, with no room view to act through. */
+type ParticipantInfo<P extends ParticipantMeta = ParticipantMeta> = Pick<
+  RemoteParticipant<P>,
+  'id' | 'identity' | 'meta' | 'joinedAt' | 'isConnected'
+>
 
 type RoomStatic = {
   create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
@@ -79,15 +94,16 @@ type RoomStatic = {
   ): Promise<LocalParticipant<P, Pub>>
   list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
   setMeta(id: string, meta: RoomMeta): Promise<void>
-  setAttributes(id: string, attributes: RoomMeta): Promise<void>
+  updateMeta(id: string, meta: RoomMeta): Promise<void>
   close(id: string): Promise<void>
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
-  announce(id: string, data: unknown): Promise<RoomSendReceipt>
-  send(id: string, target: ParticipantRef, data: unknown): Promise<void>
+  publish(id: string, data: unknown): Promise<RoomSendReceipt>
+  send(id: string, target: { id: string }, data: unknown): Promise<RoomSendReceipt>
+  send(id: string, target: { identity: string }, data: unknown): Promise<RoomSendReceipt[]>
   getParticipants<P extends ParticipantMeta = ParticipantMeta>(
     id: string,
     target?: { identity: string },
-  ): Promise<ParticipantSnapshotView<P>[]>
+  ): Promise<ParticipantInfo<P>[]>
 }
 
 const roomStatics: RoomStatic = {
@@ -98,10 +114,10 @@ const roomStatics: RoomStatic = {
   join: joinRoom as RoomStatic['join'],
   list: listRooms as RoomStatic['list'],
   setMeta: setRoomMeta,
-  setAttributes: setRoomAttributes,
+  updateMeta: updateRoomMeta,
   close: closeRoom,
   removeParticipant,
-  announce: announceToRoom,
+  publish: publishToRoom,
   send: sendToParticipant,
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
@@ -138,20 +154,25 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
-  const room = await openRoom(id)
-  if (options?.tail === true) await handleOf(room).startTail()
+  const room = await openRoom(await requireRoom(id))
+  await applyGetOptions(room, options)
   return room
 }
 
-/** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
- *  count and the meta. */
-async function openRoom(id: string): Promise<ServerRoom> {
-  const incarnation = await requireRoom(id)
+async function applyGetOptions(room: ServerRoom, { tail }: RoomGetOptions = {}): Promise<void> {
+  if (tail === true) await handleOf(room).startTail()
+}
+
+/** A handle on this process's view of the room, with its members: a held view catches up unless it is current; a new
+ *  one reads the roster and the meta. */
+async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord): Promise<ServerRoom> {
+  const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await held.sharedHandle()
-  const [count, meta] = await Promise.all([reapAndCountPresence(incarnation), requireRoomMeta(id, incarnation)])
-  const replica = RoomReplica.seeded(id, incarnation, meta, { count })
-  return replica.handle()
+  const [roster, meta] = await Promise.all([reapAndReadRoster(incarnation), requireRoomMeta(id, incarnation)])
+  const replica = RoomReplica.seeded(id, incarnation, meta, roster)
+  // One seeded meanwhile for a join alone has read no roster.
+  return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle()
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
@@ -165,8 +186,8 @@ async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOption
   const { tail, ...roomOptions } = options ?? {}
   const result = await tryCreateRoom(id, roomOptions)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  const room = result.kind === 'created' ? result.room : await openRoom(id)
-  if (tail === true) await handleOf(room).startTail()
+  const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) })
+  await applyGetOptions(room, { tail })
   return room
 }
 
@@ -245,10 +266,14 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   return rooms
 }
 
-/** A directory entry as `Room.list()` lists it, after repairing its listing; null once the room isn't open. */
+/** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. */
 async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Promise<RoomInfo | null> {
   const head = await plane.driver.readHead(roomId)
-  await repairRoomIndex(plane, roomId, incTag, head)
+  const [, info] = await Promise.all([repairRoomIndex(plane, roomId, incTag, head), openRoomInfo(plane, roomId, head)])
+  return info
+}
+
+async function openRoomInfo(plane: RoomPlane, roomId: string, head: RoomHead | null): Promise<RoomInfo | null> {
   const config = openConfig(head)
   if (config === null) return null
   const [count, stored] = await Promise.all([countListedRoom(plane, roomId, config), readRoomMeta(roomId, config)])
@@ -273,9 +298,9 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   await writeRoomMeta(id, config, { replace: owned })
 }
 
-async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
-  assertUsage(isRecord(attributes), 'Room.setAttributes() attributes should be an object')
-  const owned = ownMetadata(attributes)
+async function updateRoomMeta(id: string, meta: RoomMeta): Promise<void> {
+  assertUsage(isRecord(meta), 'Room.updateMeta() meta should be an object')
+  const owned = ownMetadata(meta)
   const config = await requireRoom(id)
   await writeRoomMeta(id, config, { merge: owned })
 }
@@ -314,7 +339,7 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   await eachInFlight(members, (member) => evictMember(incarnation, member.id, cause))
 }
 
-async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
+async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
   const incarnation = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
@@ -335,26 +360,43 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     }))
 }
 
-async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
-  const record = encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope)
+async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
+  const record = encodeRoomRecord({ __r: 'data', from: '', data } satisfies RoomDataEnvelope)
   const config = await requireRoom(id)
   const commit = acceptedOrThrow(id, await commitLane({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record))
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
-async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
+/** One receipt for `{ id }`; for `{ identity }`, one per tab it reached, in the order they were delivered. */
+function sendToParticipant(id: string, target: { id: string }, data: unknown): Promise<RoomSendReceipt>
+function sendToParticipant(id: string, target: { identity: string }, data: unknown): Promise<RoomSendReceipt[]>
+async function sendToParticipant(
+  id: string,
+  target: ParticipantRef,
+  data: unknown,
+): Promise<RoomSendReceipt | RoomSendReceipt[]> {
   const message = ownMessage(data)
   const incarnation = await requireRoom(id)
   const members = await resolveParticipantRef(incarnation, target)
-  const exact = 'id' in target
-  await eachInFlight(members, (member) => sendDm(id, incarnation.inc, member.id, message, exact))
+  if ('id' in target) return deliveredOrThrow(id, await sendDm(id, incarnation.inc, target.id, message))
+  const receipts: RoomSendReceipt[] = []
+  await eachInFlight(members, async (member) => {
+    const commit = await sendDm(id, incarnation.inc, member.id, message)
+    // A tab that left since the user's tabs were read is skipped: the others still get the message.
+    if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
+  })
+  return receipts
 }
 
-async function sendDm(id: string, inc: string, member: string, message: unknown, exact: boolean): Promise<void> {
+async function sendDm(id: string, inc: string, member: string, message: unknown): Promise<LaneCommit> {
   const envelope = { __r: 'dm', to: member, from: '', fromMeta: null, data: message } as const
   const requiredCellKeys = [memberCellKey(member)]
-  const receipt = await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
-  if (receipt.kind === 'stale-incarnation') throw roomClosedError(id)
-  if (receipt.kind === 'gone' && exact) throw participantGoneError(member)
-  if (receipt.kind === 'accepted' && receipt.lost !== undefined) throw messageLostError()
+  return await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
+}
+
+/** The delivered message's receipt; a member that left, a closed room or a lost handoff throws. */
+function deliveredOrThrow(id: string, commit: LaneCommit): RoomSendReceipt {
+  const accepted = acceptedOrThrow(id, commit)
+  if (accepted.lost !== undefined) throw messageLostError()
+  return { seq: accepted.seq, timestamp: accepted.timestamp }
 }

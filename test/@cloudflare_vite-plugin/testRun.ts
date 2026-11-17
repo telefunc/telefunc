@@ -1,9 +1,9 @@
 export { testRun }
 export { testCloudflareBindings }
 
-import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
+import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { Page, WebSocket } from 'playwright-chromium'
-import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
+import { sendRefusedWarning, testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
@@ -18,6 +18,10 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
     additionalTimeout: 110_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
+      // The Channel/Chat streaming (SSE) connection surfaces a benign
+      // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
+      // (the message flow is asserted by testChannel()/testChat()).
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
       // before the request's signal could report it: "Broken pipe" and "Connection reset by peer" are both that write.
       (log.logText.includes('disconnected: ::write(') &&
@@ -47,6 +51,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
+  if (!isDev) testRoomJoinRoundTrip()
   testRoomAcrossSessions()
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
@@ -247,7 +252,17 @@ function testChat() {
 }
 
 function testBacklog() {
-  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+  test('Backlog: 24 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+    expect(await sendToStalledPage(1500)).toBe(0)
+  })
+
+  test("Backlog: of 96 MiB the same way, those past Cloudflare's default maxMemory of 64 MiB are refused, and the rest arrive in order, the channel open", async () => {
+    expect(await sendToStalledPage(6000)).greaterThan(0)
+    expectLog(sendRefusedWarning)
+  })
+
+  /** Returns how many were refused. */
+  async function sendToStalledPage(count: 1500 | 6000) {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -259,31 +274,32 @@ function testBacklog() {
       expect(channelId).not.toBe(null)
     })
     const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
-    await page.click('#backlog-run')
+    await page.click(`#backlog-run-${count}`)
     await autoRetry(async () => {
       expect(await (await fetch(runUrl)).json()).deep.equal({ started: true })
     })
     // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
       await fetch(runUrl, { method: 'POST' })
-      let run: { sent: number; refused: string | null } | undefined
+      let run: { sent: number; refused: number } | undefined
       await autoRetry(async () => {
         run = await (await fetch(runUrl)).json()
         expect(run!.sent).not.toBe(undefined)
       })
       return run!
     })
-    expect({ sent, refused }).deep.equal({ sent: 6000, refused: null })
+    expect(sent).toBe(count)
     await autoRetry(
       async () => {
         const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.received).toBe(6000)
+        expect(state.received).toBe(count - refused)
         expect(state.outOfOrder).toBe(0)
         expect(state.closeErr).toBe(null)
       },
       { timeout: 30_000 },
     )
-  })
+    return refused
+  }
 }
 
 function testChatMembers() {
@@ -336,7 +352,7 @@ function testUnsubscribeTwice() {
     await autoRetry(async () => {
       expect(await publisher.locator('#hydrated').count()).toBe(1)
     })
-    // Each try publishes again: the subscriber's presence may still be on its way to KV.
+    // Each try publishes again: another session's publish may reach the key's authority before the subscriber's presence.
     await autoRetry(
       async () => {
         await publisher.click('#publish')
@@ -359,8 +375,12 @@ function testResubscribe() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
     })
-    // A presence lasts 90 s unless refreshed.
-    await page.waitForTimeout(95_000)
+    // A presence lasts 90 s unless refreshed. The page reads meanwhile, as a page's traffic does: a session Durable
+    // Object nothing calls is evicted 70-140 s after its last request, and the subscription it holds with it.
+    for (let waited = 0; waited < 95_000; waited += 19_000) {
+      await page.waitForTimeout(19_000)
+      await page.click('#read')
+    }
     await page.click('#publish')
     await autoRetry(
       async () => {
@@ -507,6 +527,29 @@ function testRoomOrderAcrossSessions() {
   })
 }
 
+function testRoomJoinRoundTrip() {
+  test("Room: a join reaches the room's authority right after its inbox's registration, without waiting for its reply", async () => {
+    const id = crypto.randomUUID()
+    const [session] = await openSessions(id, ['p1'])
+    await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
+    expect(await clickRoomCard(session!, 'join')).toBe('joined')
+    await autoRetry(async () => {
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+        object: string
+        method: string
+      }[]
+      const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
+      const registered = methods.indexOf('registerRoute(inbox)')
+      const joined = methods.indexOf('runOperation')
+      expect(registered).greaterThan(-1)
+      expect(joined).greaterThan(registered)
+      expect(methods.indexOf('registerRoute(inbox) replied')).greaterThan(joined)
+    })
+    await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
+    await session!.context().close()
+  })
+}
+
 function testRoomAcrossSessions() {
   test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
     const id = crypto.randomUUID()
@@ -566,7 +609,7 @@ function testRoomCreatedInRegion() {
     ] as const) {
       await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
       expect(await clickRoomCard(page, 'create')).toBe('created')
-      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
+      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })).json()) as {
         object: string
         room: unknown
       }[]

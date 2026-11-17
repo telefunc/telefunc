@@ -4,6 +4,7 @@ export type { CommitInput, OperationOutcome, RedisCommand }
 // Every Lua script and the one command table that registers and invokes them.
 
 import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
+import { ChannelOverflowError, publishedData } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellSelector,
@@ -54,6 +55,9 @@ const REDIS_DELIVERY_FENCE_BYTE = 0xff
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 /** What a start read's, a leave's or an incarnation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
+/** Telefunc's ceiling on a message, whatever Redis's limits are set to. Over it, a Redis at its defaults closes the
+ *  subscriber: its allocator rounds the buffer up to the default pubsub limit, 32 MiB. */
+const PUBLISH_MAX_BYTES = 28 * 1024 * 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
@@ -75,8 +79,7 @@ local function tf_live_head(key, now)
 end
 `
 
-// The same bytes as telefunc's ordering frame (wire-protocol/wire/orderingFrame.ts): four u32 big-endian words,
-// then the payload.
+// The ordering frame orderingFrame.ts reads: four u32 big-endian words, then the payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
   local hi = math.floor(n / 4294967296)
@@ -746,11 +749,14 @@ const REDIS_COMMANDS = {
     name: 'tfPublish',
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => ({
-      keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
-      // ioredis sends a string as UTF-8.
-      argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind],
-    }),
+    invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
+      assertPublishable(publishedData(payload))
+      return {
+        keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
+        // ioredis sends a string as UTF-8.
+        argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind],
+      }
+    },
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
       const values = Array.isArray(reply) ? reply.map(Number) : []
@@ -1171,9 +1177,19 @@ function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kin
   return lane
 }
 
+/** Refuses a message over Telefunc's ceiling before it reaches Redis. */
+function assertPublishable(payload: string | Uint8Array): void {
+  const bytes = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength
+  if (bytes <= PUBLISH_MAX_BYTES) return
+  throw new ChannelOverflowError(
+    `Telefunc's Redis backend takes a message of ${PUBLISH_MAX_BYTES} bytes at most, and this one has ${bytes}`,
+  )
+}
+
 /** COMMIT's KEYS and ARGV, which OPERATION's commit takes too. */
 function commitInvocation(prefix: string, input: CommitInput): { keys: string[]; argv: (string | Buffer)[] } {
   const { roomId, inc, lane, laneKey, channels, fenceTokens } = input
+  assertPublishable(input.payload)
   const retained = retainedKey(prefix, roomId, inc, laneKey)
   const indexed = lane.kind === 'binary' && input.retain
   const order =

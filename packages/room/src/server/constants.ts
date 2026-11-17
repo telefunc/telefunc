@@ -1,5 +1,6 @@
 export {
   ROOM_CLOUDFLARE_EXTENSION,
+  ROOM_DIRECTORY_CLOUDFLARE_EXTENSION,
   ROOM_CLOUDFLARE_PREFIX,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_LEASE_TTL_MS,
@@ -69,6 +70,8 @@ const ROOM_CLOSE_LEASE_MS = 15_000
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
 /** The name Room's Cloudflare extension registers its `durableObject` under. */
 const ROOM_CLOUDFLARE_EXTENSION = 'room'
+/** The name a region's directory registers its `durableObject` under. */
+const ROOM_DIRECTORY_CLOUDFLARE_EXTENSION = 'room-directory'
 /** Room shares the Telefunc Durable Object namespace with sessions and Broadcast, and Broadcast's routes with its keys,
  *  so each of its Durable Object names and route keys starts with this. */
 const ROOM_CLOUDFLARE_PREFIX = '__telefunc_room__:'

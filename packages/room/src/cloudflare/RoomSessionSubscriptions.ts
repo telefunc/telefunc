@@ -6,6 +6,7 @@ import {
   DriverAttempt,
   OrderedStubs,
   currentCloudflareMember,
+  getOrCreate,
   hostLocal,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
@@ -17,6 +18,8 @@ import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 const ROOM_SESSION = Symbol.for('telefunc.room.cloudflareSession')
+const REGISTER_RETRY_MIN_MS = 100
+const REGISTER_RETRY_MAX_MS = 5_000
 
 /** A session DO's Room part: its subscriptions, made by the first subscribe or lane commit made in it. */
 type RoomSession = { readonly id: string; subscriptions: RoomSessionSubscriptions | null }
@@ -35,11 +38,16 @@ function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSess
   return (session.subscriptions ??= new RoomSessionSubscriptions({ sessionId: session.id, member, driver }))
 }
 
+/** The attempts a room's next renewal renews, once its timer fires. */
+type RoomRenewal = { attempts: Set<CloudflareRoomAttempt>; timer: ReturnType<typeof setTimeout> }
+
 type RoomSessionSubscriptionsOptions = { sessionId: string; member: CloudflareMember; driver: CloudflareRoomDriver }
 
 /** A session DO's Room subscriptions, and its calls to room authorities. */
 class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  /** By room: a session's lanes of a room renew in one call, which the first of them to register times. */
+  private readonly renewals = new Map<string, RoomRenewal>()
   private readonly id: string
   private readonly member: CloudflareMember
   private readonly driver: CloudflareRoomDriver
@@ -58,7 +66,8 @@ class RoomSessionSubscriptions {
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
     const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
+    const readyWhenSent = lane.kind === 'inbox'
+    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries, readyWhenSent })
     void attempt.register()
     return attempt
   }
@@ -68,6 +77,36 @@ class RoomSessionSubscriptions {
   callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
     return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
   }
+
+  renewWithRoom(attempt: CloudflareRoomAttempt): void {
+    const { roomId } = attempt.route
+    const renewal = getOrCreate(this.renewals, roomId, () => ({
+      attempts: new Set<CloudflareRoomAttempt>(),
+      timer: setTimeout(() => void this.renewRoutes(roomId), ROUTE_RENEW_EVERY_MS),
+    }))
+    renewal.attempts.add(attempt)
+  }
+
+  stopRenewing(attempt: CloudflareRoomAttempt): void {
+    const { roomId } = attempt.route
+    const renewal = this.renewals.get(roomId)
+    if (renewal === undefined || !renewal.attempts.delete(attempt) || renewal.attempts.size > 0) return
+    clearTimeout(renewal.timer)
+    this.renewals.delete(roomId)
+  }
+
+  private async renewRoutes(roomId: string): Promise<void> {
+    const attempts = [...this.renewals.get(roomId)!.attempts]
+    this.renewals.delete(roomId)
+    let results: RenewWire[]
+    try {
+      results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)))
+    } catch (error) {
+      for (const attempt of attempts) attempt.lose(error)
+      return
+    }
+    attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!))
+  }
 }
 
 type CloudflareRoomAttemptOptions = {
@@ -75,35 +114,44 @@ type CloudflareRoomAttemptOptions = {
   route: RouteInstallation
   /** Stops the lane's frames reaching its receiver. */
   stopDeliveries: () => void
+  /** What this session commits next to the room follows the registration on the same ordered stub, so a member's join
+   *  needn't wait for the reply: no private message can target it before the route is stored. */
+  readyWhenSent: boolean
 }
 
-/** Ready once the authority has durably registered this attempt's exact route; Room owns retry and
- *  replacement. */
+/** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
+ *  went out. A failed call to the authority, or a lapsed route, holds it back until its route is registered again. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
-  private renewalTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly readyWhenSent: boolean
+  private retry: ReturnType<typeof setTimeout> | null = null
+  private retryDelay = REGISTER_RETRY_MIN_MS
 
-  constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
+  constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
     super()
     this.owner = owner
     this.route = route
     this.stopDeliveries = stopDeliveries
+    this.readyWhenSent = readyWhenSent
   }
 
   async register(): Promise<void> {
+    const registering = this.callAuthority((authority) => authority.registerRoute(this.route))
+    if (this.readyWhenSent) this.transition('ready')
     let registration: RegisterWire
     try {
-      registration = await this.callAuthority((authority) => authority.registerRoute(this.route))
+      registration = await registering
     } catch (error) {
-      return this.fail(error)
+      return this.lose(error)
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
+    this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
-    this.scheduleRenewal()
+    this.owner.renewWithRoom(this)
   }
 
   async unsubscribe(): Promise<void> {
@@ -112,22 +160,26 @@ class CloudflareRoomAttempt extends DriverAttempt {
     await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
   }
 
-  private scheduleRenewal(): void {
-    this.renewalTimer = setTimeout(() => void this.renew(), ROUTE_RENEW_EVERY_MS)
+  onRenewal(renewal: RenewWire): void {
+    if (this.state() === 'closed') return
+    if (renewal === 'renewed') return this.owner.renewWithRoom(this)
+    // A route that went with its dropped incarnation ends on purpose; a lapsed one is registered again.
+    if (renewal === 'dropped') this.end()
+    else this.lose(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
   }
 
-  private async renew(): Promise<void> {
-    let renewal: RenewWire
-    try {
-      renewal = await this.callAuthority((authority) => authority.renewRoute(this.route))
-    } catch (error) {
-      return this.fail(error)
-    }
+  /** What is committed until its route is registered again may miss it: lost if it was ready, then registered again
+   *  after a wait that doubles while the authority fails. The first failure of a run is reported. */
+  lose(error: unknown): void {
     if (this.state() === 'closed') return
-    if (renewal === 'renewed') return this.scheduleRenewal()
-    // A route that went with its dropped incarnation ends on purpose; a lapsed one is a failure.
-    if (renewal === 'dropped') this.end()
-    else this.fail(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+    this.owner.stopRenewing(this)
+    if (this.state() === 'ready') this.transition('lost')
+    if (this.retryDelay === REGISTER_RETRY_MIN_MS) console.error(error)
+    this.retry = setTimeout(() => {
+      this.retry = null
+      void this.register()
+    }, this.retryDelay)
+    this.retryDelay = Math.min(this.retryDelay * 2, REGISTER_RETRY_MAX_MS)
   }
 
   /** Its incarnation is no longer open: closed on purpose, with no reason. */
@@ -136,14 +188,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.transition('closed')
   }
 
-  private fail(error: unknown): void {
-    if (this.state() === 'closed') return
-    this.stop()
-    this.transition('closed', error)
-  }
-
   private stop(): void {
-    clearTimeout(this.renewalTimer)
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = null
+    this.owner.stopRenewing(this)
     this.stopDeliveries()
   }
 

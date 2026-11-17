@@ -36,6 +36,8 @@ function testVideoChat() {
       expect(draws.Bob!.Alice).to.be.greaterThan(15)
       expect(decodeErrors).to.equal(0)
     })
+    // 10 s on a link that keeps up: a frame the server skipped would log 'fell behind', which fails the test.
+    await page.waitForTimeout(10_000)
     await leave(page, 'Alice')
     await leave(page, 'Bob')
   })
@@ -111,6 +113,7 @@ function testVideoChat() {
       await bobTab.context().setOffline(false)
       await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
       await aliceDraws(seesBob)
+      expect((await tally(page)).decodeErrors).to.equal(0)
       await leave(bobTab, 'Bob')
       await bobTab.close()
       await leave(page, 'Alice')

@@ -65,6 +65,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     },
     validators: new Map(),
     responseState: (_key, init) => init(),
+    page: 'page',
     maxFrameBytes: undefined,
   }
   const replacer = createStreamingReplacer(
@@ -443,7 +444,6 @@ async function roundTrip(
       telefunctionAborted: false,
       context: {},
       requestContext,
-      abortSignal: requestContext.abortSignal,
       streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
       useNodeStream: false,
       serverConfig: {
@@ -462,9 +462,6 @@ async function roundTrip(
       {
         telefunctionName: 'testFn',
         telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
-        telefuncUrl: '/_telefunc',
-        headers: null,
-        fetch: null,
         abortController,
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
@@ -663,7 +660,7 @@ describe('extension wire types registered while a telefunc module loads', () => 
       serverConfig: getServerConfig(),
     })
     expect(parsed.isMalformedRequest).toBe(false)
-    if (parsed.isMalformedRequest || parsed.wireResponse) throw new Error('expected a telefunction request')
+    if (parsed.isMalformedRequest || parsed.isSseRequest) throw new Error('expected a telefunction request')
 
     // Registration happens after routing/parse — exactly the window the target module loads in.
     registerExtension()
@@ -693,7 +690,6 @@ describe('extension wire types registered while a telefunc module loads', () => 
         telefunctionAborted: false,
         context: {},
         requestContext,
-        abortSignal: requestContext.abortSignal,
         streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
         useNodeStream: false,
         serverConfig: requestStartConfig,

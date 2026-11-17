@@ -1,16 +1,20 @@
 export {
   testRoom,
+  testRoomDemand,
   testRoomFailingBackend,
   testRoomMetaReads,
   testRoomLimits,
   testRoomAckTimeout,
-  testRoomSmallBuffer,
+  testRoomSmallMemory,
   testRoomPublishHold,
   testRoomLongWaits,
   testRoomRedisSubscriberDropped,
+  testRoomRedisPublishLimit,
+  testRoomStaleRead,
 }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
 import {
   navigate,
   getResult,
@@ -23,6 +27,7 @@ import {
   canCutWire,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
+import type { NamedDemand } from './demandNames'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
 const CLOSED_TAB_WAIT = { timeout: 90_000 }
@@ -30,7 +35,7 @@ const CLOSED_TAB_WAIT = { timeout: 90_000 }
 type ChatResult = {
   events: string[]
   received: Array<{ text: string; from: string }>
-  updates: Array<[number, number | undefined]>
+  updates: unknown[]
   countAfterJoin: number
   count: number
   ack: { key: string; seq: number }
@@ -54,7 +59,7 @@ type BinaryResult = {
     size: number
     firstByte: number
     fromSelf: boolean
-    track: string | null
+    track: string
     meta: Record<string, unknown> | null
   }>
   cameraOnly: number[]
@@ -65,14 +70,16 @@ type GuardResult = {
   joinError: string | null
   unguardedJoinError: string | null
   publishError: string | null
+  trackError: string | null
   sendError: string | null
   received: string[]
   inbox: string[]
 }
 
 type AdminResult = {
-  announcements: string[]
+  published: Array<{ data: string; fromRoom: boolean }>
   system: Array<{ data: string; fromRoom: boolean }>
+  receipt: { seq: number; timestamp: number }
   kicked: boolean
   kickCause: { type: string; reason?: string } | null
   closed: boolean
@@ -80,11 +87,26 @@ type AdminResult = {
   count: number
 }
 
+/** What a view received after its page's participant was removed, and how often it closed. */
+type RemovedView = { text: string[]; closes: number; closeCause: unknown; isClosed: boolean }
+/** The same, and how the page's participant left. */
+type RemovedMe = RemovedView & { myCause: unknown }
+
+/** What a view received of messages, of track `cam` and of the lossy track `cursor`. */
+type OwnTrack = { text: string[]; frames: number[]; lossy: number[] }
+
+/** What a view receives of `Other`'s messages and frames, beside a `me` whose own it doesn't get back. */
+const othersOnly: OwnTrack = { text: ['hello', 'bye'], frames: [1, 9], lossy: [1, 9] }
+
 type MemberResult = {
   hasMember: boolean
   memberName: string | null
   sameObject: boolean
+  listedOnServer: string[]
 }
+
+/** `cam` received by `watchers` and `watcherCount` people in all. */
+const cam = (watchers: string[], watcherCount: number): NamedDemand => ({ track: 'cam', watchers, watcherCount })
 
 function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
   test(name, async () => {
@@ -198,9 +220,19 @@ async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 
 }
 
 function testRoom() {
+  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
+    'dm-overflow',
+    'room: DMs to a page before its first listen() are held within 2 MiB and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+    (r) => {
+      expect(r.first).toBe('rejected')
+      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
+      expect(r.got).deep.equal(['2', '3'])
+    },
+  )
   testRoomScenario<{
     unchanged: boolean
     received: string[]
+    onServer: string[]
     stopped: boolean
     abortedWithReason: boolean
   }>('signals', 'room: abort removes registrations, and iterated messages keep their sender and track', (result) => {
@@ -213,6 +245,7 @@ function testRoom() {
         'text Alice: hello',
         'text Bob: hi',
       ],
+      onServer: ['binary Alice: 1', 'binary Alice: 2', 'binary Bob: 3', 'text Alice: hello', 'text Bob: hi'],
       stopped: true,
       abortedWithReason: true,
     })
@@ -224,7 +257,7 @@ function testRoom() {
     expect(result.received).deep.equal([{ text: 'hello', from: 'Alice' }])
     expect(result.ack.key).match(/^e2e-chat:/)
     expect(result.ack.seq).greaterThan(0)
-    expect(result.updates).deep.equal([[42, null]])
+    expect(result.updates).deep.equal([42])
     expect(result.snapshotChanged).toBe(true)
     expect(result.snapshotStable).toBe(true)
     expect(result.changes).greaterThan(0)
@@ -255,7 +288,7 @@ function testRoom() {
     expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64, 32])
     expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3, 9])
     for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
-    expect(result.frames.map((f) => f.track)).deep.equal([null, null, null, 'camera'])
+    expect(result.frames.map((f) => f.track)).deep.equal(['main', 'main', 'main', 'camera'])
     expect(result.frames.map((f) => f.meta)).deep.equal([null, null, null, { key: true }])
     expect(result.cameraOnly).deep.equal([9])
     expect(result.defaultOnly).deep.equal([1, 2, 3])
@@ -278,7 +311,7 @@ function testRoom() {
   testRoomScenario<{
     messages: Array<{ data: unknown; from: string }>
     frames: number[][]
-    announcements: unknown[]
+    systemMessages: unknown[]
     dms: unknown[]
     reuserTags: string[] | null
     roomTags: string[] | null
@@ -292,10 +325,18 @@ function testRoom() {
         { data: { n: 1 }, from: 'Reuser' },
       ])
       expect(r.frames).deep.equal([[1, 2, 3]])
-      expect(r.announcements).deep.equal([{ n: 3 }])
+      expect(r.systemMessages).deep.equal([{ n: 3 }])
       expect(r.dms).to.have.deep.members([{ n: 2 }, { n: 4 }])
       expect(r.reuserTags).deep.equal(['b'])
       expect(r.roomTags).deep.equal(['x'])
+    },
+  )
+  testRoomScenario<{ dms: string[]; packaged: unknown[] }>(
+    'package-message',
+    "room: a package's private message reaches the package on the page holding its recipient, joined there or returned alone, never the app's listen()",
+    (r) => {
+      expect(r.dms).to.have.members(['me: from the app', 'alone: from the app'])
+      expect(r.packaged).deep.equal(['from the package', 'from the package'])
     },
   )
   testRoomScenario<{ seen: unknown[]; serverSeen: unknown[] }>(
@@ -338,7 +379,7 @@ function testRoom() {
         ['winner', winner],
         [`w${winner}`, true],
       ])
-      // A member's writes apply in call order: its last setMeta(), then the setAttributes() calls after it.
+      // A member's writes apply in call order: its last setMeta(), then the updateMeta() calls after it.
       expect(memberMeta).deep.equal([
         ['name', 'Writer'],
         ['round', 90],
@@ -373,11 +414,14 @@ function testRoom() {
   testRoomScenario<{
     binaryError: string | null
     afterHookAck: boolean | string
-    calls: Array<{ hook: string; name: unknown; frozen: boolean }>
+    calls: Array<{ hook: string; name: unknown; frozen: boolean; track?: string | null }>
   }>(
     'guard-calls',
-    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish",
+    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish; both hooks get a message's track",
     (r) => {
+      const tracks = (hook: string) => r.calls.filter((call) => call.hook === hook).map((call) => call.track)
+      expect(tracks('publish')).include('cursor')
+      expect(tracks('after-publish')).include('cursor')
       expect(r.binaryError).toBe('no frames')
       expect(r.afterHookAck).toBe(true)
       expect(r.calls.filter((call) => call.hook === 'join').map((call) => call.name)).deep.equal(['G', 'P'])
@@ -413,7 +457,8 @@ function testRoom() {
     close: string
     atLeave: { cause: string; isClosed: boolean; count: number } | null
     unsubscribeInOnClose: string | null
-    lateOnClose: boolean
+    closeCause: unknown
+    lateOnClose: unknown
     isClosed: boolean[]
   }>(
     'close-handles',
@@ -425,7 +470,8 @@ function testRoom() {
       expect(r.isClosed).deep.equal([true, true])
       expect(r.atLeave).deep.equal({ cause: 'closed', isClosed: true, count: 0 })
       expect(r.unsubscribeInOnClose).toBe('returned')
-      expect(r.lateOnClose).toBe(true)
+      expect(r.closeCause).deep.equal({ type: 'closed' })
+      expect(r.lateOnClose).deep.equal({ type: 'closed' })
     },
   )
   testRoomScenario<{
@@ -520,11 +566,10 @@ function testRoom() {
     { fromHangingUp: 'Participant left the room' },
     { fromHangingUp: 'Participant left the room', unhandled: [] },
   )
-  testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
+  testRoomScenario<{ listed: number; serverCount: number; count: number; emptied: boolean }>(
     'roster-churn',
-    'room: a page opening a room of 2,000 members while members join, leave and change meta loads its roster, counts only visible members, and sees no empty room',
+    'room: a page opening a room of 2,000 members while members join, leave and change meta gets its roster, counts only visible members, and sees no empty room',
     (r) => {
-      expect(typeof r.listed).toBe('number') // the roster loaded, not an error
       expect(r.listed).greaterThanOrEqual(2000)
       expect(r.serverCount).toBe(2001) // 2,000 members and the page's; not the hidden one
       expect(r.count).toBe(r.serverCount)
@@ -540,11 +585,52 @@ function testRoom() {
   )
   testRoomScenario<MemberResult>(
     'member',
-    'room: a returned RemoteParticipant is the same object as the room view',
+    'room: a returned RemoteParticipant is the same object as the room view, and a server lists it at once after Room.get()',
     (result) => {
       expect(result.hasMember).toBe(true)
       expect(result.memberName).toBe('Viewed')
       expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
+      expect(result.listedOnServer).deep.equal(['Viewed'])
+    },
+  )
+  testRoomScenario<{ identity: string; hidden: string; listHidden: string }>(
+    'server-only',
+    "room: a page's join({ identity }), join({ hidden }) and getParticipants({ hidden }) fail with what only a server may do",
+    (r) => {
+      expect(r).deep.equal({
+        identity:
+          '[@telefunc/room@0.1.0][Wrong Usage] join() options.identity is server-assigned: identity is trusted, so set ' +
+          'it where trust lives, in the granting telefunction (server-side join()), not on the client.',
+        hidden:
+          '[@telefunc/room@0.1.0][Wrong Usage] join() options.hidden is server-side only: a hidden participant is ' +
+          'created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
+        listHidden: '[@telefunc/room@0.1.0][Wrong Usage] Hidden participants can only be enumerated on the server',
+      })
+    },
+  )
+  testRoomScenario<{ arrived: unknown; joins: unknown[] }>(
+    'complete-room',
+    'room: a page gets a room with its participants: on the next line both reads list them and the snapshot shows them, and a later join reaches onJoin',
+    (r) => {
+      expect(r.arrived).deep.equal({ listed: ['A', 'B'], shown: ['A', 'B'], count: 2, one: 'A' })
+      expect(r.joins).deep.equal(['C'])
+    },
+  )
+  testRoomScenario<{
+    kept: boolean[]
+    replaced: boolean
+    status: (string | null)[]
+    fromA: unknown[]
+    revived: { sameObject: boolean; name: string }
+  }>(
+    'snapshot-grid',
+    "room: a snapshot's participants act as the participants, and one that changes is the only one replaced",
+    (r) => {
+      expect(r.kept).deep.equal([true, true])
+      expect(r.replaced).toBe(true)
+      expect(r.status).deep.equal([null, 'away'])
+      expect(r.fromA).deep.equal(['from A'])
+      expect(r.revived).deep.equal({ sameObject: true, name: 'C' })
     },
   )
   testRoomScenario<GuardResult>(
@@ -555,44 +641,36 @@ function testRoom() {
       // A room returned without Room.guard() refuses a page's join, and says how to allow it
       expect(result.unguardedJoinError).toContain('Room.guard(room, { anyoneCanJoin: true })')
       expect(result.publishError).toBe('blocked publish from Mallory')
+      expect(result.trackError).toBe('blocked publish from Mallory')
       expect(result.sendError).toBe('blocked send from Mallory')
       expect(result.received).deep.equal(['fine'])
       expect(result.inbox).deep.equal(['psst'])
     },
   )
-  testRoomScenario<{ okAck: boolean; badError: string | null; received: string[] }>(
+  testRoomScenario<{ okAck: boolean; badError: string | null; trackBadError: string | null; received: string[] }>(
     'shield',
     'room: the declared message type is shielded at runtime (a malformed publish is rejected)',
     (r) => {
       expect(r.okAck).toBe(true)
       // The generated shield rejects malformed ingress through the publish promise.
       expect(r.badError).toBe('ShieldValidationError')
+      expect(r.trackBadError).toBe('ShieldValidationError')
       expect(r.received).deep.equal(['hi'])
     },
   )
   testRoomScenario<AdminResult>(
     'admin',
-    'room: room-authored messages, admin kick and close reach the client',
+    "room: the server's messages, admin kick and close reach the client",
     (result) => {
-      expect(result.announcements).deep.equal(['maintenance'])
+      expect(result.published).deep.equal([{ data: 'maintenance', fromRoom: true }])
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
+      expect(result.receipt.seq).greaterThan(0) // its place in the member's inbox
+      expect(result.receipt.timestamp).greaterThan(0)
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
       expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' })
       expect(result.closed).toBe(true) // Room.onClose fired on close()
       expect(result.isClosed).toBe(true)
       expect(result.count).toBe(0)
-    },
-  )
-  testRoomScenario<{ received: number[]; ackSeqs: number[] }>(
-    'conflate',
-    'room: coalesce conflates a same-key burst to first + latest',
-    (r) => {
-      const first = r.ackSeqs[0]!
-      const latest = r.ackSeqs[4]!
-      expect(r.received).deep.equal([1, 5]) // 2..4 collapsed into the single pending slot
-      expect(first).greaterThan(0)
-      expect(latest).toBe(first + 1) // only first and latest committed
-      expect(r.ackSeqs).deep.equal([first, latest, latest, latest, latest]) // overwritten callers share the winner
     },
   )
   testRoomScenario<{
@@ -601,21 +679,14 @@ function testRoom() {
     hasScore: boolean
     localName: string | null
     localHasScore: boolean
-  }>('attributes', 'room: setAttributes merges per key and deletes on undefined', (r) => {
+  }>('attributes', 'room: updateMeta merges per key and deletes on undefined', (r) => {
     expect(r.name).toBe('Zoe')
     expect(r.title).toBe('lead')
     expect(r.hasScore).toBe(false) // score removed by `undefined`
     expect(r.localName).toBe('Zoe')
     expect(r.localHasScore).toBe(false)
   })
-  testRoomScenario<{ cam: boolean[] }>(
-    'demand',
-    'room: onDemand turns on when a subscriber wants a track and off when it leaves',
-    (r) => {
-      expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
-      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwanted
-    },
-  )
+  testRoomDemand()
   test('room: a member the page keeps works on after the page lets go of the room it joined through and a GC pass runs', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-member-keeps-room')
@@ -687,13 +758,40 @@ function testRoom() {
     expect(r.publish).deep.equal({ name: 'A', data: 'hello', seqOk: true })
     expect(r.send).deep.equal({ name: 'A', to: 'B', seqOk: true })
   })
-  testRoomScenario<{ xText: string[]; xBin: number[]; all: string[] }>(
+  testRoomScenario<{ xText: string[]; xBin: string[]; all: string[] }>(
     'member-sub',
     'room: a per-member subscription receives only that member',
     (r) => {
       expect(r.all).deep.equal(['x1', 'y1']) // both delivered room-wide (so absence below is meaningful)
-      expect(r.xText).deep.equal(['x1'])
-      expect(r.xBin).deep.equal([7])
+      expect(r.xText).deep.equal(['X:x1']) // each with its sender, the member subscribed to
+      expect(r.xBin).deep.equal(['X:7'])
+    },
+  )
+  test("room: a member's subscription turned off and on again in one task gets what follows, not the member's retained message again, and holds the room the page read the member from through a GC pass", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-member-resub')
+    await autoRetry(async () => {
+      expect((await getResult<{ ready: boolean }>('#room-result')).ready).toBe(true)
+    })
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    // A room the pass collected closes right after it, so it would have closed by now.
+    await sleep(1000)
+    await page.click('#test-room-member-resub-publish')
+    try {
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ first: ['pinned'], second: ['live'] })
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
+  testRoomScenario<{ received: string[] }>(
+    'member-sub-order',
+    "room: a member's subscription made right before a publish in the same task gets that publish",
+    (r) => {
+      expect(r.received).deep.equal(['live', 'end'])
     },
   )
   testRoomScenario<{ held: string[] }>(
@@ -701,6 +799,14 @@ function testRoom() {
     'room: a DM sent before listen() is held and flushed on attach',
     (r) => {
       expect(r.held).deep.equal(['early'])
+    },
+  )
+  testRoomScenario<{ senders: (string | null)[]; alice: string; reply: unknown }>(
+    'dm-info',
+    'room: each listener of a private message gets its own info, for a plain and an acknowledged send',
+    (r) => {
+      expect(r.senders).deep.equal([r.alice, r.alice])
+      expect(r.reply).toBe('ok')
     },
   )
   testRoomScenario<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>(
@@ -721,6 +827,51 @@ function testRoom() {
       expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
     },
   )
+  testRoomScenario<{ roomFirst: OwnTrack; meFirst: OwnTrack }>(
+    'self-separate',
+    "room: selfDelivery: false holds on the page's view of the room when the room and `me` come from two telefunction calls, in either order",
+    (r) => {
+      expect(r).deep.equal({ roomFirst: othersOnly, meFirst: othersOnly })
+    },
+  )
+  testRoomScenario<OwnTrack>(
+    'self-two-connections',
+    "room: selfDelivery: false holds on the page's view of the room when `me` comes from a call on another of the page's connections",
+    (r) => {
+      expect(r).deep.equal(othersOnly)
+    },
+  )
+  testRoomScenario<OwnTrack>(
+    'self-returned',
+    "room: selfDelivery: false holds on the page's view of the room for what `me` publishes right after a telefunction returned it",
+    (r) => {
+      expect(r).deep.equal(othersOnly)
+    },
+  )
+  testRoomScenario<{ earlier: string[]; returned: string[]; selfDelivery: boolean }>(
+    'self-greeting',
+    'room: a message a telefunction publishes as its selfDelivery:false participant before returning it never reaches the room returned with it, and nothing it publishes after the return reaches the page',
+    (r) => {
+      // A room the page already had open may get the greeting: on one server it does, elsewhere it may arrive too late.
+      expect(r.earlier.filter((data) => data !== 'greeting')).deep.equal(['bye'])
+      expect(r).deep.include({ returned: ['bye'], selfDelivery: false })
+    },
+  )
+  testRoomScenario<{ heard: string[] }>(
+    'self-server-listener',
+    "room: a server's room that joined a selfDelivery:false participant doesn't get its messages, before or after a page holds it",
+    (r) => {
+      expect(r.heard).deep.equal(['other'])
+    },
+  )
+  testRoomScenario<{ myCause: unknown; closes: unknown[]; isClosed: boolean }>(
+    'self-removed',
+    "room: removing the page's participant closes the page's view of the room when they came over two of the page's connections",
+    (r) => {
+      const removed = { type: 'removed', reason: 'be nice' }
+      expect(r).deep.equal({ myCause: removed, closes: [removed], isClosed: true })
+    },
+  )
   testRoomScenario<{
     updates: string[]
     topic: string | null
@@ -729,11 +880,66 @@ function testRoom() {
     sameId: boolean
     sameCount: number
   }>('reconfig', 'room: Room.setMeta propagates; list and getOrCreate resolve', (r) => {
-    expect(r.updates).toContain('updated') // room.onUpdate fired
+    expect(r.updates).toContain('updated') // room.onChange fired with the new meta
     expect(r.topic).toBe('updated')
     expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort())
     expect(r.sameId).toBe(true)
     expect(r.sameCount).toBe(1) // ...with exactly its original member preserved
+  })
+  testRoomScenario<{
+    alone: RemovedMe & { pubCause: unknown }
+    joined: RemovedMe
+    together: RemovedMe
+    two: RemovedView
+  }>(
+    'removed',
+    "room: a removed participant's page stops receiving the room, whether the page joined the participant on the room or got it with the room or from another call, and a page holding another participant keeps it",
+    (r) => {
+      const removed = { type: 'removed', reason: 'be nice' }
+      // Its participant leaves with the removal, the view closes with it and gets nothing after, and another participant
+      // on the view leaves it as a closed view's do, not as removed.
+      const closedByRemoval = { text: ['0'], closes: 1, closeCause: removed, isClosed: true, myCause: removed }
+      expect(r).deep.equal({
+        alone: { ...closedByRemoval, pubCause: { type: 'closed' } },
+        joined: closedByRemoval,
+        together: closedByRemoval,
+        two: { text: ['still here'], closes: 0, closeCause: null, isClosed: false },
+      })
+    },
+  )
+  test('room: a removal by identity closes the room on each tab holding that participant, and a tab that never joined keeps receiving', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-removed-identity')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-removed-identity:/)
+    })
+    const context = await page.context().browser()!.newContext()
+    const tabs = [await context.newPage(), await context.newPage()]
+    const tabResult = async (tab: (typeof tabs)[number]) => JSON.parse((await tab.textContent('#room-result'))!)
+    try {
+      for (const tab of tabs) {
+        await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, tab)
+        await tab.click('#test-room-removed-identity-held')
+        await autoRetry(async () => expect(await tabResult(tab)).deep.equal({ ready: true }))
+      }
+      await page.click('#test-room-removed-identity-remove')
+      await autoRetry(async () => expect(await getResult('#room-result')).deep.equal({ text: ['0'], isClosed: false }))
+      for (const tab of tabs) {
+        await autoRetry(async () =>
+          expect(await tabResult(tab)).deep.equal({
+            text: [],
+            closes: 1,
+            cause: { type: 'removed', reason: 'multi-tab' },
+            isClosed: true,
+          }),
+        )
+      }
+    } finally {
+      await context.close()
+      await page.goto('about:blank')
+    }
   })
   testRoomScenario<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(
     'identity',
@@ -795,7 +1001,7 @@ function testRoom() {
         await page.goto('about:blank')
       }
     })
-  test("room: another page's member shows when its page drops and comes back, and leaves with 'disconnected' once its page never returns", async () => {
+  test("room: another page's member shows when its meta changes and its page drops and comes back, through onChange and its events, and leaves with 'disconnected' once its page never returns", async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-connection')
@@ -812,21 +1018,23 @@ function testRoom() {
       return { events, closerConnected }
     }
     await autoRetry(async () => expect(await seen()).deep.equal({ events: [], closerConnected: true }))
+    await other.click('#test-room-join-only-away')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"away"'))
+    const away = ['change:away:true']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: away, closerConnected: true }))
     await context.setOffline(true)
     await cutWire()
-    await autoRetry(async () =>
-      expect(await seen()).deep.equal({ events: ['disconnect:false'], closerConnected: false }),
-    )
+    const dropped = [...away, 'change:away:false', 'disconnect:false']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: dropped, closerConnected: false }))
     await context.setOffline(false)
-    await autoRetry(async () =>
-      expect(await seen()).deep.equal({ events: ['disconnect:false', 'reconnect:true'], closerConnected: true }),
-    )
+    const back = [...dropped, 'change:away:true', 'reconnect:true']
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: back, closerConnected: true }))
     await context.setOffline(true)
     await cutWire()
     await context.close()
     await autoRetry(async () => {
       expect(await seen()).deep.equal({
-        events: ['disconnect:false', 'reconnect:true', 'disconnect:false', 'leave:disconnected'],
+        events: [...back, 'change:away:false', 'disconnect:false', 'leave:disconnected'],
         closerConnected: null,
       })
     }, CLOSED_TAB_WAIT)
@@ -1039,9 +1247,9 @@ function testRoom() {
   )
   testRoomScenario<{
     text: string[]
-    frames: Array<[string | null, number, string]>
+    frames: Array<[string, number, string]>
     later: string[]
-    server: { text: string[]; frames: number[] }
+    server: { text: string[]; frames: number[]; lossy: number[] }
   }>(
     'retain-late',
     'room: a late subscriber, on the page or the server, gets each retained message once before the live ones, and none of a member who left',
@@ -1052,10 +1260,10 @@ function testRoom() {
         ['cam', 4, 'A'],
       ])
       expect(r.later).deep.equal(['live-2'])
-      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
+      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4], lossy: [] })
     },
   )
-  testRoomScenario<{ frames: Array<[string | null, number, unknown]>; server: Array<[number, unknown]> }>(
+  testRoomScenario<{ frames: Array<[string, number, unknown]>; server: Array<[number, unknown]> }>(
     'retain-leave',
     "room: a member who leaves while a late subscriber's replay holds its live frames has none of them delivered after its leave, on the page or the server, and another member's held frames still arrive",
     (r) => {
@@ -1083,9 +1291,21 @@ function testRoom() {
       expect(r.counts).deep.equal([1, 1])
       expect(r.events).deep.equal(['join:P', 'leave:P', 'join:Q'])
       expect(r.handedEvents.filter((e) => e.includes('Bot'))).deep.equal([])
-      expect(r.memberEvents).deep.equal(['update:Bot2', 'leave:left'])
+      expect(r.memberEvents).deep.equal(['change:Bot2', 'leave:left'])
       expect(r.empty).toBe(true)
       expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
+    },
+  )
+  testRoomScenario<{ names: string[]; count: number; causes: Array<string | null>; listed: boolean[] }>(
+    'departed-returned',
+    'room: a member returned after it left, held across an await, from an older snapshot or hidden, has left on the page too',
+    (r) => {
+      expect(r).deep.equal({
+        names: [],
+        count: 0,
+        causes: ['unknown', 'unknown', 'unknown'],
+        listed: [false, false, false],
+      })
     },
   )
   test('room: React reads a room through useSyncExternalStore with its methods as they are; a member returned with a closed room has left', async () => {
@@ -1148,24 +1368,26 @@ function testRoom() {
   testRoomScenario<{
     inOrder: number
     defaultTrack: number[]
-    demand: Array<[string | null, boolean]>
+    demand: Array<[string, boolean]>
     wanted: number
+    pubOwn: Array<[string, boolean]>
     otherOwn: Array<[string, boolean]>
     tooMany: string | null
   }>(
     'tracks',
-    "room: each of 1,000 named tracks reaches its subscriber in order, onDemand follows the wants, and a selfDelivery:false member's own side is no demand",
+    "room: each of 1,000 named tracks reaches its subscriber in order, me.demand follows the wants, and a selfDelivery:false member's own side is no demand",
     (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
-      expect(r.demand.filter(([track]) => track !== null)).deep.equal([
+      expect(r.demand.filter(([track]) => track !== 'main')).deep.equal([
         ['t0', true],
         ['t999', true],
         ['t0', false],
       ])
-      expect(r.demand.filter(([track]) => track === null)).deep.equal([[null, true]])
-      expect(r.wanted).toBe(1_001)
-      expect(r.otherOwn).deep.equal([['own', true]])
+      expect(r.demand.filter(([track]) => track === 'main')).deep.equal([['main', true]])
+      expect(r.wanted).toBe(1_002)
+      expect(r.pubOwn).deep.equal([['own', true]])
+      expect(r.otherOwn).deep.equal([])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
     },
   )
@@ -1196,7 +1418,7 @@ function testRoom() {
       })
     })
   })
-  test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+  test("room: a page back from offline, twice, gets its room's meta each time, as an attach sends it again", async () => {
     if (!canCutWire()) return
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-meta-away')
@@ -1218,55 +1440,8 @@ function testRoom() {
       })
     }
   })
-  test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
-    if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-overflow')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-overflow:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`roomOverflow_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`roomOverflow_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({
-        roomId,
-        seen: ['before'],
-        myCause: { type: 'disconnected' },
-        closed: true,
-        isClosed: true,
-        leaves: ['Me:disconnected'],
-      })
-    })
-  })
-  test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
-    if (!canCutWire()) return
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-participant-overflow')
-    let roomId = ''
-    await autoRetry(async () => {
-      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
-      expect(roomId).match(/^e2e-participant-overflow:/)
-    })
-    await page.context().setOffline(true)
-    await cutWire()
-    await runServerAction(`participantOverflow_${roomId}`)
-    await autoRetry(async () => {
-      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
-    })
-    await page.context().setOffline(false)
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
-    })
-  })
   test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
-    await navigate(`${getServerUrl()}/room`)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     let sseStreams = 0
     const onResponse = (response: Response) => {
       if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
@@ -1275,23 +1450,12 @@ function testRoom() {
     const onWebSocket = (ws: WebSocket) => {
       if (ws.url().includes('/_telefunc')) webSockets++
     }
-    page.on('response', onResponse)
-    page.on('websocket', onWebSocket)
-    // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
-    const cdp = await page.context().newCDPSession(
-      page
-        .context()
-        .pages()
-        .find((p) => p.url() === page.url())!,
-    )
     try {
-      await cdp.send('Network.enable')
-      await cdp.send('Network.emulateNetworkConditions', {
-        offline: false,
-        latency: 0,
-        downloadThroughput: 125_000,
-        uploadThroughput: 125_000,
-      })
+      await navigate(`${proxy.url}/room`)
+      page.on('response', onResponse)
+      page.on('websocket', onWebSocket)
+      // 1 Mbit/s each way.
+      proxy.pace({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })
       await page.click('#test-room-slow-link')
       await autoRetry(
         async () => {
@@ -1309,15 +1473,11 @@ function testRoom() {
         webSockets: transports.includes('ws') ? 1 : 0,
       })
     } finally {
-      await cdp.send('Network.emulateNetworkConditions', {
-        offline: false,
-        latency: 0,
-        downloadThroughput: -1,
-        uploadThroughput: -1,
-      })
-      await cdp.detach()
       page.off('response', onResponse)
       page.off('websocket', onWebSocket)
+      // The page leaves before the proxy closes, which would cut its connections.
+      await page.goto('about:blank')
+      await proxy.close()
     }
   })
   test('room: the server lets go of a view whose listeners are gone, a member that left and the listeners on it, and a closed room and its members', async () => {
@@ -1339,12 +1499,11 @@ function testRoom() {
       { timeout: 10_000 },
     )
   })
-  testRoomScenario<{ received: string[]; announcements: string[]; kept: string[] }>(
+  testRoomScenario<{ received: string[]; kept: string[] }>(
     'tail-order',
-    'room: a tail hands its first subscriber what it held in order, though an announcement came first, and only the latest 256',
+    "room: a tail hands its first subscriber what it held in order, the server's messages too, and only the latest 256",
     (r) => {
-      expect(r.announcements).deep.equal(['ann'])
-      expect(r.received).deep.equal(['a', 'b'])
+      expect(r.received).deep.equal(['a', 'system', 'b'])
       expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
     },
   )
@@ -1376,9 +1535,147 @@ function testRoom() {
   })
 }
 
+/** Who receives a participant's tracks: `me.demand`, and the `onChange` it is read on. */
+function testRoomDemand() {
+  testRoomScenario<{ cam: boolean[] }>(
+    'demand',
+    'room: a track is in me.demand while a subscriber receives it, and leaves it when the subscriber stops',
+    (r) => {
+      expect(r.cam).toContain(true) // a viewer arrived (the track is watched)
+      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwatched
+    },
+  )
+  testRoomScenario<Record<'docsPage' | 'twoOnOnePage' | 'nameless' | 'hidden' | 'oneTask', NamedDemand[][]>>(
+    'watchers',
+    "room: me.demand lists the people at each page that receives a track and counts them: `me` beside the page's watching view, two people on one page, one for a page with nobody to name, a hidden one never named; changes of one task call onChange once",
+    (r) => {
+      expect(r.docsPage.at(-1)).deep.equal([cam(['Me'], 1)])
+      expect(r.twoOnOnePage.at(-1)).deep.equal([cam(['Ann', 'Bob'], 2)])
+      expect(r.nameless.at(-1)).deep.equal([cam([], 1)])
+      expect(r.hidden.flat().flatMap(({ watchers }) => watchers)).deep.equal([])
+      expect(r.hidden.at(-1)).deep.equal([cam([], 1)])
+      // Two tracks a server-side room started receiving in one task: each is told once its lane delivers, and on Redis the
+      // two lanes can deliver in two tasks, the first track then told alone first.
+      const mic = { track: 'mic', watchers: [], watcherCount: 1 }
+      expect(r.oneTask.at(-1)).deep.equal([cam([], 1), mic])
+      expect([[], [[cam([], 1)]], [[mic]]]).deep.include(r.oneTask.slice(0, -1))
+    },
+  )
+  testRoomScenario<{ reads: NamedDemand[][]; sameList: boolean; sameEntry: boolean; tracks: NamedDemand[] }>(
+    'watchers-on-page',
+    "room: a page's me.demand names the people at a server-side room that receives its track, counts a room with nobody to name, and keeps its array and entries while they don't change",
+    (r) => {
+      expect(r.reads).deep.include([cam(['Sam', 'Tia'], 2)])
+      expect(r.reads).deep.include([cam(['Sam', 'Tia'], 3)])
+      expect(r.sameList).toBe(true) // a meta change called onChange, and demand stayed the same array
+      expect(r.sameEntry).toBe(true) // `mic` came, and the `cam` entry stayed the same object
+      expect(r.tracks).deep.equal([cam(['Sam', 'Tia'], 3), { track: 'mic', watchers: [], watcherCount: 1 }])
+    },
+  )
+  testRoomScenario<{ reads: NamedDemand[][] }>(
+    'watchers-alone',
+    "room: a `me` a server returned alone, with no room of it on the page, names who receives its track, and shows that watcher's meta change and leave",
+    (r) => {
+      expect(r.reads).deep.include([cam(['Sam'], 1)])
+      expect(r.reads).deep.include([cam(['Samuel'], 1)])
+      expect(r.reads.at(-1)).deep.equal([cam([], 1)]) // the server room still receives it, with nobody to name
+    },
+  )
+  testRoomScenario<{
+    onePageOnBoth: number
+    twoPagesOnOneEach: number
+    third: { watchers: string[]; watcherCount: number }
+  }>(
+    'watchers-union',
+    'room: watchersOf() counts a page with nobody to name once over the tracks it receives, and a person beside the pages',
+    (r) => {
+      expect(r.onePageOnBoth).toBe(1)
+      expect(r.twoPagesOnOneEach).toBe(2)
+      expect(r.third).deep.equal({ watchers: ['Sam'], watcherCount: 3 })
+    },
+  )
+  testRoomScenario<Record<'left' | 'removed', { watchers: number; watcherCount: number; demand: number }>>(
+    'watchers-left',
+    'room: watchersOf() counts nobody for a participant that left or was removed, as its me.demand lists nothing',
+    (r) => {
+      const none = { watchers: 0, watcherCount: 0, demand: 0 }
+      expect(r).deep.equal({ left: none, removed: none })
+    },
+  )
+  test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
+    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    if (!transports.includes('sse') || !transports.includes('ws')) return
+    const context = await page.context().browser()!.newContext()
+    try {
+      // The page's WebSocket opens once the page watches: the upgrade then moves a watching page.
+      const { promise: watching, resolve: watched } = Promise.withResolvers<void>()
+      await context.routeWebSocket(/\/_telefunc/, async (ws) => {
+        await watching
+        ws.connectToServer()
+      })
+      const tab = await context.newPage()
+      let upgradedFrames = 0
+      tab.on('websocket', (ws) => ws.on('framereceived', () => upgradedFrames++))
+      await navigate(`${getServerUrl()}/room`, undefined, tab)
+      await tab.click('#test-room-watchers-upgrade')
+      await autoRetry(async () =>
+        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ watching: true }),
+      )
+      watched()
+      await autoRetry(() => expect(upgradedFrames).greaterThan(0))
+      // The upgrade's join, and the planning pass after it, had their chance to tell the publisher a new page.
+      await sleep(1000)
+      await tab.click('#test-room-watchers-upgrade-check')
+      await autoRetry(async () => {
+        const { reads } = JSON.parse((await tab.textContent('#room-result'))!) as { reads: NamedDemand[][] }
+        expect(reads.length).greaterThan(0)
+        for (const read of reads) expect(read).deep.equal([cam(['Me'], 1)])
+      })
+    } finally {
+      await context.close()
+    }
+  })
+  test("room: selfDelivery: false holds on the page's view of the room from another call after the page's connection upgrades to a WebSocket", async () => {
+    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    if (!transports.includes('sse') || !transports.includes('ws')) return
+    const context = await page.context().browser()!.newContext()
+    try {
+      // The page's WebSocket opens once `me` and the room are on the page: the upgrade then moves both.
+      const { promise: ready, resolve: release } = Promise.withResolvers<void>()
+      await context.routeWebSocket(/\/_telefunc/, async (ws) => {
+        await ready
+        ws.connectToServer()
+      })
+      const tab = await context.newPage()
+      let upgradedFrames = 0
+      tab.on('websocket', (ws) => ws.on('framereceived', () => upgradedFrames++))
+      await navigate(`${getServerUrl()}/room`, undefined, tab)
+      await tab.click('#test-room-self-upgrade')
+      await autoRetry(async () =>
+        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ ready: true }),
+      )
+      release()
+      await autoRetry(() => expect(upgradedFrames).greaterThan(0))
+      // The upgrade's reconcile had its chance to move every end of the page.
+      await sleep(1000)
+      await tab.click('#test-room-self-upgrade-publish')
+      await autoRetry(async () => expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal(othersOnly))
+    } finally {
+      await context.close()
+    }
+  })
+  testRoomScenario<{ changes: number; changed: boolean }>(
+    'change-once',
+    'room: room.onChange is called once for the changes of one task, and me.onChange works unbound',
+    (r) => {
+      expect(r).deep.equal({ changes: 1, changed: true })
+    },
+  )
+}
+
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testRoomFailingBackend() {
-  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store ends is replaced", async () => {
+  test("room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, a leave whose event and reply are lost ends once with 'left', a DM whose handoff is lost rejects its send, and a lane the store drops delivers again", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups')
     await autoRetry(async () => {
@@ -1397,9 +1694,30 @@ function testRoomFailingBackend() {
           dm: "Message may not be delivered: its handoff to the recipient failed, and it isn't sent again",
           dms: ['after'],
         },
-        lane: { ended: true, got: ['before', 'after'] },
+        lane: { dropped: true, got: ['before', 'after'] },
       })
     })
+  })
+  test("room: a member whose page's connection dropped leaves the room though the store fails its eviction once, and the failure is reported", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups-departed')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const context = await page.context().browser()!.newContext()
+    try {
+      const other = await context.newPage()
+      await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+      await other.click('#test-room-malformed-request')
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({
+          roomId,
+          events: ['join:Mallory', 'leave:Mallory:disconnected'],
+        })
+        expectLog('failing-backend: runOperation failed')
+      })
+    } finally {
+      await context.close()
+      await page.goto('about:blank')
+    }
   })
 }
 
@@ -1419,24 +1737,239 @@ function testRoomAckTimeout() {
   })
 }
 
-/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
-function testRoomSmallBuffer() {
-  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
-    'dm-overflow',
-    'room: DMs to a page before its first listen() are held within bufferLimit and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+/** Runs in a lane whose server has the smallest `maxMemory`, 2 MiB. */
+function testRoomSmallMemory() {
+  test('room: a page offline while its room sent it more than maxMemory holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        seen: ['before'],
+        myCause: { type: 'disconnected' },
+        closed: true,
+        isClosed: true,
+        leaves: ['Me:disconnected'],
+      })
+    })
+  })
+  test('room: a page offline while its server-joined participant was sent more than maxMemory holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    if (!canCutWire()) return
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-participant-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-participant-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`participantOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
+    })
+  })
+  testRoomScenario<{ seen: number[]; closed: boolean }>(
+    'behind',
+    'room: a connected page that falls behind what the server holds is let go, with no gap in what it got',
     (r) => {
-      expect(r.first).toBe('rejected')
-      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
-      expect(r.got).deep.equal(['2', '3'])
+      expect(r.closed).toBe(true)
+      expect(r.seen.length).lessThan(16)
+      expect(r.seen).deep.equal(r.seen.map((_, n) => n))
     },
   )
+  testRoomScenario<Record<string, string | null>>(
+    'track-lossy',
+    "room: each publish on a track says lossy itself, a track takes publishes with and without it, and a message's lossy: true needs a track",
+    ({ noTrack, ...accepted }) => {
+      expect(accepted).deep.equal({
+        first: null,
+        omitted: null,
+        text: null,
+        plain: null,
+        lossyAfterPlain: null,
+        defaultTrack: null,
+      })
+      expect(noTrack ?? 'no error').toContain('publish() options.lossy: true needs options.track')
+    },
+  )
+  testRoomScenario<{ closeCause: unknown; myCause: unknown }>(
+    'meta-flood',
+    "room: a connected page whose room's events alone are more than the server holds for it is let go",
+    (r) => {
+      expect(r).deep.equal({ closeCause: { type: 'disconnected' }, myCause: { type: 'disconnected' } })
+    },
+  )
+  testRoomScenario<{ receipts: number; seen: number[]; listed: number }>(
+    'lossy-uplink',
+    "room: lossy frames that wait for the page's uplink while it reconnects are replaced by the newest of their track, which its viewers get, their publishes share its receipt, and none stays listed once settled",
+    (r) => {
+      expect(r.listed).toBe(0)
+      expect(r.receipts).lessThan(20)
+      expect(r.seen.at(-1)).toBe(19)
+      expect(r.seen).deep.equal([...r.seen].sort((a, b) => a - b))
+    },
+  )
+  testRoomScenario<{ refused: string | null; next: string; closed: boolean; myCause: unknown; leaves: unknown[] }>(
+    'meta-past-memory',
+    'room: a setMeta() larger than maxMemory rejects with ChannelOverflowError, its page stays in the room and the others see no leave',
+    (r) => {
+      expect(r).deep.equal({
+        refused: 'ChannelOverflowError',
+        next: 'accepted',
+        closed: false,
+        myCause: null,
+        leaves: [],
+      })
+    },
+  )
+  testRoomTracksBehind(
+    'cursor',
+    "room: a page offline while its room sent it more than maxMemory holds in lossy frames gets each track's newest frame, with the jump in its info.seq, and gets the reliable track and the messages whole",
+    (r) => {
+      expect(r).deep.include({ closed: false, myCause: null })
+      const all = Array.from({ length: 16 }, (_, n) => n)
+      expect(r.text.map(({ data }) => data)).deep.equal(['before', ...all.map(String)])
+      expect(r.drawing.map(({ n }) => n)).deep.equal(all)
+      for (const stream of [r.text, r.drawing]) {
+        expect(stream.map(({ seq }) => seq - stream[0]!.seq)).deep.equal(stream.map((_, i) => i))
+      }
+      // Each gets its newest, the pointer's too though it went quiet first, and its seq jumps by as many as it missed.
+      for (const [stream, count] of [
+        [r.pointer, 8],
+        [r.cursor, 16],
+      ] as const) {
+        expect(stream.length).lessThan(count)
+        expect(stream.at(-1)?.n).toBe(count - 1)
+        expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => stream[0]!.seq - stream[0]!.n))
+      }
+    },
+  )
+  testRoomTracksBehind(
+    'drawing',
+    'room: a page offline while its room sent it more than maxMemory holds on a reliable track is let go at its reconnect, with no gap in that track',
+    (r) => {
+      expect(r).deep.include({ closed: true, myCause: { type: 'disconnected' } })
+      expect(r.drawing.map(({ n }) => n)).deep.equal(r.drawing.map((_, i) => i))
+    },
+  )
+  test('room: a page offline while a text track sent it more than maxMemory holds in lossy messages gets the newest one, with the jump in its info.seq, and stays in its room; a publish on the track without lossy is never skipped, and arrives after the lossy ones before it', async () => {
+    if (!canCutWire()) return
+    const roomId = await runServerActionOffline('text-cursor', 'roomTextCursor')
+    const plain = (await getCleanupState())[`roomTextCursorPlain_${roomId}`]
+    await autoRetry(async () => {
+      const r = await getResult<{ cursor?: { n: number | 'plain'; seq: number }[]; closed: boolean; myCause: unknown }>(
+        '#room-result',
+      )
+      expect(r).deep.include({ closed: false, myCause: null })
+      expect(plain).toBe('published')
+      const cursor = r.cursor!
+      expect(cursor.length).lessThan(18)
+      expect(cursor.at(-1)?.n).toBe(15)
+      // The order they were published in: each arrives in it, its seq jumping by as many as were skipped before it.
+      const sent = [
+        -1,
+        ...Array.from({ length: 8 }, (_, n) => n),
+        'plain',
+        ...Array.from({ length: 8 }, (_, n) => n + 8),
+      ]
+      expect(cursor.map(({ n }) => n)).toContain('plain')
+      expect(cursor.map(({ n, seq }) => seq - sent.indexOf(n))).deep.equal(
+        cursor.map(() => cursor[0]!.seq - sent.indexOf(cursor[0]!.n)),
+      )
+      expect(cursor.map(({ n }) => sent.indexOf(n))).deep.equal(
+        cursor.map(({ n }) => sent.indexOf(n)).sort((a, b) => a - b),
+      )
+    })
+  })
+  test('room: a page offline while reliable messages pass 7/8 of maxMemory, its publish waiting for a receipt, is let go: no message and no receipt crosses what it missed', async () => {
+    if (!canCutWire()) return
+    await runServerActionOffline('reliable-gap', 'roomReliableGap')
+    await autoRetry(async () => {
+      const r = await getResult<{ received?: string[]; receipt: string | null; closed: boolean; myCause: unknown }>(
+        '#room-result',
+      )
+      expect(r).deep.equal({
+        ...r,
+        received: ['before'],
+        receipt: 'ChannelOverflowError',
+        closed: true,
+        myCause: { type: 'disconnected' },
+      })
+    })
+  })
+  test("room: a page offline with only lossy frames waiting is not let go over them where the server still holds each track's newest", async () => {
+    if (!canCutWire()) return
+    await runServerActionOffline('lossy-near-budget', 'roomLossyNearBudget')
+    await autoRetry(async () => {
+      const { tracks, closed } = await getResult<{ tracks?: string[]; closed?: boolean }>('#room-result')
+      expect(closed).toBe(false)
+      expect(tracks).deep.equal(['a', 'b', 'c'])
+    })
+  })
 }
 
-/** Runs on Redis, in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+/** Runs the room scenario `id`, whose result names its room, then its server `action` while the page is offline; the
+ *  room's id. */
+async function runServerActionOffline(id: string, action: string): Promise<string> {
+  await navigate(`${getServerUrl()}/room`)
+  await page.click(`#test-room-${id}`)
+  let roomId = ''
+  await autoRetry(async () => {
+    roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+    expect(roomId).match(new RegExp(`^e2e-${id}:`))
+  })
+  await page.context().setOffline(true)
+  await cutWire()
+  await runServerAction(`${action}_${roomId}`)
+  await autoRetry(async () => {
+    expect((await getCleanupState())[`${action}_${roomId}`]).toBe('done')
+  })
+  await page.context().setOffline(false)
+  return roomId
+}
+
+type TracksBehind = {
+  text: { data: string; seq: number }[]
+  pointer: { n: number; seq: number }[]
+  cursor: { n: number; seq: number }[]
+  drawing: { n: number; seq: number }[]
+  closed: boolean
+  myCause: unknown
+}
+
+/** A page offline while its room's speaker sends 8 lossy `pointer` frames, then 16 rounds of a lossy `cursor` frame, a
+ *  reliable `drawing` frame and a message, the `scenario`'s track 4 MiB in all. */
+function testRoomTracksBehind(scenario: 'cursor' | 'drawing', name: string, validate: (r: TracksBehind) => void) {
+  test(name, async () => {
+    if (!canCutWire()) return
+    await runServerActionOffline(`tracks-${scenario}`, 'roomTracks')
+    await autoRetry(async () => validate(await getResult<TracksBehind>('#room-result')))
+  })
+}
+
+/** Runs on Redis. */
 function testRoomPublishHold() {
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-overflow',
-    'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',
+    'room: publishes held while a subscription establishes fit 2 MiB by their bytes, and the one past it rejects with ChannelOverflowError',
     (r) => {
       expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'ChannelOverflowError'])
       expect(r.seen).deep.equal(['1', '2'])
@@ -1444,7 +1977,7 @@ function testRoomPublishHold() {
   )
   testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
     'hold-alone',
-    'room: a publish held alone goes through past bufferLimit, and a second one rejects with ChannelOverflowError',
+    'room: a publish held alone goes through past 2 MiB, and a second one rejects with ChannelOverflowError',
     (r) => {
       expect(r.serverOutcomes).deep.equal(['sent', 'ChannelOverflowError'])
       expect(r.seen).deep.equal(['1'])
@@ -1454,15 +1987,13 @@ function testRoomPublishHold() {
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
 function testRoomRedisSubscriberDropped() {
-  testRoomScenario<{ published: number; received: number; reported: number; rejected: number }>(
+  testRoomScenario<{ published: number; received: number; reported: number }>(
     'subscriber-dropped',
     "room: Redis drops a server's subscriber connection during publishes: what didn't arrive is reported, count for count",
     (r) => {
       expect(r.published).toBe(600)
       expect(r.reported > 0).toBe(true)
-      // A rejected publish may have run: the drop can cut its reply and not the commit.
-      expect(r.received + r.reported <= r.published).toBe(true)
-      expect(r.received + r.reported + r.rejected >= r.published).toBe(true)
+      expect(r.received + r.reported).toBe(600)
       expectLog('Redis subscriber connection closed')
     },
   )
@@ -1485,6 +2016,34 @@ function testRoomRedisSubscriberDropped() {
       expect(r.reported.sort()).deep.equal([commits, commits, messages, messages])
       expect(r.arrivedAfter).toBe(3)
       expectLog('Redis subscriber connection closed')
+    },
+  )
+}
+
+function testRoomStaleRead() {
+  test("room: a server's room that nothing follows warns, naming it, when read a heartbeat after its Room.get(); a room read right after its own Room.get() doesn't", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-stale-read')
+    let keptId = ''
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ keptId: string; kept: number; fresh: number }>('#room-result')
+        keptId = r.keptId
+        expect(r).deep.equal({ keptId, kept: 0, fresh: 0 })
+      },
+      { timeout: 60_000 },
+    )
+    // Any other warning, such as one for the room read after its own Room.get(), is a log the test doesn't expect.
+    expectLog(`Room '${keptId}' was read`)
+  })
+}
+
+function testRoomRedisPublishLimit() {
+  testRoomScenario<{ refused: string }>(
+    'over-redis-limit',
+    "room: a publish over the Redis backend's ceiling rejects",
+    (r) => {
+      expect(r).deep.equal({ refused: 'ChannelOverflowError' })
     },
   )
 }
@@ -1519,7 +2078,7 @@ function testRoomLongWaits() {
     expect(viewRoomId).match(/^e2e-hiccup-view:/)
   })
 
-  test('room: a room of 100,000 members streams its roster to a page, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
+  test('room: a room of 100,000 members reaches a page with its roster, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-scale')
     await autoRetry(

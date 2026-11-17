@@ -2,7 +2,7 @@ export {
   installFailingBackend,
   addBackendFault,
   pendingBackendFaults,
-  endBackendSubscriptions,
+  dropBackendSubscriptions,
   holdCellPages,
   holdRetainedReads,
 }
@@ -111,10 +111,11 @@ class FailingAttempt extends DriverAttempt implements BackendReceiver {
     await this.inner?.unsubscribe()
   }
 
-  end(): void {
-    this.stop()
-    this.transition('closed', new Error('failing-backend: subscription ended'))
-    void this.inner?.unsubscribe()
+  /** As a driver reports a store that dropped it and subscribed it again: lost, then ready, still delivering. */
+  drop(): void {
+    if (this.state() !== 'ready') return
+    this.transition('lost')
+    this.transition('ready')
   }
 
   private innerChanged(state: 'ready' | 'lost' | 'closed', reason: Error | undefined): void {
@@ -198,11 +199,12 @@ function pendingBackendFaults(): number {
   return faults.reduce((sum, fault) => sum + fault.times, 0)
 }
 
-/** Ends every subscription open on `roomId` or the Broadcast `key`, as a store that drops them would; returns how many. */
-function endBackendSubscriptions(match: { roomId?: string; key?: string }): number {
-  const ended = [...subscriptions].filter((subscription) => matches(match, callOf(subscription.source)))
-  for (const subscription of ended) subscription.end()
-  return ended.length
+/** Drops every subscription open on `roomId` or the Broadcast `key`, as a store that drops them and is back at once
+ *  would; returns how many. */
+function dropBackendSubscriptions(match: { roomId?: string; key?: string }): number {
+  const dropped = [...subscriptions].filter((subscription) => matches(match, callOf(subscription.source)))
+  for (const subscription of dropped) subscription.drop()
+  return dropped.length
 }
 
 /** Holds the next `readCellPages` call of `roomId` whose prefix starts with `key`, once it yielded `pages` pages, until

@@ -11,7 +11,7 @@ user code ──► Room (ServerRoom, the user's facade)              client: Cl
               handle (RoomHandle, one per Room.get())                                   │
                 │  guards, tail, stubs, participants, listeners                         │
                 ▼                                                                       │
-              replica (RoomReplica, one per room per process) ── model (RoomModel) ── views (RoomState)
+              replica (RoomReplica, one per room per process) ── model (RoomModel) ── states (RoomState)
                 │  lease, heartbeat, demand, authority sync
                 ▼
               lane plan (LanePlan) ── which lanes this process subscribes, from its holders' wants
@@ -58,8 +58,11 @@ this one too, applies the event to its model, and its views tell their listeners
   lease, the heartbeat and the demand. It keeps the handles it serves, and what they are to the room (observed,
   listened, a tail held, the members owned), in the methods each change of a handle goes through; the lane plan reads
   those roles as data.
-- **model** / **view**: a room's members, meta and closure as one side knows them (`RoomModel`), and one listener set
-  over it (`RoomState`).
+- **model**: a room's members, meta and closure as one side knows them (`RoomModel`).
+- **state**: one side's listeners on a model, the app's and the package fields', and the wants they amount to
+  (`RoomState`).
+- **view**: the public room for one adder, the app or a package's field, with the participants it hands out
+  (`RoomView` over `RoomRemotes`).
 - **stub**: the server end of a client's room: what the client wants, and the members it joined (`RoomStub`).
 - **holder**: anything lanes replay into: a stub, or the handle's own listeners (`LaneHolder`).
 - **wants**: the lanes a holder asks for: text, and binary per member and track (`WantsIndex`).
@@ -73,8 +76,17 @@ this one too, applies the event to its model, and its views tell their listeners
   its timeout (`lifecycle/hold.ts`).
 - **roster**: the members as the authority lists them, read to correct a view that drifted (`store/roster.ts`,
   `RosterStream`).
-- **demand**: whether any process wants a member's track, exchanged on the demand lane so a publisher knows
-  (`RoomDemand`, `DemandExchange`, `GossipOutbox`).
+- **page**: one tab's Room ends in a process: its views' and participants' stubs (`PageIndex`). An end is at the page
+  of the response that returned it, which core names by the session the page's client sends with every call
+  (`context.page`), so one page holds the ends of all its calls and connections; a request that names no session is a
+  page of its own. Each server-side room is its own page. No end of a page gets back the messages of a participant it
+  holds that joined with `selfDelivery: false`, and a removal closes the views of each page that held the removed
+  participant and holds no other one of the room. A delivery asks the page as it is then, so what such a participant
+  published before the response that placed it reaches the page's other ends only if it arrives first: on one server it
+  does, through Redis or another Durable Object it may not.
+- **demand**: who receives a member's track. Each process tells on the demand lane what each page here receives and
+  who is at it (`PageIndex`), and the member's owner tells the member the people named and, by its token, each page with
+  nobody to name (`RoomDemand`, `DemandExchange`, `GossipOutbox`); the member's side counts them.
 - **horizon**: `ROOM_HORIZON_MS`, how long Room waits for a lane to be ready, a delivery handoff or a lost lane's read.
 - **plane**: what Room's server code calls instead of the driver: its writes' orderings checked, its subscriptions
   shared (`backend/RoomPlane.ts`). The **kit** is the lane keys and page sizes a driver is built with.
@@ -137,8 +149,8 @@ The plan is three parts, each using only the one before it:
   starts by taking what the lanes' readiness and switches replanned (`takeReplans()`).
 
 **Why not one every-track lane per wanted member, filtered here.** Measured on the memory driver, 50 members each
-publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (the probe counts
-the driver's subscriptions and the binary frames it delivers to this process):
+publishing 10 frames of 256 bytes on each of 4 tracks (2000 frames), with one handle here listening (counting the
+driver's subscriptions and the binary frames it delivers to this process):
 
 | the handle listens to | lanes opened | frames delivered here | one every-track lane per member |
 |---|---|---|---|
@@ -150,9 +162,8 @@ The simpler plan delivers every track of each member it covers, 4 times the fram
 when the unwanted tracks are video. On Redis each frame is a Pub/Sub message to this process, and on Cloudflare a
 delivery to its session's Durable Object. It also opens 50 subscriptions where one does.
 
-**The thresholds, measured.** `probes/lane-plan.mjs` (memory driver; the members joined on another server's lease, so
-only the view's lanes are here; `node packages/room/probes/lane-plan.mjs` after a build) counts the binary
-subscriptions opened and closed:
+**The thresholds, measured.** Measured on the memory driver, with the members joined on another server's lease, so only
+the view's lanes are counted. The binary subscriptions opened and closed:
 
 | what changes | where the plan switches | subscribes and unsubscribes |
 |---|---|---|
@@ -166,7 +177,7 @@ The `byMember` band holds: at 40 members the plan switches at 41 tracks and back
 inside the band switches nothing. `ROOM_MEMBER_NAMED_LANES_MAX` has no band: a member whose named tracks hover at the
 limit switches its lanes on every change.
 
-The same probe times a want change's pass until the lanes it opened are ready. The times below are one dev machine's,
-and depend on it; the probe prints yours. One track of every member plans only that track's every-member lane: 0.2 ms
+The same run timed a want change's pass until the lanes it opened are ready. The times below are one dev machine's,
+and depend on it. One track of every member plans only that track's every-member lane: 0.2 ms
 at 1,000, 10,000 and 100,000 members. Every track of every member plans each member: about 10 ms at 1,000 members and
 90 ms at 10,000, in slices, the longest the event loop waited being 12–15 ms against the 10 ms `ROOM_PLAN_SLICE_MS`.

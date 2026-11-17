@@ -31,9 +31,8 @@ import {
 import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
 import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
-import { raceTimeout } from '../utils/raceTimeout.js'
-import { ROOM_HORIZON_MS } from '../server/constants.js'
-import { reportDeliveryLost } from '../server/config.js'
+import { lostReason } from '../server/lanes/lanes.js'
+import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
@@ -53,10 +52,7 @@ import {
   compareExchangeCells,
   compareExchangeHead,
   dropCellPrefix,
-  directoryDelete,
-  directoryGet,
-  directoryList,
-  directoryPut,
+  deleteListing,
   dropIncarnationRows,
   dropLaneOrderRows,
   initSchema,
@@ -67,9 +63,11 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
+  readListing,
   readListingBucket,
   readOrder,
   settleDueListing,
+  writeListing,
   type CellPage,
   readExpiringCells,
   writeExpiringCell,
@@ -99,8 +97,8 @@ type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 
-/** Room's part of a Durable Object that is a room authority, fanning out through Broadcast's `regions`, or a region's
- *  directory. Its tables are created on first use. */
+/** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
+ *  created on first use. */
 class RoomAuthority {
   private readonly ctx: DurableObjectState
   private readonly getNamespace: () => TelefuncExtensionNamespace
@@ -134,7 +132,7 @@ class RoomAuthority {
   }
 
   async readExpiringCells(inc: string, keys: readonly string[]): Promise<ExpiringCellsRead> {
-    return this.transaction((sql) => readExpiringCells(sql, inc, keys, Date.now()))
+    return readExpiringCells(this.sql(), inc, keys, Date.now())
   }
 
   async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
@@ -204,9 +202,8 @@ class RoomAuthority {
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
-      // No committer awaits a data or binary frame's handoff, so a lost one is reported here. A delivery that can be lost
-      // has a route, and each route is this room's.
-      delivery.catch((error: unknown) => reportDeliveryLost(routes[0]!.roomId, String(error)))
+      // No committer awaits a data or binary frame's handoff, so a lost one is reported here.
+      void reportIfLost(delivery, routes, lane)
       return receipt
     }
     const lost = await lostReason(delivery)
@@ -237,16 +234,18 @@ class RoomAuthority {
     return registration
   }
 
-  /** Renews the route, or says it lapsed or went with its dropped incarnation; the session then ends its
+  /** Renews each route, or says it lapsed or went with its dropped incarnation; its session then ends its
    *  subscription. */
-  async renewRoute(route: RouteInstallation): Promise<RenewWire> {
+  async renewRoutes(routes: RouteInstallation[]): Promise<RenewWire[]> {
     const now = Date.now()
-    const renewal = this.transaction((sql): RenewWire => {
-      if (renewRoute(sql, route, now)) return 'renewed'
-      return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
-    })
+    const renewals = this.transaction((sql) =>
+      routes.map((route): RenewWire => {
+        if (renewRoute(sql, route, now)) return 'renewed'
+        return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
+      }),
+    )
     await this.scheduleMaintenanceIfNeeded()
-    return renewal
+    return renewals
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
@@ -259,7 +258,8 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** At a room's authority: lists the room, in the region directory of `bucket` if it is the room's first listing. */
+  /** Lists the room, and tells its region's directory when `incTag` is new here: `bucket`'s, if it is the room's first
+   *  listing. */
   async directoryPut(
     roomId: string,
     incTag: string,
@@ -268,41 +268,29 @@ class RoomAuthority {
     bucket: string,
   ): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    const listedIn = this.transaction((sql) => {
-      directoryPut(sql, roomId, incTag, at)
-      return claimListingBucket(sql, bucket)
+    const newlyListedIn = this.transaction((sql) => {
+      const listed = readListing(sql, roomId) === incTag
+      writeListing(sql, roomId, incTag, at)
+      const listedIn = claimListingBucket(sql, bucket)
+      return listed ? null : listedIn
     })
-    await this.callDirectory(listedIn, (directory) => directory.listInRegion(roomId, incTag))
-    await this.scheduleMaintenanceIfNeeded()
+    await Promise.all([
+      newlyListedIn !== null && this.callDirectory(newlyListedIn, (directory) => directory.add(roomId, incTag)),
+      this.scheduleMaintenanceIfNeeded(),
+    ])
   }
 
-  /** At a room's authority. Its region directory forgets `incTag` even when the listing here is gone or newer, as after
-   *  an alarm that couldn't reach it. */
+  /** Its region directory forgets `incTag` even when the listing here is gone or newer, as after an alarm that couldn't
+   *  reach it. */
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryDelete(sql, roomId, incTag))
+    this.transaction((sql) => deleteListing(sql, roomId, incTag))
     await this.unlistInItsRegion(roomId, incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return directoryGet(this.sql(), roomId)
+    return readListing(this.sql(), roomId)
   }
 
-  /** At a region's directory. */
-  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    return directoryList(this.sql(), prefix, cursor)
-  }
-
-  /** At a region's directory. */
-  async listInRegion(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryPut(sql, roomId, incTag, Infinity))
-  }
-
-  /** At a region's directory. */
-  async unlistInRegion(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => directoryDelete(sql, roomId, incTag))
-  }
-
-  /** Only a room authority schedules alarms. */
   async alarm(): Promise<void> {
     try {
       const unlisted = this.runSweep(Date.now())
@@ -328,7 +316,7 @@ class RoomAuthority {
 
   private async unlistInItsRegion(roomId: string, incTag: string): Promise<void> {
     const listedIn = readListingBucket(this.sql())
-    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.unlistInRegion(roomId, incTag))
+    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.remove(roomId, incTag))
   }
 
   private callDirectory(bucket: string, invoke: (directory: RegionDirectoryStub) => Promise<void>): Promise<void> {
@@ -389,11 +377,11 @@ function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uin
   return read.cells.get(key)
 }
 
-/** Null once each session DO took the delivery, else why it was lost: a handoff unconfirmed within the horizon is. */
-function lostReason(delivery: Promise<void>): Promise<string | null> {
-  const settled = delivery.then(
-    () => null,
-    (reason: unknown) => String(reason),
-  )
-  return raceTimeout(settled, ROOM_HORIZON_MS, () => 'unconfirmed within the horizon')
+/** A commit nobody subscribes to has no route. A delivery that can be lost has one, and each route is this room's. */
+async function reportIfLost(delivery: Promise<void>, routes: RouteInstallation[], lane: LaneId): Promise<void> {
+  try {
+    await delivery
+  } catch (error) {
+    reportLaneLost(routes[0]!.roomId, lane, String(error))
+  }
 }

@@ -39,7 +39,7 @@ import { onGetLobby } from './Lobby.telefunc'
 
 const room = await onGetLobby()
 
-room.subscribe((message, info, from) => console.log(`${from.meta.name}: ${message.text}`))
+room.subscribe((message, { from }) => console.log(from ? `${from.meta.name}: ${message.text}` : message.text))
 
 const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })

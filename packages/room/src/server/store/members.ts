@@ -20,8 +20,7 @@ import {
   memberCellKey,
   memberMetaCellPrefix,
 } from './cells.js'
-import { leaseHosting, type LeaseState, type RoomLease } from './lease.js'
-import { assert } from '../../utils/assert.js'
+import { leaseHosting, runHosted, type LeaseState, type RoomLease } from './lease.js'
 
 // A member's cells: written with its join under a lease, removed with its leave, each one operation.
 
@@ -84,24 +83,13 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
 
 const identityTextEncoder = new TextEncoder()
 
-/** Joins a member under the lease. A lease found lost is replaced once: its replacement has no cell yet, so the join
- *  writes it. */
+/** Joins a member under the lease. */
 async function joinMember(
   room: RoomIncarnation,
   lease: RoomLease,
   member: Omit<JoinArgs, 'lease' | 'hold'>,
 ): Promise<void> {
-  const join = (id: string) =>
-    runOperation(room, JOIN, { ...member, lease: { id, created: lease.created }, hold: room.hold })
-  let id = lease.id
-  let joined = await join(id)
-  if (joined.value === 'lease-lost') {
-    lease.lost(id)
-    id = lease.id
-    joined = await join(id)
-  }
-  assert(joined.value === 'joined')
-  lease.hosted(id)
+  const joined = await runHosted(room, lease, JOIN, { ...member, hold: room.hold })
   afterHoldChange(room, holdDelta(member.record.hidden ? null : room.hold, 1, { joining: true }).after(joined.counters))
 }
 

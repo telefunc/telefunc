@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
-import type { BinaryFrame } from '../shared/binary.js'
+import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -17,7 +17,7 @@ import {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../shared/errors.js'
-import { ownMetaArgument, senderSnapshot } from '../shared/arguments.js'
+import { senderSnapshot } from '../shared/arguments.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
@@ -27,8 +27,7 @@ import type {
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
-import type { RoomState } from '../shared/state.js'
-import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
+import type { ParticipantMeta, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, acceptedOrThrow, commitLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
@@ -48,8 +47,7 @@ interface RoomWritesOwner {
 type RoomWritesOptions = {
   owner: RoomWritesOwner
   incarnation: RoomIncarnation
-  model: Pick<RoomModel, 'closed' | 'acceptedMeta'>
-  state: Pick<RoomState, 'getRemote'>
+  model: Pick<RoomModel, 'closed' | 'acceptedMeta' | 'entry'>
   /** The view the writes commit through: it applies a member's committed meta or connection event at once, and admits
    *  a binary publish's track. */
   replica: Pick<RoomReplica, 'applyControl' | 'admitTrack'>
@@ -72,29 +70,27 @@ class RoomWrites {
   private readonly owner: RoomWritesOwner
   private readonly incarnation: RoomIncarnation
   private readonly model: RoomWritesOptions['model']
-  private readonly state: RoomWritesOptions['state']
   private readonly replica: RoomWritesOptions['replica']
   private readonly acks: PendingDmAcks
   private readonly localParticipants: RoomWritesOptions['localParticipants']
 
-  constructor({ owner, incarnation, model, state, replica, acks, localParticipants }: RoomWritesOptions) {
+  constructor({ owner, incarnation, model, replica, acks, localParticipants }: RoomWritesOptions) {
     this.owner = owner
     this.incarnation = incarnation
     this.model = model
-    this.state = state
     this.replica = replica
     this.acks = acks
     this.localParticipants = localParticipants
   }
 
-  /** Full replace (`setMeta`). */
+  /** Full replace (`setMeta`), of a meta owned already. */
   async setMemberMeta(id: string, meta: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMetaInOrder(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
+    return await this.writeMetaInOrder(id, { replace: meta })
   }
 
-  /** Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
+  /** Per-key merge (`updateMeta`), of keys owned already; an `undefined` value deletes the key. */
   async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMetaInOrder(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
+    return await this.writeMetaInOrder(id, { merge: attrs })
   }
 
   /** The connection of the page holding the member, which its holder here saw change. */
@@ -117,7 +113,7 @@ class RoomWrites {
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const { sender, commit } = await this.inCallOrder(from, async (sent) => {
-      const { sender, stamp } = await this.admitPublish(from, data)
+      const { sender, stamp } = await this.admitPublish(from, data, null)
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
@@ -126,15 +122,17 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
-    return await this.finishPublish(sender, data, commit)
+    return await this.finishPublish(sender, data, null, commit)
   }
 
-  /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
-  async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
+  /** `frame` is `framed` decoded, and `message` what its guards see: its bytes, or a text frame's message. Receivers
+   *  trust its sender id, which every caller checked is the publisher's. */
+  async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array, message: unknown): Promise<ChannelPublishAck> {
     const { from } = frame
+    const track = publicTrack(frame.track)
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this.inCallOrder(encodeLaneKey(lane), async (sent) => {
-      const { sender } = await this.admitPublish(from, frame.payload)
+      const { sender } = await this.admitPublish(from, message, track)
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
       const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
@@ -142,7 +140,7 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
-    return await this.finishPublish(sender, frame.payload, commit)
+    return await this.finishPublish(sender, message, track, commit)
   }
 
   /** A member's publishes on one lane leave in call order: each starts once the one before it was sent to the backend
@@ -162,19 +160,28 @@ class RoomWrites {
   }
 
   /** The sender as its guard sees it, with its stamp. */
-  private async admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
+  private async admitPublish(
+    from: string,
+    payload: unknown,
+    track: string | null,
+  ): Promise<{ sender: Sender; stamp: SenderStamp }> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const sender = this.memberSender(from)
     const stamp = this.stampedSender(from, sender)
     const onBeforePublish = this.owner.guards?.onBeforePublish
-    if (onBeforePublish) await onBeforePublish(sender, payload)
+    if (onBeforePublish) await onBeforePublish(sender, payload, { track })
     return { sender, stamp }
   }
 
-  private async finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
+  private async finishPublish(
+    sender: Sender,
+    payload: unknown,
+    track: string | null,
+    commit: CommitAccepted,
+  ): Promise<ChannelPublishAck> {
     const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
     const onAfterPublish = this.owner.guards?.onAfterPublish
-    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
+    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, { ...receipt, track }))
     return { key: this.incarnation.id, ...receipt }
   }
 
@@ -189,24 +196,31 @@ class RoomWrites {
 
   /** A member that left while its call waited has no sender to show a guard. */
   private memberSender(from: string): Sender {
-    const known = this.state.getRemote(from) ?? this.localParticipants.get(from)
-    if (!known) throw participantLeftError()
-    return senderSnapshot(from, known.meta, known.identity)
+    const entry = this.model.entry(from)
+    if (entry) return senderSnapshot(from, entry.meta.object, entry.identity)
+    const local = this.localParticipants.get(from)
+    if (!local) throw participantLeftError()
+    return senderSnapshot(from, local.meta, local.identity)
   }
 
-  async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
+  /** The receipt, or with `ack` the recipient's reply. */
+  async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<unknown> {
     return ack ? await this.sendDmAck(from, to, data) : await this.publishDm(from, to, data)
   }
 
-  private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
+  /** A package's message, through the app's send guards as any DM. */
+  async sendPrivate(from: string, to: string, field: string, data: unknown): Promise<void> {
+    await this.publishDm(from, to, data, { field })
+  }
+
+  private async sendDmAck(from: string, to: string, data: unknown): Promise<unknown> {
     const ackId = crypto.randomUUID()
     const acks = this.acks
     const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
     const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
-    let receipt: RoomSendReceipt
     try {
-      receipt = await this.publishDm(from, to, data, ackId)
+      await this.publishDm(from, to, data, { ackId })
     } catch (err) {
       acks.delete(ackId)
       clearTimeout(timer)
@@ -215,7 +229,7 @@ class RoomWrites {
     const settled = await reply
     clearTimeout(timer)
     if (!settled.ok) throw roomFailureError(settled)
-    return { ...receipt, response: settled.value }
+    return settled.value
   }
 
   /** The recipient stores its reply before committing its frame, so a reply whose frame was lost is still read. */
@@ -229,7 +243,12 @@ class RoomWrites {
     this.acks.settle(ackId, reply)
   }
 
-  private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
+  private async publishDm(
+    from: string,
+    to: string,
+    data: unknown,
+    { ackId, field }: { ackId?: string; field?: string } = {},
+  ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     const target = await this.resolveMember(to)
     if (!target) throw participantGoneError(to)
@@ -239,6 +258,7 @@ class RoomWrites {
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
+    if (field !== undefined) envelope.field = field
     const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
     const committing = commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
       requiredCellKeys,
@@ -262,8 +282,8 @@ class RoomWrites {
   }
 
   private async resolveMember(id: string): Promise<Sender | null> {
-    const remote = this.state.getRemote(id)
-    if (remote) return senderSnapshot(id, remote.meta, remote.identity)
+    const entry = this.model.entry(id)
+    if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
     const [member] = await reapAndReadMembersById(this.incarnation, [id])
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
   }

@@ -73,5 +73,7 @@ async function cleanupFinalizedIncarnation(plane: RoomPlane, roomId: string, clo
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
   await plane.driver.dropIncarnation(roomId, inc)
+  // The listing goes last: while it stays, `Room.list()`, a later create of the room and the directory sweep (for a
+  // room with hold timeouts, the only kind it visits) drop the incarnation again if this drop failed.
   await plane.driver.directoryDelete(roomId, inc)
 }

@@ -42,8 +42,8 @@ function untilServerAction(key: string): Promise<void> {
 async function onSignIn(chatId: string, name: string) {
   const chat = await onGetChat(chatId)
   const me = await chat.join({ meta: { name }, identity: name })
-  me.onDisconnect(() => void Room.announce(chatId, `${name} went away`))
-  me.onReconnect(() => void Room.announce(chatId, `${name} is back`))
+  me.onDisconnect(() => void Room.publish(chatId, `${name} went away`))
+  me.onReconnect(() => void Room.publish(chatId, `${name} is back`))
   return { chat, me }
 }
 
@@ -60,5 +60,5 @@ async function onWhoIsOnline(chatId: string) {
 
 async function onGetChatMember(chatId: string, memberId: string) {
   const chat = await onGetChat(chatId)
-  return { chat, member: await chat.getParticipant(memberId) }
+  return { chat, member: chat.getParticipant(memberId) }
 }

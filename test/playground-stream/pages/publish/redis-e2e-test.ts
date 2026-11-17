@@ -1,4 +1,4 @@
-export { testRedisReconnect, testBroadcastRedisSubscriberDropped }
+export { testRedisReconnect, testBroadcastRedisSubscriberDropped, testBroadcastRedisPublishLimit }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
@@ -37,6 +37,22 @@ function testRedisReconnect() {
   })
 }
 
+function testBroadcastRedisPublishLimit() {
+  test("broadcast: a publish over the Redis backend's ceiling rejects, by its bytes, and the largest one and the next arrive", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-over-limit')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-over-limit-result')).deep.equal({
+          refused: ['ChannelOverflowError', 'ChannelOverflowError'],
+          received: [28 * 1024 * 1024, 1],
+        })
+      },
+      { timeout: 10_000 },
+    )
+  })
+}
+
 function testBroadcastRedisSubscriberDropped() {
   test("broadcast: Redis drops a server's subscriber connection during publishes of both kinds: what didn't arrive is reported, count for count, per kind", async () => {
     await navigate(`${getServerUrl()}/publish`)
@@ -47,16 +63,61 @@ function testBroadcastRedisSubscriberDropped() {
           '#redis-subscriber-dropped-result',
         )
         expect(result).not.toBe(null)
-        for (const { published, received, reported, rejected } of Object.values(result!)) {
+        for (const { published, received, reported } of Object.values(result!)) {
           expect(published).toBe(300)
           expect(reported! > 0).toBe(true)
-          // A rejected publish may have run: the drop can cut its reply and not the publish.
-          expect(received! + reported! <= published!).toBe(true)
-          expect(received! + reported! + rejected! >= published!).toBe(true)
+          expect(received! + reported!).toBe(300)
         }
       },
       { timeout: 15_000 },
     )
     expectLog('Redis subscriber connection closed')
+  })
+
+  test("broadcast: a subscriber connection goes silent, its socket still open: it's taken for lost, what it missed is reported, and later publishes arrive", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-silent')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-silent-result')).deep.equal({
+          received: ['before', 'after'],
+          reported: ["1 text message never reached this server's Redis subscription"],
+          connections: 2,
+        })
+      },
+      { timeout: 50_000 },
+    )
+    expectLog('Redis subscriber connection went silent')
+  })
+
+  test('broadcast: a publish lands while a reconnected subscription reads where its key starts: it arrives, and nothing is reported', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-during-resume')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-during-resume-result')).deep.equal({
+          received: ['before', 'during the read', 'after'],
+          reported: [],
+        })
+      },
+      { timeout: 10_000 },
+    )
+    expectLog('Redis subscriber connection closed')
+  })
+
+  test("broadcast: reading where a new subscription starts fails during a publish of the key's other kind: the publish arrives, and that subscription reads again until it is ready", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-start-read-failed')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#redis-start-read-failed-result')).deep.equal({
+          received: ['before', 'beside the failed read'],
+          reported: [],
+          binary: 'ready',
+        })
+      },
+      { timeout: 10_000 },
+    )
+    expectLog('the start read failed')
   })
 }

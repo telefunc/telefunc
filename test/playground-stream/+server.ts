@@ -18,7 +18,7 @@ import { installFailingBackend, addBackendFault } from './failing-backend'
 
 config.channel.pingInterval = 1000
 config.shield = true
-// A lane reaching a channel limit sets it low, e.g. `{"serverReplayBuffer":65536}`.
+// A lane reaching a channel limit sets it low, e.g. `{"maxMemory":2097152}`.
 if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'
@@ -84,10 +84,6 @@ console.log(
 )
 
 app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
-app.get('/api/stream-flows', (c) => {
-  const objects = (globalThis as Record<string, any>)._telefunc
-  return c.json({ count: objects?.['wire-protocol/values/server/response/StreamFlow.ts']?.flows.size ?? 0 })
-})
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
   return c.json({ ok: true })
@@ -207,7 +203,8 @@ type CrossInstanceRoomFixture = {
   received: unknown[]
   /** Binary frames of the tracks this instance watches: `<track>:<member>:<first byte>`. */
   frames: string[]
-  /** `join:<name>`, `leave:<name>:<cause>` and `close` as this instance's view saw them, `demand:<track>:<wanted>`. */
+  /** `join:<name>`, `leave:<name>:<cause>` and `close` as this instance's view saw them, `demand:<track>:<wanted>` as
+   *  a track of its member starts or stops being received. */
   events: string[]
   unsubscribe(): void
   /** Removes this instance's room listeners, or adds its event listeners again: its view stops or starts watching. */
@@ -242,7 +239,13 @@ app.post('/api/room-cross-instance/join', async (c) => {
   ]
   let removers = listeners()
   const participant = await room.join({ meta: { instance: INST, name: c.req.query('name') ?? INST } })
-  participant.onDemand((track, wanted) => events.push(`demand:${track}:${wanted}`))
+  let demanded = new Set<string>()
+  participant.onChange(() => {
+    const now = new Set(participant.demand.map(({ track }) => track))
+    for (const track of now) if (!demanded.has(track)) events.push(`demand:${track}:true`)
+    for (const track of demanded) if (!now.has(track)) events.push(`demand:${track}:false`)
+    demanded = now
+  })
   const received: unknown[] = []
   const readiness = crypto.randomUUID()
   const { promise: subscribed, resolve } = Promise.withResolvers<void>()
@@ -304,7 +307,7 @@ app.post('/api/room-cross-instance/watch', async (c) => {
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
   const track = c.req.query('track')!
-  fixture.room.subscribeBinary((data, _info, from) => fixture.frames.push(`${track}:${nameOf(from)}:${data[0]}`), {
+  fixture.room.subscribeBinary((data, { from }) => fixture.frames.push(`${track}:${nameOf(from)}:${data[0]}`), {
     track,
   })
   return c.json({ ok: true, instance: INST })
@@ -356,8 +359,8 @@ app.post('/api/room-cross-instance/meta', async (c) => {
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!roomId || !fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
   const attributes = await c.req.json()
-  if (c.req.query('target') === 'room') await Room.setAttributes(roomId, attributes)
-  else await fixture.participant.setAttributes(attributes)
+  if (c.req.query('target') === 'room') await Room.updateMeta(roomId, attributes)
+  else await fixture.participant.updateMeta(attributes)
   return c.json({ ok: true, instance: INST })
 })
 
@@ -373,7 +376,7 @@ app.get('/api/room-cross-instance/view', async (c) => {
   const roomId = c.req.query('roomId')
   const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
   if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
-  const participants = fixture.room.isClosed ? [] : await fixture.room.getParticipants()
+  const participants = fixture.room.isClosed ? [] : fixture.room.getParticipants()
   const members = Object.fromEntries(participants.map((member) => [nameOf(member), member.meta]))
   // A room the store closed before this view saw it holds no members.
   const inStore = await Room.getParticipants(roomId!).catch(() => [])
@@ -467,6 +470,7 @@ app.post('/api/gc', async (c) => {
 })
 
 app.get('/api/heap-used', (c) => c.json({ heapUsed: process.memoryUsage().heapUsed }))
+app.get('/api/array-buffers', (c) => c.json({ arrayBuffers: process.memoryUsage().arrayBuffers }))
 
 app.post('/api/server-close-trigger', async (c) => {
   const channelId = c.req.query('channelId')

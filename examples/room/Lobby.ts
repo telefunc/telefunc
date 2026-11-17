@@ -8,8 +8,8 @@ room.onChange(() => {
   const names = room.snapshot().participants.map((member) => item(member.meta.name))
   document.querySelector('#members')!.replaceChildren(...names)
 })
-room.subscribe((message, _info, from) => {
-  document.querySelector('#messages')!.append(item(`${from.meta.name}: ${message.text}`))
+room.subscribe((message, { from }) => {
+  document.querySelector('#messages')!.append(item(from ? `${from.meta.name}: ${message.text}` : message.text))
 })
 
 const me = await room.join({ meta: { name: `Guest ${crypto.randomUUID().slice(0, 4)}` } })

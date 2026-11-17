@@ -243,8 +243,11 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
   })
   if (update === null) return
-  acceptedOrThrow(roomId, await commitLane(controlLane(roomId, inc), encodeRoomRecord(update)))
-  if ('replace' in write) await dropReplacedMetaGenerations(roomId, inc)
+  const [commit] = await Promise.all([
+    commitLane(controlLane(roomId, inc), encodeRoomRecord(update)),
+    'replace' in write && dropReplacedMetaGenerations(roomId, inc),
+  ])
+  acceptedOrThrow(roomId, commit)
 }
 
 /** The update a committed exchange made, at the `meta:seq` it left. */
@@ -266,7 +269,6 @@ async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise
   const marks = await plane.driver.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if (marks.kind === 'stale-incarnation') return
   const slice = new Slice()
-  // The loop is `dropCells`' marked one, inline so that a replace's drop runs in this one async frame.
   for (const [mark, raw] of marks.cells) {
     let held: string[] = []
     for await (const page of plane.driver.readCellPages(

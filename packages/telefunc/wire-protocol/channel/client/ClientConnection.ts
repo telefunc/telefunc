@@ -21,8 +21,9 @@ import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
-import type { ChannelTable } from './ChannelTable.js'
+import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
+import { EVERY_STREAM, OWN_STREAM } from '../ownStream.js'
 import type { ChannelAttach } from './ChannelAttach.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -55,13 +56,35 @@ interface MuxChannel {
 }
 
 interface MuxConnection {
+  /** A frame of `stream` that must arrive: it ends the place of that stream's lossy frame that still waits, or of every
+   *  stream's with `EVERY_STREAM`. */
   sendSequenced<T>(
     channel: MuxChannel,
     kind: 'data' | 'ack',
     encodeFrame: SequencedEncoder<T>,
     data: T,
     onQueued?: (seq: number) => void,
+    stream?: string,
   ): number
+  /** A lossy frame of `stream`, whose place a newer one may take while it waits to go (`replaceWaiting`). */
+  sendReplaceable<T>(
+    channel: MuxChannel,
+    stream: string,
+    kind: 'data' | 'ack',
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+    onQueued?: (seq: number) => void,
+  ): number
+  /** Puts `data` in the place of `stream`'s lossy frame that still waits to go on a link that is behind. Returns that
+   *  frame's seq and the bytes this adds; null where none waits or the link keeps up. */
+  replaceWaiting<T>(
+    channel: MuxChannel,
+    stream: string,
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+  ): { seq: number; added: number } | null
+  /** Throws where `data`, encoded by `encodeFrame`, is larger than the server accepts, as its send would. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -112,6 +135,9 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
   headroom(): number
+  /** How long a lossy publish may wait to go before the page counts as behind: past the wire's own wait, its least
+   *  round trip, so `Infinity` before that is measured. */
+  readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
   abandonActiveTransport(): void
@@ -194,28 +220,77 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     encodeFrame: SequencedEncoder<T>,
     data: T,
     onQueued?: (seq: number) => void,
+    stream: string = OWN_STREAM,
   ): number {
     const record = this.channels.of(channel)
     if (record === undefined) return 0
-    const { replay } = record
-    const frame = encodeFrame(record.ix, data, replay.seq + 1)
+    const frame = this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+    const seq = this.sequence(record, stream)
+    onQueued?.(seq)
+    this.gate.send(record, seq, frame, kind)
+    return frame.byteLength
+  }
+
+  sendReplaceable<T>(
+    channel: MuxChannel,
+    stream: string,
+    kind: 'data' | 'ack',
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+    onQueued?: (seq: number) => void,
+  ): number {
+    const queued = (seq: number) => {
+      const record = this.channels.of(channel)
+      if (record !== undefined) (record.replaceable ??= new Map()).set(stream, seq)
+      onQueued?.(seq)
+    }
+    return this.sendSequenced(channel, kind, encodeFrame, data, queued, stream)
+  }
+
+  replaceWaiting<T>(
+    channel: MuxChannel,
+    stream: string,
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+  ): { seq: number; added: number } | null {
+    const record = this.channels.of(channel)
+    const seq = record?.replaceable?.get(stream)
+    if (record === undefined || seq === undefined) return null
+    const added = this.gate.replaceWaiting(record.ix, seq, this.fitting(channel, encodeFrame(record.ix, data, seq)))
+    return added === null ? null : { seq, added }
+  }
+
+  /** The next seq of `record`'s channel, for a frame of `stream` that must arrive. The stream's lossy frame that still
+   *  waits, or every stream's, keeps its data from here on: what was sent after a frame never arrives ahead of it in an
+   *  older one's place. */
+  private sequence(record: ChannelRecord, stream: string): number {
+    if (stream === EVERY_STREAM) record.replaceable?.clear()
+    else record.replaceable?.delete(stream)
+    return record.replay.nextSeq()
+  }
+
+  /** For a send held before it takes a seq: a frame's header has the same size at any seq. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined) this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+  }
+
+  /** `frame`, where it is no larger than the server accepts from `channel`: the server ends any wire a larger frame
+   *  arrives on, and the replay would send it again on the next one. */
+  private fitting(channel: MuxChannel, frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
     const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
     assertUsage(
       frame.byteLength <= maxFrameBytes,
       `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
     )
-    const seq = replay.nextSeq()
-    onQueued?.(seq)
-    this.gate.send(record, seq, frame, kind)
-    return frame.byteLength
+    return frame
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const { ix } = record
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends any wire a larger frame arrives on, so the awaiting send gets an error answer instead.
@@ -237,21 +312,21 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   sendAbort(channel: MuxChannel, abortValue: string): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.abort(record.ix, abortValue, seq), 'control')
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.close(record.ix, timeoutMs, seq), 'control')
   }
 
   sendCloseAck(channel: MuxChannel): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
   }
 

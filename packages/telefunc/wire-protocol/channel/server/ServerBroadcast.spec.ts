@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { parse } from '@brillout/json-serializer/parse'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
-import { ReplayBuffer } from '../ReplayBuffer.js'
-import { ACK_STATUS, decode, encode, type ChannelFrame } from '../../wire/frame.js'
+import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
+import { publishBody } from './PublishBody.js'
+import { ServerReplay } from './ServerReplay.js'
+import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
+import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
+import { ChannelOverflowError } from '../channelErrors.js'
+import type { BroadcastPublishOptions } from '../channel.js'
 
 afterEach(() => disposeBackend())
 
@@ -142,39 +148,16 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
-  // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
-  // any peer attaches. The behavioral contract: when the peer eventually attaches,
-  // the previously-published message is delivered to it (not silently dropped).
-  // Asserts at the count level — exact frame encoding is impl detail.
-  it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
-    receiver._end._dispatchFrame(decode(encode.broadcastSub(0, false)) as ChannelFrame) // the page subscribes
+  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:unsub-in-delivery' })
+    broadcast._end._registerChannel()
 
-    sender.publish({ text: 'hello' })
+    const seen: string[] = []
+    broadcast.subscribe(() => unsubscribe())
+    const unsubscribe = broadcast.subscribe((m) => seen.push(m))
+    broadcast.publish('first')
 
-    const frames: Uint8Array[] = []
-    receiver._end._attachPeer(
-      new IndexedPeer({
-        sender: {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry() {},
-          bufferedAmount: () => 0,
-          deliveredBefore: () => 0,
-          terminate() {},
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
-      }),
-    )
-
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
+    expect(seen).toEqual([])
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
@@ -210,6 +193,59 @@ describe('keyed in-process broadcast', () => {
     expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
   })
+
+  // Options read from a form or a configuration file: `'false'` would otherwise publish it lossy.
+  it("refuses a `lossy` that isn't a boolean, at the call", () => {
+    const key = 'room:lossy-option'
+    const broadcast = new ServerBroadcast({ key })
+    const options: BroadcastPublishOptions = JSON.parse('{ "lossy": "false" }')
+
+    expect(() => broadcast.publish(1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
+    expect(() => Broadcast.publish(key, 1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
+    expect(() => broadcast.publishBinary(new Uint8Array([1]), options)).toThrow(
+      "`publishBinary()`'s `lossy` should be a boolean",
+    )
+    expect(() => Broadcast.publishBinary(key, new Uint8Array([1]), options)).toThrow(
+      "`publishBinary()`'s `lossy` should be a boolean",
+    )
+  })
+})
+
+describe('in-memory publishes in answer', () => {
+  it('delivers a chain of 5,000 answers', async () => {
+    const backend = new MemoryBackend()
+    const route = { key: 'room:finite', kind: 'text' } as const
+    let received = 0
+    const attempt = backend.subscribe(route, {
+      deliver(payload) {
+        received++
+        const n = Number(payload)
+        if (n < 5000) void backend.publish(route, String(n + 1))
+      },
+    })
+    await backend.publish(route, '0')
+    await attempt.unsubscribe()
+    expect(received).toBe(5001)
+  })
+
+  it('rejects a listener that answers its own messages without end, and timers run again', async () => {
+    const backend = new MemoryBackend()
+    const route = { key: 'room:endless', kind: 'text' } as const
+    const errors: unknown[] = []
+    const attempt = backend.subscribe(route, {
+      deliver() {
+        const result = backend.publish(route, 'again')
+        if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+      },
+    })
+    const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
+    void backend.publish(route, 'start')
+    await timerRan
+    await attempt.unsubscribe()
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
+    expect((errors[0] as Error).message).toContain('a listener that answers its own messages')
+  }, 60_000)
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -252,6 +288,147 @@ describe('binary in-process broadcast', () => {
   })
 })
 
+describe('ServerBroadcastEnd', () => {
+  // Room's stubs deliver from the moment a response returns them, ahead of the page's attach.
+  it('sends what was delivered before its page attached, once it attaches', () => {
+    const end = new ServerBroadcastEnd()
+    end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+    end._registerChannel()
+
+    end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, 'room:early', true))
+
+    const frames: Uint8Array[] = []
+    end._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send: (frame) => {
+            frames.push(frame)
+          },
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: () => 700,
+          deliveredBefore: () => 0,
+          terminate() {},
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFrom() {},
+          },
+        },
+        index: 7,
+        replay: new ServerReplay({ heldBytes: 0 }),
+      }),
+    )
+
+    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
+  })
+
+  it("sends a stream's held lossy publish before a plain one of that stream", () => {
+    const { end, sent } = behindEnd()
+    end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+    end.deliver(publishBody('"lossy"', { seq: 2, timestamp: 2 }, 'cursor', true))
+    end.deliver(publishBody('"plain"', { seq: 3, timestamp: 3 }, 'cursor', false))
+
+    expect(sent).toEqual(['"first"', '"lossy"', '"plain"'])
+  })
+
+  it('lets a plain publish of another stream go ahead of a held one, which a newer one still replaces', () => {
+    const { end, sent } = behindEnd()
+    end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+    end.deliver(publishBody('"older"', { seq: 2, timestamp: 2 }, 'cursor', true))
+    end.deliver(publishBody('"plain"', { seq: 3, timestamp: 3 }, 'drawing', false))
+    end.deliver(publishBody('"newer"', { seq: 4, timestamp: 4 }, 'cursor', true))
+    void end.close()
+
+    expect(sent).toEqual(['"first"', '"plain"', '"newer"'])
+  })
+
+  // As a Channel's send and a page's publish: a lossy publish replaces only lossy ones after the last plain one of its stream.
+  describe.each(['behind', 'away'] as const)('to a page that is %s', (wire) => {
+    it.each([
+      [
+        ['l1', 'plain', 'l2'],
+        ['l1', 'plain', 'l2'],
+      ],
+      [
+        ['l1', 'l2', 'plain', 'l3', 'l4'],
+        ['l2', 'plain', 'l4'],
+      ],
+    ])('keeps a lossy publish before a plain one of its stream: %j arrives as %j', (published, arrives) => {
+      const { end, peer } = behindEnd(Number.POSITIVE_INFINITY)
+      if (wire === 'away') end._onPeerDisconnect(peer, 60_000)
+      end.deliver(publishBody('"first"', { seq: 1, timestamp: 1 }, null, false))
+      published.forEach((text, i) => {
+        const info = { seq: i + 2, timestamp: i + 2 }
+        end.deliver(publishBody(JSON.stringify(text), info, 'cursor', text !== 'plain'))
+      })
+      void end.close()
+
+      expect(replayed(end)).toEqual(['first', ...arrives].map((text) => JSON.stringify(text)))
+    })
+  })
+})
+
+/** The publishes a reconnect of `end`'s page would get, in order. */
+function replayed(end: ServerBroadcastEnd): string[] {
+  return end
+    ._replayBuffer!.getAfter(0)
+    .map((frame) => decode(frame))
+    .flatMap((decoded) => (decoded.tag === TAG.PUBLISH ? [decoded.text] : []))
+}
+
+/** The `info.seq` of the publishes, of both kinds, a reconnect of `end`'s page would get, in order. */
+function replayedSeqs(end: ServerBroadcastEnd): number[] {
+  return (end._replayBuffer?.getAfter(0) ?? [])
+    .map((frame) => decode(frame))
+    .flatMap((decoded) => (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.PUBLISH_BINARY ? [decoded.info.seq] : []))
+}
+
+/** An attached page's end whose page is behind once a publish waits for its confirmation, with `waiting` of its newest
+ *  publishes not yet taken by its wire; the publishes it sends. */
+function behindEnd(waiting = 0) {
+  const end = new ServerBroadcastEnd()
+  end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
+  return behindPage(end, waiting)
+}
+
+/** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets, the binary ones, and the
+ *  `info.seq` of both in the order they arrive. */
+function behindPage(end: ServerBroadcastEnd, waiting = 0) {
+  end._registerChannel()
+  const sent: string[] = []
+  const seqs: number[] = []
+  const binary: number[][] = []
+  const peer = new IndexedPeer({
+    sender: {
+      send: (frame) => {
+        const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+        if (decoded.tag === TAG.PUBLISH_BINARY) binary.push([...decoded.data])
+        else if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
+        else return
+        seqs.push(decoded.info.seq)
+      },
+      carry() {},
+      bufferedAmount: () => 0,
+      behindAfter: () => -1,
+      deliveredBefore: () => 0,
+      terminate() {},
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+      queue: {
+        waitingPublishes: () => waiting,
+        dropWaitingPublishes() {},
+        dropWaitingFrom() {},
+      },
+    },
+    index: 7,
+    // Its own replay: what it hasn't confirmed there is what makes its page behind.
+    replay: end._replayBuffer!,
+  })
+  end._attachPeer(peer, { broadcast: { text: true, binary: true } })
+  return { end, peer, sent, seqs, binary }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Channel-method gating — the type hides send/listen/sendBinary/listenBinary,
 // and calling one at runtime still throws a usage error.
@@ -293,12 +470,18 @@ describe('Broadcast shield validation', () => {
           },
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFrom() {},
+          },
         },
         index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
 
@@ -330,17 +513,63 @@ describe('Broadcast shield validation', () => {
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
+          behindAfter: () => 700,
           deliveredBefore: () => 0,
           terminate() {},
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFrom() {},
+          },
         },
         index: 7,
-        replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+        replay: new ServerReplay({ heldBytes: 0 }),
       }),
     )
     await sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
+  })
+})
+
+describe('lossy broadcast under memory pressure', () => {
+  // Another object's publish sheds it: the channel ends once its own object runs, but what it holds goes at once.
+  it('lets go of the newest it holds for a page that is behind', async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed' })
+    const end = broadcast._end
+    end._registerChannel()
+    end._attachPeer(
+      new IndexedPeer({
+        sender: {
+          send() {},
+          carry() {},
+          bufferedAmount: () => 0,
+          behindAfter: () => 0,
+          deliveredBefore: () => 0,
+          terminate() {},
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+          queue: {
+            waitingPublishes: () => 0,
+            dropWaitingPublishes() {},
+            dropWaitingFrom() {},
+          },
+        },
+        index: 7,
+        replay: end._replayBuffer!,
+      }),
+      { broadcast: { text: true, binary: false } },
+    )
+    await broadcast.publish('first', { lossy: true })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await broadcast.publish('x'.repeat(256 * 1024), { lossy: true })
+    expect(end.newestUnhanded).toBeDefined()
+    expect(end.heldBytes).greaterThan(256 * 1024)
+
+    end.shed(0)
+
+    expect(end.newestUnhanded).toBe(undefined)
+    expect(end.heldBytes).lessThan(1024)
   })
 })
 
@@ -352,21 +581,33 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('TransportBroadcastDriver — multi-node transport', () => {
-  type TextListener = (payload: string, info: { seq: number; timestamp: number }) => void
+  type Info = { seq: number; timestamp: number }
+  type TextListener = (payload: string, info: Info) => void
+  type BinaryListener = (payload: Uint8Array, info: Info) => void
 
-  /** Synchronous-delivery bus for fast, deterministic tests. */
-  function createMockTransport(): BroadcastTransport & { _listeners: Map<string, Set<TextListener>> } {
+  /** Synchronous-delivery bus for fast, deterministic tests; `_carried` is every payload it was sent, as sent. */
+  function createMockTransport(): BroadcastTransport & {
+    _listeners: Map<string, Set<TextListener>>
+    _carried: (string | number[])[]
+  } {
     const listeners = new Map<string, Set<TextListener>>()
+    const binaryListeners = new Map<string, Set<BinaryListener>>()
     const seqs = new Map<string, number>()
+    const carried: (string | number[])[] = []
+    const nextInfo = (key: string): Info => {
+      const seq = (seqs.get(key) ?? 0) + 1
+      seqs.set(key, seq)
+      return { seq, timestamp: Date.now() }
+    }
     return {
       _listeners: listeners,
+      _carried: carried,
       send(key, payload) {
-        const seq = (seqs.get(key) ?? 0) + 1
-        seqs.set(key, seq)
-        const timestamp = Date.now()
+        carried.push(payload)
+        const info = nextInfo(key)
         const set = listeners.get(key)
-        if (set) for (const cb of set) cb(payload, { seq, timestamp })
-        return { seq, timestamp }
+        if (set) for (const cb of set) cb(payload, info)
+        return info
       },
       listen(key, onMessage) {
         let set = listeners.get(key)
@@ -377,11 +618,16 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
         set.add(onMessage)
         return () => listeners.delete(key)
       },
-      sendBinary(_key, _payload) {
-        return { seq: 0, timestamp: Date.now() }
+      sendBinary(key, payload) {
+        carried.push([...payload])
+        const info = nextInfo(key)
+        for (const cb of binaryListeners.get(key) ?? []) cb(payload, info)
+        return info
       },
-      listenBinary() {
-        return () => {}
+      listenBinary(key, onMessage) {
+        const set = binaryListeners.get(key) ?? new Set()
+        binaryListeners.set(key, set.add(onMessage))
+        return () => binaryListeners.delete(key)
       },
     }
   }
@@ -421,6 +667,91 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     sender.publish({ text: 'hello' })
 
     expect(received).toEqual([{ text: 'hello' }])
+  })
+
+  // A key carries both kinds: a page that is behind skips to the newest lossy publish, and gets the plain one after it.
+  it('delivers the newest lossy publish of a key, then the plain one after it, to a page that is behind', async () => {
+    configureBroadcastTransport(createMockTransport())
+    const key = 'room:tx:lossy-then-plain'
+    const { sent, seqs } = behindPage(new ServerBroadcast({ key })._end)
+
+    await Broadcast.publish(key, 'first')
+    for (let n = 1; n <= 10; n++) void Broadcast.publish(key, n, { lossy: true })
+    await Broadcast.publish(key, 'plain')
+
+    expect(sent.map((text) => parse(text))).toEqual(['first', 10, 'plain'])
+    expect(seqs).toEqual([1, 11, 12])
+  })
+
+  // One order spans a key's two kinds: a plain publish of either goes after the lossy ones of both, oldest first.
+  describe.each(['behind', 'away'] as const)('to a page that is %s', (wire) => {
+    it.each([
+      [
+        ['binary lossy', 'text', 'binary lossy'],
+        [1, 2, 3, 4],
+      ],
+      [
+        ['text lossy', 'binary', 'text lossy'],
+        [1, 2, 3, 4],
+      ],
+      [
+        ['text lossy', 'binary lossy', 'text lossy', 'binary'],
+        [1, 3, 4, 5],
+      ],
+    ])('delivers %j after a first plain publish with info.seq %j', async (published, arrives) => {
+      configureBroadcastTransport(createMockTransport())
+      const key = `room:tx:across-kinds:${wire}:${published.join()}`
+      const broadcast = new ServerBroadcast({ key })
+      const { end, peer, seqs } = behindPage(broadcast._end)
+      await Broadcast.publish(key, 'first')
+      if (wire === 'away') end._onPeerDisconnect(peer, 60_000)
+      for (const publish of published) {
+        const options = { lossy: publish.endsWith(' lossy') }
+        if (publish.startsWith('text')) void Broadcast.publish(key, publish, options)
+        else void Broadcast.publishBinary(key, new Uint8Array([9]), options)
+      }
+      void broadcast.close()
+
+      expect(wire === 'behind' ? seqs : replayedSeqs(end)).toEqual(arrives)
+    })
+  })
+
+  // What a transport carries is the caller's JSON, a lossy one behind a line feed, and the caller's bytes behind one
+  // byte, 1 where lossy; every reader gets what the caller published.
+  it("hands every reader the caller's data, and the transport the payload that says whether it is lossy", async () => {
+    const transport = createMockTransport()
+    configureBroadcastTransport(transport)
+    const key = 'room:tx:payloads'
+    const broadcast = new ServerBroadcast({ key })
+    const { sent, binary } = behindPage(broadcast._end)
+    const fromObject: unknown[] = []
+    const fromStatic: unknown[] = []
+    const fromObjectBinary: number[][] = []
+    const fromStaticBinary: number[][] = []
+    broadcast.subscribe((data) => fromObject.push(data))
+    broadcast.subscribeBinary((data) => fromObjectBinary.push([...data]))
+    Broadcast.subscribe(key, (data) => fromStatic.push(data))
+    Broadcast.subscribeBinary(key, (data) => fromStaticBinary.push([...data]))
+
+    await broadcast.publish({ n: 1 })
+    await Broadcast.publish(key, { n: 2 }, { lossy: true })
+    await broadcast.publishBinary(new Uint8Array([3, 1]))
+    await Broadcast.publishBinary(key, new Uint8Array([4]), { lossy: true })
+    await broadcast.publishBinary(new Uint8Array([5]), { lossy: true })
+    await Broadcast.publish(key, 'plain')
+    void broadcast.close()
+
+    expect(transport._carried).toEqual(['{"n":1}', '\n{"n":2}', [0, 3, 1], [1, 4], [1, 5], '"plain"'])
+    expect(fromObject).toEqual([{ n: 1 }, { n: 2 }, 'plain'])
+    expect(fromStatic).toEqual(fromObject)
+    expect(fromObjectBinary).toEqual([[3, 1], [4], [5]])
+    expect(fromStaticBinary).toEqual(fromObjectBinary)
+    // Its page is behind from the first publish on: the newest lossy one of each kind waits, for a plain one or the close.
+    expect(sent).toEqual(['{"n":1}', '\n{"n":2}', '"plain"'])
+    expect(binary).toEqual([
+      [0, 3, 1],
+      [1, 5],
+    ])
   })
 
   it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {
@@ -496,5 +827,15 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
+  })
+
+  it('does not call a subscriber that an earlier one unsubscribed during the same delivery', async () => {
+    const received: string[] = []
+    Broadcast.subscribe<string>('room:static-unsub-in-delivery', () => unsubscribe())
+    const unsubscribe = Broadcast.subscribe<string>('room:static-unsub-in-delivery', (m) => received.push(m))
+
+    await Broadcast.publish('room:static-unsub-in-delivery', 'first')
+
+    expect(received).toEqual([])
   })
 })

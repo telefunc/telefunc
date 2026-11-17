@@ -3,6 +3,7 @@ export { roomConfig } from './server/config.js'
 export type { RoomConfig } from './server/config.js'
 // `Room` is both the statics object and the instance type: one export carries both meanings.
 export { Room } from './server/lazyRoom.js'
+export type { ParticipantInfo, RoomGuards } from './server/roomStatics.js'
 export type {
   RoomInfo,
   RoomOptions,
@@ -14,6 +15,7 @@ export type {
   ReadonlyMeta,
   LocalParticipant,
   RemoteParticipant,
+  TrackDemand,
   Sender,
   SendGuard,
   PublishGuard,
@@ -22,11 +24,10 @@ export type {
   AfterSendHook,
   AfterJoinHook,
   RoomSendReceipt,
-  RoomAckReceipt,
   LeaveCause,
   ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomMessage,
   RoomSnapshotView,
-  ParticipantSnapshotView,
 } from './types.js'

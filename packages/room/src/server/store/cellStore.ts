@@ -1,18 +1,13 @@
-export { readPrefix, readPrefixAt, readOpenCells, mutateCells, eachInFlight, dropCells, deleteCells }
-export type { CellPlan, CellCommit, CellsAt }
+export { readPrefix, readPrefixAt, readOpenCells, eachInFlight, deleteCells }
+export type { CellsAt }
 
 import { getRoomPlane } from '../../backend/plane.js'
-import type { CellCount, CellCounter, CellMutation, CellsRead } from '../../backend/contract.js'
+import type { CellsRead } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { ROOM_BACKEND_CALLS_IN_FLIGHT_MAX } from '../constants.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 
-// A room's cells, read and written by the incarnation's server code: a read that throws once the incarnation closed, a
-// compare-exchange retried until it commits, and paged drops.
-
-type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
-type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
+// A room's cells, read and deleted by the incarnation's server code: a read that throws once the incarnation closed.
 
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
@@ -33,26 +28,6 @@ async function readPrefixAt(roomId: string, inc: string, prefix: string): Promis
     if (slice.over) await slice.next()
   }
   return { cells, now }
-}
-
-/** Reads `keys`, plans from them and the read's authority time, and commits only while each is still as read. */
-async function mutateCells<T>(
-  roomId: string,
-  inc: string,
-  keys: string[],
-  plan: (cells: ReadonlyMap<string, Uint8Array>, now: number) => CellPlan<T>,
-): Promise<CellCommit<T>> {
-  const plane = getRoomPlane()
-  return await retryCompareExchange(async () => {
-    const read = await plane.driver.readCells(roomId, inc, { keys })
-    if (read.kind === 'stale-incarnation') throw roomClosedError(roomId)
-    const { value, mutations, counts = [] } = plan(read.cells, read.now)
-    if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
-    const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
-    const result = await plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts })
-    if (result.kind === 'stale-incarnation') throw roomClosedError(roomId)
-    return result.kind === 'conflict' ? EXCHANGE_CONFLICT : { value, counters: result.counters }
-  })
 }
 
 async function readOpenCells(
@@ -88,27 +63,6 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   }
   await Promise.all(Array.from({ length: ROOM_BACKEND_CALLS_IN_FLIGHT_MAX }, worker))
   if (failure) throw failure.error
-}
-
-/** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn; `mark` goes with
- *  the last page. False once the incarnation is stale. */
-async function dropCells(roomId: string, inc: string, prefix: string, mark?: string): Promise<boolean> {
-  let held: string[] = []
-  const slice = new Slice()
-  for await (const page of getRoomPlane().driver.readCellPages(roomId, inc, prefix)) {
-    if (page.kind === 'stale-incarnation') return false
-    // Without a mark, each page goes as it is read; with one, a page waits for the next, so the last goes with it.
-    if (mark === undefined) {
-      if (!(await deleteCells(roomId, inc, page.cells.keys()))) return false
-    } else {
-      if (held.length > 0 && !(await deleteCells(roomId, inc, held))) return false
-      held = [...page.cells.keys()]
-    }
-    if (slice.over) await slice.next()
-  }
-  if (mark === undefined) return true
-  held.push(mark)
-  return await deleteCells(roomId, inc, held)
 }
 
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */

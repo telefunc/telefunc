@@ -4,6 +4,7 @@ import crossws from 'crossws/adapters/deno'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -29,9 +30,12 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/216,
-  // closed unmerged). Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
-  const hooks = getTelefuncChannelHooks({ terminate: (peer) => peer.close() })
+  const hooks = getTelefuncChannelHooks({
+    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/216, closed unmerged).
+    // Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
+    terminate: (peer) => peer.close(),
+    copiesOnSend: true,
+  })
   const ws = crossws({
     hooks: {
       open(peer) {
@@ -50,6 +54,7 @@ function telefunc(): TelefuncServe {
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {
+      await preloadServerProductionEntry()
       const url = new URL(request.url)
       const config = getServerConfig()
       if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {

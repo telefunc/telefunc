@@ -1,4 +1,4 @@
-export { ReplayGate, ReplayHold, LocalHolder, ANNOUNCE_KEY, heldWeight, heldTextWeight }
+export { ReplayGate, ReplayHold, LocalHolder, heldWeight, heldTextWeight }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
@@ -8,13 +8,9 @@ import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } fr
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from '../lanes/binaryWants.js'
 import type { MemberWants } from '../../shared/protocol.js'
 import type { RoomDataEnvelope } from '../protocol.js'
-import type { RoomState } from '../../shared/state.js'
-import { toggle } from '../../utils/sets.js'
+import type { RoomState } from '../../shared/RoomState.js'
 import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from '../constants.js'
 assertIsNotBrowser()
-
-// Text gate keys: a member's id, and for announcements a key no id takes.
-const ANNOUNCE_KEY = '\0announce'
 
 type HeldFrame = { from: string; bytes: number; relay: () => void }
 
@@ -94,7 +90,7 @@ class ReplayGate {
   admit(key: string, info: OrderingInfo): boolean {
     const first = !this.high.has(key)
     if (!admitInto(this.high, key, info)) return false
-    if (first && key !== ANNOUNCE_KEY) this.firstLive(key, null, info)
+    if (first) this.firstLive(key, null, info)
     return true
   }
 
@@ -124,7 +120,7 @@ class ReplayGate {
 
   /** A sender no text want covers any more starts afresh: a later subscription gets its retained message again. */
   forgetUnwantedText(wanted: (member: string) => boolean): void {
-    for (const key of this.high.keys()) if (key !== ANNOUNCE_KEY && !wanted(key)) this.high.delete(key)
+    for (const key of this.high.keys()) if (!wanted(key)) this.high.delete(key)
   }
 
   /** A lane no want covers any more starts afresh: a later subscription to it gets its retained frame again. */
@@ -236,7 +232,10 @@ type TextWantsChange = { all: boolean; members: Map<string, boolean> }
 /** A consumer of a room's lanes that retained frames replay into: a client stub, or this instance's own listeners. */
 interface LaneHolder {
   readonly binaryWants: BinaryWants
-  readonly wantsAnnounce: boolean
+  /** The participants it holds, who are the people at its page. */
+  heldMembers(): Iterable<string>
+  /** Whether `member` is one of `heldMembers()`. */
+  holds(member: string): boolean
   /** The text the holder needs ingested; its relay filters further. */
   textDemand(): MemberWants
   wantsTextFrom(member: string): boolean
@@ -253,41 +252,53 @@ interface LaneHolder {
 
 type LocalHolderOptions = {
   state: RoomState
-  /** The local members joined with `selfDelivery: false`, whose messages these listeners don't get. */
-  suppressed: ReadonlySet<string>
+  /** The participants that joined through this handle. */
+  participants: ReadonlyMap<string, { readonly _heldByPage: boolean; readonly selfDelivery: boolean }>
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
  *  differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
   private readonly state: RoomState
-  private readonly suppressed: ReadonlySet<string>
+  /** The members whose own messages its page doesn't get back (`PageIndex`). */
+  private suppressed: ReadonlySet<string> = new Set()
+  private readonly participants: LocalHolderOptions['participants']
   private readonly replay = new ReplayGate()
-  private textAll = false
-  private readonly textMembers = new Set<string>()
   readonly binaryWants: BinaryWants = emptyBinaryWants()
 
-  constructor({ state, suppressed }: LocalHolderOptions) {
+  constructor({ state, participants }: LocalHolderOptions) {
     this.state = state
+    this.participants = participants
+  }
+
+  /** The server-side room is its own page: the participants that joined through it and no page holds are at it. */
+  *heldMembers(): Generator<string> {
+    for (const [id, participant] of this.participants) if (!participant._heldByPage) yield id
+  }
+
+  holds(member: string): boolean {
+    return this.participants.get(member)?._heldByPage === false
+  }
+
+  /** Every participant that joined through it with `selfDelivery: false`, a page holding it or not: its listeners never
+   *  get that participant's messages. */
+  *selfSuppressed(): Generator<string> {
+    for (const [id, participant] of this.participants) if (!participant.selfDelivery) yield id
+  }
+
+  suppresses(member: string): boolean {
+    return this.participants.get(member)?.selfDelivery === false
+  }
+
+  atPage(suppressed: ReadonlySet<string>): void {
     this.suppressed = suppressed
   }
 
-  /** Re-derives the listeners' room-wide text want, and the own want of `member` when its listeners changed; `null`
-   *  when neither changed. */
-  refreshText(member: string | null): TextWantsChange | null {
-    const text = this.state.textWants()
-    const before = new Map<string, boolean>()
-    if (member !== null) {
-      const wantsText = text.members.has(member)
-      if (wantsText !== this.textMembers.has(member)) {
-        before.set(member, !wantsText)
-        toggle(this.textMembers, member, wantsText)
-      }
-    }
-    const change = text.all !== this.textAll || before.size > 0 ? { all: this.textAll, members: before } : null
-    this.textAll = text.all
-    if (change !== null) this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
-    return change
+  /** Its listeners' room-wide text want (`member` null) or `member`'s own turned `on` or off; returns the wants before. */
+  textChanged(member: string | null, on: boolean): TextWantsChange {
+    this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
+    if (member === null) return { all: !on, members: new Map() }
+    return { all: this.state.textWants().all, members: new Map([[member, !on]]) }
   }
 
   applyBinary(change: BinaryWantChange): boolean {
@@ -296,12 +307,8 @@ class LocalHolder implements LaneHolder {
     return true
   }
 
-  get wantsAnnounce(): boolean {
-    return this.state.wantsAnnounce
-  }
-
   textDemand(): MemberWants {
-    return { all: this.textAll, members: this.textMembers }
+    return this.state.textWants()
   }
 
   suppressedMembers(): ReadonlySet<string> {
@@ -309,7 +316,7 @@ class LocalHolder implements LaneHolder {
   }
 
   wantsTextFrom(member: string): boolean {
-    return !this.suppressed.has(member) && (this.textAll || this.textMembers.has(member))
+    return !this.suppressed.has(member) && this.state.wantsTextFrom(member)
   }
 
   wantsBinary(member: string, track: string): boolean {
@@ -324,12 +331,6 @@ class LocalHolder implements LaneHolder {
       if (replay.held(event.from, null, heldTextWeight(serialized), relay)) return
     }
     if (replay.admit(event.from, info)) this.applyTextMessage(event, info)
-  }
-
-  relayAnnouncement(data: unknown, info: OrderingInfo): void {
-    if (this.state.wantsAnnounce && this.replay.admit(ANNOUNCE_KEY, info)) {
-      this.state.applyAnnounce(data, this.publishInfo(info))
-    }
   }
 
   relayBinary(frame: BinaryFrame, info: OrderingInfo): void {
@@ -369,6 +370,6 @@ class LocalHolder implements LaneHolder {
   }
 
   private publishInfo(info: OrderingInfo): ChannelPublishInfo {
-    return { key: this.state.roomId, seq: info.seq, timestamp: info.timestamp }
+    return { key: this.state.model.roomId, seq: info.seq, timestamp: info.timestamp }
   }
 }

@@ -15,7 +15,7 @@ export type {
 }
 
 import type { BroadcastKind } from '../wire/payloads.js'
-import type { OrderingInfo } from '../wire/orderingFrame.js'
+import type { OrderingInfo } from './driverOrdering.js'
 
 /** A Broadcast route. The text and binary routes of one key share one order: one `seq` counts both. */
 type BroadcastRoute<Kind extends BroadcastKind = BroadcastKind> = { key: string; kind: Kind }

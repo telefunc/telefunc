@@ -69,6 +69,5 @@ class RedisBackend implements BroadcastDriver {
 function broadcastWaitRule(prefix: string, { key, kind }: BroadcastRoute): WaitRule {
   const text = broadcastChannel(prefix, { key, kind: 'text' })
   const binary = broadcastChannel(prefix, { key, kind: 'binary' })
-  const bufferLimit = kind === 'binary' ? 'bufferLimitBinary' : 'bufferLimit'
-  return { queue: text, channels: [text, binary], budget: kind === 'text' ? text : binary, bufferLimit }
+  return { queue: text, channels: [text, binary], budget: kind === 'text' ? text : binary }
 }

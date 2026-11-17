@@ -35,7 +35,7 @@ export type {
   RoomSubscriptionSource,
 }
 
-import type { reportDeliveryLost } from '../server/config.js'
+import type { reportLaneLost } from '../server/config.js'
 import type { BackendReceiver, DriverAttempt, OrderingInfo, PlaneKey, SubscriptionDriver } from 'telefunc/__internal'
 import type { recordOperation } from './operation.js'
 
@@ -59,7 +59,7 @@ type RoomPlaneKit = {
   DIRECTORY_PAGE_SIZE: number
   recordOperation: typeof recordOperation
   OPERATION_COMMIT_LANE: LaneId
-  reportDeliveryLost: typeof reportDeliveryLost
+  reportLaneLost: typeof reportLaneLost
 }
 
 /** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per

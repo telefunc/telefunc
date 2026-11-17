@@ -1,9 +1,9 @@
-export { assertRoomTimeout, roomConfig, getRoomConfig, reportDeliveryLost }
+export { assertRoomTimeout, roomConfig, getRoomConfig, reportDeliveryLost, reportLaneLost }
 export type { RoomConfig }
 
 import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
 import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
-import { handleCallbackBug } from 'telefunc/__internal'
+import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { assertUsage } from '../utils/assert.js'
 
@@ -22,13 +22,6 @@ type RoomConfig = {
    * @default 20000
    */
   departureTimeout?: number
-  /**
-   * Called when a message, a join or a leave couldn't be handed on to a server holding the room. A join or a leave
-   * still took effect, as the servers read it back, and a message isn't sent again.
-   *
-   * @default ({ roomId, reason }) => console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
-   */
-  onDeliveryLost?: (lost: { roomId: string; reason: string }) => void
 }
 
 const globalObject = getGlobalObject<{ config: RoomConfig }>('server/config.ts', () => ({ config: {} }))
@@ -40,11 +33,6 @@ const roomConfig: RoomConfig = new Proxy({} as RoomConfig, {
   },
   set(_target, prop, value) {
     const configPath = `roomConfig.${String(prop)}`
-    if (prop === 'onDeliveryLost') {
-      assertUsage(typeof value === 'function', `\`${configPath}\` should be a function`)
-      globalObject.config.onDeliveryLost = value
-      return true
-    }
     assertUsage(prop === 'emptyTimeout' || prop === 'departureTimeout', `Unknown ${configPath}`)
     assertRoomTimeout(value, configPath)
     globalObject.config[prop] = value
@@ -52,26 +40,22 @@ const roomConfig: RoomConfig = new Proxy({} as RoomConfig, {
   },
 })
 
-function getRoomConfig(): Required<Pick<RoomConfig, 'emptyTimeout' | 'departureTimeout'>> {
+function getRoomConfig(): Required<RoomConfig> {
   return {
     emptyTimeout: globalObject.config.emptyTimeout ?? ROOM_EMPTY_TIMEOUT_MS,
     departureTimeout: globalObject.config.departureTimeout ?? ROOM_DEPARTURE_TIMEOUT_MS,
   }
 }
 
-/** Tells the app of a delivery Room lost: delivery is at-most-once, so nothing else hears of it. A throw in its callback
- *  is the app's bug, and doesn't fail the commit. */
+/** Logs a message, a join or a leave Room couldn't hand on to a server holding the room: delivery is at-most-once, so
+ *  nothing else hears of it. A join or a leave still took effect, as the servers read it back. */
 function reportDeliveryLost(roomId: string, reason: string): void {
-  const { onDeliveryLost = logDeliveryLost } = globalObject.config
-  try {
-    onDeliveryLost({ roomId, reason })
-  } catch (err) {
-    handleCallbackBug(err)
-  }
+  console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
 }
 
-function logDeliveryLost({ roomId, reason }: { roomId: string; reason: string }): void {
-  console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+/** Tells the app of what a lane lost. Demand is what the servers tell each other, and its gaps are asked for again. */
+function reportLaneLost(roomId: string, lane: RoomSubscriptionSource['lane'], reason: string): void {
+  if (lane.kind !== 'demand') reportDeliveryLost(roomId, reason)
 }
 
 /** Milliseconds a timer can wait, or `Infinity` for never. */

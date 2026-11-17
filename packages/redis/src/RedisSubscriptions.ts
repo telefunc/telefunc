@@ -2,10 +2,11 @@ export { RedisSubscriptions, neverReachedSubscription }
 
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
-import { DriverAttempt, createDeferred, decodeOrderingFrame, type Deferred } from 'telefunc/__internal'
+import { DriverAttempt, createDeferred, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, type SubscriberSocket } from './ioredis.js'
+import { decodeOrderingFrame } from './orderingFrame.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionsOptions = { connection: RedisConnection }
@@ -41,7 +42,15 @@ type SocketState =
   | { phase: 'idle' }
   | { phase: 'waiting'; timer: ReturnType<typeof setTimeout> }
   | { phase: 'connecting'; id: number; socket: SubscriberSocket | null }
-  | { phase: 'connected'; id: number; socket: SubscriberSocket; subscribed: Set<string> }
+  | {
+      phase: 'connected'
+      id: number
+      socket: SubscriberSocket
+      subscribed: Set<string>
+      pings: ReturnType<typeof setInterval>
+      /** A ping is on its way, unanswered. */
+      awaitingPong: boolean
+    }
 
 type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 
@@ -69,6 +78,8 @@ const RECONNECT_DELAY_MAX_MS = 2_000
 // Redis Cluster forwards a channel's frames from the old and the new slot owner over separate bus links during a
 // reshard or a failover, so the old owner's last frame can arrive after the new owner's first.
 const REORDER_WAIT_MS = 1_000
+// A partition closes no socket, and pub/sub is silent while nothing is published, so only a ping can tell.
+const SUBSCRIBER_PING_MS = 10_000
 
 /**
  * Redis's only backend-specific subscription edge: one subscriber connection, its channels refcounted across
@@ -93,6 +104,10 @@ class RedisSubscriptions {
   private reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private outageReported = false
+  /** The next try of start reads that failed, the wait before it, and whether this run of failures was reported. */
+  private readRetry: ReturnType<typeof setTimeout> | null = null
+  private readRetryDelay = RECONNECT_DELAY_MIN_MS
+  private readFailureReported = false
 
   constructor({ connection }: RedisSubscriptionsOptions) {
     this.connection = connection
@@ -205,9 +220,29 @@ class RedisSubscriptions {
       return this.lost(id, error)
     }
     if (!this.isCurrent(id)) return
-    this.socket = { phase: 'connected', id, socket, subscribed: new Set() }
+    const connected: ConnectedSocket = {
+      phase: 'connected',
+      id,
+      socket,
+      subscribed: new Set(),
+      pings: unrefTimer(setInterval(() => void this.ping(connected), SUBSCRIBER_PING_MS)),
+      awaitingPong: false,
+    }
+    this.socket = connected
     this.changedChannels = new Set(this.byChannel.keys())
     this.syncChannels()
+  }
+
+  /** A ping still unanswered at the next one means the connection went silent. */
+  private async ping(connection: ConnectedSocket): Promise<void> {
+    if (connection.awaitingPong) return this.lost(connection.id, new Error('Redis subscriber connection went silent'))
+    connection.awaitingPong = true
+    try {
+      await connection.socket.ping()
+    } catch {
+      // A refusal is an answer, and a closed connection reports itself through `close`.
+    }
+    connection.awaitingPong = false
   }
 
   private lost(id: number, error: unknown): void {
@@ -223,8 +258,7 @@ class RedisSubscriptions {
       this.outageReported = true
       console.error(error)
     }
-    const timer = setTimeout(() => void this.connect(), this.reconnectDelay)
-    timer.unref()
+    const timer = unrefTimer(setTimeout(() => void this.connect(), this.reconnectDelay))
     this.socket = { phase: 'waiting', timer }
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
@@ -234,6 +268,9 @@ class RedisSubscriptions {
     this.socket = { phase: 'idle' }
     if (connection.phase === 'waiting') clearTimeout(connection.timer)
     else if (connection.phase !== 'idle') connection.socket?.disconnect()
+    if (connection.phase === 'connected') clearInterval(connection.pings)
+    if (this.readRetry !== null) clearTimeout(this.readRetry)
+    this.readRetry = null
   }
 
   private isCurrent(id: number): boolean {
@@ -283,7 +320,7 @@ class RedisSubscriptions {
       missing.length > 0 && this.subscribeMissing(connection, missing),
     ])
     // After the SUBSCRIBE's acknowledgment: a lane's start read before it would miss a publish between the two.
-    if (this.isCurrent(id)) await this.confirmCovered(id, subscribed)
+    if (this.isCurrent(id)) await this.confirmCovered(connection)
   }
 
   /** Redis refuses a whole SUBSCRIBE over one channel it denies, leaving the connection as it was: each channel then
@@ -306,35 +343,58 @@ class RedisSubscriptions {
   }
 
   /** Confirms the attempts `subscribed` covers. An attempt made during a SUBSCRIBE waits for the sync it queued. */
-  private async confirmCovered(id: ConnectedSocket['id'], subscribed: ConnectedSocket['subscribed']): Promise<void> {
+  private async confirmCovered(connection: ConnectedSocket): Promise<void> {
     const covered: RedisAttempt[] = []
     for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
         this.unconfirmed.delete(attempt)
-      } else if (attempt.channels.every((channel) => subscribed.has(channel))) {
+      } else if (attempt.channels.every((channel) => connection.subscribed.has(channel))) {
         this.unconfirmed.delete(attempt)
         covered.push(attempt)
       }
     }
-    await Promise.all(covered.map((attempt) => this.confirm(attempt, id)))
+    await Promise.all(covered.map((attempt) => this.confirm(attempt, connection)))
   }
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
-  private async confirm(attempt: RedisAttempt, id: number): Promise<void> {
+  private async confirm(attempt: RedisAttempt, { id, socket }: ConnectedSocket): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
       starts = await attempt.readStarts()
+      // A resume delivers what the starts count that reached this connection. A frame published just before the read can
+      // still be on its way, and the acknowledgment of a repeated SUBSCRIBE comes after it.
+      if (!attempt.establishing) await socket.subscribe(...attempt.channels)
     } catch (error) {
-      // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
-      if (this.isCurrent(id)) attempt.fail(error)
-      return
+      if (!this.isCurrent(id)) return
+      // A refusal stands until an operator changes Redis's ACL. Any other failure (a command-connection error) is tried
+      // again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber connection stays.
+      if (isRefusal(error)) return attempt.fail(error)
+      return this.retryRead(attempt, error)
     }
     if (!this.isCurrent(id)) return
+    this.readRetryDelay = RECONNECT_DELAY_MIN_MS
+    this.readFailureReported = false
     if (starts !== null) return attempt.markReady(starts)
     // Closed on purpose since the caller read it open; gone after a loss, it may have gone with Redis's data.
     if (attempt.establishing) return attempt.end()
     attempt.fail(new Error(`subscribeLane: the incarnation of '${attempt.channel}' is not open`))
+  }
+
+  private retryRead(attempt: RedisAttempt, error: unknown): void {
+    this.unconfirmed.add(attempt)
+    if (this.readRetry !== null) return
+    if (!this.readFailureReported) {
+      this.readFailureReported = true
+      console.error(error)
+    }
+    this.readRetry = unrefTimer(
+      setTimeout(() => {
+        this.readRetry = null
+        this.syncChannels()
+      }, this.readRetryDelay),
+    )
+    this.readRetryDelay = Math.min(this.readRetryDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
   private attempts(): Set<RedisAttempt> {
@@ -423,23 +483,39 @@ class RedisAttempt extends DriverAttempt {
     return state === 'establishing' || state === 'lost'
   }
 
-  /** A lane missing from `starts` has no commit yet. */
+  /** A lane missing from `starts` has no commit yet. A first establish promises nothing from before it is ready; on a
+   *  resume, what reached the new subscription while the starts were read goes out, and only the rest was missed. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
-    const missed = this.state() === 'lost' ? this.missedBefore(starts) : 0
+    const resuming = this.state() === 'lost'
+    const early = this.early.map((message) => this.decodeLaneFrame(message))
+    this.early = []
+    const missed = resuming ? this.missedBefore(starts) : 0
+    const arrived = resuming && missed !== null ? this.arrivedOfMissed(early, starts) : []
     this.orders = new Map()
     for (const [lane, start] of starts) {
       this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, releaseTimer: null })
     }
-    const early = this.early
-    this.early = []
     this.transition('ready')
-    if (missed !== 0) this.reportMissed(missed)
-    for (const message of early) {
+    const neverArrived = missed === null ? null : missed - arrived.length
+    if (neverArrived !== 0) this.reportMissed(neverArrived)
+    for (const { payload, info, token } of arrived) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
-      this.order(this.decodeLaneFrame(message))
+      this.deliver(payload, info, token)
     }
+    for (const frame of early) {
+      if (this.state() !== 'ready') return
+      this.order(frame)
+    }
+  }
+
+  /** The frames held that its lanes' starts count as passed by, in place order. */
+  private arrivedOfMissed(early: LaneFrame[], starts: Map<string, OrderingInfo>): LaneFrame[] {
+    const arrived = early.filter(({ lane, place }) => {
+      return place > (this.orders.get(lane)?.last ?? 0) && place <= (starts.get(lane)?.seq ?? 0)
+    })
+    return arrived.sort((a, b) => a.place - b.place)
   }
 
   /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
@@ -457,7 +533,8 @@ class RedisAttempt extends DriverAttempt {
 
   fail(error: unknown): void {
     if (this.state() === 'closed') return
-    this.firstReadiness.reject(error)
+    // Only a refusal fails the sends waiting on it: a closed incarnation says nothing of them, and `closed` ends their wait.
+    if (isRefusal(error)) this.firstReadiness.reject(error)
     this.close(error)
     this.transition('closed', error)
   }
@@ -542,8 +619,7 @@ class RedisAttempt extends DriverAttempt {
     order.parked ??= new Map()
     order.parked.set(predecessor, frame)
     if (order.releaseTimer !== null) return
-    order.releaseTimer = setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS)
-    order.releaseTimer.unref()
+    order.releaseTimer = unrefTimer(setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS))
   }
 
   /** What the lane waited for isn't coming. `lost` says it may have missed messages, which is what makes Room catch up
