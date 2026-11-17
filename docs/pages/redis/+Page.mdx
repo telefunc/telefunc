@@ -43,6 +43,12 @@ installRedis(redis)
 
 Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
 
+## Errors
+
+While Redis is unreachable, a new subscription waits, and so does its `ready`. If Redis refuses the subscription, or ioredis gives up on its `SUBSCRIBE` command (with ioredis's default `maxRetriesPerRequest` of 20: after about 10 s where each connection is refused at once), the subscription fails: a <Link href="/channel#broadcast">`BroadcastChannel`</Link> closes with the error, and the `ready` of a `Broadcast.subscribe()` rejects with it.
+
+> After a `Broadcast.subscribe()` fails, the server's `publish()` calls to that key fail with the same error until you call the function that unsubscribes. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
+
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.

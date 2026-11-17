@@ -475,11 +475,9 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-> The page receives what is published after it calls `subscribe()`, and nothing published before. Return the earlier messages along with the broadcast, as in `return { chat, history }`. A telefunction the page calls after `subscribe()` runs with the subscription in effect, so the page receives what that telefunction publishes.
+> The page receives what is published once its subscription is in effect. Return the earlier messages along with the broadcast, as in `return { chat, history }`. A telefunction the page calls after `subscribe()` runs once the subscription is in effect, so the page receives what that telefunction publishes. If the subscription fails first, the broadcast closes with the error before the telefunction runs.
 
-> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike. `ready` resolves once the subscription is in effect on every server, so that a publish from any server reaches it, or once you unsubscribe. It rejects if the broadcast ends first. For example, `await unsubscribe.ready` before you fetch a snapshot from a plain HTTP route, so that nothing published after the snapshot is missed.
-
-> While Redis is unreachable, `ready` waits. If Redis refuses the subscription, or ioredis stops retrying it, the broadcast closes with that error. With ioredis's default options, it stops after 20 failed reconnection attempts: about 10 s where each connection is refused at once. After a `Broadcast.subscribe()` fails this way, the server's `publish()` calls to that key fail with the same error until you call the function that unsubscribes. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
+> `subscribe()` returns a function that unsubscribes, with a `ready` promise, on the page and on the server alike. `ready` resolves once the subscription is in effect, so that a publish from any server reaches it, or once you unsubscribe. It rejects if the broadcast closes first, or has closed already. For example, `await unsubscribe.ready` before you fetch a snapshot from a plain HTTP route, so that nothing published after the snapshot is missed. On Cloudflare, a publish from another location can still miss it for a while: see <Link href="/stream/cloudflare#delivery-guarantees">Delivery guarantees</Link>.
 
 ### Receive broadcast messages in a loop
 

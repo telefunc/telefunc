@@ -622,9 +622,9 @@ type BroadcastChannel<T = unknown> = {
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
   /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
-   *  publishes to the key: while the broadcast backend is unreachable, that waits, and where the backend gives it up,
-   *  the broadcast ends with its error. A page gets what is published from its `subscribe()` on, and every telefunction
-   *  the page calls after `subscribe()` runs with the subscription in effect.
+   *  publishes to the key (`ready`): while the broadcast backend is unreachable, that waits, and where the backend gives
+   *  it up, the broadcast ends with its error. A telefunction the page calls after `subscribe()` runs once the
+   *  subscription is in effect, or once the broadcast ended.
    *
    *  https://telefunc.com/channel#chat-example */
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe

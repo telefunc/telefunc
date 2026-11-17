@@ -373,7 +373,7 @@ async function runTelefunc_(
     }
   }
 
-  // The subscriptions the page made before this call are in effect before its telefunction runs.
+  // Each subscription the page made before this call is in effect, or its broadcast ended, before the telefunction runs.
   if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
 
   {
