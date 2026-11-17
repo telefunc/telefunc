@@ -1,23 +1,22 @@
 export { testRedisReconnect }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, REDIS_TOOK_REFUSED_KEY } from '../../e2e-utils'
 
 function testRedisReconnect() {
   test("broadcast: while Redis refuses one key's subscription, a publish on another key from the same server reaches its subscribers", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-beside-refused')
+    let refuses = true
     await autoRetry(
       async () => {
         const result = await getResult('#redis-beside-refused-result')
-        if (result.refusesChannels === false) {
-          console.log("Redis here doesn't refuse a subscription by its channel permissions: nothing to check")
-          return
-        }
-        expect(result).deep.equal({ refusedReady: 'rejected', published: 'sent', received: ['beside'] })
+        refuses = result.refusesChannels !== false
+        if (refuses) expect(result).deep.equal({ refusedReady: 'rejected', published: 'sent', received: ['beside'] })
       },
       { timeout: 20_000 },
     )
+    if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
   })
 
   test("broadcast: a failed Redis subscription rejects the publishes of its key and kind, not the key's other kind, and a new subscription restores delivery", async () => {

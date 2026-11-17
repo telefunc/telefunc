@@ -14,6 +14,7 @@ import {
   serverHeapUsed,
   serverRuntime,
   expectServerError,
+  REDIS_TOOK_REFUSED_KEY,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
 
@@ -525,8 +526,8 @@ function testSubscribeOrder(inDocker = false) {
         },
         { timeout: 20_000 },
       )
-      if (refuses) expectServerError('NOPERM', inDocker)
-      else console.log("Redis here doesn't refuse a subscription by its channel permissions: nothing to check")
+      if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
+      expectServerError('NOPERM', inDocker)
     })
   }
 
