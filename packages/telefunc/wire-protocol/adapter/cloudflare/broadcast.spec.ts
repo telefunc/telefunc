@@ -751,6 +751,27 @@ describe('cloudflare broadcast routing', () => {
       _resetBroadcastAdapterForTesting(previousTransport)
     })
 
+    it("once the refresh writes the presence, a later subscriber's `ready` resolves, and the refused one's stays rejected", async () => {
+      vi.useFakeTimers()
+      const previousTransport = getBroadcastAdapter()
+      try {
+        const { state, inObject } = refusing()
+        const refused = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await expect(refused.ready).rejects.toThrow('429')
+        state.refuse = false
+        // Telefunc's next try at the presence, every 30 s.
+        await vi.advanceTimersByTimeAsync(30_000)
+        const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await expect(later.ready).resolves.toBe(undefined)
+        await expect(refused.ready).rejects.toThrow('429')
+        refused()
+        later()
+      } finally {
+        _resetBroadcastAdapterForTesting(previousTransport)
+        vi.useRealTimers()
+      }
+    })
+
     it("a broadcast that subscribes closes with KV's error", async () => {
       const previousTransport = getBroadcastAdapter()
       const { inObject } = refusing()

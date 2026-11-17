@@ -171,7 +171,7 @@ class MemberBucketState {
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
   /** Each owner's presence KV hasn't written, by owner: being written, its subscribers are in effect once it is; refused,
-   *  they never are, nor any it gets until it has none left. */
+   *  they never are, nor any it gets until a refresh writes it or it has none left. */
   readonly unwritten = new Map<string, Readiness>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
@@ -360,8 +360,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return `tfps:${encodeURIComponent(key)}:`
   }
 
-  private async putPresence(key: string, owner: string): Promise<void> {
-    await this.warnRefusedPresence(key, this.writePresence(key, owner))
+  /** Writes `owner`'s presence again; once KV takes it, a refusal before is no longer its subscribers' outcome. */
+  private async refreshPresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
+    const wrote = await this.warnRefusedPresence(key, this.writePresence(key, owner))
+    if (wrote && memberState.unwritten.get(owner)?.failure) memberState.unwritten.delete(owner)
   }
 
   private writePresence(key: string, owner: string): Promise<void> {
@@ -641,14 +643,14 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     memberState.unwritten.set(owner, unwritten)
     const wrote = await this.warnRefusedPresence(key, written)
     memberState.setupsInFlight--
-    // A refused write stays its owner's outcome; the refresh below still tries again.
+    // A refused write stays its owner's outcome until the refresh below writes it.
     if (wrote && memberState.unwritten.get(owner) === unwritten) memberState.unwritten.delete(owner)
     // Its release may have deleted the presence before the put above wrote it.
     if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)
     if (memberState.setupsInFlight > 0) return
 
     memberState.refreshTimer ??= setInterval(() => {
-      for (const current of memberState.owners.keys()) void this.putPresence(key, current)
+      for (const current of memberState.owners.keys()) void this.refreshPresence(key, memberState, current)
     }, PRESENCE_REFRESH_INTERVAL_MS)
 
     await memberState.pendingPublishes.flush()
