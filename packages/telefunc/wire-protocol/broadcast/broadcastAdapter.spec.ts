@@ -329,6 +329,84 @@ describe('a subscription the adapter refused', () => {
   })
 })
 
+// The same rule as a page's `ready`: it resolves once the listener is in effect or removed, and rejects where the
+// broadcast ends first. The backend here confirms no subscription until each test is over.
+describe("a server subscriber's `ready` while its backend hasn't confirmed the subscription", () => {
+  const pending = new Promise<void>(() => {})
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const listen = () => () => {}
+  const unconfirmed = () =>
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({
+        send: sent,
+        sendBinary: sent,
+        listen,
+        listenBinary: listen,
+        listening: () => pending,
+      }),
+    )
+  const settled = async (ready: Promise<void>) => {
+    let state = 'pending'
+    ready.then(
+      () => (state = 'resolved'),
+      () => (state = 'rejected'),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return state
+  }
+  type Subscribe = (signal: AbortSignal) => { remove: () => void; ready: Promise<void>; end?: () => void }
+  const instance =
+    (binary: boolean): Subscribe =>
+    (signal) => {
+      const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+      const remove = binary
+        ? broadcast.subscribeBinary(() => {}, { signal })
+        : broadcast.subscribe(() => {}, { signal })
+      return { remove, ready: remove.ready, end: () => broadcast.abort() }
+    }
+  const statically =
+    (binary: boolean): Subscribe =>
+    (signal) => {
+      const key = crypto.randomUUID()
+      const remove = binary
+        ? Broadcast.subscribeBinary(key, () => {}, { signal })
+        : Broadcast.subscribe(key, () => {}, { signal })
+      return { remove, ready: remove.ready }
+    }
+  const SUBSCRIBERS: Record<string, Subscribe> = {
+    'subscribe()': instance(false),
+    'subscribeBinary()': instance(true),
+    'Broadcast.subscribe()': statically(false),
+    'Broadcast.subscribeBinary()': statically(true),
+  }
+  for (const [name, subscribe] of Object.entries(SUBSCRIBERS)) {
+    it(`${name}: resolves once removed by its remover`, async () => {
+      unconfirmed()
+      const subscriber = subscribe(new AbortController().signal)
+      subscriber.remove()
+      expect(await settled(subscriber.ready)).toBe('resolved')
+      subscriber.end?.()
+    })
+    it(`${name}: resolves once removed by its signal`, async () => {
+      unconfirmed()
+      const controller = new AbortController()
+      const subscriber = subscribe(controller.signal)
+      controller.abort()
+      expect(await settled(subscriber.ready)).toBe('resolved')
+      subscriber.end?.()
+    })
+  }
+  const ENDING: Record<string, Subscribe> = { 'subscribe()': instance(false), 'subscribeBinary()': instance(true) }
+  for (const [name, subscribe] of Object.entries(ENDING)) {
+    it(`${name}: rejects once its broadcast ends first`, async () => {
+      unconfirmed()
+      const subscriber = subscribe(new AbortController().signal)
+      subscriber.end?.()
+      expect(await settled(subscriber.ready)).toBe('rejected')
+    })
+  }
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

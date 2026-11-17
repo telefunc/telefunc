@@ -67,8 +67,9 @@ type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => 
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 /** Removes the listener. `ready` resolves once the listener is in effect, at once where nothing has to reach the other
- *  side first, or once the listener is removed; it rejects where it never will be in effect, as when its channel ends
- *  first. */
+ *  side first, or once the listener is removed; it rejects where it never will be in effect: its channel ended first,
+ *  or, without a channel (`Broadcast.subscribe()`), the broadcast backend gave the subscription up. So on the page and on
+ *  the server alike. */
 type Unsubscribe = (() => void) & { readonly ready: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number

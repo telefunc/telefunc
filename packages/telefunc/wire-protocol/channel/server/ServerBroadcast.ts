@@ -36,7 +36,8 @@ import {
 } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ChannelOverflowError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
@@ -105,6 +106,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
    *  those its page still wants, ahead of the close where the broadcast closed meanwhile, as a plain channel does. */
   private beforeAttach: PublishBody[] = []
+  /** Rejects as it ends, ahead of clearing its subscribers: the `ready` of each of them that waits rejects. */
+  private ending: Deferred<void> | null = null
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -137,14 +140,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** In effect once its backend delivers what any server publishes to the key. */
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
-    if (options.signal?.aborted) return withReady(() => {})
-    this.subscribeBroadcast()
-    const remove = this.broadcastListeners.add(callback, {
-      ...options,
-      onRemove: () => this.unsubscribeUnusedBroadcasts(),
-    })
-    this.unsubscribeUnusedBroadcasts()
-    return withReady(remove, this.broadcastAdapter().listening?.(this.key, false))
+    return this.addSubscriber(this.broadcastListeners, false, callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -154,14 +150,32 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    return this.addSubscriber(this.broadcastBinaryListeners, true, callback, options)
+  }
+
+  /** Its `ready` settles as a page's does: once the backend delivers to it what any server publishes to the key, or once
+   *  it is removed, and it rejects where the broadcast ends first. One added to an ended broadcast never takes effect. */
+  private addSubscriber<L>(
+    listeners: Listeners<L>,
+    binary: boolean,
+    callback: L,
+    options: { signal?: AbortSignal },
+  ): Unsubscribe {
     if (options.signal?.aborted) return withReady(() => {})
-    this.subscribeBinaryBroadcast()
-    const remove = this.broadcastBinaryListeners.add(callback, {
+    if (this._phase === 'ended') return withReady(() => {}, Promise.reject(this.endError()))
+    if (binary) this.subscribeBinaryBroadcast()
+    else this.subscribeBroadcast()
+    const removed = createDeferred()
+    const remove = listeners.add(callback, {
       ...options,
-      onRemove: () => this.unsubscribeUnusedBroadcasts(),
+      onRemove: () => {
+        removed.resolve()
+        this.unsubscribeUnusedBroadcasts()
+      },
     })
     this.unsubscribeUnusedBroadcasts()
-    return withReady(remove, this.broadcastAdapter().listening?.(this.key, true))
+    const listening = this.broadcastAdapter().listening?.(this.key, binary)
+    return withReady(remove, Promise.race([this.ended().promise, listening, removed.promise]))
   }
 
   // --- Transport callbacks ---
@@ -457,11 +471,23 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.unsubBinaryBroadcast?.()
     this.unsubBinaryBroadcast = null
     super.shutdown(err, options)
+    this.ending?.reject(this.endError())
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
   }
 
   // --- Internal broadcast helpers ---
+
+  private ended(): Deferred<void> {
+    if (this.ending) return this.ending
+    this.ending = createDeferred()
+    this.ending.promise.catch(() => {})
+    return this.ending
+  }
+
+  private endError(): Error {
+    return this.lifecycle.closeError ?? new ChannelClosedError()
+  }
 
   /** The installed adapter, which the channel keeps from its first use. */
   private broadcastAdapter(): BroadcastAdapter {
@@ -553,11 +579,10 @@ type BroadcastChannel<T = unknown> = {
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  /** Receive `(data, info)` for each publish to the key. Returns an unsubscribe function, whose `ready` resolves once
-   *  the subscription gets what any server publishes to the key: it waits while the broadcast backend is unreachable,
-   *  and rejects when the broadcast ends first, as it does where the backend gives the subscription up. A page gets what
-   *  is published from its `subscribe()` on, and every telefunction the page calls after `subscribe()` runs with the
-   *  subscription in effect.
+  /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
+   *  publishes to the key: while the broadcast backend is unreachable, that waits, and where the backend gives it up,
+   *  the broadcast ends with its error. A page gets what is published from its `subscribe()` on, and every telefunction
+   *  the page calls after `subscribe()` runs with the subscription in effect.
    *
    *  https://telefunc.com/channel#chat-example */
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
@@ -635,8 +660,7 @@ const Broadcast = {
     const serialized = stringifyMessage(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
-  /** Receive `(data, info)` for each publish to `key`. Returns an unsubscribe function, whose `ready` resolves once the
-   *  subscription gets what any server publishes to `key`. */
+  /** Receive `(data, info)` for each publish to `key`, in effect once it gets what any server publishes to `key`. */
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return withReady(() => {})
@@ -644,7 +668,7 @@ const Broadcast = {
       const data = parse(serialized) as ChannelData<U>
       callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
-    return withReady(unsubscribeOnAbort(unsubscribe, options?.signal), adapter.listening?.(key, false))
+    return removedOnAbort(unsubscribe, options?.signal, adapter.listening?.(key, false))
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
@@ -658,7 +682,7 @@ const Broadcast = {
       // A copy of its own, as a `BroadcastChannel` listener gets.
       callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
     })
-    return withReady(unsubscribeOnAbort(unsubscribe, options?.signal), adapter.listening?.(key, true))
+    return removedOnAbort(unsubscribe, options?.signal, adapter.listening?.(key, true))
   },
 }
 
@@ -680,16 +704,23 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
 }
 
-/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs. */
-function unsubscribeOnAbort(unsubscribe: () => void, signal: AbortSignal | undefined): () => void {
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
+ *  `ready` resolves once the subscription is in effect (`listening`) or removed. */
+function removedOnAbort(
+  unsubscribe: () => void,
+  signal: AbortSignal | undefined,
+  listening: Promise<void> | undefined,
+): Unsubscribe {
+  const removed = createDeferred()
   let current: (() => void) | undefined = unsubscribe
   const remove = () => {
     const pending = current
     current = undefined
     signal?.removeEventListener('abort', remove)
     pending?.()
+    removed.resolve()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()
-  return remove
+  return withReady(remove, Promise.race([listening, removed.promise]))
 }
