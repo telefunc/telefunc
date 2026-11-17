@@ -80,10 +80,10 @@ describe('ClientBroadcast uplink', () => {
     expect(waitingPublishes(page)).toEqual(sent)
   })
 
-  // Options read from a form or a configuration file: `'false'` would otherwise publish it lossy.
+  // Options read from a configuration file: a `null` there is not an absent option.
   it("refuses a `lossy` that isn't a boolean, at the call", () => {
     const page = behindUplink()
-    const options: BroadcastPublishOptions = JSON.parse('{ "lossy": "false" }')
+    const options: BroadcastPublishOptions = JSON.parse('{ "lossy": null }')
 
     expect(() => page.publish(1, options)).toThrow("`publish()`'s `lossy` should be a boolean")
     expect(() => page.publishBinary(new Uint8Array([1]), options)).toThrow(

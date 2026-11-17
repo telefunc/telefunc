@@ -26,7 +26,7 @@ function isLossy(payload: string | Uint8Array): boolean {
 
 /** A JavaScript caller may pass anything, such as `'false'` read from a form. */
 function assertLossy(lossy: boolean, method: 'publish' | 'publishBinary'): void {
-  assertUsage(typeof lossy === 'boolean', `\`${method}()\`'s \`lossy\` should be a boolean`)
+  if (typeof lossy !== 'boolean') assertUsage(false, `\`${method}()\`'s \`lossy\` should be a boolean`)
 }
 
 /** What was published, without the binary payload's leading byte. */

@@ -78,7 +78,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
-    const lossy = options?.lossy ?? false
+    const { lossy = false } = options ?? {}
     const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
@@ -97,7 +97,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
-    const lossy = options?.lossy ?? false
+    const { lossy = false } = options ?? {}
     return reportingUnexpected(
       this.sendPublish(encode.publishBinaryAckReq, binaryPayload(data, lossy), lossy ? 'binary' : EVERY_STREAM, lossy),
     )
