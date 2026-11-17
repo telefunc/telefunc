@@ -149,6 +149,7 @@ function Publish() {
         onClick={async () => {
           try {
             const room = await onBroadcastRedisRefuses()
+            if (!room) return setResult(JSON.stringify({ refusesChannels: false }))
             const received: string[] = []
             const stop = room.subscribe((text) => {
               received.push(text)

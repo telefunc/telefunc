@@ -35,6 +35,7 @@ import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import { redis } from '../../redis'
+import { refuseChannels } from './refuseChannels'
 
 type TextMsg = { text: string; from: string }
 
@@ -627,11 +628,10 @@ async function onPublishTo(key: string, text: string) {
   await Broadcast.publish(key, text)
 }
 
-/** A broadcast whose key Redis refuses to subscribe to: its channel permissions leave out the keys that start with `!`
- *  until `onRedisAllowsEveryKey()`. Only where the playground runs on Redis. */
+/** A broadcast whose key Redis refuses to subscribe to (`refuseChannels()`), null where Redis doesn't refuse one. Only
+ *  where the playground runs on Redis. */
 async function onBroadcastRedisRefuses() {
-  if (!redis) throw new Error('The playground runs without Redis')
-  await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:?:{[^!]*')
+  if (!(await refuseChannels())) return null
   return new BroadcastChannel<string>({ key: `!refused:${crypto.randomUUID()}` })
 }
 

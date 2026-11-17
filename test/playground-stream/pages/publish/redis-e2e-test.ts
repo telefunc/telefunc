@@ -9,11 +9,12 @@ function testRedisReconnect() {
     await page.click('#test-redis-beside-refused')
     await autoRetry(
       async () => {
-        expect(await getResult('#redis-beside-refused-result')).deep.equal({
-          refusedReady: 'rejected',
-          published: 'sent',
-          received: ['beside'],
-        })
+        const result = await getResult('#redis-beside-refused-result')
+        if (result.refusesChannels === false) {
+          console.log("Redis here doesn't refuse a subscription by its channel permissions: nothing to check")
+          return
+        }
+        expect(result).deep.equal({ refusedReady: 'rejected', published: 'sent', received: ['beside'] })
       },
       { timeout: 20_000 },
     )
