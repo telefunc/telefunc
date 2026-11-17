@@ -275,6 +275,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
   }
 
+  /** As its replay's `dropFromGap`, for what it holds for its first attach: all of it, where it holds more than
+   *  `toBytes` and more than one waits (any at 0). True where any went. */
+  private dropBeforeAttachFromGap(toBytes: number): boolean {
+    const mayGo = toBytes === 0 ? this.beforeAttach.length : this.beforeAttach.length - 1
+    if (mayGo <= 0 || this.heldBytes <= toBytes) return false
+    this.dropBeforeAttach()
+    return true
+  }
+
   private dropBeforeAttach(): void {
     for (const body of this.beforeAttach) letGo(this, body)
     this.beforeAttach = []
@@ -333,10 +342,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.peer?.unhanded() ?? Number.POSITIVE_INFINITY
   }
 
-  /** Its newest publish, where no wire has that yet. */
+  /** Its newest publish, where no wire has that yet: before its first attach, the newest it holds for that. */
   get newestUnhanded(): PublishBody | undefined {
     if (this._phase === 'ended' || !this._replayBuffer) return undefined
-    return this.lossyPublishes?.held ?? (this.unhanded() === 0 ? undefined : this._replayBuffer.newestPublish())
+    return (
+      this.lossyPublishes?.held ??
+      this.beforeAttach.at(-1) ??
+      (this.unhanded() === 0 ? undefined : this._replayBuffer.newestPublish())
+    )
   }
 
   private get owner(): string | undefined {
@@ -351,7 +364,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     const replay = this._replayBuffer
     if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
     if (toBytes === 0) this.lossyPublishes?.dispose()
-    const gap = replay.dropFromGap(toBytes, this.unhanded()) > 0
+    const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
     if (gap) {
       this.peer?.sender.queue.dropWaitingFrom(this.peer.index, 'publish')
       this.dropPendingFrames()

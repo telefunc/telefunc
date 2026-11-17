@@ -16,6 +16,9 @@ import {
 import { TAG } from '../../wire/tags.js'
 import type { Want } from '../../wire/payloads.js'
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
+import { config } from '../../../node/server/serverConfig.js'
+
+config.channel = { maxMemory: '2m' }
 
 /** A broadcast that the call of `session` returned, its page attached at index 0 and wanting nothing yet. */
 function attachedBroadcast(session: string) {
@@ -25,9 +28,9 @@ function attachedBroadcast(session: string) {
 }
 
 /** A broadcast that the call of `session` returned, its page not attached yet. */
-function returnedBroadcast(session: string) {
+function returnedBroadcast(session: string, lossy = false) {
   const key = crypto.randomUUID()
-  const broadcast = new ServerBroadcast<string>({ key })
+  const broadcast = new ServerBroadcast<string>({ key, lossy })
   // As `carryChannel` stamps it.
   broadcast._session = session
   getChannelMux().registerChannel(broadcast)
@@ -131,6 +134,25 @@ test("before the page's first attach, what it subscribed to by a call waits for 
   expect(page.publishes()).toEqual({ text: 1, binary: 0 })
   page.broadcast.abort()
 })
+
+// What a page subscribed to by a call and waits for its first attach counts as what any page holds that no wire has.
+for (const lossy of [false, true]) {
+  test(`memory pressure ends the ${lossy ? 'lossy ' : ''}page whose first attach is late with what it holds, not a page that keeps up`, async () => {
+    const binary = { version: 1, text: false, binary: true }
+    const late = returnedBroadcast('session-a', lossy)
+    await late.call(binary)
+    // A lossy page holds its newest only.
+    for (const size of lossy ? [1_000_000] : [570_000, 570_000, 570_000])
+      await Broadcast.publishBinary(late.key, new Uint8Array(size))
+    const live = attachedBroadcast('session-a')
+    live.wire(binary)
+    await Broadcast.publishBinary(live.key, new Uint8Array(lossy ? 1_200_000 : 520_000))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect({ late: late.broadcast.isClosed, live: live.broadcast.isClosed }).toEqual({ late: true, live: false })
+    live.broadcast.abort()
+    late.broadcast._release()
+  })
+}
 
 test('before the first attach of a page that has not subscribed, nothing published is held for it', async () => {
   const page = returnedBroadcast('session-a')
