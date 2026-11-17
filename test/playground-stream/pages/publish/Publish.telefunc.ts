@@ -27,12 +27,15 @@ export {
   onBroadcastToSubscribe,
   onPublishTo,
   onBroadcastPublishingAfterReturn,
+  onBroadcastRedisRefuses,
+  onRedisAllowsEveryKey,
 }
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
+import { redis } from '../../redis'
 
 type TextMsg = { text: string; from: string }
 
@@ -631,4 +634,16 @@ async function onBroadcastPublishingAfterReturn() {
   const key = `room:after-return:${crypto.randomUUID()}`
   setTimeout(() => void Broadcast.publish(key, 'after-return'), 0)
   return new BroadcastChannel<string>({ key })
+}
+
+/** A broadcast whose key Redis refuses to subscribe to: its channel permissions leave out the keys that start with `!`
+ *  until `onRedisAllowsEveryKey()`. Only where the playground runs on Redis. */
+async function onBroadcastRedisRefuses() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:?:{[^!]*')
+  return new BroadcastChannel<string>({ key: `!refused:${crypto.randomUUID()}` })
+}
+
+async function onRedisAllowsEveryKey() {
+  await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
 }

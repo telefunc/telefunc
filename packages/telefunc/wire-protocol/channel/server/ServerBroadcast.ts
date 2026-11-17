@@ -446,7 +446,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     try {
       await listening
     } catch {
-      // A backend that can't listen says so itself: Redis fails this server's publishes.
+      // The broadcast ends instead (`endUnlessListening`).
       return
     }
     this.peer?.sendWanted(version)
@@ -511,20 +511,37 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private subscribeBroadcast(): void {
     if (this.unsubBroadcast) return
-    this.unsubBroadcast = this.broadcastAdapter().subscribe(
+    const unsubscribe = this.broadcastAdapter().subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
       this.wireRequest,
     )
+    this.unsubBroadcast = unsubscribe
+    void this.endUnlessListening(false, () => this.unsubBroadcast === unsubscribe)
   }
 
   private subscribeBinaryBroadcast(): void {
     if (this.unsubBinaryBroadcast) return
-    this.unsubBinaryBroadcast = this.broadcastAdapter().subscribeBinary(
+    const unsubscribe = this.broadcastAdapter().subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
       this.wireRequest,
     )
+    this.unsubBinaryBroadcast = unsubscribe
+    void this.endUnlessListening(true, () => this.unsubBinaryBroadcast === unsubscribe)
+  }
+
+  /** A subscription its backend failed stays failed (Redis doesn't try it again), so the broadcast ends: with the
+   *  backend's error on the server, reported as a server error, and as a server error on its page. Every `ready` waiting
+   *  for the subscription rejects with that end. One removed meanwhile ends nothing. */
+  private async endUnlessListening(binary: boolean, current: () => boolean): Promise<void> {
+    try {
+      await this.broadcastAdapter().listening?.(this.key, binary)
+    } catch (err) {
+      if (!current()) return
+      handleCallbackBug(err)
+      this.endWithError(ERROR_REASON.BUG, err instanceof Error ? err : new Error(String(err)))
+    }
   }
 
   private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {

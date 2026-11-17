@@ -31,6 +31,8 @@ import {
   onJoinChat,
   onBroadcastToSubscribe,
   onBroadcastPublishingAfterReturn,
+  onBroadcastRedisRefuses,
+  onRedisAllowsEveryKey,
   onPublishTo,
 } from './Publish.telefunc'
 
@@ -141,6 +143,40 @@ function Publish() {
         }}
       >
         Subscribe, then call a telefunction that publishes
+      </button>
+
+      <button
+        id="test-broadcast-refused"
+        onClick={async () => {
+          try {
+            const room = await onBroadcastRedisRefuses()
+            const received: string[] = []
+            const stop = room.subscribe((text) => {
+              received.push(text)
+            })
+            const ready = await Promise.race([
+              stop.ready.then(
+                () => 'resolved',
+                () => 'rejected',
+              ),
+              new Promise((resolve) => setTimeout(() => resolve('pending'), 5_000)),
+            ])
+            const closed = await Promise.race([
+              room.closed.then(
+                () => 'clean',
+                () => 'with an error',
+              ),
+              new Promise((resolve) => setTimeout(() => resolve('open'), 1_000)),
+            ])
+            setResult(JSON.stringify({ ready, closed, received }))
+          } catch (err) {
+            setResult(String(err))
+          } finally {
+            await onRedisAllowsEveryKey()
+          }
+        }}
+      >
+        Subscribe to a broadcast whose key Redis refuses to subscribe to
       </button>
 
       <button

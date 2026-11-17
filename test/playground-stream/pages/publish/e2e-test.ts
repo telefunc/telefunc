@@ -44,7 +44,7 @@ function testPublish(isDev: boolean, inDocker = false) {
   const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
   const transport = transports.at(-1)
 
-  testSubscribeOrder()
+  testSubscribeOrder(inDocker)
 
   test('broadcast: a messages() loop that falls 2 MiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
     let wsBytes = 0
@@ -499,7 +499,26 @@ function testPublish(isDev: boolean, inDocker = false) {
 }
 
 /** When a page's subscription takes effect. */
-function testSubscribeOrder() {
+function testSubscribeOrder(inDocker = false) {
+  // On Redis: the Docker suite and a lane with REDIS_URL.
+  if (inDocker || process.env.REDIS_URL) {
+    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `ready` rejects", async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-refused')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#publish-result')).deep.equal({
+            ready: 'rejected',
+            closed: 'with an error',
+            received: [],
+          })
+        },
+        { timeout: 20_000 },
+      )
+      expectServerError('NOPERM', inDocker)
+    })
+  }
+
   test('broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too', async () => {
     const cdp = await newCDPSession()
     // A slow page's wire declares the subscription late, which a call made right after it doesn't wait for.
