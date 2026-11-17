@@ -26,6 +26,7 @@ export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/Serve
 export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
 export { publishBody, type PublishBody } from '../../wire-protocol/channel/server/PublishBody.js'
+export { publishedData } from '../../wire-protocol/channel/broadcastPayload.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export {
   ProtocolViolationError,

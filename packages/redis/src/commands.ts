@@ -4,7 +4,7 @@ export type { CommitInput, OperationOutcome, RedisCommand }
 // Every Lua script and the one command table that registers and invokes them.
 
 import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
-import { ChannelOverflowError } from 'telefunc/__internal'
+import { ChannelOverflowError, publishedData } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellSelector,
@@ -750,7 +750,7 @@ const REDIS_COMMANDS = {
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
-      assertPublishable(payload)
+      assertPublishable(publishedData(payload))
       return {
         keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
         // ioredis sends a string as UTF-8.

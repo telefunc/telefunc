@@ -1,4 +1,4 @@
-export { textPayload, binaryPayload, isLossy, binaryData }
+export { textPayload, binaryPayload, isLossy, binaryData, publishedData }
 
 import { assertUsage } from '../../utils/assert.js'
 
@@ -32,4 +32,10 @@ function assertLossy(lossy: boolean, method: 'publish' | 'publishBinary'): void 
 /** What was published, without the binary payload's leading byte. */
 function binaryData(payload: Uint8Array): Uint8Array {
   return payload.subarray(1)
+}
+
+/** What was published, of either kind: without the binary payload's leading byte or the lossy text's line feed. */
+function publishedData(payload: string | Uint8Array): string | Uint8Array {
+  if (typeof payload !== 'string') return binaryData(payload)
+  return isLossy(payload) ? payload.slice(1) : payload
 }
