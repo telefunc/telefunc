@@ -1198,7 +1198,7 @@ function assertCommittable({ lane, payload, kit }: CommitInput): void {
   assertPublishable(published)
   if (payload.byteLength - published <= ROOM_FRAMING_MAX_BYTES) return
   throw new ChannelOverflowError(
-    `Telefunc's Redis backend takes a Room message whose sender's meta, track and meta take ${ROOM_FRAMING_MAX_BYTES} bytes at most beside its data, and this one's take ${payload.byteLength - published}`,
+    `Telefunc's Redis backend takes a Room message whose track name and metadata take ${ROOM_FRAMING_MAX_BYTES} bytes at most beside its data, and this one's take ${payload.byteLength - published}`,
   )
 }
 
