@@ -193,6 +193,21 @@ describe('in-memory publishes in answer', () => {
     expect(received).toBe(5001)
   })
 
+  it('delivers the bytes an answer published, though its publisher reuses its buffer once publishBinary() returns', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const received: number[][] = []
+    const unsubscribeBinary = adapter.subscribeBinary('room:reused', (data) => received.push(Array.from(data)))
+    const unsubscribe = adapter.subscribe('room:reused', () => {
+      const bytes = new Uint8Array([1, 2, 3])
+      void adapter.publishBinary('room:reused', bytes)
+      bytes.fill(0)
+    })
+    await adapter.publish('room:reused', 'question')
+    unsubscribe()
+    unsubscribeBinary()
+    expect(received).toEqual([[1, 2, 3]])
+  })
+
   it('rejects a listener that answers its own messages without end, and timers run again', async () => {
     const adapter = new DefaultBroadcastAdapter()
     const errors: unknown[] = []
