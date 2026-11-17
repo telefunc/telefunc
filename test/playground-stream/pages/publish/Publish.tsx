@@ -205,6 +205,34 @@ function Publish() {
       </button>
 
       <button
+        id="test-broadcast-subscribe-again"
+        onClick={async () => {
+          try {
+            const { room, key } = await onBroadcastToSubscribe()
+            const first: string[] = []
+            const second: string[] = []
+            const stop = room.subscribe((text) => {
+              first.push(text)
+            })
+            stop()
+            room.subscribe((text) => {
+              second.push(text)
+            })
+            await onPublishTo(key, 'after-subscribe-again')
+            for (let i = 0; i < 25 && second.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 200))
+            // A second delivery would have come by now.
+            await new Promise((resolve) => setTimeout(resolve, 500))
+            await room.close()
+            setResult(JSON.stringify({ first, second }))
+          } catch (err) {
+            setResult(String(err))
+          }
+        }}
+      >
+        Subscribe, unsubscribe and subscribe again, then call a telefunction that publishes
+      </button>
+
+      <button
         id="test-broadcast-heard-from-return"
         onClick={async () => {
           try {

@@ -500,6 +500,17 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** When a page's subscription takes effect. */
 function testSubscribeOrder(inDocker = false) {
+  test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-subscribe-again')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({ first: [], second: ['after-subscribe-again'] })
+      },
+      { timeout: 20_000 },
+    )
+  })
+
   // On Redis: the Docker suite and a lane with REDIS_URL.
   if (inDocker || process.env.REDIS_URL) {
     test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `ready` rejects", async () => {
