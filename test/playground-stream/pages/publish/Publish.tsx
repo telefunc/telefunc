@@ -98,14 +98,14 @@ function Publish() {
           try {
             const { room, key } = await onBroadcastToSubscribe()
             await room.opened
-            if (sseOnly) await holdNextSsePost()
+            if (holdsPosts()) await holdNextSsePost()
             const received: string[] = []
             const stop = room.subscribe((text) => {
               received.push(text)
             })
             // The server takes the subscription only once the POST that carries it reaches it.
-            const readyWhileHeld = sseOnly ? await settledWithin(stop.ready, 1_000) : null
-            const held = sseOnly ? await releaseHeldSsePosts() : null
+            const readyWhileHeld = holdsPosts() ? await settledWithin(stop.ready, 1_000) : null
+            const held = holdsPosts() ? await releaseHeldSsePosts() : null
             await stop.ready
             // Not by a telefunction: a call would carry the subscription and wait for it.
             await fetch(`/api/server-action?key=publish_${key}`, { method: 'POST' })
@@ -135,7 +135,7 @@ function Publish() {
             const { room, key } = await onBroadcastToSubscribe()
             await room.opened
             // The call's copy of the subscription reaches the server first: the wire's is held.
-            if (sseOnly) await holdNextSsePost()
+            if (holdsPosts()) await holdNextSsePost()
             const received: string[] = []
             room.subscribe((text) => {
               received.push(text)
@@ -143,7 +143,7 @@ function Publish() {
             await onPublishTo(key, 'after-subscribe')
             for (let i = 0; i < 25 && received.length === 0; i++)
               await new Promise((resolve) => setTimeout(resolve, 200))
-            const held = sseOnly ? await releaseHeldSsePosts() : null
+            const held = holdsPosts() ? await releaseHeldSsePosts() : null
             await room.close()
             setResult(JSON.stringify({ received, held }))
           } catch (err) {
@@ -807,8 +807,12 @@ function Publish() {
   )
 }
 
-/** Whether the page's wire is SSE only, whose next batch POST the server can hold. */
-const sseOnly = JSON.stringify(JSON.parse(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+/** Whether the page's wire is SSE alone, over HTTP/1.1, where it sends its frames in batch POSTs the server can hold:
+ *  over HTTPS the browser can stream them in one upload. */
+function holdsPosts(): boolean {
+  const transports = JSON.stringify(JSON.parse(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]'))
+  return transports === '["sse"]' && location.protocol === 'http:'
+}
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`. */
 async function holdNextSsePost() {

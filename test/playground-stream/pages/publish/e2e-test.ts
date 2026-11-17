@@ -501,8 +501,9 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** When a page's subscription takes effect. */
 function testSubscribeOrder(inDocker = false) {
-  // On SSE alone, the page holds the POST that carries its subscription (Publish.tsx `holdNextSsePost()`).
+  // On SSE alone, over HTTP/1.1, the page holds the POST that carries its subscription (Publish.tsx `holdsPosts()`).
   const sseOnly = JSON.stringify(JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+  const holdsPosts = () => sseOnly && getServerUrl().startsWith('http:')
 
   test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
     await navigate(`${getServerUrl()}/publish`)
@@ -546,7 +547,7 @@ function testSubscribeOrder(inDocker = false) {
           async () => {
             expect(await getResult('#publish-result')).deep.equal({
               received: ['after-subscribe'],
-              held: sseOnly ? 1 : null,
+              held: holdsPosts() ? 1 : null,
             })
           },
           { timeout: 20_000 },
@@ -564,8 +565,8 @@ function testSubscribeOrder(inDocker = false) {
     await autoRetry(
       async () => {
         expect(await getResult('#publish-result')).deep.equal({
-          readyWhileHeld: sseOnly ? 'pending' : null,
-          held: sseOnly ? 1 : null,
+          readyWhileHeld: holdsPosts() ? 'pending' : null,
+          held: holdsPosts() ? 1 : null,
           received: ['from a server action'],
           abortedReady: 'Abort',
         })
