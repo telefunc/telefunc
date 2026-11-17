@@ -113,7 +113,9 @@ type ChannelConfigUser = {
   maxPendingBytes?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
-   * connect before it is closed automatically.
+   * connect before it is closed automatically, and a telefunction call waits for
+   * a broadcast subscription its client made before it to take effect before
+   * that broadcast is closed.
    */
   connectTtl?: number
   /**

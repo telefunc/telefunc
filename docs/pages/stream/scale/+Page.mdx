@@ -87,7 +87,7 @@ type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Pro
 
 `send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
 
-If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`: resolve `ready` once the listener receives what any server publishes to the key, and reject it if the broker refuses the subscription. The subscribers' <Link href="/channel#chat-example">`ready`</Link> then resolves or rejects with it, and a `BroadcastChannel` closes with the error.
+If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`. Resolve `ready` once the listener can receive what any server publishes to the key, and reject it if the broker refuses the subscription. The subscribers' <Link href="/channel#chat-example">`ready`</Link> then resolves or rejects with it, and a `BroadcastChannel` closes with the error.
 
 ```ts
 // server/broadcastTransport.ts
