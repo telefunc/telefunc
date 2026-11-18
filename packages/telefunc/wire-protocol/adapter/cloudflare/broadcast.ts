@@ -383,9 +383,14 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private async deletePresence(key: string, owner: string): Promise<void> {
     await warnRefusedWrite(
-      this.requireKV().delete(this.getPresenceKey(key, owner)),
+      this.removePresence(key, owner),
       `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key keep reaching this Durable Object, which no longer needs them, for up to ${PRESENCE_TTL_SECONDS} s`,
     )
+  }
+
+  /** Async, so a delete that throws at once is warned of as one KV refuses is. */
+  private async removePresence(key: string, owner: string): Promise<void> {
+    return this.requireKV().delete(this.getPresenceKey(key, owner))
   }
 
   private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {

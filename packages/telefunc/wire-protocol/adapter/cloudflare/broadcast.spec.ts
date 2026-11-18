@@ -827,6 +827,28 @@ describe('cloudflare broadcast routing', () => {
       _resetBroadcastAdapterForTesting(previousTransport)
     })
 
+    it('a presence delete that throws at once is warned of as a refused one', async () => {
+      const previousTransport = getBroadcastAdapter()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { state, kv, inObject } = refusing()
+        state.refuse = false
+        kv.delete = () => {
+          throw new Error('KV binding invocation failed')
+        }
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await subscriber.ready
+        subscriber()
+        await flushMicrotasks()
+        expect(warn.mock.calls.map(([warning]) => String(warning).includes('KV binding invocation failed'))).toEqual([
+          true,
+        ])
+      } finally {
+        warn.mockRestore()
+        _resetBroadcastAdapterForTesting(previousTransport)
+      }
+    })
+
     it("a broadcast that subscribes closes with KV's error", async () => {
       const previousTransport = getBroadcastAdapter()
       const { inObject } = refusing()
