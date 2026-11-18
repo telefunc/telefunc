@@ -883,12 +883,12 @@ describe('a message the transport delivers inside listen()', () => {
       for (const stop of stops) stop()
       end?.()
       // Whether the second hears the message it was added on is delivery's to decide, not this case's.
-      const laterPublish = { first: heard.first.filter((n) => n === 2), second: heard.second.filter((n) => n === 2) }
-      expect({ laterPublish, starts: transport.starts(), listening: transport.listening() }).toEqual({
-        laterPublish: { first: [2], second: [2] },
-        starts: 1,
-        listening: false,
-      })
+      expect({
+        first: heard.first,
+        second: heard.second.filter((n) => n === 2),
+        starts: transport.starts(),
+        listening: transport.listening(),
+      }).toEqual({ first: [1, 2], second: [2], starts: 1, listening: false })
     })
   }
 })
