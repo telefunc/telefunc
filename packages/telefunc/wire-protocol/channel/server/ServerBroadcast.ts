@@ -536,7 +536,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.adapter
   }
 
-  /** `forPage`: a subscription its backend refuses at once fails as one it gives up later does (`endUnlessListening`),
+  /** `forPage`: a subscription its backend refuses at once fails as one it gives up later does (`whenListening`),
    *  where a server subscriber's `subscribe()` throws the refusal instead. */
   private subscribeBroadcast(forPage = false): void {
     if (this.textListening) return
