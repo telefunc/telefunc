@@ -45,6 +45,8 @@ import {
   onJoinChat,
   onBroadcastToSubscribe,
   onBroadcastRedisRefuses,
+  onBroadcastsToRefuseOnRenewal,
+  onRefuseRenewals,
   onRedisAllowsEveryKey,
   onPublishTo,
 } from './Publish.telefunc'
@@ -166,6 +168,42 @@ function Publish() {
         }}
       >
         Subscribe, then call a telefunction that publishes
+      </button>
+
+      <button
+        id="test-broadcast-renewal-refused"
+        onClick={async () => {
+          try {
+            const { text, binary } = await onBroadcastsToRefuseOnRenewal()
+            const heard: string[] = []
+            const closes = [text, binary].map((room) => new Promise<unknown>((resolve) => room.onClose(resolve)))
+            const stops = [
+              text.subscribe((message) => heard.push(message)),
+              binary.subscribeBinary((data) => heard.push(`${data}`)),
+            ]
+            await Promise.all(stops.map((stop) => stop.ready))
+            await Promise.all([text.publish('text'), binary.publishBinary(new Uint8Array([1]))])
+            for (let tries = 1; heard.length < 2 && tries <= 50; tries++)
+              await new Promise((resolve) => setTimeout(resolve, 100))
+            if (!(await onRefuseRenewals())) return setResult(JSON.stringify({ refusesChannels: false }))
+            const timeout = new Promise<string>((resolve) => setTimeout(() => resolve('open'), 10_000))
+            const closed = await Promise.all(
+              closes.map((close) =>
+                Promise.race([
+                  close.then((err) => (err instanceof Error ? `${err.name}: ${err.message}` : `${err}`)),
+                  timeout,
+                ]),
+              ),
+            )
+            setResult(JSON.stringify({ heard: heard.sort(), closed }))
+          } catch (err) {
+            setResult(String(err))
+          } finally {
+            await onRedisAllowsEveryKey()
+          }
+        }}
+      >
+        Subscribe to two broadcasts, then have Redis refuse their renewal
       </button>
 
       <button

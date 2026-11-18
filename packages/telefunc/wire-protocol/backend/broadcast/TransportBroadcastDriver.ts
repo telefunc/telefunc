@@ -56,10 +56,15 @@ class TransportBroadcastDriver implements BroadcastDriver {
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    const listening =
-      route.kind === 'text'
-        ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
-        : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+    let listening: BroadcastUnsubscribe
+    try {
+      listening =
+        route.kind === 'text'
+          ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+          : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+    } catch (err) {
+      throw refusal(err)
+    }
     return new ListenAttempt(listening)
   }
 }
@@ -86,26 +91,32 @@ class ListenAttempt extends DriverAttempt {
     } catch (err) {
       // Unsubscribed first: that stopped it.
       if (this.state() === 'closed') return
-      // A close without a reason is a backend's on purpose, which isn't reported: a refusal always is.
-      this.transition('closed', err ?? new Error('config.broadcast.transport refused the listener with no error'))
-      return this.stopRefused()
+      this.transition('closed', refusal(err))
+      return stopListener(this.stop)
     }
     this.transition('ready')
   }
 
-  /** What its stop throws is logged, as on an unsubscribe: the refusal already ended the attempt. */
-  private stopRefused(): void {
-    try {
-      this.stop()
-    } catch (error) {
-      console.error(error)
-    }
-  }
-
-  async unsubscribe(): Promise<void> {
+  unsubscribe(): Promise<void> {
     this.transition('closed')
-    this.stop()
+    return stopListener(this.stop)
   }
+}
+
+/** Calls a transport's `unsubscribe()`, which may be async: what it throws, or what the promise it returns rejects
+ *  with, is logged, as the attempt is over either way. */
+async function stopListener(stop: () => void): Promise<void> {
+  try {
+    await stop()
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+/** What the broker refused a listener with: a close without a reason is a backend's on purpose, which isn't reported,
+ *  while a refusal always is. */
+function refusal(err: unknown): unknown {
+  return err ?? new Error('config.broadcast.transport refused the listener with no error')
 }
 
 function checkOrdering<Ordering extends { seq: number; timestamp: number }>(ordering: Ordering): Ordering {

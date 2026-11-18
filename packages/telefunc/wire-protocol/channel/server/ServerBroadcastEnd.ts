@@ -118,6 +118,12 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.endWithError(ERROR_REASON.NOT_IN_EFFECT, err)
   }
 
+  /** Its subscription in effect was ended for good by its backend: it ends with `err` on the server, and on its page with
+   *  a `ChannelClosedError` that says so. */
+  endEnded(err: Error): void {
+    this.endWithError(ERROR_REASON.ENDED, err)
+  }
+
   private forward(body: PublishBody): void {
     if (this.lastPeer) this.lastPeer.sendPublish(body)
     else this.holdBeforeAttach(body)

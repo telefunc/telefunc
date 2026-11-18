@@ -617,5 +617,10 @@ function channelErrorFor(reason: number): Error {
       'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',
     )
   }
+  if (reason === ERROR_REASON.ENDED) {
+    return new ChannelClosedError(
+      'Broadcast closed: its subscription was in effect on the server until its backend ended it. Get the broadcast from a telefunction again to subscribe again.',
+    )
+  }
   return makeBugError()
 }

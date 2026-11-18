@@ -843,6 +843,42 @@ describe("a transport's listener whose broker refuses it", () => {
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
     return state
   }
+  // A transport may stop its listener asynchronously, as one waiting for its broker's acknowledgment does.
+  for (const binary of [false, true]) {
+    for (const path of ['refused', 'removed'] as const) {
+      it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): what an async \`unsubscribe()\` rejects with once its listener was ${path} is logged, not left unhandled`, async () => {
+        const teardown = new Error('broker refused async teardown')
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const unhandled: unknown[] = []
+        const onUnhandled = (reason: unknown) => unhandled.push(reason)
+        process.on('unhandledRejection', onUnhandled)
+        try {
+          const listen = () => ({
+            ready: path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
+            unsubscribe: async () => {
+              throw teardown
+            },
+          })
+          const sent = () => ({ seq: 1, timestamp: 1 })
+          configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+          const subscriber = binary
+            ? Broadcast.subscribeBinary('room:async-stop', () => {})
+            : Broadcast.subscribe('room:async-stop', () => {})
+          await subscriber.ready.catch(() => {})
+          if (path === 'removed') subscriber()
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          expect({ unhandled, logged: logged.mock.calls.some(([error]) => error === teardown) }).toEqual({
+            unhandled: [],
+            logged: true,
+          })
+        } finally {
+          process.off('unhandledRejection', onUnhandled)
+          logged.mockRestore()
+        }
+      })
+    }
+  }
+
   for (const refusesInListen of [false, true]) {
     it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
       const broker = reservingBroker(refusesInListen)
@@ -1000,15 +1036,31 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
     expect({ ...state, reported }).toEqual({ listens: 1, stops: 1, reported: ['NOPERM'] })
   })
 
-  it('is reported where the broker refuses with no reason', async () => {
-    reported.length = 0
-    const { refuse } = refusingBroker()
-    const subscriber = Broadcast.subscribe(KEY, () => {})
-    refuse()
-    await expect(subscriber.ready).rejects.toThrow()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(reported).toHaveLength(1)
-  })
+  for (const binary of [false, true]) {
+    const subscribe = () => (binary ? Broadcast.subscribeBinary(KEY, () => {}) : Broadcast.subscribe(KEY, () => {}))
+    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where the broker refuses with no reason in its \`ready\``, async () => {
+      reported.length = 0
+      const { refuse } = refusingBroker()
+      const subscriber = subscribe()
+      refuse()
+      await expect(subscriber.ready).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(reported).toHaveLength(1)
+    })
+
+    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where \`listen()\` throws with no reason`, async () => {
+      reported.length = 0
+      const throwing = () => {
+        throw undefined
+      }
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen: throwing, listenBinary: throwing })
+      const subscriber = subscribe()
+      await expect(subscriber.ready).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(reported).toHaveLength(1)
+    })
+  }
 
   it('is not reported once every subscription left before the refusal', async () => {
     reported.length = 0
