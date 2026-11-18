@@ -15,15 +15,18 @@ import type { RedisSubscriptions } from './RedisSubscriptions.js'
 const SEND_WAIT_MS = 60_000
 
 /** A send waits while one of our subscriptions on `channels` is new, behind the waiting sends of its `queue` (what one
- *  seq counts). Its bytes count against `budget`, on the server's memory ledger. */
+ *  seq counts), and fails where Redis refuses one on `failsOn`. Its bytes count against `budget`, on the server's memory
+ *  ledger. */
 type WaitRule = {
   queue: string
   channels: readonly string[]
+  failsOn: readonly string[]
   budget: string
 }
 
-/** The sends of one queue, waiting for our new subscriptions on their channels. */
-type Wait = { readonly ready: Promise<void>; sends: number }
+/** The sends of one queue, waiting for our new subscriptions on their channels; `refused` holds Redis's refusal of each
+ *  channel it refused meanwhile. */
+type Wait = { readonly ready: Promise<void>; readonly refused: Map<string, unknown>; sends: number }
 
 /** The bytes of one budget's waiting sends, and the ledger's holder for them. */
 type WaitingBytes = { bytes: number; readonly memory: QueueMemory }
@@ -62,7 +65,7 @@ class NewSubscriptionWait {
   /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
    *  Throws `ChannelOverflowError` when others wait and the server's memory ledger doesn't admit it. */
   waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
-    const { queue, channels, budget } = rule
+    const { queue, channels, failsOn, budget } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
     const bytes =
@@ -83,18 +86,21 @@ class NewSubscriptionWait {
     this.waitingBytes.set(budget, waiting)
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
     const sent = () => this.endWait(queue, wait, budget, waiting, charged)
-    return { turn: this.turnOf(wait, owned, sent), sent }
+    return { turn: this.turnOf(wait, failsOn, owned, sent), sent }
   }
 
-  /** The payload, once `wait` is over; a failed wait's send counts as gone. */
-  private async turnOf<Payload>(wait: Wait, owned: Payload, sent: () => void): Promise<Payload> {
-    try {
-      await wait.ready
-    } catch (error) {
-      sent()
-      throw error
-    }
-    return owned
+  /** The payload, once `wait` is over; a send that Redis refused one of its `failsOn` for counts as gone. */
+  private async turnOf<Payload>(
+    wait: Wait,
+    failsOn: readonly string[],
+    owned: Payload,
+    sent: () => void,
+  ): Promise<Payload> {
+    await wait.ready
+    const refusedOn = failsOn.find((channel) => wait.refused.has(channel))
+    if (refusedOn === undefined) return owned
+    sent()
+    throw wait.refused.get(refusedOn)
   }
 
   /** A waiting send went out: the last of its wait's sends unmaps it, so a send made before then still queues behind
@@ -106,36 +112,42 @@ class NewSubscriptionWait {
     if (waiting.bytes === 0) this.waitingBytes.delete(budget)
   }
 
-  /** A wait for our new subscriptions on `channels`, including ones made meanwhile, that fails when Redis refuses one; a
-   *  failed wait leaves its queue at once, so the next send there doesn't join it. */
+  /** A wait for our new subscriptions on `channels`, including ones made meanwhile. Where Redis refuses one, the wait
+   *  leaves its queue at once, so the next send there doesn't join it. */
   private openWait(queue: string, channels: readonly string[]): Wait {
-    const wait: Wait = { ready: this.whenReady(channels), sends: 0 }
-    void this.leaveOnFailure(queue, wait)
+    const refused = new Map<string, unknown>()
+    const leave = (channel: string, refusal: unknown) => {
+      refused.set(channel, refusal)
+      if (this.waits.get(queue) === wait) this.waits.delete(queue)
+    }
+    const wait: Wait = { ready: this.whenReady(channels, leave), refused, sends: 0 }
     return wait
   }
 
-  private async leaveOnFailure(queue: string, wait: Wait): Promise<void> {
-    try {
-      await wait.ready
-    } catch {
-      if (this.waits.get(queue) === wait) this.waits.delete(queue)
-    }
-  }
-
-  private async whenReady(channels: readonly string[]): Promise<void> {
+  private async whenReady(
+    channels: readonly string[],
+    onRefused: (channel: string, refusal: unknown) => void,
+  ): Promise<void> {
     const timeout = createDeferred()
     const timer = unrefTimer(setTimeout(timeout.resolve, SEND_WAIT_MS))
     try {
-      await Promise.race([this.readyOn(channels), timeout.promise])
+      await Promise.race([this.readyOn(channels, onRefused), timeout.promise])
     } finally {
       clearTimeout(timer)
     }
   }
 
-  private async readyOn(channels: readonly string[]): Promise<void> {
-    for (let left = this.subscriptions.establishingOn(channels); left.length > 0; ) {
-      await Promise.all(left)
-      left = this.subscriptions.establishingOn(channels)
-    }
+  /** Once each of ours on `channels` that is new was ready once, ended or was refused. */
+  private async readyOn(
+    channels: readonly string[],
+    onRefused: (channel: string, refusal: unknown) => void,
+  ): Promise<void> {
+    const settledOn = () =>
+      channels.flatMap((channel) =>
+        this.subscriptions
+          .establishingOn([channel])
+          .map((firstReady) => firstReady.catch((refusal: unknown) => onRefused(channel, refusal))),
+      )
+    for (let left = settledOn(); left.length > 0; left = settledOn()) await Promise.all(left)
   }
 }
