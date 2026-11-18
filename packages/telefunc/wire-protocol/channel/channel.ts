@@ -188,7 +188,7 @@ class Readiness {
   }
 
   /** Settles as `promise` does: where a backend's `ready` is observed once, or a listener's once it is read. */
-  private async follow(promise: Promise<void>): Promise<void> {
+  async follow(promise: Promise<void>): Promise<void> {
     try {
       await promise
     } catch (err) {

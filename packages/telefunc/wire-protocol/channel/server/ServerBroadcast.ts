@@ -186,8 +186,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       remove()
       throw err
     }
-    // A listener that removed itself on such a message leaves the backend unused.
-    this.unsubscribeUnusedBroadcasts()
     if ((binary ? this.binaryListening : this.textListening)?.ready) waiting.add(readiness)
     else readiness.settle(true)
     return withReady(remove, readiness)
@@ -522,9 +520,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super.shutdown(err, options)
     // Ahead of clearing its subscribers, which settles their `ready` as removed.
     const endError = this.endError()
-    for (const readiness of [...this.textWaiting, ...this.binaryWaiting]) readiness.settle(endError)
-    this.textWaiting.clear()
-    this.binaryWaiting.clear()
+    settleAll(this.textWaiting, endError)
+    settleAll(this.binaryWaiting, endError)
     for (const goOn of this.callWaits) goOn()
     this.callWaits.clear()
     this.broadcastListeners.clear()
@@ -543,28 +540,56 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  where a server subscriber's `subscribe()` throws the refusal instead. */
   private subscribeBroadcast(forPage = false): void {
     if (this.textListening) return
-    const listening = listeningOrFailure(forPage, () =>
+    this.textListening = starting()
+    this.startListening(this.textListening, this.textWaiting, forPage, () =>
       this.broadcastAdapter().subscribe(
         this.key,
         (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
         this.ownerRequest,
       ),
     )
-    this.textListening = listening
-    if (listening.ready) void this.whenListening(listening, listening.ready, this.textWaiting)
   }
 
   private subscribeBinaryBroadcast(forPage = false): void {
     if (this.binaryListening) return
-    const listening = listeningOrFailure(forPage, () =>
+    this.binaryListening = starting()
+    this.startListening(this.binaryListening, this.binaryWaiting, forPage, () =>
       this.broadcastAdapter().subscribeBinary(
         this.key,
         (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
         this.ownerRequest,
       ),
     )
-    this.binaryListening = listening
-    if (listening.ready) void this.whenListening(listening, listening.ready, this.binaryWaiting)
+  }
+
+  /** Starts `listening`, which holds its kind's place while its backend starts: a message the backend delivers meanwhile
+   *  may add a subscriber of the kind, which waits in `waiting` with the others, or end the broadcast, or remove the
+   *  kind's last subscriber, either of which stops it once started. Where a server subscriber's start throws, the place
+   *  is given back, and the subscribers in `waiting` get the error. */
+  private startListening(
+    listening: Listening,
+    waiting: Set<Readiness>,
+    forPage: boolean,
+    subscribe: () => Listening,
+  ): void {
+    let started: Listening
+    try {
+      started = listeningOrFailure(forPage, subscribe)
+    } catch (err) {
+      if (this.textListening === listening) this.textListening = null
+      if (this.binaryListening === listening) this.binaryListening = null
+      settleAll(waiting, err instanceof Error ? err : new Error(String(err)))
+      throw err
+    }
+    listening.unsubscribe = started.unsubscribe
+    if (!this.isListening(listening)) return listening.unsubscribe()
+    listening.ready = started.ready
+    if (started.ready) void this.whenListening(listening, started.ready, waiting)
+    else settleAll(waiting, true)
+  }
+
+  private isListening(listening: Listening): boolean {
+    return this.textListening === listening || this.binaryListening === listening
   }
 
   /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
@@ -572,18 +597,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
    *  broadcast ends: with the backend's error on the server, reported as a server error, and as a server error on its
    *  page; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
   private async whenListening(listening: Listening, ready: Readiness, waiting: Set<Readiness>): Promise<void> {
-    const current = () => this.textListening === listening || this.binaryListening === listening
     try {
       await ready.promise
     } catch (err) {
-      if (!current()) return
+      if (!this.isListening(listening)) return
       handleCallbackBug(err)
       return this.endWithError(ERROR_REASON.BUG, err instanceof Error ? err : new Error(String(err)))
     }
-    if (!current()) return
+    if (!this.isListening(listening)) return
     listening.ready = undefined
-    for (const readiness of waiting) readiness.settle(true)
-    waiting.clear()
+    settleAll(waiting, true)
     this._confirmWant()
   }
 
@@ -772,6 +795,16 @@ function listeningOrFailure(orFailure: boolean, subscribe: () => Listening): Lis
     ready.settle(err instanceof Error ? err : new Error(String(err)))
     return { unsubscribe: () => {}, ready }
   }
+}
+
+/** A subscription its backend is starting: not in effect yet, with nothing to stop. */
+function starting(): Listening {
+  return { unsubscribe: () => {}, ready: new Readiness() }
+}
+
+function settleAll(waiting: Set<Readiness>, outcome: true | Error): void {
+  for (const readiness of waiting) readiness.settle(outcome)
+  waiting.clear()
 }
 
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its

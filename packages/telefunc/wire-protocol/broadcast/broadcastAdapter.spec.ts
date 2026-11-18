@@ -625,6 +625,8 @@ describe('a message the transport delivers inside listen()', () => {
   /** A transport whose `listen()` and `listenBinary()` deliver `1` to their key before they return. */
   const deliveringInsideListen = () => {
     let seq = 0
+    let starts = 0
+    let active = 0
     let text: ((payload: string, info: Info) => void) | undefined
     let binary: ((payload: Uint8Array, info: Info) => void) | undefined
     const send = (_key: string, payload: string) => {
@@ -642,22 +644,28 @@ describe('a message the transport delivers inside listen()', () => {
         send,
         sendBinary,
         listen: (key, onMessage) => {
+          starts++
+          active++
           text = onMessage
           send(key, '1')
           return () => {
+            active--
             text = undefined
           }
         },
         listenBinary: (key, onMessage) => {
+          starts++
+          active++
           binary = onMessage
           sendBinary(key, Uint8Array.of(1))
           return () => {
+            active--
             binary = undefined
           }
         },
       }),
     )
-    return { listening: () => text !== undefined || binary !== undefined }
+    return { listening: () => active > 0, starts: () => starts }
   }
   const room = () => new ServerBroadcast<number>({ key: KEY })
   const SURFACES: Record<string, (heard: number[]) => { stop: Unsubscribe; publish: () => unknown; end?: () => void }> =
@@ -698,6 +706,87 @@ describe('a message the transport delivers inside listen()', () => {
       stop()
       end?.()
       expect({ heard, listening: transport.listening() }).toEqual({ heard: [1, 2], listening: false })
+    })
+  }
+
+  // A static subscriber's signal is listened to once its subscribe returns.
+  const LEAVING: Record<string, (onMessage: () => void, signal: AbortSignal) => void> = {
+    'BroadcastChannel.subscribe()': (onMessage, signal) => room().subscribe(onMessage, { signal }),
+    'BroadcastChannel.subscribeBinary()': (onMessage, signal) => room().subscribeBinary(onMessage, { signal }),
+  }
+
+  for (const [surface, subscribe] of Object.entries(LEAVING)) {
+    it(`${surface}: a listener that leaves as that message comes leaves nothing listening`, () => {
+      const transport = deliveringInsideListen()
+      const leaving = new AbortController()
+      subscribe(() => leaving.abort(), leaving.signal)
+      expect({ starts: transport.starts(), listening: transport.listening() }).toEqual({ starts: 1, listening: false })
+    })
+  }
+
+  /** The first listener of each surface adds a second of its kind from its callback, as that message comes. */
+  const NESTED: Record<
+    string,
+    (heard: { first: number[]; second: number[] }) => { stops: Unsubscribe[]; publish: () => unknown; end?: () => void }
+  > = {
+    'Broadcast.subscribe()': (heard) => {
+      const stops: Unsubscribe[] = []
+      const second = (n: number) => heard.second.push(n)
+      const first = (n: number) => {
+        heard.first.push(n)
+        if (heard.first.length === 1) stops.push(Broadcast.subscribe<number>(KEY, second))
+      }
+      stops.push(Broadcast.subscribe<number>(KEY, first))
+      return { stops, publish: () => Broadcast.publish(KEY, 2) }
+    },
+    'Broadcast.subscribeBinary()': (heard) => {
+      const stops: Unsubscribe[] = []
+      const second = (data: Uint8Array) => heard.second.push(...data)
+      const first = (data: Uint8Array) => {
+        heard.first.push(...data)
+        if (heard.first.length === 1) stops.push(Broadcast.subscribeBinary(KEY, second))
+      }
+      stops.push(Broadcast.subscribeBinary(KEY, first))
+      return { stops, publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)) }
+    },
+    'BroadcastChannel.subscribe()': (heard) => {
+      const broadcast = room()
+      const stops: Unsubscribe[] = []
+      const first = (n: number) => {
+        heard.first.push(n)
+        if (heard.first.length === 1) stops.push(broadcast.subscribe((n) => heard.second.push(n)))
+      }
+      stops.push(broadcast.subscribe(first))
+      return { stops, publish: () => Broadcast.publish(KEY, 2), end: () => broadcast.abort() }
+    },
+    'BroadcastChannel.subscribeBinary()': (heard) => {
+      const broadcast = room()
+      const stops: Unsubscribe[] = []
+      const first = (data: Uint8Array) => {
+        heard.first.push(...data)
+        if (heard.first.length === 1) stops.push(broadcast.subscribeBinary((data) => heard.second.push(...data)))
+      }
+      stops.push(broadcast.subscribeBinary(first))
+      return { stops, publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)), end: () => broadcast.abort() }
+    },
+  }
+
+  for (const [surface, subscribe] of Object.entries(NESTED)) {
+    it(`${surface}: a listener its callback adds as that message comes shares the one start, and nothing listens after`, async () => {
+      const transport = deliveringInsideListen()
+      const heard = { first: [], second: [] }
+      const { stops, publish, end } = subscribe(heard)
+      await Promise.all(stops.map((stop) => stop.ready))
+      await publish()
+      for (const stop of stops) stop()
+      end?.()
+      // Whether the second hears the message it was added on is delivery's to decide, not this case's.
+      const laterPublish = { first: heard.first.filter((n) => n === 2), second: heard.second.filter((n) => n === 2) }
+      expect({ laterPublish, starts: transport.starts(), listening: transport.listening() }).toEqual({
+        laterPublish: { first: [2], second: [2] },
+        starts: 1,
+        listening: false,
+      })
     })
   }
 })

@@ -76,13 +76,6 @@ type BroadcastTransport = {
   ): BroadcastUnsubscribe
 }
 
-/** The one form of either `BroadcastUnsubscribe`: the transport's `ready` is observed here once, for every subscriber of
- *  the key, so its first outcome is known to each, read or not. */
-function listeningOf(returned: BroadcastUnsubscribe): Listening {
-  if (typeof returned === 'function') return { unsubscribe: returned, ready: undefined }
-  return { unsubscribe: returned.unsubscribe, ready: Readiness.following(returned.ready) }
-}
-
 /** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
  *  for a recursive delivery. A chain that deep is taken for a listener that answers its own messages without end. */
 const MAX_ANSWER_DEPTH = 10_000
@@ -135,21 +128,21 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
     // Registered before the transport listens, so a message it delivers inside listen() reaches this subscriber; where
     // listen() throws, the subscriber is removed again, leaving nothing registered.
-    let listening = this.transportUnsubs.get(key)
-    if (this.transport && !listening) {
-      try {
-        listening = listeningOf(
-          this.transport.listen(key, (payload, info) => {
+    const transport = this.transport
+    if (!transport) return { unsubscribe, ready: undefined }
+    try {
+      const listening =
+        this.transportUnsubs.get(key) ??
+        startListening(this.transportUnsubs, key, () =>
+          transport.listen(key, (payload, info) => {
             this.deliver(this.subscriptions, key, payload, info)
           }),
         )
-      } catch (err) {
-        unsubscribe()
-        throw err
-      }
-      this.transportUnsubs.set(key, listening)
+      return { unsubscribe, ready: listening.ready }
+    } catch (err) {
+      unsubscribe()
+      throw err
     }
-    return { unsubscribe, ready: listening?.ready }
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -181,21 +174,21 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
 
     // As in `subscribe()`.
-    let listening = this.transportBinaryUnsubs.get(key)
-    if (this.transport && !listening) {
-      try {
-        listening = listeningOf(
-          this.transport.listenBinary(key, (payload, info) => {
+    const transport = this.transport
+    if (!transport) return { unsubscribe, ready: undefined }
+    try {
+      const listening =
+        this.transportBinaryUnsubs.get(key) ??
+        startListening(this.transportBinaryUnsubs, key, () =>
+          transport.listenBinary(key, (payload, info) => {
             this.deliver(this.binarySubscriptions, key, payload, info)
           }),
         )
-      } catch (err) {
-        unsubscribe()
-        throw err
-      }
-      this.transportBinaryUnsubs.set(key, listening)
+      return { unsubscribe, ready: listening.ready }
+    } catch (err) {
+      unsubscribe()
+      throw err
     }
-    return { unsubscribe, ready: listening?.ready }
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -319,6 +312,37 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     listening.unsubscribe()
   }
+}
+
+/** The transport's one listener of `key`, in the one form of either `BroadcastUnsubscribe`: its `ready` is observed here
+ *  once, for every subscriber of the key, so its first outcome is known to each, read or not. It holds the key's place in
+ *  `listenings` while `listen()` runs, as a message delivered inside it may subscribe to the key, which joins this
+ *  listener. Where `listen()` throws, the place is given back, and the subscribers that joined get its error. */
+function startListening(
+  listenings: Map<string, Listening>,
+  key: string,
+  listen: () => BroadcastUnsubscribe,
+): Listening {
+  const ready = new Readiness()
+  const listening: Listening = { unsubscribe: () => {}, ready }
+  listenings.set(key, listening)
+  let started: BroadcastUnsubscribe
+  try {
+    started = listen()
+  } catch (err) {
+    listenings.delete(key)
+    ready.settle(err instanceof Error ? err : new Error(String(err)))
+    throw err
+  }
+  if (typeof started === 'function') {
+    listening.unsubscribe = started
+    listening.ready = undefined
+    ready.settle(true)
+  } else {
+    listening.unsubscribe = started.unsubscribe
+    void ready.follow(started.ready)
+  }
+  return listening
 }
 
 /** Each of `targets` that `subs` still holds when its turn comes: one that left while the publish waited, or during its
