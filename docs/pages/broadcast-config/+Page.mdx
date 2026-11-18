@@ -40,7 +40,7 @@ type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Pro
 
 > Telefunc calls `unsubscribe()` once for every `listen()` that returned: when it stops the listener, or once `ready` rejects. If `listen()` throws, release what it acquired before it throws, as Telefunc has no `unsubscribe()` to call.
 
-> `unsubscribe()` may return a promise. Telefunc doesn't wait for it, and logs what `unsubscribe()` throws or what that promise rejects with. Telefunc may call `listen()` for the same key before an earlier `unsubscribe()` finished. On a Worker, an `unsubscribe()` that does I/O passes its promise to `ctx.waitUntil()`, so that the Worker keeps running until that I/O is done.
+> `unsubscribe()` may return a promise. Telefunc doesn't wait for it, and logs what `unsubscribe()` throws or what that promise rejects with. Telefunc may call `listen()` for the same key before an earlier `unsubscribe()` finished. With `telefunc/cloudflare`, Telefunc calls `unsubscribe()` on the Durable Object that holds the subscription. A cleanup that must go on after that Durable Object's handler returns passes its promise to `waitUntil()`, imported from `cloudflare:workers`. What keeps the Durable Object alive until then is in Cloudflare's [Durable Object state](https://developers.cloudflare.com/durable-objects/api/state/#waituntil) docs, and depends on the [`durable_object_io_tasks_prevent_eviction`](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#durable-object-io-tasks-prevent-eviction) compatibility flag.
 
 ```ts
 // server/broadcastTransport.ts
