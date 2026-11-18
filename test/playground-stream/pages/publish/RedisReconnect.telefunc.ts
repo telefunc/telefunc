@@ -2,7 +2,7 @@ export { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure, onPublishBes
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
 import { redis } from '../../redis'
-import { refuseChannels } from './refuseChannels'
+import { allowEveryChannel, refuseChannels } from './refuseChannels'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
  *  while ioredis reconnects. */
@@ -91,6 +91,6 @@ async function onPublishBesideRefusedSubscribe() {
     return { refusedReady, published, received }
   } finally {
     for (const stop of unsubscribe) stop()
-    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
+    await allowEveryChannel()
   }
 }

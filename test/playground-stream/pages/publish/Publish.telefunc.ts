@@ -34,8 +34,7 @@ import { Broadcast, BroadcastChannel } from 'telefunc'
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { redis } from '../../redis'
-import { refuseChannels } from './refuseChannels'
+import { allowEveryChannel, refuseChannels } from './refuseChannels'
 
 type TextMsg = { text: string; from: string }
 
@@ -637,5 +636,5 @@ async function onBroadcastRedisRefuses() {
 }
 
 async function onRedisAllowsEveryKey() {
-  await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
+  await allowEveryChannel()
 }
