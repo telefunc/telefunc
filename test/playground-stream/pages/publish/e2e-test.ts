@@ -1,4 +1,4 @@
-export { testPublish, testSubscribeOrder }
+export { testPublish }
 
 import type { ConsoleMessage, WebSocket } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
