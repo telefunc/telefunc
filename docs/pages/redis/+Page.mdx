@@ -45,7 +45,7 @@ Internally, Telefunc calls `duplicate()` on the client to open a dedicated subsc
 
 ## Errors
 
-While Redis is unreachable, a new subscription waits, and so does its `ready`. The subscription fails when Redis refuses it, or when ioredis gives up on its `SUBSCRIBE` command. With ioredis's default `maxRetriesPerRequest` of 20, that takes about 10 s where each connection is refused at once. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes with the error, and the `ready` of a `Broadcast.subscribe()` rejects with it.
+While Redis is unreachable, a new subscription waits, and so does its `ready`. The subscription fails when Redis refuses it, or when ioredis gives up on its `SUBSCRIBE` command. With ioredis's default `maxRetriesPerRequest` of 20, that takes about 10 s where each connection is refused at once. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes: on the server with the error, and on its page with a `ChannelClosedError` that says its subscription didn't take effect. The `ready` of a `Broadcast.subscribe()` rejects with the error.
 
 > After a `Broadcast.subscribe()` fails, the server's `publish()` calls to that key fail with the same error until you call the function that unsubscribes. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
 
