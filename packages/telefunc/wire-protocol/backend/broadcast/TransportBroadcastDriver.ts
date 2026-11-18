@@ -86,7 +86,8 @@ class ListenAttempt extends DriverAttempt {
     } catch (err) {
       // Unsubscribed first: that stopped it.
       if (this.state() === 'closed') return
-      this.transition('closed', err)
+      // A close without a reason is a backend's on purpose, which isn't reported: a refusal always is.
+      this.transition('closed', err ?? new Error('config.broadcast.transport refused the listener with no error'))
       return this.stopRefused()
     }
     this.transition('ready')

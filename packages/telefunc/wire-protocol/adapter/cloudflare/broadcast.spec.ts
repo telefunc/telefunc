@@ -506,45 +506,22 @@ describe("a subscriber's `ready` on Cloudflare", () => {
 
     // A presence the authority refuses to store is a subscription that failed, as a refused one is on any other backend.
     describe("where the key's authority refuses the presence write", () => {
-      it("a subscriber's `ready` rejects with the authority's error, and a later one of the same Durable Object registers again", async () => {
+      it("a subscriber's `ready` rejects with the authority's error, the subscriber is removed, and a later one of the same Durable Object registers again", async () => {
         const { state, presences, inObject } = worker()
         state.refuse = true
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(first.ready)).toBe(REFUSAL)
-        const registered = presences.length
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(presences).toHaveLength(1)
         const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(second.ready)).toBe(REFUSAL)
-        expect(presences.length).toBeGreaterThan(registered)
+        expect(presences).toHaveLength(2)
         first()
         second()
-        // The registration the first one's renewal made meanwhile is answered, refused, before the refusal lifts.
-        await new Promise((resolve) => setTimeout(resolve, 0))
         state.refuse = false
         const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(third.ready)).toBe('resolved')
         third()
-      })
-
-      it("once the refresh writes the presence, a later subscriber's `ready` resolves, and the refused one's stays rejected", async () => {
-        vi.useFakeTimers()
-        const { state, inObject } = worker()
-        state.refuse = true
-        const refused = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        const refusedReady = outcome(refused.ready)
-        await vi.advanceTimersByTimeAsync(0)
-        expect(await refusedReady).toBe(REFUSAL)
-        state.refuse = false
-        // Telefunc's next write of the presence, every 30 s.
-        await vi.advanceTimersByTimeAsync(30_000)
-        const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        const laterReady = outcome(later.ready)
-        await vi.advanceTimersByTimeAsync(0)
-        expect({ later: await laterReady, refused: await outcome(refused.ready) }).toEqual({
-          later: 'resolved',
-          refused: REFUSAL,
-        })
-        refused()
-        later()
       })
 
       it('a presence write that throws at once fails as a refused one: `ready` rejects with its error, and a publish goes on', async () => {
@@ -638,7 +615,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         expect(await outcome(room.closed)).toBe(REFUSAL)
       })
 
-      // A static subscriber subscribes again after a loss; its `ready` keeps what its first subscription's start came to.
+      // A removed subscriber's `ready` keeps what its subscription's start came to.
       it("a static subscriber's remover keeps the authority's first refusal in its `ready` once it is removed", async () => {
         const { state, inObject } = worker()
         state.refuse = true

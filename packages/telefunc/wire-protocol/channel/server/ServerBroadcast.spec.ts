@@ -18,6 +18,8 @@ import {
 } from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
+import { DriverAttempt, type BackendReceiver, type BroadcastRoute } from '../../backend/driver.js'
+import { onBug } from '../../../node/server/runTelefunc/onBug.js'
 import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
@@ -710,36 +712,47 @@ describe("a transport's listen() that throws", () => {
     return state
   }
 
-  // The throw is the start's failure, as a refusal is: a static subscriber's `ready` keeps it, and the subscriber
-  // subscribes again; a `BroadcastChannel` ends, its subscription not in effect.
-  it('Broadcast.subscribe(): `ready` rejects with the throw, and the subscriber subscribes again and hears what follows', async () => {
-    const transport = failingFirst()
-    const heard: string[] = []
-    const stop = Broadcast.subscribe<string>('room:throws', (text) => heard.push(text))
-    await expect(stop.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
-    await vi.waitFor(() => expect(transport.active).toBe(1))
-    transport.text('"hello"', { seq: 1, timestamp: 1 })
-    stop()
-    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
-      heard: ['hello'],
-      active: 0,
-      attempts: 2,
+  // The throw is the start's failure, as a refusal is: a static subscriber is removed, its `ready` keeping the throw, so
+  // the one an app subscribes on the rejection is its only subscription; a `BroadcastChannel` ends, its subscription not
+  // in effect.
+  for (const binary of [false, true]) {
+    it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): \`ready\` rejects with the throw and stays rejected, and the one an app subscribes on the rejection hears each publish once`, async () => {
+      const transport = failingFirst()
+      const heard: string[] = []
+      const subscribe = () =>
+        binary
+          ? Broadcast.subscribeBinary('room:throws', (data) => heard.push(`${data}`))
+          : Broadcast.subscribe<string>('room:throws', (text) => heard.push(text))
+      const failed = subscribe()
+      await expect(failed.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+      const again = subscribe()
+      await again.ready
+      if (binary) transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
+      else transport.text('"hello"', { seq: 1, timestamp: 1 })
+      failed()
+      await expect(failed.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+      again()
+      expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+        heard: [binary ? '1,2,3' : 'hello'],
+        active: 0,
+        attempts: 2,
+      })
     })
-  })
+  }
 
-  it('Broadcast.subscribeBinary(): `ready` rejects with the throw, and the subscriber subscribes again and hears what follows', async () => {
-    const transport = failingFirst()
-    const heard: string[] = []
-    const stop = Broadcast.subscribeBinary('room:throws', (data) => heard.push(`${data}`))
-    await expect(stop.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
-    await vi.waitFor(() => expect(transport.active).toBe(1))
-    transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
-    stop()
-    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
-      heard: ['1,2,3'],
-      active: 0,
-      attempts: 2,
-    })
+  it('Broadcast.subscribe(): a subscriber whose start failed stays removed when a transport replaces the plane', async () => {
+    failingFirst()
+    const failed = Broadcast.subscribe('room:throws', () => {})
+    await expect(failed.ready).rejects.toThrow()
+    let listens = 0
+    const listen = () => {
+      listens++
+      return () => {}
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    failed()
+    expect(listens).toBe(0)
   })
 
   for (const binary of [false, true]) {
@@ -846,6 +859,167 @@ describe("a transport's listener whose broker refuses it", () => {
   }
 })
 
+/** The failures the server reported through `onBug()`, by the message of their cause. */
+const reported: string[] = []
+onBug((err) => reported.push(err instanceof Error && err.cause instanceof Error ? err.cause.message : String(err)))
+
+/** Ready at once, as a memory subscription is, until the test loses it or ends it, as a backend does that loses its
+ *  connection or whose renewal is refused. */
+class SteeredAttempt extends DriverAttempt {
+  private readonly inner: DriverAttempt
+
+  constructor(inner: DriverAttempt) {
+    super()
+    this.inner = inner
+    this.transition('ready')
+  }
+
+  steer(state: 'ready' | 'lost' | 'closed', reason?: Error): void {
+    this.transition(state, reason)
+    if (state === 'closed') void this.inner.unsubscribe()
+  }
+
+  unsubscribe(): Promise<void> {
+    this.transition('closed')
+    return this.inner.unsubscribe()
+  }
+}
+
+class BackendOfSteeredAttempts extends MemoryBackend {
+  readonly attempts: SteeredAttempt[] = []
+
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+    const attempt = new SteeredAttempt(super.subscribe(route, receiver))
+    this.attempts.push(attempt)
+    return attempt
+  }
+}
+
+// A backend renews a subscription that lost its connection, and closes one with a reason only once it can't: the
+// subscription is over, and a fresh `subscribe()` starts another.
+describe('a server-side subscription in effect whose backend ends it', () => {
+  const KEY = 'room:in-effect'
+  const STATIC: Record<string, (heard: string[], signal?: AbortSignal) => Unsubscribe> = {
+    'Broadcast.subscribe()': (heard, signal) =>
+      Broadcast.subscribe<string>(KEY, (text) => heard.push(text), { signal }),
+    'Broadcast.subscribeBinary()': (heard, signal) =>
+      Broadcast.subscribeBinary(KEY, (data) => heard.push(new TextDecoder().decode(data)), { signal }),
+  }
+  const publish = (binary: boolean, text: string) =>
+    binary ? Broadcast.publishBinary(KEY, new TextEncoder().encode(text)) : Broadcast.publish(KEY, text)
+  for (const [surface, subscribe] of Object.entries(STATIC)) {
+    const binary = surface.includes('Binary')
+    it(`${surface}: is removed, its \`ready\` resolved and its signal let go, the failure reported once, and a fresh one hears each publish once`, async () => {
+      reported.length = 0
+      const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
+      const heard: string[] = []
+      const signal = new AbortController().signal
+      const ended = subscribe(heard, signal)
+      await ended.ready
+      backend.attempts[0]?.steer('closed', new Error('NOPERM renewal refused'))
+      await vi.waitFor(() => expect(getEventListeners(signal, 'abort')).toHaveLength(0))
+      await publish(binary, 'unheard')
+      const fresh = subscribe(heard)
+      await fresh.ready
+      await publish(binary, 'heard')
+      ended()
+      fresh()
+      await expect(ended.ready).resolves.toBeUndefined()
+      expect({ heard, attempts: backend.attempts.length, reported }).toEqual({
+        heard: ['heard'],
+        attempts: 2,
+        reported: ['NOPERM renewal refused'],
+      })
+    })
+
+    it(`${surface}: stays subscribed through a loss, and hears what is published once it is back`, async () => {
+      reported.length = 0
+      const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
+      const heard: string[] = []
+      const stop = subscribe(heard)
+      await stop.ready
+      backend.attempts[0]?.steer('lost')
+      backend.attempts[0]?.steer('ready')
+      await publish(binary, 'after')
+      stop()
+      expect({ heard, attempts: backend.attempts.length, reported }).toEqual({
+        heard: ['after'],
+        attempts: 1,
+        reported: [],
+      })
+    })
+  }
+
+  it("BroadcastChannel: closes with the backend's error", async () => {
+    const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
+    const room = new ServerBroadcast<string>({ key: KEY })
+    await room.subscribe(() => {}).ready
+    backend.attempts[0]?.steer('closed', new Error('NOPERM renewal refused'))
+    await expect(room.closed).rejects.toMatchObject({ cause: { message: 'NOPERM renewal refused' } })
+    expect(backend.attempts).toHaveLength(1)
+  })
+})
+
+// One failed attempt is one report, however many of the server's subscriptions shared it and whether any read `ready`.
+describe('a refused attempt that server-side subscriptions of one key share', () => {
+  const KEY = 'room:shared-refusal'
+  /** A transport whose broker refuses each listener it holds once `refuse()` runs, with `reason`. */
+  const refusingBroker = () => {
+    const state = { listens: 0, stops: 0 }
+    const refusals = new Set<(reason?: Error) => void>()
+    const listen = () => {
+      state.listens++
+      const ready = Promise.withResolvers<void>()
+      refusals.add(ready.reject)
+      return { unsubscribe: () => void state.stops++, ready: ready.promise }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    const refuse = (reason?: Error) => {
+      for (const reject of refusals) reject(reason)
+      refusals.clear()
+    }
+    return { state, refuse }
+  }
+
+  it('ends each of them, stops the listener once, and is reported once', async () => {
+    reported.length = 0
+    const { state, refuse } = refusingBroker()
+    const controller = new AbortController()
+    const first = Broadcast.subscribe(KEY, () => {})
+    const second = Broadcast.subscribe(KEY, () => {}, { signal: controller.signal })
+    const room = new ServerBroadcast({ key: KEY })
+    room.subscribe(() => {})
+    // A subscriber that removes another on its own rejection.
+    void first.ready.catch(() => controller.abort())
+    refuse(new Error('NOPERM'))
+    await expect(first.ready).rejects.toThrow()
+    await expect(room.closed).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    second()
+    expect({ ...state, reported }).toEqual({ listens: 1, stops: 1, reported: ['NOPERM'] })
+  })
+
+  it('is reported where the broker refuses with no reason', async () => {
+    reported.length = 0
+    const { refuse } = refusingBroker()
+    const subscriber = Broadcast.subscribe(KEY, () => {})
+    refuse()
+    await expect(subscriber.ready).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(reported).toHaveLength(1)
+  })
+
+  it('is not reported once every subscription left before the refusal', async () => {
+    reported.length = 0
+    const { refuse } = refusingBroker()
+    Broadcast.subscribe(KEY, () => {})()
+    refuse(new Error('NOPERM'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(reported).toEqual([])
+  })
+})
+
 // A broker that replays on connect can deliver a message, then fail to connect: a listener added on that message came
 // for the start that failed, and goes with it.
 describe("a transport's listen() that delivers a message, then throws", () => {
@@ -929,9 +1103,10 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       const stop = subscribe((n) => heard.push(n))
       await expect(stop.ready).rejects.toThrow()
       if (end === undefined) {
-        await vi.waitFor(() => expect(transport.listening()).toBe(1))
+        const again = subscribe((n) => heard.push(n))
+        await again.ready
         await publish()
-        stop()
+        again()
       } else end()
       expect({ heard, listening: transport.listening() }).toEqual({ heard: end ? [] : [2], listening: 0 })
     })
@@ -950,19 +1125,13 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       return (onMessage) => broadcast.subscribeBinary(onMessage, { signal })
     },
   }
-  // A failed start ends a `BroadcastChannel`, which removes its listeners; a static subscriber subscribes again, so it
-  // stays on its signal until it is removed.
+  // A failed start ends a `BroadcastChannel`, which removes its listeners, and removes a static subscriber.
   for (const [surface, of] of Object.entries(WITH_SIGNAL)) {
-    const isStatic = surface.startsWith('Broadcast.')
-    it(`${surface}: a ${isStatic ? 'subscriber' : 'listener'} with a signal ${isStatic ? 'whose start failed stays on it while it subscribes again, and leaves no abort listener on it once removed' : 'leaves no abort listener on it once the failed start ended its broadcast'}`, async () => {
+    it(`${surface}: a ${surface.startsWith('Broadcast.') ? 'subscriber' : 'listener'} with a signal leaves no abort listener on it once its start failed`, async () => {
       deliveringThenThrowing()
       const signal = new AbortController().signal
       const subscribed = of(signal)(() => {})
       await expect(subscribed.ready).rejects.toThrow()
-      if (isStatic) {
-        expect(getEventListeners(signal, 'abort')).toHaveLength(1)
-        subscribed()
-      }
       expect(getEventListeners(signal, 'abort')).toHaveLength(0)
     })
   }

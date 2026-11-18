@@ -393,7 +393,7 @@ function testResubscribe() {
 }
 
 function testRefusedPresence() {
-  test("Broadcast: a publish made while the key's authority refuses its subscriber's presence settles, and the subscription that replaces it receives the next publish", async () => {
+  test("Broadcast: a publish made while the key's authority refuses its subscriber's presence settles, the subscriber is removed, and the one the app subscribes again receives the next publish once", async () => {
     await page.goto(getServerUrl() + '/refused-presence')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -404,10 +404,9 @@ function testRefusedPresence() {
       // The subscriber's `ready` keeps the refusal of its first presence.
       expect({ published: state.published, ready: state.ready }).deep.equal({ published: true, ready: 'rejected' })
     })
-    // Each try publishes again, until the replacing subscription's presence is recorded.
+    await page.click('#publish')
     await autoRetry(async () => {
-      await page.click('#publish')
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).deep.equal(['again'])
     })
   })
 }
