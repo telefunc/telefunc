@@ -45,15 +45,41 @@ function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPu
 const LOSSY_WITH_ACK_TEXT =
   "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
 
-/** `data` as JSON, for `send()` and `publish()` on either end. Bytes are refused: JSON turns them into an object. */
+/** `data` as JSON, for `send()` and `publish()` on either end. Bytes are refused, at any depth: JSON turns them into an
+ *  object. The serializer's own pass over `data` checks each value, so a message without bytes costs one call per value. */
 function stringifyMessage(data: unknown, method: 'send' | 'publish'): string {
-  if (ArrayBuffer.isView(data) || data instanceof ArrayBuffer) {
-    assertUsage(
-      false,
-      `\`${method}()\` serializes its data as JSON, which turns this \`${data.constructor.name}\` into a plain object. Bytes go through \`${method}Binary()\`, which takes a \`Uint8Array\`.`,
-    )
+  return stringify(data, {
+    replacer(key, value) {
+      if (!ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) return undefined
+      const name = `\`${value.constructor.name}\``
+      const at = key === '' ? null : pathOf(data, this, key)
+      const which = key === '' ? `this ${name}` : at === null ? `a ${name} in it` : `the ${name} at \`${at}\``
+      assertUsage(
+        false,
+        `\`${method}()\` serializes its data as JSON, which turns ${which} into a plain object. Bytes go through \`${method}Binary()\`, which takes a \`Uint8Array\`.`,
+      )
+    },
+  })
+}
+
+/** Where `holder[key]` is in `data`, as `a.b[0]`; searched only for a message refused. Null where `holder` isn't one of
+ *  its objects, as inside a `Map` or a `Set`, which the serializer copies. */
+function pathOf(data: unknown, holder: object, key: string): string | null {
+  const seen = new Set<object>()
+  const search = (value: unknown, at: (string | number)[]): (string | number)[] | null => {
+    if (typeof value !== 'object' || value === null || seen.has(value)) return null
+    seen.add(value)
+    const step = Array.isArray(value) ? Number(key) : key
+    if (value === holder) return [...at, step]
+    for (const [k, v] of Object.entries(value)) {
+      const found = search(v, [...at, Array.isArray(value) ? Number(k) : k])
+      if (found) return found
+    }
+    return null
   }
-  return stringify(data)
+  const path = search(data, [])
+  if (!path) return null
+  return path.map((step, i) => (typeof step === 'number' ? `[${step}]` : i === 0 ? step : `.${step}`)).join('')
 }
 
 type ChannelListenReturn<T> = [T] extends [never]

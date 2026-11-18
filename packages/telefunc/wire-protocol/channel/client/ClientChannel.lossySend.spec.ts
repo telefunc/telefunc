@@ -246,6 +246,18 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
     expect(held(channel)).toEqual(['R'])
   })
 
+  test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', () => {
+    const channel = newChannel()
+    const page = channel as unknown as ClientChannelType
+    expect(() => page.send({ b: new Uint8Array(1) })).toThrow('turns the `Uint8Array` at `b` into')
+    expect(() => page.send({ a: { b: { c: new ArrayBuffer(1) } } }, { lossy: true })).toThrow(
+      'the `ArrayBuffer` at `a.b.c`',
+    )
+    expect(() => page.send([0, [new Uint8Array(1)]])).toThrow('the `Uint8Array` at `[1][0]`')
+    void page.send('R')
+    expect(held(channel)).toEqual(['R'])
+  })
+
   test('`publish()` is a usage error naming `publishBinary()`', () => {
     const room = new ClientBroadcast({
       channelId: crypto.randomUUID(),
@@ -256,6 +268,7 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
       },
     })
     expect(() => room.publish(new Uint8Array(1))).toThrow('Bytes go through `publishBinary()`')
+    expect(() => room.publish({ a: { b: { c: new Uint8Array(1) } } })).toThrow('the `Uint8Array` at `a.b.c`')
   })
 })
 

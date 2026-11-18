@@ -325,6 +325,34 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(page.read).toEqual(['R'])
   })
 
+  test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', () => {
+    const channel = new Channel()
+    expect(() => channel.send({ b: new Uint8Array([1, 2, 255]) })).toThrow('turns the `Uint8Array` at `b` into')
+    expect(() => channel.send({ a: { b: { c: Buffer.from('hi') } } }, { ack: true })).toThrow('the `Buffer` at `a.b.c`')
+    expect(() => channel.send(['x', new ArrayBuffer(2)], { lossy: true })).toThrow('the `ArrayBuffer` at `[1]`')
+    expect(() => channel.send({ b: [new DataView(new ArrayBuffer(1))] })).toThrow('Bytes go through `sendBinary()`')
+    expect(() => channel.send(new Map([['m', new Uint8Array(1)]]))).toThrow('turns a `Uint8Array` in it into')
+    void channel.send('R')
+    const server = channel as unknown as ServerChannel<never, string>
+    server._registerChannel()
+    const page = newPage()
+    wire(server, page).attach()
+    expect(page.read).toEqual(['R'])
+  })
+
+  test('nested at any depth, are a usage error naming `publishBinary()` and where they are, and nothing is published', async () => {
+    const key = `room:nested-bytes:${crypto.randomUUID()}`
+    const received: unknown[] = []
+    const unsubscribe = Broadcast.subscribe(key, (data) => received.push(data))
+    const room = new BroadcastChannel({ key })
+    expect(() => room.publish({ frame: new Uint8Array(1) })).toThrow('the `Uint8Array` at `frame`')
+    expect(() => Broadcast.publish(key, { a: [{ b: new Float32Array(1) }] })).toThrow('the `Float32Array` at `a[0].b`')
+    expect(() => Broadcast.publish(key, [new Uint8Array(1)])).toThrow('Bytes go through `publishBinary()`')
+    await Broadcast.publish(key, 'R')
+    expect(received).toEqual(['R'])
+    unsubscribe()
+  })
+
   test('are a usage error naming `publishBinary()`, and nothing is published', async () => {
     const key = `room:bytes:${crypto.randomUUID()}`
     const received: unknown[] = []

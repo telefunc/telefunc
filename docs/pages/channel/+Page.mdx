@@ -265,7 +265,7 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-> `send()` and `publish()` serialize their data as JSON, so they throw at the call when given a `Uint8Array`, another typed array or an `ArrayBuffer`: bytes go through `sendBinary()` and `publishBinary()`.
+> `send()` and `publish()` serialize their data as JSON, so they throw at the call when given a `Uint8Array`, another typed array or an `ArrayBuffer`, also inside an object or an array: bytes go through `sendBinary()` and `publishBinary()`.
 
 A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open.
 
