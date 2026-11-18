@@ -32,7 +32,9 @@ type BroadcastTransport = {
 
 /** What stops a listener: the function, where the listener receives what any server publishes from the moment `listen()`
  *  returns; with `ready`, where the broker confirms the listener later: it resolves once the listener receives what any
- *  server publishes to the key, and rejects where the broker refuses it. */
+ *  server publishes to the key, and rejects where the broker refuses it. Telefunc calls `unsubscribe()` once for every
+ *  `listen()` that returned, also where its `ready` rejected; a `listen()` that throws returns nothing to call, so it
+ *  releases what it took before it throws. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 type TransportBroadcastDriverOptions = { transport: BroadcastTransport }
@@ -63,7 +65,7 @@ class TransportBroadcastDriver implements BroadcastDriver {
 }
 
 /** Ready once the transport's listener is: at once where `listen()` returned the function that stops it, else once its
- *  `ready` resolves; closed with the broker's refusal where that rejects. */
+ *  `ready` resolves; closed with the broker's refusal where that rejects, and the listener stopped. */
 class ListenAttempt extends DriverAttempt {
   private readonly stop: () => void
 
@@ -82,9 +84,21 @@ class ListenAttempt extends DriverAttempt {
     try {
       await ready
     } catch (err) {
-      return this.transition('closed', err)
+      // Unsubscribed first: that stopped it.
+      if (this.state() === 'closed') return
+      this.transition('closed', err)
+      return this.stopRefused()
     }
     this.transition('ready')
+  }
+
+  /** What its stop throws is logged, as on an unsubscribe: the refusal already ended the attempt. */
+  private stopRefused(): void {
+    try {
+      this.stop()
+    } catch (error) {
+      console.error(error)
+    }
   }
 
   async unsubscribe(): Promise<void> {

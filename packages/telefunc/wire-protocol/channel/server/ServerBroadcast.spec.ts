@@ -754,6 +754,98 @@ describe("a transport's listen() that throws", () => {
   }
 })
 
+// A transport that keeps one listener per key, as most do, would refuse the key's next `listen()` while it still holds
+// the refused one.
+describe("a transport's listener whose broker refuses it", () => {
+  /** A transport whose broker refuses each listener it holds once `refuse()` runs, counting its listeners and stops. */
+  const refusingBroker = () => {
+    const state = { listens: 0, stops: 0, refusals: new Set<(err: Error) => void>() }
+    const listen = () => {
+      state.listens++
+      const ready = Promise.withResolvers<void>()
+      state.refusals.add(ready.reject)
+      return { unsubscribe: () => void state.stops++, ready: ready.promise }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    const refuse = () => {
+      for (const reject of state.refusals) reject(new Error('NOPERM'))
+      state.refusals.clear()
+    }
+    return { state, refuse }
+  }
+  const SURFACES: Record<string, () => { ready: Promise<void>; end: () => void }> = {
+    'Broadcast.subscribe()': () => {
+      const remove = Broadcast.subscribe('room:refused-listener', () => {})
+      return { ready: remove.ready, end: remove }
+    },
+    'Broadcast.subscribeBinary()': () => {
+      const remove = Broadcast.subscribeBinary('room:refused-listener', () => {})
+      return { ready: remove.ready, end: remove }
+    },
+    'BroadcastChannel.subscribe()': () => {
+      const broadcast = new ServerBroadcast({ key: 'room:refused-listener' })
+      return { ready: broadcast.subscribe(() => {}).ready, end: () => broadcast.abort() }
+    },
+  }
+  for (const [surface, subscribe] of Object.entries(SURFACES)) {
+    it(`${surface}: the transport is told to stop each listener its broker refused, once`, async () => {
+      const { state, refuse } = refusingBroker()
+      const subscriber = subscribe()
+      refuse()
+      await expect(subscriber.ready).rejects.toThrow()
+      // Any listener started after the refusal is refused too.
+      await vi.waitFor(() => {
+        refuse()
+        expect(state.stops).toBe(state.listens)
+      })
+      subscriber.end()
+      expect(state.stops).toBe(state.listens)
+    })
+    it(`${surface}: a listener the broker refuses after it was removed is stopped once`, async () => {
+      const { state, refuse } = refusingBroker()
+      subscribe().end()
+      refuse()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect({ listens: state.listens, stops: state.stops }).toEqual({ listens: 1, stops: 1 })
+    })
+  }
+
+  /** A broker that holds a key from `listen()` until its `unsubscribe()`, and refuses another listener of a key it holds;
+   *  until `accepts` is set, it refuses each new one in its `ready`, or in `listen()` itself, which then holds nothing. */
+  const reservingBroker = (refusesInListen: boolean) => {
+    const state = { accepts: false, unsubscribes: 0, held: new Set<string>() }
+    const listen = (key: string) => {
+      if (state.held.has(key))
+        return { unsubscribe: () => {}, ready: Promise.reject(new Error('attempt still reserved')) }
+      if (!state.accepts && refusesInListen) throw new Error('NOPERM')
+      state.held.add(key)
+      const unsubscribe = () => {
+        state.unsubscribes++
+        state.held.delete(key)
+      }
+      return { unsubscribe, ready: state.accepts ? Promise.resolve() : Promise.reject(new Error('NOPERM')) }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    return state
+  }
+  for (const refusesInListen of [false, true]) {
+    it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
+      const broker = reservingBroker(refusesInListen)
+      const route = { key: 'room:reserved', kind: 'text' } as const
+      const refused = getBroadcastPlane().subscribe(route, () => {})
+      await expect(refused.ready).rejects.toMatchObject({ cause: { message: 'NOPERM' } })
+      broker.accepts = true
+      const accepted = getBroadcastPlane().subscribe(route, () => {})
+      await accepted.ready
+      const unsubscribes = broker.unsubscribes
+      void accepted.unsubscribe()
+      expect({ unsubscribes, held: [...broker.held] }).toEqual({ unsubscribes: refusesInListen ? 0 : 1, held: [] })
+    })
+  }
+})
+
 // A broker that replays on connect can deliver a message, then fail to connect: a listener added on that message came
 // for the start that failed, and goes with it.
 describe("a transport's listen() that delivers a message, then throws", () => {
