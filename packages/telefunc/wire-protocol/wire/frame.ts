@@ -96,6 +96,9 @@ const ERROR_REASON = {
   /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
    *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
   NOT_IN_EFFECT: 0x03 as const,
+  /** A broadcast's subscription that was in effect ended: its backend ended it for good. What the backend said stays on
+   *  the server. */
+  ENDED: 0x04 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]

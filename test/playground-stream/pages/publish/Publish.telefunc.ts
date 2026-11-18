@@ -40,6 +40,8 @@ export {
   onBroadcastToSubscribe,
   onPublishTo,
   onBroadcastRedisRefuses,
+  onBroadcastsToRefuseOnRenewal,
+  onRefuseRenewals,
   onRedisAllowsEveryKey,
 }
 
@@ -49,7 +51,7 @@ import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { redis } from '../../redis'
+import { dropRedisSubscribers, redis } from '../../redis'
 import { refuseChannels } from './refuseChannels'
 
 type TextMsg = { text: string; from: string }
@@ -933,6 +935,24 @@ async function onPublishTo(key: string, text: string) {
 async function onBroadcastRedisRefuses() {
   if (!(await refuseChannels())) return null
   return new BroadcastChannel<string>({ key: `!refused:${crypto.randomUUID()}` })
+}
+
+/** Two broadcasts whose keys Redis allows until `onRefuseRenewals()`: the page subscribes to one's text messages and to
+ *  the other's binary ones. */
+async function onBroadcastsToRefuseOnRenewal() {
+  const id = crypto.randomUUID()
+  return {
+    text: new BroadcastChannel<string>({ key: `!renewal-text:${id}` }),
+    binary: new BroadcastChannel({ key: `!renewal-binary:${id}` }),
+  }
+}
+
+/** Redis refuses the keys that start with `!` from now on, and this server's subscriber connection drops: Redis refuses
+ *  the subscriptions it renews to them. False where Redis still takes such a subscription. */
+async function onRefuseRenewals() {
+  if (!(await refuseChannels())) return false
+  await dropRedisSubscribers()
+  return true
 }
 
 async function onRedisAllowsEveryKey() {

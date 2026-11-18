@@ -681,6 +681,25 @@ function testSubscribeOrder(inDocker = false) {
       if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
       expectServerError('NOPERM', inDocker)
     })
+
+    test('broadcast: a subscription in effect whose renewal Redis refuses closes its broadcast, text and binary, with a ChannelClosedError that says its backend ended it', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-renewal-refused')
+      const ended =
+        'ChannelClosedError: Broadcast closed: its subscription was in effect on the server until its backend ended it. Get the broadcast from a telefunction again to subscribe again.'
+      let refuses = true
+      await autoRetry(
+        async () => {
+          const result = await getResult('#publish-result')
+          refuses = result.refusesChannels !== false
+          if (refuses) expect(result).deep.equal({ heard: ['1', 'text'], closed: [ended, ended] })
+        },
+        { timeout: 30_000 },
+      )
+      if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
+      expectServerError('NOPERM', inDocker)
+      expectLog('Redis subscriber connection closed')
+    })
   }
 
   test("broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too, and on SSE while the server holds the page's POST that carries it", async () => {

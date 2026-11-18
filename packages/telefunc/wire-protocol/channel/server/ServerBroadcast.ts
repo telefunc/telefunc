@@ -78,12 +78,14 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
         receiver: (payload, rawInfo) => this.deliverBroadcastMessage(payload, rawInfo),
         onReady: () => settleAll(this.waiting.text, true),
         onFailed: (err) => this._end.endNotInEffect(err),
+        onEnded: (err) => this._end.endEnded(err),
       }),
       binary: new RouteSubscription({
         route: { key: this.key, kind: 'binary' },
         receiver: (payload, rawInfo) => this.deliverBroadcastBinaryMessage(payload, rawInfo),
         onReady: () => settleAll(this.waiting.binary, true),
         onFailed: (err) => this._end.endNotInEffect(err),
+        onEnded: (err) => this._end.endEnded(err),
       }),
     }
     this._end.onClose(() => {
@@ -464,6 +466,7 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
       signal?.removeEventListener('abort', remove)
       readiness.settle(err)
     },
+    onEnded: () => signal?.removeEventListener('abort', remove),
   })
   const remove = () => {
     signal?.removeEventListener('abort', remove)
@@ -506,8 +509,10 @@ type RouteSubscriptionOptions<Kind extends BroadcastKind> = {
   receiver: RouteReceiver<Kind>
   /** A subscription it opened takes effect: its backend delivers to it what any server publishes to the route. */
   onReady: () => void
-  /** A subscription it opened ended for good with `err`, before or after it took effect: it is closed. */
+  /** A subscription it opened ended for good with `err` before it took effect: it is closed. */
   onFailed: (err: Error) => void
+  /** A subscription it opened that took effect was ended for good with `err`: it is closed. */
+  onEnded: (err: Error) => void
 }
 
 /** A route's subscription while wanted, until its backend ends it for good; a transport that replaces the plane gets
@@ -517,6 +522,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private readonly receiver: RouteReceiver<Kind>
   private readonly onReady: () => void
   private readonly onFailed: (err: Error) => void
+  private readonly onEnded: (err: Error) => void
   private opened = false
   /** Inside its backend's subscribe, which may deliver a message whose listener opens or closes it again. */
   private starting = false
@@ -524,11 +530,12 @@ class RouteSubscription<Kind extends BroadcastKind> {
   /** The start of `current`, until it took effect; null once it did. */
   private start: Readiness | null = null
 
-  constructor({ route, receiver, onReady, onFailed }: RouteSubscriptionOptions<Kind>) {
+  constructor({ route, receiver, onReady, onFailed, onEnded }: RouteSubscriptionOptions<Kind>) {
     this.route = route
     this.receiver = receiver
     this.onReady = onReady
     this.onFailed = onFailed
+    this.onEnded = onEnded
   }
 
   /** Whether a subscription it opened is in effect. */
@@ -596,6 +603,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
         if (this.current !== subscription) return
         this.close()
         const failure = err instanceof Error ? err : new Error(String(err))
+        if (wasReady) return this.onEnded(failure)
         start.settle(failure)
         this.onFailed(failure)
       }
