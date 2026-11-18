@@ -527,8 +527,8 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private current: BackendSubscription | null = null
   /** Whether `current` took effect. */
   private currentInEffect = false
-  /** What waits for it to take effect: settled by the first subscription that takes effect or fails, on whichever plane
-   *  is in effect by then. A wait that comes once it was in effect gets its own. */
+  /** What waits for it to take effect: resolved by the first subscription that takes effect, on whichever plane is in
+   *  effect by then; let go where it closes first. A wait that comes once it was in effect gets its own. */
   private establishing: Readiness | null = null
 
   constructor({ route, receiver, onReady, onFailed }: RouteSubscriptionOptions<Kind>) {
@@ -543,8 +543,8 @@ class RouteSubscription<Kind extends BroadcastKind> {
     return this.current !== null && this.currentInEffect
   }
 
-  /** `undefined` while in effect; else settles once a subscription on the plane in effect takes effect, and rejects
-   *  where one fails first. */
+  /** `undefined` while in effect; else resolves once a subscription on the plane in effect takes effect. One that ends for
+   *  good first lets it go, as a close does: `onFailed` tells the failure. */
   get ready(): Promise<void> | undefined {
     if (this.inEffect) return undefined
     this.establishing ??= new Readiness()
@@ -584,13 +584,6 @@ class RouteSubscription<Kind extends BroadcastKind> {
     current?.unsubscribe()
   }
 
-  /** Settles what waits for it to take effect: a wait that comes later gets its own. */
-  private settleEstablishing(outcome: true | Error): void {
-    const establishing = this.establishing
-    this.establishing = null
-    establishing?.settle(outcome)
-  }
-
   /** On the plane in effect now; the subscription keeps its own handle. */
   private startSubscription(): BackendSubscription {
     this.starting = true
@@ -614,7 +607,9 @@ class RouteSubscription<Kind extends BroadcastKind> {
     const tookEffect = () => {
       if (this.current !== subscription || this.currentInEffect) return
       this.currentInEffect = true
-      this.settleEstablishing(true)
+      // A wait that comes later gets its own.
+      this.establishing?.settle(true)
+      this.establishing = null
       this.onReady()
     }
     // Only a failure rejects `ready`, after the shared subscriptions retired and reported the subscription; an
@@ -624,10 +619,8 @@ class RouteSubscription<Kind extends BroadcastKind> {
         await subscription.ready
       } catch (err) {
         if (this.current !== subscription) return
-        this.stop()
-        const failure = err instanceof Error ? err : new Error(String(err))
-        this.settleEstablishing(failure)
-        this.onFailed(failure)
+        this.close()
+        this.onFailed(err instanceof Error ? err : new Error(String(err)))
       }
     }
     if (subscription.state() === 'closed') return void ended()
