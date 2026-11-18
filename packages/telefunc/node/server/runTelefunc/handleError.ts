@@ -1,4 +1,5 @@
 export { handleError }
+export { describeValue }
 
 import type { ViteDevServer } from 'vite'
 import { hasProp } from '../../../utils/hasProp.js'
@@ -57,8 +58,8 @@ function describeError(err: unknown): string {
   return texts.join('\n[cause]: ')
 }
 
-/** A cause may be any value a broker refused with: a plain object is shown as JSON, and one `String()` throws on (an
- *  object without a prototype) too. */
+/** A value thrown or refused with, which may be no `Error`: a plain object is shown as JSON, and one `String()` throws on
+ *  (an object without a prototype) too. */
 function describeValue(value: unknown): string {
   let text: string
   try {
