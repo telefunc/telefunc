@@ -1059,6 +1059,41 @@ describe("a transport's listener whose broker refuses it", () => {
     }
   }
 
+  // A broker may refuse with a status of its own, which may not even convert to a string.
+  const STATUSES = {
+    'a plain object': () => ({ code: 'NOPERM', detail: 'subscription ACL changed' }),
+    'an object without a prototype': () => ({ __proto__: null, code: 'NOPERM', detail: 'subscription ACL changed' }),
+  }
+  for (const [given, status] of Object.entries(STATUSES)) {
+    it(`a broker that rejects a listener's \`ready\` with ${given} gives the subscriber that value as the cause, and its listener is stopped`, async () => {
+      const refused = status()
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        let stops = 0
+        const listen = () => ({ ready: Promise.reject(refused), unsubscribe: () => void stops++ })
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+        const subscriber = Broadcast.subscribe('room:broker-status', () => {})
+        const cause = await subscriber.ready.then(
+          () => 'resolved',
+          (err: unknown) => err instanceof Error && err.cause,
+        )
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect({ causeIsStatus: cause === refused, stops, unhandled }).toEqual({
+          causeIsStatus: true,
+          stops: 1,
+          unhandled: [],
+        })
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+        logged.mockRestore()
+      }
+    })
+  }
+
   // A monitoring client an app reports bugs to may fail on its own.
   for (const fails of ['throws', 'returns a rejected promise'] as const) {
     it(`a refusal reported to an \`onBug()\` listener that ${fails} still rejects the subscriber's \`ready\`, the listener's failure logged, not left unhandled`, async () => {

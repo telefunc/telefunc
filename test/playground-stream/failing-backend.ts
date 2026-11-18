@@ -118,7 +118,7 @@ class FailingAttempt extends DriverAttempt implements BackendReceiver {
     this.transition('ready')
   }
 
-  private innerChanged(state: 'ready' | 'lost' | 'closed', reason: Error | undefined): void {
+  private innerChanged(state: 'ready' | 'lost' | 'closed', reason: unknown): void {
     if (state === 'ready') return this.ready()
     if (state === 'lost') return this.transition('lost')
     this.stop()

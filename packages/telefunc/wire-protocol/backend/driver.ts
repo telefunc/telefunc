@@ -115,7 +115,8 @@ type BackendReceiver = {
 
 type AttemptState = 'establishing' | 'ready' | 'lost' | 'closed'
 
-type StateListener = (state: Exclude<AttemptState, 'establishing'>, reason?: Error) => void
+/** `reason` is what the backend gave, as it gave it: a broker may refuse with any value. */
+type StateListener = (state: Exclude<AttemptState, 'establishing'>, reason?: unknown) => void
 
 /**
  * One driver subscription to a source. It starts `establishing`; the driver makes it `ready` once every publish made
@@ -144,7 +145,6 @@ abstract class DriverAttempt {
   protected transition(state: Exclude<AttemptState, 'establishing'>, reason?: unknown): void {
     if (this.current === state || this.current === 'closed') return
     this.current = state
-    const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
-    for (const listener of this.listeners) listener(state, error)
+    for (const listener of this.listeners) listener(state, reason)
   }
 }

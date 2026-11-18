@@ -183,7 +183,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     if (state !== 'establishing') this.attemptChanged(state, undefined)
   }
 
-  private attemptChanged(state: Exclude<AttemptState, 'establishing'>, reason: Error | undefined): void {
+  private attemptChanged(state: Exclude<AttemptState, 'establishing'>, reason: unknown): void {
     if (this.finished) return
     if (state === 'ready') return this.becameReady()
     if (state === 'lost') return this.lost()

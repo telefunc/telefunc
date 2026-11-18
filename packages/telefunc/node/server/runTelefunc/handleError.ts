@@ -51,8 +51,28 @@ function describeError(err: unknown): string {
   let error = err
   while (error !== undefined && !seen.has(error)) {
     seen.add(error)
-    texts.push((hasProp(error, 'stack') && String(error.stack)) || String(error))
+    texts.push((hasProp(error, 'stack') && String(error.stack)) || describeValue(error))
     error = hasProp(error, 'cause') ? error.cause : undefined
   }
   return texts.join('\n[cause]: ')
+}
+
+/** A cause may be any value a broker refused with: a plain object is shown as JSON, and one `String()` throws on (an
+ *  object without a prototype) too. */
+function describeValue(value: unknown): string {
+  let text: string
+  try {
+    text = String(value)
+  } catch {
+    return toJson(value) ?? Object.prototype.toString.call(value)
+  }
+  return text === '[object Object]' ? (toJson(value) ?? text) : text
+}
+
+function toJson(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return undefined
+  }
 }
