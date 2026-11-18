@@ -736,7 +736,7 @@ describe('cloudflare broadcast routing', () => {
       _resetBroadcastAdapterForTesting(transport)
       const inObject = <T>(run: () => T) => transport.runInObject('telefunc-shard-weur-0', run)
       const inOtherObject = <T>(run: () => T) => transport.runInObject('telefunc-shard-weur-1', run)
-      return { state, inObject, inOtherObject }
+      return { state, kv, inObject, inOtherObject }
     }
 
     it("a subscriber's `ready` rejects with KV's error, and so does a later one of the same Durable Object, until it has none", async () => {
@@ -807,6 +807,24 @@ describe('cloudflare broadcast routing', () => {
         _resetBroadcastAdapterForTesting(previousTransport)
         vi.useRealTimers()
       }
+    })
+
+    it('a presence write that throws at once fails as a refused one: `ready` rejects with its error, and a publish goes on', async () => {
+      const previousTransport = getBroadcastAdapter()
+      const { kv, inObject } = refusing()
+      kv.put = () => {
+        throw new Error('KV binding invocation failed')
+      }
+      const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await expect(subscriber.ready).rejects.toThrow('KV binding invocation failed')
+      // A publish from here waits for the presence writes in flight here.
+      const published = await Promise.race([
+        inObject(() => Broadcast.publish('room:test', 'hello')).then(() => 'published'),
+        new Promise((resolve) => setTimeout(() => resolve('held'), 1_000)),
+      ])
+      expect(published).toBe('published')
+      subscriber()
+      _resetBroadcastAdapterForTesting(previousTransport)
     })
 
     it("a broadcast that subscribes closes with KV's error", async () => {

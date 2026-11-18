@@ -369,7 +369,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       memberState.unwritten.delete(owner)
   }
 
-  private writePresence(key: string, owner: string): Promise<void> {
+  /** Async, so a write that throws at once fails as one KV refuses does. */
+  private async writePresence(key: string, owner: string): Promise<void> {
     return this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS })
   }
 
