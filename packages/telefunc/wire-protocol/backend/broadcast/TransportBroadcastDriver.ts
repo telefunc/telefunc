@@ -12,6 +12,7 @@ import {
 } from '../driver.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { stopLogged } from '../stopLogged.js'
 
 /** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
 type BroadcastTransport = {
@@ -73,6 +74,9 @@ class TransportBroadcastDriver implements BroadcastDriver {
  *  `ready` resolves; closed with the broker's refusal where that rejects, and the listener stopped. */
 class ListenAttempt extends DriverAttempt {
   private readonly stop: () => void
+  /** What the reactions on the broker's `ready` settle, until it is unsubscribed: a broker may keep `ready` pending for
+   *  good, and the reactions then hold none of the attempt. */
+  private readonly confirming: Confirming = { attempt: null }
 
   constructor(listening: BroadcastUnsubscribe) {
     super()
@@ -82,36 +86,34 @@ class ListenAttempt extends DriverAttempt {
       return
     }
     this.stop = listening.unsubscribe
-    void this.whenListening(listening.ready)
-  }
-
-  private async whenListening(ready: Promise<void>): Promise<void> {
-    try {
-      await ready
-    } catch (err) {
-      // Unsubscribed first: that stopped it.
-      if (this.state() === 'closed') return
-      this.transition('closed', refusal(err))
-      return stopListener(this.stop)
-    }
-    this.transition('ready')
+    const confirming = this.confirming
+    confirming.attempt = this
+    void listening.ready.then(
+      () => confirming.attempt?.listening(),
+      (err: unknown) => confirming.attempt?.refused(err),
+    )
   }
 
   unsubscribe(): Promise<void> {
+    this.confirming.attempt = null
     this.transition('closed')
-    return stopListener(this.stop)
+    stopLogged(this.stop)
+    return Promise.resolve()
+  }
+
+  private listening(): void {
+    this.confirming.attempt = null
+    this.transition('ready')
+  }
+
+  private refused(err: unknown): void {
+    this.confirming.attempt = null
+    this.transition('closed', refusal(err))
+    stopLogged(this.stop)
   }
 }
 
-/** Calls a transport's `unsubscribe()`, which may be async: what it throws, or what the promise it returns rejects
- *  with, is logged, as the attempt is over either way. */
-async function stopListener(stop: () => void): Promise<void> {
-  try {
-    await stop()
-  } catch (error) {
-    console.error(error)
-  }
-}
+type Confirming = { attempt: ListenAttempt | null }
 
 /** What the broker refused a listener with: a close without a reason is a backend's on purpose, which isn't reported,
  *  while a refusal always is. */

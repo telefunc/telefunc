@@ -573,7 +573,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
     unfollowBroadcastPlane(this)
     const current = this.current
     this.current = null
-    void current?.unsubscribe()
+    current?.unsubscribe()
   }
 
   /** On the plane in effect now; the subscription keeps its own handle. */
@@ -589,7 +589,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private subscribe(): void {
     const subscription = this.startSubscription()
     // A listener of a message its subscribe delivered closed it.
-    if (!this.opened) return void subscription.unsubscribe()
+    if (!this.opened) return subscription.unsubscribe()
     this.current = subscription
     const start = new Readiness()
     this.start = start

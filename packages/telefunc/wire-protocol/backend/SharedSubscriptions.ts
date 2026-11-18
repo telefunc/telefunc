@@ -6,6 +6,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { handleCallbackBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { assertDriverOrdering } from './driverOrdering.js'
+import { stopLogged } from './stopLogged.js'
 import type {
   AttemptState,
   BackendListener,
@@ -22,7 +23,7 @@ type BackendSubscription = {
   readonly ready: Promise<void>
   state(): AttemptState
   onStateChange(listener: (state: AttemptState) => void): () => void
-  unsubscribe(): Promise<void>
+  unsubscribe(): void
 }
 
 /** How a plane's sources share attempts and what they deliver. */
@@ -44,7 +45,6 @@ class SharedSubscriptions<Source> {
   private readonly sources: SourceRules<Source>
   /** By host and source key. */
   private readonly slots = new Map<string, SubscriptionSlot<Source>>()
-  private readonly cleanups = new Set<Promise<void>>()
 
   constructor({ driver, sources }: SharedSubscriptionsOptions<Source>) {
     this.driver = driver
@@ -63,31 +63,14 @@ class SharedSubscriptions<Source> {
     return slot.attach(listener)
   }
 
-  async dispose(): Promise<void> {
-    const slots = [...this.slots.values()]
-    await Promise.allSettled([...slots.map((slot) => slot.stop()), ...this.cleanups])
+  /** Stops what is live and waits on none of it. */
+  dispose(): void {
+    for (const slot of [...this.slots.values()]) slot.stop()
   }
 
   /** Unmaps `slot`, if it is still the one its key maps. */
   unmapSlot(slot: SubscriptionSlot<Source>): void {
     if (this.slots.get(slot.slotKey) === slot) this.slots.delete(slot.slotKey)
-  }
-
-  /** Unsubscribes `attempt`, tracked for `dispose()`. */
-  releaseAttempt(attempt: DriverAttempt): Promise<void> {
-    // Called now, not deferred: a subscribe in the same tick starts the source's next attempt after this one let go.
-    const cleanup = this.unsubscribeAttempt(attempt)
-    this.cleanups.add(cleanup)
-    void cleanup.finally(() => this.cleanups.delete(cleanup))
-    return cleanup
-  }
-
-  private async unsubscribeAttempt(attempt: DriverAttempt): Promise<void> {
-    try {
-      await attempt.unsubscribe()
-    } catch (error) {
-      console.error(error)
-    }
   }
 }
 
@@ -150,21 +133,21 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     return consumer
   }
 
-  /** Makes no promise while other consumers stay, so consumers that come and go cost none. */
-  detach(consumer: Consumer): Promise<void> {
+  detach(consumer: Consumer): void {
     this.attached.delete(consumer)
     this.snapshot = null
-    return this.attached.size === 0 ? this.stop() : DETACHED
+    if (this.attached.size === 0) this.stop()
   }
 
-  /** The last consumer left, or the plane is disposed. */
-  stop(): Promise<void> {
-    if (this.finished) return Promise.resolve()
+  /** The last consumer left, or the plane is disposed. Called now, not deferred: a subscribe in the same tick starts the
+   *  source's next attempt after this one let go. */
+  stop(): void {
+    if (this.finished) return
     const attempt = this.attempt
     this.finish()
     this.latestReadiness.resolve()
     this.enter('closed')
-    return attempt === null ? Promise.resolve() : this.owner.releaseAttempt(attempt)
+    if (attempt !== null) stopLogged(() => attempt.unsubscribe())
   }
 
   deliver(payload: BackendPayload, ordering: OrderingInfo): void {
@@ -306,12 +289,12 @@ class Consumer implements BackendSubscription {
     return () => this.stateListeners.delete(listener)
   }
 
-  unsubscribe(): Promise<void> {
-    if (!this.attached) return DETACHED
+  unsubscribe(): void {
+    if (!this.attached) return
     this.attached = false
     if (this.slot.state !== 'closed') this.notify('closed')
     this.stateListeners.clear()
-    return this.slot.detach(this)
+    this.slot.detach(this)
   }
 
   notify(state: AttemptState): void {
@@ -324,9 +307,6 @@ class Consumer implements BackendSubscription {
     }
   }
 }
-
-/** What a detach that stops nothing returns: one settled promise for all of them. */
-const DETACHED = Promise.resolve()
 
 function createReadiness(): Deferred<void> {
   const readiness = createDeferred()

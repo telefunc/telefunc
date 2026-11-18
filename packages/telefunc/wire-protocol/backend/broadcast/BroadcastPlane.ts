@@ -48,8 +48,8 @@ class BroadcastPlane {
     })
   }
 
-  dispose(): Promise<void> {
-    return this.subscriptions.dispose()
+  dispose(): void {
+    this.subscriptions.dispose()
   }
 }
 

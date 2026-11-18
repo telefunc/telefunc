@@ -136,8 +136,8 @@ abstract class DriverAttempt {
     return () => this.listeners.delete(listener)
   }
 
-  /** Settles after the driver's own cleanup. Core calls it at most once, never on a closed attempt, and stops
-   *  listening first. */
+  /** Core stops listening first, calls it at most once and never on a closed attempt, and waits on nothing it returns:
+   *  what it throws or rejects with is logged. */
   abstract unsubscribe(): Promise<void>
 
   /** `lost` on a drop, `ready` again after it, `closed` with the reason. */

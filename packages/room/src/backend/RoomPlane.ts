@@ -90,8 +90,8 @@ class RoomPlane {
     return this.subscriptions.subscribe({ roomId, inc, lane }, listener as BackendListener)
   }
 
-  dispose(): Promise<void> {
-    return this.subscriptions.dispose()
+  dispose(): void {
+    this.subscriptions.dispose()
   }
 }
 

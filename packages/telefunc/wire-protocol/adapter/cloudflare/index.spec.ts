@@ -137,9 +137,7 @@ beforeEach(() => {
   mocks.authorityInstances.length = 0
 })
 
-afterEach(async () => {
-  await disposeBackend()
-})
+afterEach(() => disposeBackend())
 
 describe('cloudflare adapter entrypoint', () => {
   it('routes by the home its page names and forwards routing headers', async () => {

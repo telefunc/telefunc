@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -16,7 +18,7 @@ import {
   getBroadcastPlane,
   installBackend,
 } from '../../backend/install.js'
-import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
+import type { BroadcastTransport, BroadcastUnsubscribe } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
 import { DriverAttempt, type BackendReceiver, type BroadcastRoute } from '../../backend/driver.js'
 import { onBug } from '../../../node/server/runTelefunc/onBug.js'
@@ -841,6 +843,70 @@ describe("a transport's listener whose broker refuses it", () => {
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    return state
+  }
+  // A broker may keep the promise it gave pending for good, as one whose connection dropped does: what telefunc attached
+  // to it holds no stopped listener.
+  // Made here: an error made in the stop would keep the stop reachable from its stack, and the log keeps the error.
+  const teardownFailed = new Error('teardown failed')
+  // The broker keeps the stop it never answers.
+  const unanswered = new Promise<void>(() => {})
+  const STOPS = {
+    'never settles': () => unanswered,
+    rejects: () => Promise.reject(teardownFailed),
+    throws: () => {
+      throw teardownFailed
+    },
+  }
+  for (const binary of [false, true]) {
+    const surface = binary ? 'subscribeBinary' : 'subscribe'
+    for (const [stop, stopped] of Object.entries(STOPS)) {
+      it(`Broadcast.${surface}(): a transport's \`unsubscribe()\` that ${stop} is called once a round, its failure logged, and keeps no listener reachable`, async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const state = subscribeRounds(binary, (onMessage, counted) => () => {
+            // As a broker client's stop refers to the listener it stops.
+            void onMessage
+            counted.stops++
+            return stopped()
+          })
+          await collectGarbage()
+          expect({ stops: state.stops, logged: logged.mock.calls.length, reachable: state.reachable() }).toEqual({
+            stops: 8,
+            logged: stop === 'never settles' ? 0 : 8,
+            reachable: 0,
+          })
+        } finally {
+          logged.mockRestore()
+        }
+      })
+    }
+    it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`ready\` pending keeps none of it reachable`, async () => {
+      const pending = new Promise<void>(() => {})
+      const state = subscribeRounds(binary, (onMessage) => ({ unsubscribe: () => void onMessage, ready: pending }))
+      await collectGarbage()
+      expect(state.reachable()).toBe(0)
+    })
+  }
+  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`. */
+  const subscribeRounds = (
+    binary: boolean,
+    listening: (onMessage: object, counted: { stops: number }) => BroadcastUnsubscribe,
+  ) => {
+    const listeners: WeakRef<object>[] = []
+    const state = { stops: 0, reachable: () => listeners.filter((listener) => listener.deref() !== undefined).length }
+    const listen = (_key: string, onMessage: object) => {
+      listeners.push(new WeakRef(onMessage))
+      return listening(onMessage, state)
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    for (let round = 0; round < 8; round++) {
+      const remove = binary
+        ? Broadcast.subscribeBinary('room:held', () => {})
+        : Broadcast.subscribe('room:held', () => {})
+      remove()
+    }
     return state
   }
   // A transport may stop its listener asynchronously, as one waiting for its broker's acknowledgment does.
@@ -1887,3 +1953,14 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(received).toEqual([])
   })
 })
+
+/** Collects what nothing reaches, without the `--expose-gc` flag on the test run. */
+async function collectGarbage(): Promise<void> {
+  setFlagsFromString('--expose-gc')
+  const gc: unknown = runInNewContext('gc')
+  if (typeof gc !== 'function') throw new Error('V8 exposes no gc()')
+  for (let turn = 0; turn < 4; turn++) {
+    await new Promise((resolve) => setImmediate(resolve))
+    gc()
+  }
+}
