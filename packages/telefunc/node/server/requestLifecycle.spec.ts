@@ -7,6 +7,8 @@ import { Abort } from './Abort.js'
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
+import { onBug } from './runTelefunc/onBug.js'
+import { MONITORING_FAILURES } from '../../wire-protocol/test/monitoringFailures.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
 const requests = vi.hoisted(() => [] as { closed: number; signal: AbortSignal }[])
@@ -378,4 +380,45 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(response.statusCode).toBe(422)
     expect(close.mock.contexts.map((channel) => (channel as ServerChannel).id)).toEqual([channelId])
   })
+})
+
+/** What the first `onBug()` listener does with each bug, where a test sets it; the second records each bug it gets. */
+let firstBugListener: (() => unknown) | undefined
+onBug(() => firstBugListener?.())
+const bugs: unknown[] = []
+onBug((err) => void bugs.push(err))
+
+describe("a telefunction's bug reported to an `onBug()` listener that fails", () => {
+  for (const [given, failure] of Object.entries(MONITORING_FAILURES)) {
+    for (const fails of ['throws', 'rejects'] as const) {
+      test(`one that ${fails} with ${given} is logged once, and the next listener gets the bug`, async () => {
+        const monitoringFailed = failure()
+        firstBugListener =
+          fails === 'throws'
+            ? () => {
+                throw monitoringFailed
+              }
+            : () => Promise.reject(monitoringFailed)
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const before = bugs.length
+          const response = await call('onThrow')
+          await response.getBody()
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          expect({
+            statusCode: response.statusCode,
+            nextListener: bugs.slice(before).map((bug) => bug instanceof Error && bug.message),
+            logged: logged.mock.calls.filter(([error]) => String(error).includes(monitoringFailed.message)).length,
+          }).toEqual({
+            statusCode: 500,
+            nextListener: ['the telefunction fails, as the test means it to'],
+            logged: 1,
+          })
+        } finally {
+          firstBugListener = undefined
+          logged.mockRestore()
+        }
+      })
+    }
+  }
 })
