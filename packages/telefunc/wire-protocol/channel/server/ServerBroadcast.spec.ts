@@ -986,6 +986,21 @@ describe('a server-side subscription in effect whose backend ends it', () => {
     })
   }
 
+  for (const [surface, subscribe] of Object.entries(STATIC)) {
+    it(`${surface}: keeps its resolved \`ready\` and lets its signal go where a transport that replaced its own refuses it`, async () => {
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      const accepted = () => () => {}
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen: accepted, listenBinary: accepted })
+      const signal = new AbortController().signal
+      const subscriber = subscribe([], signal)
+      await subscriber.ready
+      const refused = () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: replacement refused')) })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen: refused, listenBinary: refused })
+      await vi.waitFor(() => expect(getEventListeners(signal, 'abort')).toHaveLength(0))
+      await expect(subscriber.ready).resolves.toBeUndefined()
+    })
+  }
+
   it("BroadcastChannel: closes with the backend's error", async () => {
     const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
     const room = new ServerBroadcast<string>({ key: KEY })
