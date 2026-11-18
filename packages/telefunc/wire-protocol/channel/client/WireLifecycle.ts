@@ -468,14 +468,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private fallbackToSse(err: Error): void {
     if (this.closed) return
     const abandoned = this.upgrade.abandon()
-    if (abandoned) {
-      for (const frame of abandoned.old) this.dispatchFrame(frame)
-      this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
-    }
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
     this.handleTransportLoss(err, false)
+    if (abandoned === null) return
+    // The old wire's held frames reach their channels once the connection left the wire it gave up, which may have
+    // closed: what handling them sends, a flow-control frame or an answer, waits for the reconnect.
+    for (const frame of abandoned.old) this.dispatchFrame(frame)
+    this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
   }
 
   private drainBufferedFramesToWire(): void {
