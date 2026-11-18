@@ -369,3 +369,20 @@ for (const [end, endWait] of Object.entries(WAIT_ENDS)) {
     }),
   )
 }
+
+test("a call whose new subscription reaches a broadcast the server is closing waits for its end, and the page isn't told it's in effect", async () => {
+  const page = attachedBroadcast('session-a')
+  // The page hasn't answered the server's CLOSE: the broadcast is closing.
+  const closing = page.broadcast.close({ timeout: 50 })
+  let ran = false
+  const call = page.call(on(1))
+  void Promise.resolve(call).then(() => {
+    ran = true
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  expect({ ran, wanted: page.wanted(), hears: await page.hears() }).toEqual({ ran: false, wanted: [], hears: false })
+  await closing
+  await call
+  expect(ran).toBe(true)
+  page.broadcast._release()
+})

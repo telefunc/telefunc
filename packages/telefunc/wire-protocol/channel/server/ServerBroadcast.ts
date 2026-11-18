@@ -405,10 +405,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
   }
 
-  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. An ended one takes none: it
-   *  would listen to its backend with nothing left to stop it. */
+  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. A closing one takes none,
+   *  as it delivers nothing more, and an ended one would listen to its backend with nothing left to stop it. */
   protected override onPeerWant(want: Want): void {
-    if (this._phase !== 'ended' && want.version > this.pageWant.version) this.applyPageWant(want)
+    if (this._phase === 'open' && want.version > this.pageWant.version) this.applyPageWant(want)
   }
 
   private applyPageWant(want: Want): void {
@@ -441,6 +441,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _applyCallWant(want: Want, callAborted: AbortSignal, waitAtMost: number): Promise<void> | undefined {
     this.onPeerWant(want)
     this._confirmWant()
+    // A want a closing broadcast didn't take never takes effect: the call runs once the broadcast ended.
+    if (want.version > this.pageWant.version) return this.closed.catch(() => {})
     return this.pageWantInEffect() ? undefined : this.inEffectOrEnded(callAborted, waitAtMost)
   }
 
