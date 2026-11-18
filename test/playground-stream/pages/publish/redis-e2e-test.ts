@@ -19,6 +19,23 @@ function testRedisReconnect() {
     if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
   })
 
+  test('broadcast: a subscription in effect whose renewal Redis refuses ends its subscriber, reported once, and a fresh subscriber hears the next publish once', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-renewal-refused')
+    let refuses = true
+    await autoRetry(
+      async () => {
+        const result = await getResult('#redis-renewal-refused-result')
+        refuses = result.refusesChannels !== false
+        if (refuses) expect(result).deep.equal({ ready: 'resolved', reports: 1, heard: ['before'], fresh: ['after'] })
+      },
+      { timeout: 30_000 },
+    )
+    if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
+    expectLog('NOPERM')
+    expectLog('Redis subscriber connection closed')
+  })
+
   test("broadcast: a failed Redis subscription rejects the publishes of its key and kind, not the key's other kind, and a new subscription restores delivery", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-readiness')

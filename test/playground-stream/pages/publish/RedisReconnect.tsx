@@ -5,6 +5,7 @@ import {
   onBinaryBroadcastAcrossReconnect,
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
+  onBroadcastRenewalRefused,
   onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
@@ -17,6 +18,7 @@ function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
   const [channelDenied, setChannelDenied] = useState<unknown>(null)
   const [beside, setBeside] = useState<unknown>(null)
+  const [renewalRefused, setRenewalRefused] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   const [duringResume, setDuringResume] = useState<unknown>(null)
@@ -92,6 +94,15 @@ function RedisReconnect() {
         onClick={async () => setBeside(await onPublishBesideRefusedSubscribe())}
       >
         Publish on one key while Redis refuses another key's subscription
+      </button>
+      <h2>A Renewal Redis Refuses</h2>
+      <pre id="redis-renewal-refused-result">{JSON.stringify(renewalRefused)}</pre>
+      <button
+        type="button"
+        id="test-redis-renewal-refused"
+        onClick={async () => setRenewalRefused(await onBroadcastRenewalRefused())}
+      >
+        Refuse a key whose subscription is in effect, and drop the subscriber connection
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

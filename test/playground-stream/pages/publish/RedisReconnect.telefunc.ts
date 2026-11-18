@@ -2,6 +2,7 @@ export {
   onBinaryBroadcastAcrossReconnect,
   onBroadcastOverRedisLimit,
   onBroadcastPublishedDuringResume,
+  onBroadcastRenewalRefused,
   onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
@@ -12,7 +13,7 @@ export {
 
 import type { Socket } from 'node:net'
 import type { Redis } from 'ioredis'
-import { Broadcast, BroadcastChannel, config } from 'telefunc'
+import { Broadcast, BroadcastChannel, config, onBug } from 'telefunc'
 import type { BroadcastRoute, DriverAttempt } from 'telefunc/__internal'
 // Only `installRedis()` is public, and it takes one backend per process.
 import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
@@ -302,6 +303,61 @@ async function subscribeRefused(client: Redis, channel: string) {
     await sleep(100)
   }
   throw new Error(`Redis never refused a SUBSCRIBE of ${channel}`)
+}
+
+/** What this server reported through `onBug()`, by message. */
+const reported: string[] = []
+onBug((err) => reported.push(err instanceof Error ? err.message : String(err)))
+
+/** A key's subscription is in effect when Redis starts refusing the key and this server's subscriber connection drops:
+ *  Redis refuses its SUBSCRIBE again, which ends the subscriber. Once Redis allows the key again, a publish reaches only
+ *  a fresh subscriber. */
+async function onBroadcastRenewalRefused() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  const id = crypto.randomUUID()
+  const key = `!renewal-refused:${id}`
+  const heard: string[] = []
+  const fresh: string[] = []
+  const unsubscribe: Array<() => void> = []
+  const reports = () => reported.filter((message) => message.includes(id)).length
+  try {
+    const subscribed = Broadcast.subscribe<string>(key, (text) => heard.push(text))
+    unsubscribe.push(subscribed)
+    await subscribed.ready
+    await Broadcast.publish(key, 'before')
+    await receivedCount(heard, 1)
+    if (!(await refuseChannels())) return { refusesChannels: false }
+    await dropRedisSubscribers()
+    for (let tries = 1; reports() === 0 && tries <= 100; tries++) await sleep(100)
+    // A second report would come right after the first.
+    await sleep(500)
+    const reportsWhileRefused = reports()
+    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
+    // Dragonfly applies an ACL change to an open connection a moment after it answers, so a fresh subscription may still
+    // be refused.
+    for (let tries = 1; ; tries++) {
+      const again = Broadcast.subscribe<string>(key, (text) => fresh.push(text))
+      unsubscribe.push(again)
+      if (
+        await again.ready.then(
+          () => true,
+          () => tries === 50,
+        )
+      )
+        break
+      await sleep(100)
+    }
+    await Broadcast.publish(key, 'after')
+    await receivedCount(fresh, 1)
+    const ready = await subscribed.ready.then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    return { ready, reports: reportsWhileRefused, heard, fresh }
+  } finally {
+    for (const stop of unsubscribe) stop()
+    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
+  }
 }
 
 /** While Redis refuses the SUBSCRIBE of one key, which a subscriber the app hasn't removed keeps, this server publishes on
