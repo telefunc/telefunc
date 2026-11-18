@@ -23,6 +23,8 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 
 > See <Link href="/close" /> to manually close streams.
 
+> On the server, an `onClose()` callback that throws, or returns a promise that rejects, is logged with its stack and passed to <Link href="/onBug">`onBug()`</Link> listeners.
+
 
 ## `context.onClose()`
 
