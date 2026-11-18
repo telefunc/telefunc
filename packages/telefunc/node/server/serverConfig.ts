@@ -218,7 +218,7 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const globalObject = getGlobalObject('serverConfig.ts', {
+const globalObject = getGlobalObject('node/server/serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** The Vite plugin's settings, from the production manifest: kept so they fill again what a later assignment of the app's server code leaves unset. */
   manifestConfig: {} as Record<string, unknown>,
