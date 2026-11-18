@@ -165,8 +165,8 @@ function testSlowLink(isDev: boolean) {
 
   // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms. A pause of the
   // whole machine about as long as `LOSSY_CONFIRM_SLACK_MS` (300 ms) delays them past what the server allows a page that
-  // keeps up, and that run may lose messages. A run that lost some while a thread of the test's own woke 100 ms late or
-  // more, a stall of the machine, runs again, up to three times in all; any other run's count is the card's.
+  // keeps up, and that run may lose messages. A run that lost some while a worker thread of the test's own overslept
+  // 100 ms or more runs again, up to three times in all; any other run's count is the card's.
   test('channel: on a 900 ms round trip that keeps up, a lossy broadcast delivers every message', async () => {
     await withPacedLink(
       { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs: 450 },
@@ -217,8 +217,8 @@ async function runSmallTicker() {
   )
 }
 
-/** Runs `run` while a thread of the test's own wakes every 10 ms, and returns its result with the longest that thread
- *  overslept meanwhile: a stall of the machine, which the channel, running in other processes and threads, can't cause. */
+/** Runs `run` while a worker thread of the test's own, apart from the channel and the paced link, wakes every 10 ms, and
+ *  returns its result with the longest that thread overslept meanwhile. */
 async function whileTimingStalls<T>(run: () => Promise<T>): Promise<{ result: T; stalledMs: number }> {
   const timer = new Worker(
     `const { parentPort } = require('node:worker_threads')
