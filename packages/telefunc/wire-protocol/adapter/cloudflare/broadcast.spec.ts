@@ -540,11 +540,16 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await vi.advanceTimersByTimeAsync(0)
         expect({ ready, written: presences.length }).toEqual({ ready: 'pending', written: 1 })
         state.fail = undefined
-        await vi.advanceTimersByTimeAsync(30_000)
-        expect({ ready, present: present('room:test').map(({ member }) => member) }).toEqual({
-          ready: 'resolved',
-          present: ['telefunc-shard-weur-0'],
-        })
+        await vi.advanceTimersByTimeAsync(29_999)
+        expect({ ready, written: presences.length }).toEqual({ ready: 'pending', written: 1 })
+        await vi.advanceTimersByTimeAsync(1)
+        expect({ ready, written: presences.length, present: present('room:test').map(({ member }) => member) }).toEqual(
+          {
+            ready: 'resolved',
+            written: 2,
+            present: ['telefunc-shard-weur-0'],
+          },
+        )
         subscriber()
       })
 
@@ -556,7 +561,8 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         let ready = 'pending'
         void outcome(subscriber.ready).then((settled) => (ready = settled))
         const seen: unknown[] = []
-        for (const elapsed of [0, 30_000, 30_000]) {
+        // Just before and at each 30 seconds.
+        for (const elapsed of [0, 29_999, 1, 29_999, 1]) {
           await vi.advanceTimersByTimeAsync(elapsed)
           seen.push({ ready, written: presences.length })
         }
@@ -565,6 +571,8 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         seen.push({ ready, written: presences.length, present: present('room:test').length })
         expect(seen).toEqual([
           { ready: 'pending', written: 1 },
+          { ready: 'pending', written: 1 },
+          { ready: 'pending', written: 2 },
           { ready: 'pending', written: 2 },
           { ready: 'pending', written: 3 },
           { ready: 'resolved', written: 4, present: 1 },
