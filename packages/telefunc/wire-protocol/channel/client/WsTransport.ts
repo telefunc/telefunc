@@ -73,6 +73,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const base = typeof window === 'undefined' ? undefined : window.location.href
     const url = new URL(getWireUrl(this.telefuncUrl), base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    // A WebSocket URL may have no fragment.
+    url.hash = ''
     return url.href
   }
 
