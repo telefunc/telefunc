@@ -114,6 +114,15 @@ test('a ping deadline judged while its timer runs ahead of the performance clock
     const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
     expect(opened.statusCode).toBe(200)
     const events = (opened.body as ReadableStream<Uint8Array>).getReader()
+    // The open's RECONCILE arms the deadline again once the server read the POST's body, some turns after it answered:
+    // as many as this Node takes. Its RECONCILED, the stream's first event after a comment, shows it ran.
+    const decoder = new TextDecoder()
+    let head = ''
+    while (!head.includes('data: ')) {
+      const { done, value } = await events.read()
+      expect(done).toBe(false)
+      head += decoder.decode(value, { stream: true })
+    }
     let ended = false
     let endedAt: number | undefined
     void (async () => {
