@@ -231,6 +231,30 @@ describe('in-memory publishes in answer', () => {
     expect(received).toEqual([[1, 2, 3]])
   })
 
+  it.each(['text', 'binary'] as const)(
+    "a listener a broadcast adds while it delivers gets that message and what's published after, not an answer published before it was added (%s)",
+    async (kind) => {
+      const key = `room:joins-mid-delivery:${kind}`
+      const room = new ServerBroadcast<number>({ key })
+      const send = (n: number) =>
+        kind === 'text' ? Broadcast.publish(key, n) : Broadcast.publishBinary(key, Uint8Array.of(n))
+      const listen = (callback: (n: number) => void) =>
+        kind === 'text' ? room.subscribe(callback) : room.subscribeBinary((data) => callback(data[0] ?? -1))
+      const late: number[] = []
+      const stops = [
+        listen((n) => {
+          if (n !== 0) return
+          void send(1)
+          stops.push(listen((m) => late.push(m)))
+        }),
+      ]
+      await send(0)
+      await send(2)
+      for (const stop of stops) stop()
+      expect(late).toEqual([0, 2])
+    },
+  )
+
   it('rejects a listener that answers its own messages without end, and timers run again', async () => {
     const adapter = new DefaultBroadcastAdapter()
     const errors: unknown[] = []

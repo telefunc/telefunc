@@ -31,7 +31,7 @@ import {
   type MemoryHolder,
 } from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { Listeners } from '../../../utils/Listeners.js'
+import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -213,10 +213,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.answerHeld(seq, 0, () => this.dispatchPublishBinaryAckReq(data, seq))
   }
 
-  private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
+  /** `listeners`: the ones a publish made now reaches, also one added while it's delivered, as a server subscriber is. */
+  private deliverBroadcastMessage(
+    serialized: string,
+    rawInfo: WirePublishInfo,
+    listeners: Iterable<Registration<BroadcastListener<T>>>,
+  ): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const { listener } of this.broadcastListeners.list()) {
+    for (const { listener } of listeners) {
       if (!listener) continue
       if (this.callListener(listener, data, info)) return
     }
@@ -225,9 +230,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.forwardPublish(body)
   }
 
-  private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastBinaryMessage(
+    data: Uint8Array,
+    rawInfo: WirePublishInfo,
+    listeners: Iterable<Registration<BroadcastBinaryListener>>,
+  ): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const { listener } of this.broadcastBinaryListeners.list()) {
+    for (const { listener } of listeners) {
       if (!listener) continue
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(listener, new Uint8Array(data), info)) return
@@ -545,7 +554,18 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.startListening(this.textListening, this.broadcastListeners, this.textWaiting, forPage, () =>
       this.broadcastAdapter().subscribe(
         this.key,
-        (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
+        Object.assign(
+          (serialized: string, rawInfo: WirePublishInfo) =>
+            this.deliverBroadcastMessage(serialized, rawInfo, this.broadcastListeners.live()),
+          // A publish that waits goes to the listeners there are when it's made.
+          {
+            taken: () => {
+              const listeners = this.broadcastListeners.list()
+              return (serialized: string, rawInfo: WirePublishInfo) =>
+                this.deliverBroadcastMessage(serialized, rawInfo, listeners)
+            },
+          },
+        ),
         this.ownerRequest,
       ),
     )
@@ -557,7 +577,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.startListening(this.binaryListening, this.broadcastBinaryListeners, this.binaryWaiting, forPage, () =>
       this.broadcastAdapter().subscribeBinary(
         this.key,
-        (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
+        Object.assign(
+          (data: Uint8Array, rawInfo: WirePublishInfo) =>
+            this.deliverBroadcastBinaryMessage(data, rawInfo, this.broadcastBinaryListeners.live()),
+          {
+            taken: () => {
+              const listeners = this.broadcastBinaryListeners.list()
+              return (data: Uint8Array, rawInfo: WirePublishInfo) =>
+                this.deliverBroadcastBinaryMessage(data, rawInfo, listeners)
+            },
+          },
+        ),
         this.ownerRequest,
       ),
     )

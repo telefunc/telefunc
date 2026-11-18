@@ -23,9 +23,15 @@ import type { WirePublishInfo } from '../wire/publishInfo.js'
 type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
 
 /** Callback for delivering a broadcast message to a subscriber. */
-type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
+type BroadcastOnMessage = OnMessage<string>
 
-type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
+type BroadcastBinaryOnMessage = OnMessage<Uint8Array>
+
+/** `taken`, on a subscriber with listeners of its own: what delivers a publish to the listeners it has now, for a publish
+ *  that waits to be delivered (`queueInMemory`). */
+type OnMessage<T> = ((data: T, info: WirePublishInfo) => void) & {
+  taken?: () => (data: T, info: WirePublishInfo) => void
+}
 
 /** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
  *  is returned; else that function as `unsubscribe`, with `ready`, which resolves once the backend delivers to the
@@ -184,7 +190,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   // ── In-memory ──
 
   private publishInMemory<T extends string | Uint8Array>(
-    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    subs: Map<string, Set<OnMessage<T>>>,
     key: string,
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -211,7 +217,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   private queueInMemory<T extends string | Uint8Array>(
-    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    subs: Map<string, Set<OnMessage<T>>>,
     key: string,
     data: T,
   ): Promise<BroadcastPublishResult> {
@@ -230,8 +236,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     // The caller may reuse or transfer its buffer once the publish returns.
     const queuedData = isText ? data : (new Uint8Array(data as Uint8Array) as T)
     // Who gets it and its place in the key's order are the publish's: a subscriber that comes while it waits gets what is
-    // published after it.
-    const publishedTo = [...(subs.get(key) ?? [])]
+    // published after it, and so does a listener a subscriber adds meanwhile.
+    const publishedTo = [...(subs.get(key) ?? [])].map((target) => ({ target, deliver: target.taken?.() ?? target }))
     const info = this.takeInfo(key)
     return new Promise((resolve, reject) => {
       const deliver = () => {
@@ -336,8 +342,8 @@ function startListening(
 
 /** Each of `targets` that `subs` still holds when its turn comes: one that left while the publish waited, or during its
  *  delivery, gets none. */
-function* stillSubscribed<T>(targets: T[], subs: Set<T> | undefined): Generator<T> {
-  for (const target of targets) if (subs?.has(target)) yield target
+function* stillSubscribed<T, D>(publishedTo: { target: T; deliver: D }[], subs: Set<T> | undefined): Generator<D> {
+  for (const { target, deliver } of publishedTo) if (subs?.has(target)) yield deliver
 }
 
 function endlessAnswersError(): ChannelOverflowError {
