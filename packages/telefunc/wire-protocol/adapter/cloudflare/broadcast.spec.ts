@@ -937,6 +937,84 @@ describe('cloudflare broadcast routing', () => {
       })
     }
 
+    // A key cut through a surrogate pair, as one shortened by its string length can be: its presence's name can't be
+    // written, which fails as KV refusing it does.
+    describe('a key whose presence name `encodeURIComponent` throws on', () => {
+      const KEY = 'room:\u{1F600}'.slice(0, -1)
+      const warned = (warn: { mock: { calls: unknown[][] } }) =>
+        warn.mock.calls.filter(([warning]) => String(warning).includes('URI malformed')).length
+
+      it("a subscriber's `ready` rejects with its error, which is warned of", async () => {
+        const previousTransport = getBroadcastAdapter()
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { state, inObject } = refusing()
+          state.refuse = false
+          const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
+          await expect(subscriber.ready).rejects.toThrow('URI malformed')
+          expect(warned(warn)).toBe(1)
+          subscriber()
+        } finally {
+          warn.mockRestore()
+          _resetBroadcastAdapterForTesting(previousTransport)
+        }
+      })
+
+      it('a broadcast that subscribes, as for a page, closes with its error', async () => {
+        const previousTransport = getBroadcastAdapter()
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { state, inObject } = refusing()
+          state.refuse = false
+          const room = inObject(() => {
+            const broadcast = new ServerBroadcast<string>({ key: KEY })
+            broadcast.subscribe(() => {})
+            return broadcast
+          })
+          await expect(room.closed).rejects.toThrow('URI malformed')
+        } finally {
+          warn.mockRestore()
+          _resetBroadcastAdapterForTesting(previousTransport)
+        }
+      })
+
+      it('its release is warned of', async () => {
+        const previousTransport = getBroadcastAdapter()
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { state, inObject } = refusing()
+          state.refuse = false
+          const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
+          await subscriber.ready?.catch(() => {})
+          subscriber()
+          await flushMicrotasks()
+          expect(warned(warn)).toBe(2)
+        } finally {
+          warn.mockRestore()
+          _resetBroadcastAdapterForTesting(previousTransport)
+        }
+      })
+
+      it("the key's refresh tries it again and is warned of", async () => {
+        vi.useFakeTimers()
+        const previousTransport = getBroadcastAdapter()
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { state, inObject } = refusing()
+          state.refuse = false
+          const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
+          await subscriber.ready?.catch(() => {})
+          await vi.advanceTimersByTimeAsync(30_000)
+          expect(warned(warn)).toBe(2)
+          subscriber()
+        } finally {
+          warn.mockRestore()
+          _resetBroadcastAdapterForTesting(previousTransport)
+          vi.useRealTimers()
+        }
+      })
+    })
+
     it("a broadcast that subscribes closes with KV's error", async () => {
       const previousTransport = getBroadcastAdapter()
       const { inObject } = refusing()

@@ -288,7 +288,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private kv: KVNamespace | null = null
   private locationBucket: LocationBucket | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
-  /** Each presence's KV write or delete under way, by presence key: the next one waits for it. */
+  /** Each presence's KV write or delete under way, by its key and owner: the next one waits for it. */
   private readonly presenceOperations = new Map<string, Promise<void>>()
   /** Each subscriber with the Durable Object whose context may write to its page. */
   private readonly textSubs = new Map<string, Map<BroadcastOnMessage, string>>()
@@ -386,16 +386,17 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     owner: string,
     operation: (kv: KVNamespace, presenceKey: string) => Promise<void>,
   ): Promise<void> {
-    const presenceKey = this.getPresenceKey(key, owner)
-    const previous = this.presenceOperations.get(presenceKey) ?? Promise.resolve()
-    const done = previous.then(() => operation(this.requireKV(), presenceKey))
+    // Its KV name is formed in the operation too: `encodeURIComponent` throws on a key with a lone surrogate.
+    const presence = JSON.stringify([key, owner])
+    const previous = this.presenceOperations.get(presence) ?? Promise.resolve()
+    const done = previous.then(() => operation(this.requireKV(), this.getPresenceKey(key, owner)))
     const settled = done.then(
       () => {},
       () => {},
     )
-    this.presenceOperations.set(presenceKey, settled)
+    this.presenceOperations.set(presence, settled)
     void settled.then(() => {
-      if (this.presenceOperations.get(presenceKey) === settled) this.presenceOperations.delete(presenceKey)
+      if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
     })
     return done
   }
