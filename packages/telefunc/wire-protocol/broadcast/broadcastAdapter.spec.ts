@@ -791,6 +791,43 @@ describe('a message the transport delivers inside listen()', () => {
   }
 })
 
+// A subscriber may end its broadcast on a message that ends what it waited for, before its backend confirmed the
+// subscription: its `ready` rejects with that end, whether the message came inside listen() or after it.
+describe('a broadcast its subscriber ends on the first message, its backend not confirmed yet', () => {
+  for (const binary of [false, true]) {
+    for (const inside of [true, false]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}, the message ${inside ? 'inside' : 'after'} listen(): \`ready\` rejects with the end`, async () => {
+        let listening = 0
+        let deliver = () => {}
+        const start = (deliverFirst: () => void) => {
+          listening++
+          deliver = deliverFirst
+          if (inside) deliver()
+          return { unsubscribe: () => listening--, ready: new Promise<void>(() => {}) }
+        }
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        _resetBroadcastAdapterForTesting(
+          new DefaultBroadcastAdapter({
+            send: sent,
+            sendBinary: sent,
+            listen: (_key, onMessage) => start(() => onMessage('1', sent())),
+            listenBinary: (_key, onMessage) => start(() => onMessage(Uint8Array.of(1), sent())),
+          }),
+        )
+        const room = new ServerBroadcast<string>({ key: 'room:ends-on-first' })
+        const end = () => room.abort('terminal event')
+        const stop = binary ? room.subscribeBinary(end) : room.subscribe(end)
+        if (!inside) deliver()
+        const ready = await stop.ready.then(
+          () => 'resolved',
+          (err: unknown) => err,
+        )
+        expect({ ready, listening }).toEqual({ ready: await room.closed.catch((err: unknown) => err), listening: 0 })
+      })
+    }
+  }
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

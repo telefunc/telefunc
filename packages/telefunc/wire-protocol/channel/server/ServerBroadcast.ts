@@ -169,8 +169,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     if (options.signal?.aborted) return withReady(() => {})
     if (this._phase === 'ended') return neverInEffect(this.endError())
     const waiting = binary ? this.binaryWaiting : this.textWaiting
+    const listening = binary ? this.binaryListening : this.textListening
     const readiness = new Readiness()
-    // Before the backend starts: it may deliver a message before its subscribe returns.
+    // Both before the backend starts: it may deliver a message before its subscribe returns, to which a listener may end
+    // the broadcast, which settles what waits with that end.
+    if (listening && !listening.ready) readiness.settle(true)
+    else waiting.add(readiness)
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
@@ -186,8 +190,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       remove()
       throw err
     }
-    if ((binary ? this.binaryListening : this.textListening)?.ready) waiting.add(readiness)
-    else readiness.settle(true)
     return withReady(remove, readiness)
   }
 
