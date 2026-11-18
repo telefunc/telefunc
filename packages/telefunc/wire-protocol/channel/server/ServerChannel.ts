@@ -1064,6 +1064,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // What of it still waits for the wire of a page that is gone, its sends too, would reach no one.
     if (pageGone && this.peer) this.peer.sender.queue.dropWaitingFrom(this.peer.index, 'start')
     this._phase = 'ended'
+    // Nothing applies a want to it any more, and a host's request may reach back to it (see channelClose.spec.ts).
+    this._callRequest = undefined
     this.lossySends?.dispose()
     this.lifecycle.forcedTermination(err, () => {
       const pageAttached = this.peer !== null
