@@ -1243,6 +1243,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       async () => {
         const burst = (await getResult<ChannelState>('#channel-state')).binaryBurst!
         expect(burst.closeErr).toBe(null)
+        expect(burst.received).greaterThan(0)
         expect(burst.received).lessThan(400)
         expect(burst.inOrder).toBe(true)
         expect((await getCleanupState())[`binaryBurst_${burst.channelId}`]).toContain('config.channel.maxMemory')
