@@ -183,13 +183,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
         this.unsubscribeUnusedBroadcasts()
       },
     })
-    try {
-      if (binary) this.subscribeBinaryBroadcast()
-      else this.subscribeBroadcast()
-    } catch (err) {
-      remove()
-      throw err
-    }
+    if (binary) this.subscribeBinaryBroadcast()
+    else this.subscribeBroadcast()
     return withReady(remove, readiness)
   }
 
@@ -543,7 +538,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private subscribeBroadcast(forPage = false): void {
     if (this.textListening) return
     this.textListening = starting()
-    this.startListening(this.textListening, this.textWaiting, forPage, () =>
+    this.startListening(this.textListening, this.broadcastListeners, this.textWaiting, forPage, () =>
       this.broadcastAdapter().subscribe(
         this.key,
         (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
@@ -555,7 +550,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private subscribeBinaryBroadcast(forPage = false): void {
     if (this.binaryListening) return
     this.binaryListening = starting()
-    this.startListening(this.binaryListening, this.binaryWaiting, forPage, () =>
+    this.startListening(this.binaryListening, this.broadcastBinaryListeners, this.binaryWaiting, forPage, () =>
       this.broadcastAdapter().subscribeBinary(
         this.key,
         (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
@@ -567,9 +562,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Starts `listening`, which holds its kind's place while its backend starts: a message the backend delivers meanwhile
    *  may add a subscriber of the kind, which waits in `waiting` with the others, or end the broadcast, or remove the
    *  kind's last subscriber, either of which stops it once started. Where a server subscriber's start throws, the place
-   *  is given back, and the subscribers in `waiting` get the error. */
-  private startListening(
+   *  is given back, and the kind's subscribers, which all came for a start of the key that failed, get the error and are
+   *  removed. */
+  private startListening<L>(
     listening: Listening,
+    listeners: Listeners<L>,
     waiting: Set<Readiness>,
     forPage: boolean,
     subscribe: () => Listening,
@@ -581,6 +578,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       if (this.textListening === listening) this.textListening = null
       if (this.binaryListening === listening) this.binaryListening = null
       settleAll(waiting, err instanceof Error ? err : new Error(String(err)))
+      listeners.clear()
       throw err
     }
     listening.unsubscribe = started.unsubscribe

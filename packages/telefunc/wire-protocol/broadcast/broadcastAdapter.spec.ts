@@ -617,6 +617,108 @@ describe("a transport's listen() that throws", () => {
   })
 })
 
+// A broker that replays on connect can deliver a message, then fail to connect: a listener added on that message came
+// for the start that failed, and goes with it.
+describe("a transport's listen() that delivers a message, then throws", () => {
+  type Info = { seq: number; timestamp: number }
+  const KEY = 'room:delivers-then-throws'
+  /** A transport whose first `listen()` and first `listenBinary()` deliver `1`, then throw; it counts the listeners it
+   *  holds. */
+  const deliveringThenThrowing = () => {
+    let attempts = 0
+    let seq = 0
+    const text = new Set<(payload: string, info: Info) => void>()
+    const binary = new Set<(payload: Uint8Array, info: Info) => void>()
+    const info = () => ({ seq: ++seq, timestamp: 1 })
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({
+        send: (_key, payload) => {
+          const sent = info()
+          for (const onMessage of text) onMessage(payload, sent)
+          return sent
+        },
+        sendBinary: (_key, payload) => {
+          const sent = info()
+          for (const onMessage of binary) onMessage(payload, sent)
+          return sent
+        },
+        listen: (_key, onMessage) => {
+          if (++attempts === 1) {
+            onMessage('1', info())
+            throw new Error('broker connection closed')
+          }
+          text.add(onMessage)
+          return () => text.delete(onMessage)
+        },
+        listenBinary: (_key, onMessage) => {
+          if (++attempts === 1) {
+            onMessage(Uint8Array.of(1), info())
+            throw new Error('broker connection closed')
+          }
+          binary.add(onMessage)
+          return () => binary.delete(onMessage)
+        },
+      }),
+    )
+    return { listening: () => text.size + binary.size }
+  }
+  /** Each surface's subscribe of `onMessage`, which hears numbers, and its publish of `2`. */
+  const SURFACES: Record<
+    string,
+    () => { subscribe: (onMessage: (n: number) => void) => Unsubscribe; publish: () => unknown; end?: () => void }
+  > = {
+    'Broadcast.subscribe()': () => ({
+      subscribe: (onMessage) => Broadcast.subscribe<number>(KEY, onMessage),
+      publish: () => Broadcast.publish(KEY, 2),
+    }),
+    'Broadcast.subscribeBinary()': () => ({
+      subscribe: (onMessage) => Broadcast.subscribeBinary(KEY, (data) => data.forEach((n) => onMessage(n))),
+      publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+    }),
+    'BroadcastChannel.subscribe()': () => {
+      const broadcast = new ServerBroadcast<number>({ key: KEY })
+      return {
+        subscribe: (onMessage) => broadcast.subscribe(onMessage),
+        publish: () => Broadcast.publish(KEY, 2),
+        end: () => broadcast.abort(),
+      }
+    },
+    'BroadcastChannel.subscribeBinary()': () => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return {
+        subscribe: (onMessage) => broadcast.subscribeBinary((data) => data.forEach((n) => onMessage(n))),
+        publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+        end: () => broadcast.abort(),
+      }
+    },
+  }
+
+  for (const [surface, of] of Object.entries(SURFACES)) {
+    it(`${surface}: a listener added on that message gets the error and goes, so the retry alone listens`, async () => {
+      const transport = deliveringThenThrowing()
+      const { subscribe, publish, end } = of()
+      const joinedHeard: number[] = []
+      let joined: Unsubscribe | undefined
+      expect(() =>
+        subscribe(() => {
+          joined ??= subscribe((n) => joinedHeard.push(n))
+        }),
+      ).toThrow('broker connection closed')
+      await expect(joined?.ready).rejects.toThrow('broker connection closed')
+      const retry = subscribe(() => {})
+      await retry.ready
+      await publish()
+      retry()
+      const listeningAfterRetry = transport.listening()
+      end?.()
+      expect({ joinedHeard: joinedHeard.filter((n) => n === 2), listeningAfterRetry }).toEqual({
+        joinedHeard: [],
+        listeningAfterRetry: 0,
+      })
+    })
+  }
+})
+
 // A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the
 // key has a listener.
 describe('a message the transport delivers inside listen()', () => {

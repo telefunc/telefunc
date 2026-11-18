@@ -127,22 +127,17 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
 
     // Registered before the transport listens, so a message it delivers inside listen() reaches this subscriber; where
-    // listen() throws, the subscriber is removed again, leaving nothing registered.
+    // listen() throws, it is removed again with the key's other subscribers, leaving nothing registered.
     const transport = this.transport
     if (!transport) return { unsubscribe, ready: undefined }
-    try {
-      const listening =
-        this.transportUnsubs.get(key) ??
-        startListening(this.transportUnsubs, key, () =>
-          transport.listen(key, (payload, info) => {
-            this.deliver(this.subscriptions, key, payload, info)
-          }),
-        )
-      return { unsubscribe, ready: listening.ready }
-    } catch (err) {
-      unsubscribe()
-      throw err
-    }
+    const listening =
+      this.transportUnsubs.get(key) ??
+      startListening(this.transportUnsubs, this.subscriptions, key, () =>
+        transport.listen(key, (payload, info) => {
+          this.deliver(this.subscriptions, key, payload, info)
+        }),
+      )
+    return { unsubscribe, ready: listening.ready }
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -176,19 +171,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     // As in `subscribe()`.
     const transport = this.transport
     if (!transport) return { unsubscribe, ready: undefined }
-    try {
-      const listening =
-        this.transportBinaryUnsubs.get(key) ??
-        startListening(this.transportBinaryUnsubs, key, () =>
-          transport.listenBinary(key, (payload, info) => {
-            this.deliver(this.binarySubscriptions, key, payload, info)
-          }),
-        )
-      return { unsubscribe, ready: listening.ready }
-    } catch (err) {
-      unsubscribe()
-      throw err
-    }
+    const listening =
+      this.transportBinaryUnsubs.get(key) ??
+      startListening(this.transportBinaryUnsubs, this.binarySubscriptions, key, () =>
+        transport.listenBinary(key, (payload, info) => {
+          this.deliver(this.binarySubscriptions, key, payload, info)
+        }),
+      )
+    return { unsubscribe, ready: listening.ready }
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -317,9 +307,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 /** The transport's one listener of `key`, in the one form of either `BroadcastUnsubscribe`: its `ready` is observed here
  *  once, for every subscriber of the key, so its first outcome is known to each, read or not. It holds the key's place in
  *  `listenings` while `listen()` runs, as a message delivered inside it may subscribe to the key, which joins this
- *  listener. Where `listen()` throws, the place is given back, and the subscribers that joined get its error. */
+ *  listener. Where `listen()` throws, the place is given back, and every subscriber of the key in `subscribers` came for
+ *  this start: they are removed with it, and the ones that joined get its error. */
 function startListening(
   listenings: Map<string, Listening>,
+  subscribers: Map<string, Set<unknown>>,
   key: string,
   listen: () => BroadcastUnsubscribe,
 ): Listening {
@@ -331,6 +323,7 @@ function startListening(
     started = listen()
   } catch (err) {
     listenings.delete(key)
+    subscribers.delete(key)
     ready.settle(err instanceof Error ? err : new Error(String(err)))
     throw err
   }
