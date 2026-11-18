@@ -441,7 +441,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       return { broadcast, inEffect }
     }
 
-    it("before its first attach, is the Durable Object's that the call reached", async () => {
+    it("a page's subscription its call brings before its first attach, on a Worker without AsyncLocalStorage, is the Durable Object's that the call reached", async () => {
       const w = worker()
       const { broadcast, inEffect } = brought(w)
       await inEffect
