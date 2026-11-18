@@ -236,8 +236,11 @@ async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: (
     await run()
   } finally {
     // The page leaves before the proxy closes, which would cut its connections.
-    await page.goto('about:blank')
-    await proxy.close()
+    try {
+      await page.goto('about:blank')
+    } finally {
+      await proxy.close()
+    }
   }
 }
 
