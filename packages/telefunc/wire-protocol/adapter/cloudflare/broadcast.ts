@@ -377,7 +377,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
     return warnRefusedWrite(
       write,
-      `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until Telefunc's next try, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
+      `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until a later write of that record succeeds`,
     )
   }
 
