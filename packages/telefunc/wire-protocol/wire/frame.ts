@@ -92,6 +92,9 @@ const ERROR_REASON = {
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
+  /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
+   *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
+  NOT_IN_EFFECT: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]

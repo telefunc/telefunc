@@ -449,7 +449,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private async inEffectOrEnded(callAborted: AbortSignal, waitAtMost: number): Promise<void> {
     const inEffect = createDeferred()
     this.callWaits.add(inEffect.resolve)
-    const end = (message: string) => this.endWithError(ERROR_REASON.BUG, new ChannelClosedError(message))
+    const end = (message: string) => this.endWithError(ERROR_REASON.NOT_IN_EFFECT, new ChannelClosedError(message))
     const endAborted = () => end(NOT_IN_EFFECT)
     if (callAborted.aborted) endAborted()
     else callAborted.addEventListener('abort', endAborted, { once: true })
@@ -594,15 +594,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
    *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
-   *  broadcast ends: with the backend's error on the server, reported as a server error, and as a server error on its
-   *  page; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
+   *  broadcast ends: with the backend's error on the server, reported as a server error, and on its page as a
+   *  subscription that didn't take effect; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
   private async whenListening(listening: Listening, ready: Readiness, waiting: Set<Readiness>): Promise<void> {
     try {
       await ready.promise
     } catch (err) {
       if (!this.isListening(listening)) return
       handleCallbackBug(err)
-      return this.endWithError(ERROR_REASON.BUG, err instanceof Error ? err : new Error(String(err)))
+      return this.endWithError(ERROR_REASON.NOT_IN_EFFECT, err instanceof Error ? err : new Error(String(err)))
     }
     if (!this.isListening(listening)) return
     listening.ready = undefined
