@@ -717,6 +717,33 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       })
     })
   }
+
+  // An app that subscribes one function of its own again, through the adapter, after a start that failed.
+  for (const binary of [false, true]) {
+    it(`the adapter's ${binary ? 'subscribeBinary()' : 'subscribe()'}: the remover of a callback the failed start removed leaves that callback's later subscription be`, async () => {
+      const transport = deliveringThenThrowing()
+      const adapter = getBroadcastAdapter()
+      const heard: number[] = []
+      const onText = (payload: string) => heard.push(Number(payload))
+      const onBinary = (payload: Uint8Array) => heard.push(...payload)
+      const subscribe = (starting?: () => void) =>
+        binary
+          ? adapter.subscribeBinary(KEY, starting ? () => starting() : onBinary)
+          : adapter.subscribe(KEY, starting ? () => starting() : onText)
+      let failed: Listening | undefined
+      expect(() =>
+        subscribe(() => {
+          failed ??= subscribe()
+        }),
+      ).toThrow('broker connection closed')
+      const later = subscribe()
+      failed?.unsubscribe()
+      await (binary ? adapter.publishBinary(KEY, Uint8Array.of(2)) : adapter.publish(KEY, '2'))
+      const listening = transport.listening()
+      later.unsubscribe()
+      expect({ heard, listening }).toEqual({ heard: [1, 2], listening: 1 })
+    })
+  }
 })
 
 // A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the

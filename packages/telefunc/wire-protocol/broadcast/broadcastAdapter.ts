@@ -109,22 +109,16 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribe(key: string, onMessage: BroadcastOnMessage): Listening {
-    let subs = this.subscriptions.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.subscriptions.set(key, subs)
-    }
+    const subs = this.subscriptions.get(key) ?? new Set<BroadcastOnMessage>()
+    this.subscriptions.set(key, subs)
     subs.add(onMessage)
 
+    // On the set it joined: one a failed start discarded is left empty, so this does nothing to the key's next one.
     const unsubscribe = () => {
-      const s = this.subscriptions.get(key)
-      if (!s) return
-      s.delete(onMessage)
-      if (s.size === 0) {
-        this.subscriptions.delete(key)
-        this.releaseUnsub(this.transportUnsubs, key)
-        this.releaseSeq(key)
-      }
+      if (!subs.delete(onMessage) || subs.size > 0) return
+      this.subscriptions.delete(key)
+      this.releaseUnsub(this.transportUnsubs, key)
+      this.releaseSeq(key)
     }
 
     // Registered before the transport listens, so a message it delivers inside listen() reaches this subscriber; where
@@ -151,22 +145,15 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): Listening {
-    let subs = this.binarySubscriptions.get(key)
-    if (!subs) {
-      subs = new Set()
-      this.binarySubscriptions.set(key, subs)
-    }
+    const subs = this.binarySubscriptions.get(key) ?? new Set<BroadcastBinaryOnMessage>()
+    this.binarySubscriptions.set(key, subs)
     subs.add(onMessage)
 
     const unsubscribe = () => {
-      const s = this.binarySubscriptions.get(key)
-      if (!s) return
-      s.delete(onMessage)
-      if (s.size === 0) {
-        this.binarySubscriptions.delete(key)
-        this.releaseUnsub(this.transportBinaryUnsubs, key)
-        this.releaseSeq(key)
-      }
+      if (!subs.delete(onMessage) || subs.size > 0) return
+      this.binarySubscriptions.delete(key)
+      this.releaseUnsub(this.transportBinaryUnsubs, key)
+      this.releaseSeq(key)
     }
 
     // As in `subscribe()`.
@@ -324,6 +311,7 @@ function startListening(
     started = listen()
   } catch (err) {
     listenings.delete(key)
+    subscribers.get(key)?.clear()
     subscribers.delete(key)
     ready.settle(err instanceof Error ? err : new Error(String(err)))
     throw err
