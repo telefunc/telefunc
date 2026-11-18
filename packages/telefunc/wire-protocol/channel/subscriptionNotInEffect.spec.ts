@@ -92,6 +92,27 @@ for (const kind of ['text', 'binary'] as const) {
     expect(settled).toBe('confirmed')
   })
 
+  test(`${kind}: a page's subscription still being established across two transports that replace their own waits for the last one's listener, and its call goes on once it is`, async () => {
+    const page = await subscribedPage(kind)
+    const first = relay('held')
+    first.configure()
+    const wanted = await broadcastWantedBy(page, kind)
+    const second = relay('held')
+    second.configure()
+    const last = relay('held')
+    last.configure()
+    const settled = () =>
+      Promise.race([
+        Promise.all([page.ready, wanted.inEffect]).then(() => 'confirmed'),
+        new Promise((resolve) => setTimeout(() => resolve('waiting'), 100)),
+      ])
+    first.confirm()
+    second.confirm()
+    const beforeTheLast = await settled()
+    last.confirm()
+    expect({ beforeTheLast, once: await settled() }).toEqual({ beforeTheLast: 'waiting', once: 'confirmed' })
+  })
+
   for (const first of ['at once', 'held'] as const) {
     test(`${kind}: a page's new subscription that a replacing transport refuses gets "did not take effect", though a server-side listener on its broadcast kept the earlier one, which its transport confirmed ${first === 'held' ? 'later' : 'at once'}, in effect`, async () => {
       const page = await subscribedPage(kind)

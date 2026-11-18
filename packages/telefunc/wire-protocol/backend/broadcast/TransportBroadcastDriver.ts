@@ -105,7 +105,6 @@ class ListenAttempt extends DriverAttempt {
   }
 
   private confirmed(): void {
-    this.confirming.attempt = null
     this.transition('ready')
   }
 

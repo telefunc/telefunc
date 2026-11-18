@@ -864,7 +864,7 @@ describe("a transport's listener whose broker refuses it", () => {
       it(`Broadcast.${surface}(): a transport's \`unsubscribe()\` that ${stop} is called once a round, its failure logged, and keeps no listener reachable`, async () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
-          const state = subscribeRounds(binary, (onMessage, counted) => () => {
+          const state = await subscribeRounds(binary, (onMessage, counted) => () => {
             // As a broker client's stop refers to the listener it stops.
             void onMessage
             counted.stops++
@@ -883,15 +883,29 @@ describe("a transport's listener whose broker refuses it", () => {
     }
     it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`ready\` pending keeps none of it reachable`, async () => {
       const pending = new Promise<void>(() => {})
-      const state = subscribeRounds(binary, (onMessage) => ({ unsubscribe: () => void onMessage, ready: pending }))
+      const state = await subscribeRounds(binary, (onMessage) => ({
+        unsubscribe: () => void onMessage,
+        ready: pending,
+      }))
+      await collectGarbage()
+      expect(state.reachable()).toBe(0)
+    })
+    it(`Broadcast.${surface}(): a transport's listener its broker confirmed, then stopped, keeps none of it reachable`, async () => {
+      const state = await subscribeRounds(
+        binary,
+        (onMessage) => ({ unsubscribe: () => void onMessage, ready: Promise.resolve() }),
+        'once ready',
+      )
       await collectGarbage()
       expect(state.reachable()).toBe(0)
     })
   }
-  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`. */
-  const subscribeRounds = (
+  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`: each
+   *  subscriber removed at once, or once its `ready` resolved. */
+  const subscribeRounds = async (
     binary: boolean,
     listening: (onMessage: object, counted: { stops: number }) => BroadcastUnsubscribe,
+    removed: 'at once' | 'once ready' = 'at once',
   ) => {
     const listeners: WeakRef<object>[] = []
     const state = { stops: 0, reachable: () => listeners.filter((listener) => listener.deref() !== undefined).length }
@@ -905,6 +919,7 @@ describe("a transport's listener whose broker refuses it", () => {
       const remove = binary
         ? Broadcast.subscribeBinary('room:held', () => {})
         : Broadcast.subscribe('room:held', () => {})
+      if (removed === 'once ready') await remove.ready
       remove()
     }
     return state
