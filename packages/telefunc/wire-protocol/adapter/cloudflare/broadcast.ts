@@ -360,10 +360,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return `tfps:${encodeURIComponent(key)}:`
   }
 
-  /** Writes `owner`'s presence again; once KV takes it, a refusal before is no longer its subscribers' outcome. */
+  /** Writes `owner`'s presence again; once KV takes it, a refusal of that presence is no longer its subscribers'
+   *  outcome. One its owner got after leaving and coming back meanwhile is a presence the write didn't make. */
   private async refreshPresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
+    const unwritten = memberState.unwritten.get(owner)
     const wrote = await this.warnRefusedPresence(key, this.writePresence(key, owner))
-    if (wrote && memberState.unwritten.get(owner)?.failure) memberState.unwritten.delete(owner)
+    if (wrote && unwritten?.failure && memberState.unwritten.get(owner) === unwritten)
+      memberState.unwritten.delete(owner)
   }
 
   private writePresence(key: string, owner: string): Promise<void> {

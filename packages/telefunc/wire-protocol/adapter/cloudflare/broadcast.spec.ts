@@ -722,9 +722,12 @@ describe('cloudflare broadcast routing', () => {
       const transport = createTransport(1)
       const kv = createMockKV()
       const put = kv.put.bind(kv)
-      const state = { refuse: true }
+      /** `held`: where set, KV acknowledges the writes asked of it meanwhile once it settles. */
+      const state: { refuse: boolean; held?: Promise<void> } = { refuse: true }
       kv.put = async (...args: Parameters<KVNamespace['put']>) => {
-        if (state.refuse) throw new Error('KV PUT failed: 429 Too Many Requests')
+        const { refuse, held } = state
+        await held
+        if (refuse) throw new Error('KV PUT failed: 429 Too Many Requests')
         return put(...args)
       }
       transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
@@ -732,7 +735,8 @@ describe('cloudflare broadcast routing', () => {
       transport.attachIsolateInfo('weur')
       _resetBroadcastAdapterForTesting(transport)
       const inObject = <T>(run: () => T) => transport.runInObject('telefunc-shard-weur-0', run)
-      return { state, inObject }
+      const inOtherObject = <T>(run: () => T) => transport.runInObject('telefunc-shard-weur-1', run)
+      return { state, inObject, inOtherObject }
     }
 
     it("a subscriber's `ready` rejects with KV's error, and so does a later one of the same Durable Object, until it has none", async () => {
@@ -766,6 +770,39 @@ describe('cloudflare broadcast routing', () => {
         await expect(refused.ready).rejects.toThrow('429')
         refused()
         later()
+      } finally {
+        _resetBroadcastAdapterForTesting(previousTransport)
+        vi.useRealTimers()
+      }
+    })
+
+    it('a refresh KV acknowledges after its Durable Object left and came back, refused, leaves that refusal', async () => {
+      vi.useFakeTimers()
+      const previousTransport = getBroadcastAdapter()
+      try {
+        const { state, inObject, inOtherObject } = refusing()
+        state.refuse = false
+        const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        // Another Durable Object's subscriber keeps the key's refresh going.
+        const other = inOtherObject(() => Broadcast.subscribe('room:test', () => {}))
+        await Promise.all([left.ready, other.ready])
+        let acknowledge = () => {}
+        state.held = new Promise((resolve) => {
+          acknowledge = resolve
+        })
+        await vi.advanceTimersByTimeAsync(30_000)
+        state.held = undefined
+        left()
+        state.refuse = true
+        const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await expect(back.ready).rejects.toThrow('429')
+        acknowledge()
+        await vi.advanceTimersByTimeAsync(0)
+        const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await expect(later.ready).rejects.toThrow('429')
+        back()
+        later()
+        other()
       } finally {
         _resetBroadcastAdapterForTesting(previousTransport)
         vi.useRealTimers()
