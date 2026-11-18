@@ -178,11 +178,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        // Once its close callbacks ran, one that waits gets the end, whatever they do.
-        if (!this.lifecycle.closeFired) {
-          waiting.delete(readiness)
-          readiness.settle(true)
-        }
+        // Removed, it can no longer take effect: once its close callbacks were called, that is the end as known now.
+        waiting.delete(readiness)
+        readiness.settle(this.lifecycle.closeFired ? this.endError() : true)
         this.unsubscribeUnusedBroadcasts()
       },
     })

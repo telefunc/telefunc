@@ -66,10 +66,10 @@ class ChannelAttach {
     else this.confirming.set(readiness, version)
   }
 
-  /** The listener was removed: it waits no more. */
-  stopWaiting(readiness: Readiness): void {
+  /** The listener was removed: it waits no more, and settles with `outcome`. */
+  stopWaiting(readiness: Readiness, outcome: true | Error): void {
     this.confirming.delete(readiness)
-    readiness.settle(true)
+    readiness.settle(outcome)
   }
 
   confirmWant(version: number): void {

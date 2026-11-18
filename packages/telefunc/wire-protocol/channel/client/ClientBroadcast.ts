@@ -82,8 +82,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        // Once its close callbacks ran, one that waits gets the end, whatever they do.
-        if (!this.lifecycle.closeFired) this._attach.stopWaiting(readiness)
+        // Removed, it can no longer take effect: once its close callbacks were called, that is the end as known now.
+        this._attach.stopWaiting(readiness, this.lifecycle.closeFired ? this.endError() : true)
         if (listeners.size === 0) this.setSubscribed(kind, false)
       },
     })

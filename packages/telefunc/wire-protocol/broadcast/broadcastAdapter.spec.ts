@@ -12,7 +12,7 @@ import type { BroadcastTransport, Listening } from './broadcastAdapter.js'
 
 /** The adapter's subscription as the function that stops it. */
 const stopOf = (subscription: Listening) => subscription.unsubscribe
-import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel/channelErrors.js'
 import type { Unsubscribe } from '../channel/channel.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
@@ -1044,7 +1044,7 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
 describe("a broadcast whose graceful close times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
   for (const binary of [false, true])
     for (const removes of [false, true]) {
-      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: ${removes ? 'removed by the callback, its `ready` rejects at the removal with the close, not the end it times out with' : 'still subscribed, its `ready` rejects with the end the close times out with'}`, async () => {
         const sent = () => ({ seq: 1, timestamp: 1 })
         const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
         _resetBroadcastAdapterForTesting(
@@ -1059,12 +1059,14 @@ describe("a broadcast whose graceful close times out on an `onClose()` callback'
         await room.close({ timeout: 10 })
         const ended = await room.closed.catch((err: unknown) => err)
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
-        expect(
-          await stop.ready.then(
-            () => 'resolved',
-            (err: unknown) => err,
-          ),
-        ).toBe(ended)
+        const ready = await stop.ready.then(
+          () => 'resolved',
+          (err: unknown) => err,
+        )
+        if (removes) {
+          expect(ready).toBeInstanceOf(ChannelClosedError)
+          expect(ready).not.toBe(ended)
+        } else expect(ready).toBe(ended)
       })
     }
 })
@@ -1357,4 +1359,184 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
     expect(received).toEqual([{ text: 'first' }])
   })
+})
+
+describe('a subscriber a close callback removes while its backend starts', () => {
+  for (const method of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${method}(): a callback that awaits its \`ready\` lets the close end gracefully`, async () => {
+      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({
+          send: () => ({ seq: 1, timestamp: 1 }),
+          sendBinary: () => ({ seq: 1, timestamp: 1 }),
+          listen,
+          listenBinary: listen,
+        }),
+      )
+      const room = new ServerBroadcast({ key: method })
+      const remove = room[method](() => {})
+      room.onClose(async () => {
+        remove()
+        await remove.ready.catch(() => {})
+      })
+      const closed = room.closed
+      await room.close({ timeout: 50 })
+      await expect(closed).resolves.toBeUndefined()
+    })
+  }
+  for (const method of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${method}(): a confirmation during the cleanup leaves its \`ready\` rejected with the close`, async () => {
+      const backend = Promise.withResolvers<void>()
+      const cleanup = Promise.withResolvers<void>()
+      const entered = Promise.withResolvers<void>()
+      const listen = () => ({ unsubscribe() {}, ready: backend.promise })
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({
+          send: () => ({ seq: 1, timestamp: 1 }),
+          sendBinary: () => ({ seq: 1, timestamp: 1 }),
+          listen,
+          listenBinary: listen,
+        }),
+      )
+      const room = new ServerBroadcast({ key: method })
+      const remove = room[method](() => {})
+      const sibling = room[method](() => {})
+      const outcome = remove.ready.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      )
+      room.onClose(() => {
+        remove()
+        entered.resolve()
+        return cleanup.promise
+      })
+      const close = room.close({ timeout: 500 })
+      try {
+        await entered.promise
+        backend.resolve()
+        await sibling.ready.catch(() => {})
+      } finally {
+        cleanup.resolve()
+        await close
+      }
+      expect(await outcome).toBe('Channel is closed')
+    })
+  }
+})
+
+// When a waiting `ready` settles around its broadcast's close: at the moment its subscription can no longer take effect,
+// with what is known of the end then.
+describe("a server subscriber's `ready` around its broadcast's graceful close", () => {
+  /** A backend whose first start waits for `confirm()`, and whose later ones wait for it too, or are confirmed or refused
+   *  at once, as `next` says. */
+  const backend = (next: 'pending' | 'confirms' | 'refuses' = 'pending') => {
+    const confirmation = Promise.withResolvers<void>()
+    let starts = 0
+    const listen = () => {
+      if (starts++ === 0 || next === 'pending') return { unsubscribe() {}, ready: confirmation.promise }
+      if (next === 'confirms') return () => {}
+      return { unsubscribe() {}, ready: Promise.reject(new Error('NOPERM')) }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+    )
+    return { confirm: () => confirmation.resolve() }
+  }
+  const outcome = (ready: Promise<void> | undefined) =>
+    Promise.resolve(ready).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    )
+
+  for (const kind of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${kind}(): one its callback removes, then subscribes again with a start its backend confirms at once, stays rejected; the new one resolves`, async () => {
+      backend('confirms')
+      const room = new ServerBroadcast({ key: `room:replaced:${kind}` })
+      const removed = room[kind](() => {})
+      let added: Unsubscribe | undefined
+      room.onClose(() => {
+        removed()
+        added = room[kind](() => {})
+      })
+      const removedOutcome = outcome(removed.ready)
+      await room.close({ timeout: 50 })
+      expect({ removed: await removedOutcome, added: await outcome(added?.ready) }).toEqual({
+        removed: 'Channel is closed',
+        added: 'resolved',
+      })
+    })
+
+    it(`${kind}(): one its callback removes, then subscribes again with a start its backend refuses, stays rejected with the close`, async () => {
+      backend('refuses')
+      const room = new ServerBroadcast({ key: `room:replaced-refused:${kind}` })
+      const removed = room[kind](() => {})
+      let added: Unsubscribe | undefined
+      room.onClose(() => {
+        removed()
+        added = room[kind](() => {})
+      })
+      const removedOutcome = outcome(removed.ready)
+      await room.close({ timeout: 50 }).catch(() => {})
+      expect(await removedOutcome).toBe('Channel is closed')
+      expect(await outcome(added?.ready)).not.toBe('resolved')
+    })
+
+    it(`${kind}(): one its callback removes and replaces, while the close then times out: the removed one has the close, the new one the timeout`, async () => {
+      backend()
+      const room = new ServerBroadcast({ key: `room:replaced-pending:${kind}` })
+      const removed = room[kind](() => {})
+      let added: Unsubscribe | undefined
+      room.onClose(() => {
+        removed()
+        added = room[kind](() => {})
+        return new Promise<void>(() => {})
+      })
+      const removedOutcome = outcome(removed.ready)
+      await room.close({ timeout: 10 })
+      expect({ removed: await removedOutcome, added: await outcome(added?.ready) }).toEqual({
+        removed: 'Channel is closed',
+        added: 'Channel close timed out',
+      })
+    })
+
+    it(`${kind}(): one still subscribed while the callbacks' cleanup runs resolves once its backend confirms meanwhile`, async () => {
+      const { confirm } = backend()
+      const room = new ServerBroadcast({ key: `room:confirmed-in-cleanup:${kind}` })
+      const subscriber = room[kind](() => {})
+      const cleanup = Promise.withResolvers<void>()
+      const entered = Promise.withResolvers<void>()
+      room.onClose(() => {
+        entered.resolve()
+        return cleanup.promise
+      })
+      const close = room.close({ timeout: 500 })
+      await entered.promise
+      confirm()
+      const subscribed = await outcome(subscriber.ready)
+      cleanup.resolve()
+      await close
+      expect(subscribed).toBe('resolved')
+    })
+
+    it(`${kind}(): one that resolved stays resolved when its callback removes it`, async () => {
+      backend('confirms')
+      const room = new ServerBroadcast({ key: `room:resolved:${kind}` })
+      // Its first start waits: one that comes and goes ends it, so the next one starts again and is confirmed.
+      room[kind](() => {})()
+      const subscriber = room[kind](() => {})
+      await subscriber.ready
+      room.onClose(() => subscriber())
+      await room.close({ timeout: 50 })
+      expect(await outcome(subscriber.ready)).toBe('resolved')
+    })
+
+    it(`${kind}(): one nobody reads, removed by its callback, makes no unhandled rejection`, async () => {
+      backend()
+      const room = new ServerBroadcast({ key: `room:unread:${kind}` })
+      const subscriber = room[kind](() => {})
+      room.onClose(() => subscriber())
+      await room.close({ timeout: 50 })
+    })
+  }
 })

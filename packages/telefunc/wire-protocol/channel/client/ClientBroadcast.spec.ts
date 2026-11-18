@@ -6,6 +6,7 @@ import { createHook } from 'node:async_hooks'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
+import { ChannelClosedError } from '../channelErrors.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 
@@ -88,7 +89,7 @@ describe("a page's broadcast that ends while a subscriber waits, its `onClose()`
 describe("a page's broadcast whose close, asked by the server, times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
   for (const binary of [false, true])
     for (const removes of [false, true]) {
-      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: ${removes ? 'removed by the callback, its `ready` rejects at the removal with the close, not the end it times out with' : 'still subscribed, its `ready` rejects with the end the close times out with'}`, async () => {
         const page = new ClientBroadcast(channelOptions())
         const stop = binary ? page.subscribeBinary(() => {}) : page.subscribe(() => {})
         page.onClose(() => {
@@ -98,12 +99,14 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
         page._dispatchFrame(received(encode.close(0, 10, 1)))
         const ended = await page.closed.catch((err: unknown) => err)
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
-        expect(
-          await stop.ready.then(
-            () => 'resolved',
-            (err: unknown) => err,
-          ),
-        ).toBe(ended)
+        const ready = await stop.ready.then(
+          () => 'resolved',
+          (err: unknown) => err,
+        )
+        if (removes) {
+          expect(ready).toBeInstanceOf(ChannelClosedError)
+          expect(ready).not.toBe(ended)
+        } else expect(ready).toBe(ended)
       })
     }
 })
@@ -169,3 +172,80 @@ function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
   if (!('index' in decoded)) throw new Error('Not a channel frame')
   return decoded
 }
+
+describe("a page's subscriber a close callback removes before the server confirmed it", () => {
+  for (const method of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${method}(): a callback that awaits its \`ready\` lets the close end gracefully`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const stop = page[method](() => {})
+      page.onClose(async () => {
+        stop()
+        await stop.ready.catch(() => {})
+      })
+      const closed = page.closed
+      page._dispatchFrame(received(encode.close(0, 50, 1)))
+      await expect(closed).resolves.toBeUndefined()
+    })
+  }
+})
+
+// When a waiting `ready` settles around its broadcast's close on the page: at the moment its subscription can no longer
+// take effect, with what is known of the end then.
+describe("a page subscriber's `ready` around its broadcast's close", () => {
+  const outcome = (ready: Promise<void> | undefined) =>
+    Promise.resolve(ready).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    )
+
+  for (const kind of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${kind}(): one removed before the close resolves`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      subscriber()
+      page.abort('gone')
+      expect(await outcome(subscriber.ready)).toBe('resolved')
+    })
+
+    it(`${kind}(): the server's confirmation during the callbacks' cleanup resolves one still subscribed, not one they removed`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const removed = page[kind](() => {})
+      const subscribed = page[kind](() => {})
+      const cleanup = Promise.withResolvers<void>()
+      page.onClose(() => {
+        removed()
+        return cleanup.promise
+      })
+      const removedOutcome = outcome(removed.ready)
+      page._dispatchFrame(received(encode.close(0, 500, 1)))
+      await Promise.resolve()
+      page._dispatchFrame(received(encode.wanted(0, 2)))
+      const subscribedOutcome = await outcome(subscribed.ready)
+      cleanup.resolve()
+      await page.closed
+      expect({ removed: await removedOutcome, subscribed: subscribedOutcome }).toEqual({
+        removed: 'Channel is closed',
+        subscribed: 'resolved',
+      })
+    })
+
+    it(`${kind}(): one still subscribed at a forced end rejects with its error`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      page.abort('gone')
+      const ended = await page.closed.catch((err: unknown) => err)
+      expect(await subscriber.ready.catch((err: unknown) => err)).toBe(ended)
+    })
+
+    it(`${kind}(): one that resolved stays resolved when its callback removes it`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      page._dispatchFrame(received(encode.wanted(0, 1)))
+      await subscriber.ready
+      page.onClose(() => subscriber())
+      page.abort('gone')
+      await page.closed.catch(() => {})
+      expect(await outcome(subscriber.ready)).toBe('resolved')
+    })
+  }
+})
