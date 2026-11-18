@@ -930,6 +930,29 @@ describe('a broadcast its subscriber ends on the first message, its backend not 
   }
 })
 
+// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the broadcast ended still
+// gets that end, whatever a close callback does after.
+describe('a broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber', () => {
+  for (const binary of [false, true]) {
+    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+      )
+      const room = new ServerBroadcast<string>({ key: 'room:cleans-up-on-close' })
+      const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+      room.onClose(() => stop())
+      room.abort('terminal event')
+      const ready = await stop.ready.then(
+        () => 'resolved',
+        (err: unknown) => err,
+      )
+      expect(ready).toBe(await room.closed.catch((err: unknown) => err))
+    })
+  }
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

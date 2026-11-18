@@ -101,9 +101,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
   }
 
+  /** @internal Ahead of its close callbacks, one of which may remove a subscriber that waits: that one gets the end. */
+  override _closing(): void {
+    this._attach.failWants(this.endError())
+  }
+
   override _end(err?: Error): void {
     super._end(err)
-    // Ahead of clearing the subscribers, which settles their `ready` as removed.
+    // One added while its close callbacks ran, ahead of clearing the subscribers, which settles their `ready` as removed.
     this._attach.failWants(err ?? new ChannelClosedError())
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()

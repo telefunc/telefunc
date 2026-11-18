@@ -66,6 +66,24 @@ describe('a listener added once its channel ended on the page', () => {
   })
 })
 
+// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the page's broadcast ended
+// still gets that end, whatever a close callback does after.
+describe("a page's broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber", () => {
+  for (const binary of [false, true]) {
+    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const stop = binary ? page.subscribeBinary(() => {}) : page.subscribe(() => {})
+      page.onClose(() => stop())
+      page.abort('gone')
+      const ready = await stop.ready.then(
+        () => 'resolved',
+        (err: unknown) => err,
+      )
+      expect(ready).toBe(await page.closed.catch((err: unknown) => err))
+    })
+  }
+})
+
 // A call carries each want the server hasn't confirmed yet, and none of a channel once it confirmed them or ended.
 it("a call carries the page's wants the server hasn't confirmed", () => {
   const page = new ClientBroadcast(channelOptions())

@@ -515,14 +515,24 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.binaryListening?.unsubscribe()
     this.binaryListening = null
     super.shutdown(err, options)
-    // Ahead of clearing its subscribers, which settles their `ready` as removed.
-    const endError = this.endError()
-    settleAll(this.textWaiting, endError)
-    settleAll(this.binaryWaiting, endError)
+    // One added while its close callbacks ran, ahead of clearing its subscribers, which settles their `ready` as removed.
+    this.failWaiting()
     for (const goOn of this.callWaits) goOn()
     this.callWaits.clear()
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
+  }
+
+  /** @internal Ahead of its close callbacks, one of which may remove a subscriber that waits: that one gets the end. */
+  override _closing(): void {
+    this.failWaiting()
+  }
+
+  /** Its subscribers waiting for their subscription to take effect get its end. */
+  private failWaiting(): void {
+    const endError = this.endError()
+    settleAll(this.textWaiting, endError)
+    settleAll(this.binaryWaiting, endError)
   }
 
   // --- Internal broadcast helpers ---
