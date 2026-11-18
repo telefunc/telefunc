@@ -89,12 +89,12 @@ class ChannelLifecycle {
     return this.didEnd
   }
 
-  /** What the channel ended with, where it didn't close gracefully. */
   /** Its close callbacks have been called. */
   get closeFired(): boolean {
     return this.didFireClose
   }
 
+  /** What the channel ended with, where it didn't close gracefully. */
   get closeError(): Error | undefined {
     return this.endError
   }
