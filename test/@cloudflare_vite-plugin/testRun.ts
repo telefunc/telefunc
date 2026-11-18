@@ -400,7 +400,9 @@ function testRefusedPresence() {
     })
     await page.click('#subscribe')
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+      const state = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      // The subscriber's `ready` keeps the refusal of its first presence.
+      expect({ published: state.published, ready: state.ready }).deep.equal({ published: true, ready: 'rejected' })
     })
     // Each try publishes again, until the replacing subscription's presence is recorded.
     await autoRetry(async () => {
