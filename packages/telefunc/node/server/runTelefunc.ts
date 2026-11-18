@@ -34,6 +34,7 @@ import {
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -334,6 +335,7 @@ async function runTelefunc_(
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
+      wants: parsed.wants,
     })
   }
 
@@ -373,6 +375,9 @@ async function runTelefunc_(
       return createHttpResponse({ ...shieldValidationError })
     }
   }
+
+  // Each subscription the page made before this call is in effect, or its broadcast ended, before the telefunction runs.
+  if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
 
   {
     assert(runContext.isValidRequest)

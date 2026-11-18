@@ -68,20 +68,21 @@ class NewSubscriptionWait {
     const bytes =
       (typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
     const others = this.waitingBytes.get(budget)
-    if (others !== undefined && !others.memory.admit(bytes)) {
+    const waiting = others ?? { bytes: 0, memory: queueMemory() }
+    // The first waiting send goes whatever the ledger says, charged only where it admits it.
+    const charged = waiting.memory.tryHold(bytes) ? bytes : 0
+    if (charged === 0 && others !== undefined) {
       throw new ChannelOverflowError(
         "Publish rejected: the publishes waiting for this server's new Redis subscription would pass the most it holds for one channel, or config.channel.maxMemory; await each publish",
       )
     }
-    const waiting = others ?? { bytes: 0, memory: queueMemory() }
     wait ??= this.openWait(queue, channels)
     this.waits.set(queue, wait)
     wait.sends++
-    waiting.bytes += bytes
-    waiting.memory.hold(bytes)
+    waiting.bytes += charged
     this.waitingBytes.set(budget, waiting)
     const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
-    const sent = () => this.endWait(queue, wait, budget, waiting, bytes)
+    const sent = () => this.endWait(queue, wait, budget, waiting, charged)
     return { turn: this.turnOf(wait, owned, sent), sent }
   }
 

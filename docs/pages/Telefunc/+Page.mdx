@@ -172,10 +172,11 @@ export default {
 Add to your `wrangler.jsonc`:
 
 {/* spellcheck-ignore:on */}
+
 ```jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_als (or nodejs_compat): Broadcast and Room need it.
+  // nodejs_als (or nodejs_compat): Room, and server code that subscribes to a broadcast, need it.
   // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
@@ -188,6 +189,8 @@ Add to your `wrangler.jsonc`:
   ]
 }
 ```
+{/* spellcheck-ignore:off */}
+
 {/* spellcheck-ignore:off */}
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.

@@ -21,6 +21,7 @@ export type {
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
+import { isAsyncMode } from '../../../node/server/context/context.js'
 import { servePlane } from '../../backend/driver.js'
 import type {
   BackendReceiver,
@@ -154,6 +155,12 @@ function currentCloudflareMember(): CloudflareMember | undefined {
  *  subscription delivers to that session. */
 function currentCloudflareHostKey(): string {
   const member = currentCloudflareMember()
+  assertUsage(
+    member !== undefined || isAsyncMode(),
+    // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
+    'Server code that subscribes on Cloudflare finds its session through AsyncLocalStorage: add "nodejs_als" to the ' +
+      'compatibility_flags of your wrangler.jsonc',
+  )
   assertUsage(
     member !== undefined,
     'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, ' +

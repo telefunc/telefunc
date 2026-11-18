@@ -10,13 +10,13 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { stringifyMessage } from '../channel.js'
+import { Readiness, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../../../utils/assert.js'
-import { encode, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
+import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import type { BroadcastKind, BroadcastSubscriptions } from '../../wire/payloads.js'
+import type { BroadcastKind } from '../../wire/payloads.js'
 import { PUBLISH_BINARY_HEADER, type WirePublishInfo } from '../../wire/publishInfo.js'
 import { HEADER } from '../../wire/header.js'
 import { Listeners, type Registration } from '../../../utils/Listeners.js'
@@ -31,14 +31,11 @@ import { EVERY_STREAM } from '../ownStream.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
-  /** The subscriptions this page asks the server for. */
-  private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
 
   constructor(options: ClientChannelOptions) {
     super(options)
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
-    this._attach.declareSubscriptions(this.subscribed)
   }
 
   /** @internal Register a local listener without changing what it asks the server for; it gets each payload as it
@@ -69,12 +66,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.receiveCredit.confirmSoon()
   }
 
-  /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
+  /** @internal Changes what it wants the server to send it, as one versioned want: the wire, a reconnect's RECONCILE
+   *  entry and each call made while the server hasn't confirmed it carry it. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
-    if (on === this.subscribed[kind] || this.stopped) return
-    this.subscribed[kind] = on
-    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
-    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+    if (on === (this._attach.wants?.[kind] ?? false) || this.stopped) return
+    this.connection.sendWant(this, this._attach.changeWant(kind, on))
   }
 
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
@@ -92,7 +88,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return broadcastMessages<ChannelData<T>>(this, options)
   }
 
-  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
     return this.subscribeWired('text', callback, options)
   }
 
@@ -129,7 +125,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return waiting.promise
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
     const listener: BroadcastBinaryListener = (payload, info) => {
       if (isLossy(payload)) this._confirmSoon()
       return callback(binaryData(payload), info)
@@ -137,26 +133,50 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.subscribeWired('binary', listener, options)
   }
 
+  protected override dispatchCtrl(frame: ChannelCtrlFrame): void {
+    if (frame.tag === TAG.WANTED) this.onWanted(frame.version)
+    else super.dispatchCtrl(frame)
+  }
+
+  private onWanted(version: number): void {
+    this._attach.confirmWant(version)
+    if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
+  }
+
+  /** @internal Ahead of its close callbacks, one of which may remove a subscriber that waits: that one gets the end. */
+  override _closing(): void {
+    this._attach.failWants(this.endError())
+  }
+
   override _end(err?: Error): void {
     super._end(err)
+    // One added while its close callbacks ran, ahead of clearing the subscribers, which settles their `ready` as removed.
+    this._attach.failWants(err ?? new ChannelClosedError())
     this.subscribers.text.clear()
     this.subscribers.binary.clear()
   }
 
-  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. */
+  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. Its `ready` settles
+   *  once the server confirmed the want this subscriber needs, or the subscriber is removed. */
   private subscribeWired<K extends BroadcastKind>(
     kind: K,
     callback: BroadcastListenerByKind<T>[K],
     options: { signal?: AbortSignal },
-  ): () => void {
-    if (options.signal?.aborted) return () => {}
+  ): Unsubscribe {
+    if (options.signal?.aborted) return withReady(() => {})
+    // A closing one sends no want any more.
+    if (this.stopped) return neverInEffect(this.endError())
+    const readiness = new Readiness()
     if (this.subscribers[kind].size === 0) this._setSubscribed(kind, true)
-    return this.subscribers[kind].add(callback, {
+    const remove = this.subscribers[kind].add(callback, {
       ...options,
       onRemove: () => {
+        this._attach.stopWaiting(readiness)
         if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
       },
     })
+    this._attach.waitFor(readiness, this._attach.wants?.version ?? 0)
+    return withReady(remove, readiness)
   }
 
   private sendReplyData(data: unknown): void {

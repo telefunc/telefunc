@@ -125,6 +125,8 @@ On Cloudflare Workers, a client that disconnects before the telefunction answers
 
 > Without the flag, `signal` doesn't abort and `onClose()` doesn't run: your Worker's code just stops, and Telefunc logs a warning about it. The flag is on by default from the `compatibility_date` `2026-11-17`.
 
+> Under `wrangler dev`, `signal` aborts only for a client that disconnects while the response streams, not for one that disconnects before the telefunction answers.
+
 
 ## See also
 

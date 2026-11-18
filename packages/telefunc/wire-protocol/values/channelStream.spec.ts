@@ -9,7 +9,17 @@ import { createStreamingReviver } from './client/response/registry.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
 import { sendChunks } from './sendChunks.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_PART, STREAM_CHUNK_PART_BYTES } from '../constants.js'
+import { queueMemory } from '../channel/server/channelMemory.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { config } from '../../node/server/serverConfig.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { withReady } from '../channel/channel.js'
 import type { ClientReviverContext, ServerReplacerContext, StreamingProducer } from './types.js'
+
+config.channel = { maxMemory: '2m' }
+
+/** What this server's channels hold, on the ledger every channel shares. */
+const ledgerTotal = () => getGlobalObject('channelMemory.ts', { total: 0 }).total
 
 /** A channel in memory: each send waits until the reader takes it, as a channel's credit would. */
 function memoryChannel() {
@@ -19,10 +29,11 @@ function memoryChannel() {
   return {
     listenBinary(callback: (frame: Uint8Array) => Promise<void>) {
       listener = callback
-      return () => {}
+      return withReady(() => {})
     },
     onClose(callback: () => void) {
       onClose = callback
+      return () => {}
     },
     close: async () => {
       onClose?.()
@@ -72,7 +83,7 @@ function returnOverChannel(value: unknown): unknown {
     receiveStream(metadata) {
       if (!('__index' in metadata)) throw new Error('Unexpected metadata')
       const channel = memoryChannel()
-      const source = ChannelStreamSource.create(channel as never)
+      const source = ChannelStreamSource.create(channel)
       void sendChunks(channel, producers[metadata.__index]!(), new Promise(() => {}))
       return source
     },
@@ -148,7 +159,7 @@ describe('a chunk sent in parts', () => {
 
   test.each(['cancelled', 'completed'])('a %s read keeps none of its parts', async (ending) => {
     const channel = memoryChannel()
-    const source = ChannelStreamSource.create(channel as never)
+    const source = ChannelStreamSource.create(channel)
     const read = source.readNextChunk()
     const sent = await sendFrames(channel, Array(10).fill(CHANNEL_PUMP_TAG_PART))
     if (ending === 'cancelled') {
@@ -163,5 +174,36 @@ describe('a chunk sent in parts', () => {
       await new Promise((resolve) => setTimeout(resolve, 10))
     }
     expect(sent.filter((buffer) => buffer.deref() !== undefined)).toHaveLength(0)
+  })
+
+  test('on a server, a chunk that fits arrives whole, and its parts count toward maxMemory only while it arrives', async () => {
+    const channel = memoryChannel()
+    const source = ChannelStreamSource.create(channel, { memory: queueMemory() })
+    const read = source.readNextChunk()
+    await sendFrames(channel, [CHANNEL_PUMP_TAG_PART])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(ledgerTotal()).toBe(1 + STREAM_CHUNK_PART_BYTES)
+    await sendFrames(channel, [CHANNEL_PUMP_TAG_DATA])
+    expect((await read)?.byteLength).toBe(2 * STREAM_CHUNK_PART_BYTES)
+    expect(ledgerTotal()).toBe(0)
+  })
+
+  test('on a server, a chunk whose parts pass maxMemory ends the read with ChannelOverflowError, and nothing of it stays counted', async () => {
+    const channel = memoryChannel()
+    const source = ChannelStreamSource.create(channel, { memory: queueMemory() })
+    const read = source.readNextChunk()
+    // The reader takes no frame after the one it refuses, so the rest of the send waits for good.
+    void sendFrames(channel, [
+      CHANNEL_PUMP_TAG_PART,
+      CHANNEL_PUMP_TAG_PART,
+      CHANNEL_PUMP_TAG_PART,
+      CHANNEL_PUMP_TAG_DATA,
+    ])
+    const failure = await read.then(
+      () => undefined,
+      (err: unknown) => err,
+    )
+    expect(failure).toBeInstanceOf(ChannelOverflowError)
+    expect(ledgerTotal()).toBe(0)
   })
 })

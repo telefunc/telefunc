@@ -107,15 +107,20 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
+  sendWanted(version: number): void {
+    this.sender.send(encode.wanted(this.index, version))
+  }
+
   /** How many of its publishes no wire has taken: their heads still wait in its wire's queue, and they are the replay's
    *  newest. */
   unhanded(): number {
     return this.sender.queue.waitingPublishes(this.index)
   }
 
-  /** What those hold. */
-  unhandedHeld(): number {
-    return this.replay.heldByNewestPublishes(this.unhanded())
+  /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the
+   *  channel's last frame. */
+  replaceableHeld(): number {
+    return this.replay.heldByNewestPublishes(this.replay.sinceFrame(this.unhanded()))
   }
 
   /** Takes back from the replay and the wire's queue its publishes that no wire has taken: all of them, or with `stream`
@@ -125,6 +130,12 @@ class IndexedPeer {
     return this.offWire(
       stream === undefined ? this.replay.dropUnhanded(droppable) : this.replay.dropLossyOf(stream, droppable),
     )
+  }
+
+  /** As `dropUnhanded`, of those only the ones sent after the channel's last frame: a channel's own sends, of which a
+   *  plain one is a frame that keeps the lossy ones before it. */
+  dropReplaceable(): Dropped {
+    return this.offWire(this.replay.dropUnhanded(this.replay.sinceFrame(this.unhanded())))
   }
 
   /** Takes back those of its lossy publishes that no wire has taken and a newer one of their stream made stale. */

@@ -5,7 +5,6 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
 import { heldSendBytes } from './channelMemory.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import type { PublishBody } from './PublishBody.js'
 import { OWN_STREAM } from '../ownStream.js'
 
 /** Callback pair for buffered entries: resolve on flush, reject where the channel ends first. */
@@ -28,15 +27,14 @@ type EntryData = string | Uint8Array
  *  lossy entry, whose next lossy entry takes its place where it is the last; null for one that must arrive. */
 type Entry = {
   tag: number
-  data: EntryData | PublishBody
+  data: EntryData
   callback: EntryCallback | null
   held: number
   lossyOf: string | null
 }
 
 /**
- * Holds what a channel sends while no peer is attached (text, binary, ack requests, a first attach's publishes), for
- * `flush` to send in order. It takes all it is given, and counts it: the channel admits each send first.
+ * Holds what a channel sends while no peer is attached (text, binary, ack requests), for `flush` to send in order. It takes all it is given, and counts it: the channel admits each send first.
  */
 class ServerChannelBuffer<TAck = never> {
   private entries: Entry[] = []
@@ -81,14 +79,6 @@ class ServerChannelBuffer<TAck = never> {
     this.dropReplaced(OWN_STREAM)
     const copy = typeof data === 'string' ? data : new Uint8Array(data)
     this.keep({ tag, data: copy, callback: null, held: heldSendBytes(bytes), lossyOf: OWN_STREAM })
-  }
-
-  /** A publish to a page that never attached: until it does, its channel has no index for the head. A lossy one takes
-   *  the place of the last entry where that is a lossy one of its stream, as `pushLossy`. */
-  pushPublish(body: PublishBody): void {
-    const lossyOf = body.lossy ? body.stream : null
-    if (lossyOf !== null) this.dropReplaced(lossyOf)
-    this.keep({ tag: TAG.PUBLISH, data: body, callback: null, held: heldSendBytes(body.frame.byteLength), lossyOf })
   }
 
   /** Lets go of its lossy sends, unsent, and of what they held. */

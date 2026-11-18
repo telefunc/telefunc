@@ -5,6 +5,7 @@ export {
   onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
+  onPublishBesideRefusedSubscribe,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
 }
@@ -20,6 +21,7 @@ import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
 import { dropRedisSubscribers, redis } from '../../redis'
 import { sleep } from '../../sleep'
+import { refuseChannels } from './refuseChannels'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
  *  while ioredis reconnects. */
@@ -208,7 +210,7 @@ async function onRedisSubscribeFailure() {
   try {
     await subscribeRefused(client, user)
     attempt = subscribe((value) => received.push(value))
-    const pending = await Promise.allSettled([
+    const [textPublish, binaryPublish] = await Promise.allSettled([
       backend.publish(text, 'text'),
       backend.publish({ key: user, kind: 'binary' }, new Uint8Array(1)),
     ])
@@ -234,7 +236,7 @@ async function onRedisSubscribeFailure() {
       }
     }
     await delivered
-    return { rejected: pending.every((result) => result.status === 'rejected'), received }
+    return { rejected: textPublish.status === 'rejected', binary: binaryPublish.status, received }
   } finally {
     await attempt?.unsubscribe()
     client.disconnect()
@@ -300,4 +302,34 @@ async function subscribeRefused(client: Redis, channel: string) {
     await sleep(100)
   }
   throw new Error(`Redis never refused a SUBSCRIBE of ${channel}`)
+}
+
+/** While Redis refuses the SUBSCRIBE of one key, which a subscriber the app hasn't removed keeps, this server publishes on
+ *  another key. */
+async function onPublishBesideRefusedSubscribe() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  const unsubscribe: Array<() => void> = []
+  try {
+    if (!(await refuseChannels())) return { refusesChannels: false }
+    const refused = Broadcast.subscribe(`!refused:${crypto.randomUUID()}`, () => {})
+    unsubscribe.push(refused)
+    const key = `room:beside-refused:${crypto.randomUUID()}`
+    const received: string[] = []
+    const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
+    unsubscribe.push(subscribed)
+    const refusedReady = await refused.ready.then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+    await subscribed.ready
+    const published = await Promise.resolve(Broadcast.publish(key, 'beside')).then(
+      () => 'sent',
+      (err: unknown) => String(err),
+    )
+    for (let i = 0; i < 25 && received.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    return { refusedReady, published, received }
+  } finally {
+    for (const stop of unsubscribe) stop()
+    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
+  }
 }

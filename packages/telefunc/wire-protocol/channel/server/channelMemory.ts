@@ -7,6 +7,7 @@ export {
   fits,
   fitsPublish,
   hasCopyRoom,
+  heldAnswerBytes,
   heldPublishBytes,
   heldSendBytes,
   hold,
@@ -15,12 +16,15 @@ export {
   maxPendingBytesOf,
   queueMemory,
   releaseHolder,
+  tryHold,
 }
 export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { HEADER } from '../../wire/header.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../../wire/frame.js'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
@@ -49,13 +53,12 @@ const memory = getGlobalObject('channelMemory.ts', {
   holders: new Set<MemoryHolder>(),
   maxMemory: 0,
   maxPendingBytes: 0,
-  reclaiming: false,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
 })
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
- *  equal share is refused, so one still under it has room. */
+ *  equal share is refused, so one still under it has room. A subscriber cut to make room ends after this returns. */
 function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
   const target = shedTarget(maxMemory)
@@ -89,15 +92,10 @@ function admitPublish(body: PublishBody): void {
     for (const holder of [...memory.holders]) holder.replaceWaiting?.(stream)
   }
   reclaim(bytes, target)
-  if (memory.total + bytes <= maxMemory || memory.reclaiming) return
-  memory.reclaiming = true
-  try {
-    for (const [newest, holders] of newestsThatEndingFrees()) {
-      if (memory.total + bytes <= maxMemory) return
-      if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0)
-    }
-  } finally {
-    memory.reclaiming = false
+  if (memory.total + bytes <= maxMemory) return
+  for (const [newest, holders] of newestsThatEndingFrees()) {
+    if (memory.total + bytes <= maxMemory) return
+    if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0)
   }
 }
 
@@ -130,6 +128,11 @@ function heldPublishBytes(body: PublishBody): number {
   return body.frame.byteLength + HELD_PUBLISH_OVERHEAD_BYTES
 }
 
+/** What an answer of `result` holds in a replay, or while its page is away. */
+function heldAnswerBytes(result: string): number {
+  return utf8ByteLength(result) + MESSAGE_FRAME_OVERHEAD_MAX_BYTES + HELD_SEND_OVERHEAD_BYTES
+}
+
 /** Only counts: never reclaims, so whoever's mid-mutation finishes first. */
 function hold(holder: MemoryHolder, held: number | PublishBody): void {
   if (holder.released) return
@@ -141,6 +144,13 @@ function hold(holder: MemoryHolder, held: number | PublishBody): void {
     holder.heldBytes += heldPublishBytes(held)
     memory.total += HELD_PUBLISH_OVERHEAD_BYTES + (held.refs++ === 0 ? held.frame.byteLength : 0)
   }
+}
+
+/** Holds `bytes` for `holder` where `admit` admits them, and says whether it did. */
+function tryHold(holder: MemoryHolder, bytes: number): boolean {
+  if (!admit(holder, bytes)) return false
+  hold(holder, bytes)
+  return true
 }
 
 function letGo(holder: MemoryHolder, held: number | PublishBody): void {
@@ -183,12 +193,12 @@ function holdsEnough(): boolean {
   return memory.total > shedTarget(maxMemoryOf())
 }
 
-/** What a `messages()` loop's queue holds, on the ledger as a holder of its own: nothing else can lower it. */
+/** What a `messages()` loop's queue or a stream's reader holds, on the ledger as a holder of its own: nothing else can
+ *  lower it. */
 function queueMemory(): QueueMemory {
   const holder: MemoryHolder = { heldBytes: 0 }
   return {
-    admit: (bytes) => admit(holder, bytes),
-    hold: (bytes) => hold(holder, bytes),
+    tryHold: (bytes) => tryHold(holder, bytes),
     letGo: (bytes) => letGo(holder, bytes),
     release: () => releaseHolder(holder),
   }
@@ -197,18 +207,12 @@ function queueMemory(): QueueMemory {
 /** Everyone above the level comes down to it. A body shared goes only with its last holder, so the level drops until the
  *  total does. A holder that can't reach it, its bytes on the wire, leaves this pass; 1, not 0, as its newest stays. */
 function reclaim(need: number, target: number): void {
-  if (memory.reclaiming) return
-  memory.reclaiming = true
-  try {
-    const stuck = new Set<MemoryHolder>()
-    while (memory.total + need > target) {
-      const largest = largestSheddable(stuck)
-      const level = Math.max(1, largest - (memory.total + need - target))
-      if (level >= largest) return
-      shedTo(level, stuck)
-    }
-  } finally {
-    memory.reclaiming = false
+  const stuck = new Set<MemoryHolder>()
+  while (memory.total + need > target) {
+    const largest = largestSheddable(stuck)
+    const level = Math.max(1, largest - (memory.total + need - target))
+    if (level >= largest) return
+    shedTo(level, stuck)
   }
 }
 

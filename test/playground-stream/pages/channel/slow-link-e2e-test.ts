@@ -162,21 +162,18 @@ function testSlowLink(isDev: boolean) {
     )
   })
 
-  // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms.
+  // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms. A pause of the
+  // whole machine about as long as `LOSSY_CONFIRM_SLACK_MS` (300 ms) delays them past what the server allows a page that
+  // keeps up, and that run may lose messages. A message more than 150 ms later than the link's delay shows such a pause:
+  // the ticker then runs again, up to three times, and the run asserted is the first without one, else the third.
   test('channel: on a 900 ms round trip that keeps up, a lossy broadcast delivers every message', async () => {
+    const delayMs = 450
     await withPacedLink(
-      { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs: 450 },
+      { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs },
       async () => {
-        await page.click('#channel-test-lossy-ticker-small')
-        let ticker: SlowLinkState['lossyTicker'] = null
-        await autoRetry(
-          async () => {
-            ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
-            expect(ticker).not.toBe(null)
-          },
-          { timeout: 40_000 },
-        )
-        expect(ticker).deep.equal({ ...ticker!, received: 300, last: 299 })
+        let ticker = await runSmallTicker()
+        for (let runs = 1; runs < 3 && ticker.worstMs > delayMs + 150; runs++) ticker = await runSmallTicker()
+        expect(ticker).deep.equal({ ...ticker, received: 300, last: 299 })
       },
     )
   })
@@ -202,4 +199,19 @@ function testSlowLink(isDev: boolean) {
       },
     )
   })
+}
+
+/** Runs the page's lossy ticker of small messages and returns what the page got. */
+async function runSmallTicker() {
+  await page.click('#channel-test-lossy-ticker-small')
+  // The click clears the last run's result.
+  await autoRetry(async () => expect((await getResult<SlowLinkState>('#channel-state')).lossyTicker).toBe(null))
+  return autoRetry(
+    async () => {
+      const { lossyTicker } = await getResult<SlowLinkState>('#channel-state')
+      if (!lossyTicker) throw new Error('The ticker is still running')
+      return lossyTicker
+    },
+    { timeout: 40_000 },
+  )
 }

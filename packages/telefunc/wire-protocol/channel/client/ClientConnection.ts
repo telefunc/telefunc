@@ -19,7 +19,7 @@ import {
 import type { Urgency } from '../../flowControl/credit.js'
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
-import type { ReconciledPayload } from '../../wire/payloads.js'
+import type { CallWant, ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
@@ -97,8 +97,9 @@ interface MuxConnection {
   bufferedAmount(): number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
   deliveredBefore(ms: number): number
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
+  sendWant(channel: MuxChannel, want: Want): void
+  /** The server confirmed every want `channel` sent: a call carries none of it. */
+  wantSettled(channel: MuxChannel): void
   unregister(channel: MuxChannel): void
   reconnectWindow(): number
 }
@@ -154,10 +155,11 @@ type ClientChannelTransport = {
 }
 
 // One per page, however many copies of Telefunc it loaded: each would otherwise open its own connections.
-const globalObject = getGlobalObject<{ connections: Map<string, ClientConnection> }>(
-  'channel/client/ClientConnection.ts',
-  { connections: new Map() },
-)
+const globalObject = getGlobalObject<{
+  connections: Map<string, ClientConnection>
+  /** The page's channels with a want the server hasn't confirmed, by the `telefuncUrl` of the calls that carry it. */
+  wanting: Map<string, Set<MuxChannel>>
+}>('channel/client/ClientConnection.ts', { connections: new Map(), wanting: new Map() })
 
 /** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
  *  frames and hands them to its send gate; the wire lifecycle carries them. */
@@ -175,6 +177,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   private readonly cacheKey: string
+  private readonly telefuncUrl: string
   /** True if its transports include a WebSocket, whose runtime may accept smaller frames than the wire's limit. */
   private readonly usesWebSocket: boolean
   private readonly lifecycle: WireLifecycle
@@ -191,10 +194,25 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     cacheKey,
   }: { telefuncUrl: string; options: ClientConnectionOptions; cacheKey: string }) {
     this.cacheKey = cacheKey
+    this.telefuncUrl = telefuncUrl
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
     this.channels = this.lifecycle.channels
     this.gate = this.lifecycle.gate
+  }
+
+  /** The wants of the page's broadcasts on `telefuncUrl` that the server hasn't confirmed: a call to it carries them, so
+   *  its server applies them before the telefunction runs. Undefined where there are none. */
+  static unconfirmedWants(telefuncUrl: string): CallWant[] | undefined {
+    const wanting = globalObject.wanting.get(telefuncUrl)
+    if (wanting === undefined) return undefined
+    const wants: CallWant[] = []
+    for (const channel of wanting) {
+      const want = channel.isClosed ? null : channel._attach.unconfirmedWant
+      if (want !== null) wants.push({ channel: channel.id, ...want })
+    }
+    // A broadcast closing before its want was confirmed stays here until it sends nothing more.
+    return wants.length === 0 ? undefined : wants
   }
 
   /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */
@@ -209,6 +227,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
 
   /** Called once the channel sends nothing more. */
   unregister(channel: MuxChannel): void {
+    this.wantSettled(channel)
     this.lifecycle.unregister(channel)
   }
 
@@ -364,15 +383,17 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
+  sendWant(channel: MuxChannel, want: Want): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastSub(record.ix, binary), 'control')
+    this.gate.sendUnsequenced(record, encode.want(record.ix, want), 'control')
+    let wanting = globalObject.wanting.get(this.telefuncUrl)
+    if (wanting === undefined) globalObject.wanting.set(this.telefuncUrl, (wanting = new Set()))
+    wanting.add(channel)
   }
 
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
+  wantSettled(channel: MuxChannel): void {
+    const wanting = globalObject.wanting.get(this.telefuncUrl)
+    if (wanting?.delete(channel) && wanting.size === 0) globalObject.wanting.delete(this.telefuncUrl)
   }
 }

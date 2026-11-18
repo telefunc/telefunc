@@ -40,7 +40,11 @@ import {
   type BroadcastDelivery,
   type CloudflareExtensionDurableObject,
 } from '../wire-protocol/adapter/cloudflare/extensions.js'
-import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
+import {
+  servesRequest,
+  withCloudflareSession,
+  type CloudflareSession,
+} from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind, getSessionToken, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
@@ -149,7 +153,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
+    // App code runs in every entry but the constructor and `telefuncBroadcastPublish`: each runs it as this object's.
     async fetch(request: Request) {
+      servesRequest(this.session, request)
       return this.#runInSession(async () => {
         const target = readForwardedTarget(request)
         if (target) this.session.broadcast.locate(target.locationBucket)

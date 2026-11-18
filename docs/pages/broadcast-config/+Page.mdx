@@ -21,10 +21,11 @@ config.broadcast = {
 ```ts ts-only
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
   sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
 }
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 ```
 
 > Without a `transport`, Broadcast uses the installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>) or, with none installed, stays in memory and reaches only subscribers on the same server. A configured `transport` takes precedence over both.
@@ -33,7 +34,26 @@ type BroadcastTransport = {
 
 > `onMessage` gets each `payload` as `send()` or `sendBinary()` got it, byte for byte: it carries whether the publish is `lossy`.
 
-> `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener.
+> `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
+
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`. Resolve `ready` once the listener can receive what any server publishes to the key, and reject it if the broker refuses the subscription. The <Link href="/channel#chat-example">`ready`</Link> of the server's subscribers then resolves with it, or rejects with an error whose `cause` is the broker's, and a `BroadcastChannel` closes: on the server with that error, and on its page with a `ChannelClosedError` that says its subscription didn't take effect.
+
+```ts
+// server/broadcastTransport.ts
+// Environment: server
+
+import type { BroadcastTransport } from 'telefunc'
+import { broker } from './broker'
+
+const listen: BroadcastTransport['listen'] = (key, onMessage) => {
+  // Your broker's subscribe() resolves once the broker confirmed the subscription
+  const subscribing = broker.subscribe(`text:${key}`, (message) => onMessage(message.payload, message.info))
+  return {
+    unsubscribe: () => void subscribing.then((subscription) => subscription.unsubscribe()).catch(() => {}),
+    ready: subscribing.then(() => {}),
+  }
+}
+```
 
 > When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
 
