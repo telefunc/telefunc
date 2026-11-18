@@ -256,7 +256,12 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
-/** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
+/** How many milliseconds of its path's measured rate a sender hands its socket ahead of acknowledgements: a page this
+ *  (the allowance in `ClientHeadroom`), a server this or less, where `WIRE_SEND_AHEAD_ROUND_TRIPS` least round trips
+ *  and two acknowledgement gaps take less (`ServerHeadroom.headroom()`). It caps only that part: either hands at least
+ *  `WIRE_SEND_AHEAD_MIN_BYTES`, so on a link that drains less than that in 300 ms, a frame waits in the socket longer. A
+ *  lossy send's confirmation is late past this, its slack and a round trip (`behindAfter()` in `WireSender` for a
+ *  WebSocket page, and in `WsTransport`). */
 export const WIRE_QUEUE_DELAY_MS = 300
 /** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
 export const LOSSY_CONFIRM_SLACK_MS = 300
