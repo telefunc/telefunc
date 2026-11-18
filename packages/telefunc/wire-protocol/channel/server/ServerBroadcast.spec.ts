@@ -1000,15 +1000,31 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
     expect({ ...state, reported }).toEqual({ listens: 1, stops: 1, reported: ['NOPERM'] })
   })
 
-  it('is reported where the broker refuses with no reason', async () => {
-    reported.length = 0
-    const { refuse } = refusingBroker()
-    const subscriber = Broadcast.subscribe(KEY, () => {})
-    refuse()
-    await expect(subscriber.ready).rejects.toThrow()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(reported).toHaveLength(1)
-  })
+  for (const binary of [false, true]) {
+    const subscribe = () => (binary ? Broadcast.subscribeBinary(KEY, () => {}) : Broadcast.subscribe(KEY, () => {}))
+    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where the broker refuses with no reason in its \`ready\``, async () => {
+      reported.length = 0
+      const { refuse } = refusingBroker()
+      const subscriber = subscribe()
+      refuse()
+      await expect(subscriber.ready).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(reported).toHaveLength(1)
+    })
+
+    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where \`listen()\` throws with no reason`, async () => {
+      reported.length = 0
+      const throwing = () => {
+        throw undefined
+      }
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen: throwing, listenBinary: throwing })
+      const subscriber = subscribe()
+      await expect(subscriber.ready).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(reported).toHaveLength(1)
+    })
+  }
 
   it('is not reported once every subscription left before the refusal', async () => {
     reported.length = 0

@@ -56,10 +56,15 @@ class TransportBroadcastDriver implements BroadcastDriver {
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    const listening =
-      route.kind === 'text'
-        ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
-        : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+    let listening: BroadcastUnsubscribe
+    try {
+      listening =
+        route.kind === 'text'
+          ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+          : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
+    } catch (err) {
+      throw refusal(err)
+    }
     return new ListenAttempt(listening)
   }
 }
@@ -86,8 +91,7 @@ class ListenAttempt extends DriverAttempt {
     } catch (err) {
       // Unsubscribed first: that stopped it.
       if (this.state() === 'closed') return
-      // A close without a reason is a backend's on purpose, which isn't reported: a refusal always is.
-      this.transition('closed', err ?? new Error('config.broadcast.transport refused the listener with no error'))
+      this.transition('closed', refusal(err))
       return this.stopRefused()
     }
     this.transition('ready')
@@ -106,6 +110,12 @@ class ListenAttempt extends DriverAttempt {
     this.transition('closed')
     this.stop()
   }
+}
+
+/** What the broker refused a listener with: a close without a reason is a backend's on purpose, which isn't reported,
+ *  while a refusal always is. */
+function refusal(err: unknown): unknown {
+  return err ?? new Error('config.broadcast.transport refused the listener with no error')
 }
 
 function checkOrdering<Ordering extends { seq: number; timestamp: number }>(ordering: Ordering): Ordering {
