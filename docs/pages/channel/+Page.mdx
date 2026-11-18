@@ -398,6 +398,10 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > A subscriber sees only its kind of message: to check `seq` on a key that mixes text and binary, count `subscribe()` and `subscribeBinary()` together.
 
+> `Broadcast.subscribe()` returns a function that unsubscribes, with a `ready` promise that resolves once the subscription is in effect, or once you unsubscribe. While the backend can't be reached, `ready` waits, and a subscription in effect is renewed once the backend is back.
+
+> Where the backend fails a subscription for good, as Redis does when it refuses it, the subscriber is removed and the server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log: `ready` rejects with an error whose `cause` is the backend's, if it hadn't resolved yet. Your callback receives nothing more until you subscribe again.
+
 ### Delivery
 
 When `publish()` rejects depends on where Broadcast runs:
