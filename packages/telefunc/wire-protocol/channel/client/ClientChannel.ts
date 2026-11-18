@@ -448,6 +448,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected onPeerCloseRequest(timeoutMs: number): void {
     this.lifecycle.peerCloseReceived(normalizeCloseTimeout(timeoutMs), () => {
       this.stopped = true
+      // Nothing goes after the acknowledgement, as on the server: the newest lossy send waiting for credit is dropped.
+      this.heldLossy = null
       this.connection.sendCloseAck(this)
     })
   }

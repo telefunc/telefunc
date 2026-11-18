@@ -258,3 +258,16 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
     expect(() => room.publish(new Uint8Array(1))).toThrow('Bytes go through `publishBinary()`')
   })
 })
+
+test("a lossy send out of credit when the server's close comes doesn't go after the page acknowledged that close", () => {
+  const channel = newChannel()
+  // A close callback still working keeps the channel on the wire after it acknowledged the close.
+  channel.onClose(() => new Promise<void>(() => {}))
+  useUpCredit(channel)
+  send(channel, 'L1')
+  const index = (channel as any).connection.channels.of(channel).ix
+  channel._dispatchFrame({ tag: TAG.CLOSE, index, seq: 1, timeoutMs: 5_000 } as any)
+  grant(channel, { count: 2 * CREDIT_MSG_WINDOW_INITIAL })
+  const sent = held(channel)
+  expect(sent.slice(sent.indexOf(`tag ${TAG.CLOSE_ACK}`))).toEqual([`tag ${TAG.CLOSE_ACK}`])
+})
