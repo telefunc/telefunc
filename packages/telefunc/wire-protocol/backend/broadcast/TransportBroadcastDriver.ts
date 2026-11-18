@@ -92,23 +92,24 @@ class ListenAttempt extends DriverAttempt {
       // Unsubscribed first: that stopped it.
       if (this.state() === 'closed') return
       this.transition('closed', refusal(err))
-      return this.stopRefused()
+      return stopListener(this.stop)
     }
     this.transition('ready')
   }
 
-  /** What its stop throws is logged, as on an unsubscribe: the refusal already ended the attempt. */
-  private stopRefused(): void {
-    try {
-      this.stop()
-    } catch (error) {
-      console.error(error)
-    }
-  }
-
-  async unsubscribe(): Promise<void> {
+  unsubscribe(): Promise<void> {
     this.transition('closed')
-    this.stop()
+    return stopListener(this.stop)
+  }
+}
+
+/** Calls a transport's `unsubscribe()`, which may be async: what it throws, or what the promise it returns rejects
+ *  with, is logged, as the attempt is over either way. */
+async function stopListener(stop: () => void): Promise<void> {
+  try {
+    await stop()
+  } catch (error) {
+    console.error(error)
   }
 }
 

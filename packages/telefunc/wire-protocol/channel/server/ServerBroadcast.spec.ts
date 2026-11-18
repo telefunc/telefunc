@@ -843,6 +843,42 @@ describe("a transport's listener whose broker refuses it", () => {
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
     return state
   }
+  // A transport may stop its listener asynchronously, as one waiting for its broker's acknowledgment does.
+  for (const binary of [false, true]) {
+    for (const path of ['refused', 'removed'] as const) {
+      it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): what an async \`unsubscribe()\` rejects with once its listener was ${path} is logged, not left unhandled`, async () => {
+        const teardown = new Error('broker refused async teardown')
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const unhandled: unknown[] = []
+        const onUnhandled = (reason: unknown) => unhandled.push(reason)
+        process.on('unhandledRejection', onUnhandled)
+        try {
+          const listen = () => ({
+            ready: path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
+            unsubscribe: async () => {
+              throw teardown
+            },
+          })
+          const sent = () => ({ seq: 1, timestamp: 1 })
+          configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+          const subscriber = binary
+            ? Broadcast.subscribeBinary('room:async-stop', () => {})
+            : Broadcast.subscribe('room:async-stop', () => {})
+          await subscriber.ready.catch(() => {})
+          if (path === 'removed') subscriber()
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          expect({ unhandled, logged: logged.mock.calls.some(([error]) => error === teardown) }).toEqual({
+            unhandled: [],
+            logged: true,
+          })
+        } finally {
+          process.off('unhandledRejection', onUnhandled)
+          logged.mockRestore()
+        }
+      })
+    }
+  }
+
   for (const refusesInListen of [false, true]) {
     it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
       const broker = reservingBroker(refusesInListen)
