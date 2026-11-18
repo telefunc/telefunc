@@ -1,0 +1,30 @@
+import { describe, expect, it } from 'vitest'
+import { decodeOrderingFrame } from './orderingFrame.js'
+
+/** A frame as commands.ts's publish script writes it: `[seq_hi][seq_lo][ts_hi][ts_lo][payload]`, u32 big-endian. */
+function frameOf(seq: number, timestamp: number, payload: Uint8Array): Uint8Array {
+  const frame = new Uint8Array(16 + payload.byteLength)
+  const view = new DataView(frame.buffer)
+  const word = 0x1_0000_0000
+  view.setUint32(0, Math.floor(seq / word))
+  view.setUint32(4, seq % word)
+  view.setUint32(8, Math.floor(timestamp / word))
+  view.setUint32(12, timestamp % word)
+  frame.set(payload, 16)
+  return frame
+}
+
+describe('Redis live delivery', () => {
+  it('decodes the binary header and UTF-8 payload for text subscribers with the same seq/timestamp the publisher saw', () => {
+    const published = [
+      { text: 'msg-1', seq: 1, timestamp: 1_700_000_002_000 },
+      // A seq past one 32-bit word.
+      { text: 'héllo ✓', seq: 0x1_0000_0002, timestamp: 1_700_000_002_001 },
+    ]
+    const received = published.map(({ text, seq, timestamp }) => {
+      const { payload, info } = decodeOrderingFrame(frameOf(seq, timestamp, new TextEncoder().encode(text)))
+      return { text: new TextDecoder().decode(payload), ...info }
+    })
+    expect(received).toEqual(published)
+  })
+})
