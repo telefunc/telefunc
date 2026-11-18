@@ -95,6 +95,11 @@ class MemberRoute {
     this.attempt?.presence('lost')
   }
 
+  /** Runs `retry` once the refresh interval passed. */
+  retryLater(retry: () => void): void {
+    this.refreshTimer = setTimeout(retry, PRESENCE_REFRESH_INTERVAL_MS)
+  }
+
   startRefresh(refresh: () => Promise<boolean>): void {
     this.refreshTimer = setInterval(() => void this.refreshPresence(refresh), PRESENCE_REFRESH_INTERVAL_MS)
   }
@@ -309,6 +314,7 @@ class CloudflareBroadcastMember {
     try {
       await this.recordPresence(memberRoute.route)
     } catch (error) {
+      if (isRetryable(error)) return this.retryFirstPresence(routeKey, memberRoute)
       this.routes.delete(routeKey)
       memberRoute.attempt?.presence('closed', error)
       return
@@ -316,6 +322,14 @@ class CloudflareBroadcastMember {
     memberRoute.presenceRecorded()
     if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
     memberRoute.startRefresh(() => this.recordPresence(memberRoute.route))
+  }
+
+  /** Its attempt stays establishing meanwhile; a route nobody wants by then is dropped. */
+  private retryFirstPresence(routeKey: string, memberRoute: MemberRoute): void {
+    memberRoute.retryLater(() => {
+      if (memberRoute.attempt === null) return void this.routes.delete(routeKey)
+      void this.recordFirstPresence(routeKey, memberRoute).catch(() => {})
+    })
   }
 
   private async release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
@@ -490,4 +504,11 @@ function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<u
     console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
   }
   return failed.length
+}
+
+/** A failure Cloudflare marks as transient: `.retryable`, unless `.overloaded`, which it says not to retry. Writing a
+ *  presence again is idempotent. */
+function isRetryable(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  return 'retryable' in error && error.retryable === true && !('overloaded' in error && error.overloaded === true)
 }

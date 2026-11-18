@@ -351,22 +351,23 @@ describe("a subscriber's `ready` on Cloudflare", () => {
   const REFUSAL = 'presence refused: 429 Too Many Requests'
 
   /** A Worker whose sessions subscribe through its CloudflareBackend. The key's authority stores what reaches it unless
-   *  `refuse` is set; `held`, where set when a presence call is made, holds that call's answer until it settles;
-   *  `throwAtOnce` makes the call throw before it returns. */
+   *  `refuse` or `fail` is set, and a call then rejects with REFUSAL or with `fail`; `held`, where set when a presence
+   *  call is made, holds that call's answer until it settles; `throwAtOnce` makes the call throw before it returns. */
   function worker() {
     const authority = createAuthorityState()
-    const state: { refuse: boolean; held?: Promise<void>; throwAtOnce?: Error } = { refuse: false }
+    const state: { refuse: boolean; fail?: Error; held?: Promise<void>; throwAtOnce?: Error } = { refuse: false }
     const presences: BroadcastPresenceRequest[] = []
     const binding = createBasicBinding({
       onPresence(_id, request) {
         if (state.throwAtOnce) throw state.throwAtOnce
-        const { refuse, held } = state
+        const { refuse, fail, held } = state
         presences.push(request)
         // The authority applies the calls one stub carries in the order they come, whenever its answer reaches the member.
-        const lapsed = refuse ? false : authority.setPresence(request)
+        const lapsed = refuse || fail ? false : authority.setPresence(request)
         return (async () => {
           await held
           if (refuse) throw new Error(REFUSAL)
+          if (fail) throw fail
           return lapsed
         })()
       },
@@ -522,6 +523,74 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(third.ready)).toBe('resolved')
         third()
+      })
+
+      // Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. Neither appeared on
+      // any error local workerd raised, so these errors are made here.
+      const transient = (overloaded: boolean) =>
+        Object.assign(new Error('Durable Object is overloaded or reset'), { retryable: true, overloaded })
+
+      it("a first presence write that fails as retryable keeps the subscriber's `ready` pending, and is written again at the next refresh", async () => {
+        vi.useFakeTimers()
+        const { state, presences, present, inObject } = worker()
+        state.fail = transient(false)
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        let ready = 'pending'
+        void outcome(subscriber.ready).then((settled) => (ready = settled))
+        await vi.advanceTimersByTimeAsync(0)
+        expect({ ready, written: presences.length }).toEqual({ ready: 'pending', written: 1 })
+        state.fail = undefined
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect({ ready, present: present('room:test').map(({ member }) => member) }).toEqual({
+          ready: 'resolved',
+          present: ['telefunc-shard-weur-0'],
+        })
+        subscriber()
+      })
+
+      it("a first presence write that fails as overloaded rejects the subscriber's `ready`, and is not written again", async () => {
+        vi.useFakeTimers()
+        const { state, presences, inObject } = worker()
+        state.fail = transient(true)
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        const ready = outcome(subscriber.ready)
+        await vi.advanceTimersByTimeAsync(30_000)
+        expect({ ready: await ready, written: presences.length }).toEqual({
+          ready: 'Durable Object is overloaded or reset',
+          written: 1,
+        })
+        subscriber()
+      })
+
+      it('a subscriber removed while its retryable first presence write waits for the next refresh leaves no write', async () => {
+        vi.useFakeTimers()
+        const { state, presences, inObject } = worker()
+        state.fail = transient(false)
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        subscriber()
+        state.fail = undefined
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(presences).toHaveLength(1)
+      })
+
+      // A refresh that fails loses the subscription for a while, whatever the failure: the next one that succeeds restores it.
+      it('a subscriber whose presence refresh fails hears what another Durable Object publishes once a later refresh succeeds', async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { state, inObject, sessions } = worker()
+        const heard: string[] = []
+        const subscriber = inObject(() => Broadcast.subscribe<string>('room:test', (text) => heard.push(text)))
+        await vi.advanceTimersByTimeAsync(0)
+        await subscriber.ready
+        state.refuse = true
+        await vi.advanceTimersByTimeAsync(30_000)
+        state.refuse = false
+        await vi.advanceTimersByTimeAsync(30_000)
+        await inObject(() => Broadcast.publish('room:test', 'after'), sessions.second)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(heard).toEqual(['after'])
+        subscriber()
       })
 
       it('a presence write that throws at once fails as a refused one: `ready` rejects with its error, and a publish goes on', async () => {
