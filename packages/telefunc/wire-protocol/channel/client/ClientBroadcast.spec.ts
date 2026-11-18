@@ -67,7 +67,7 @@ describe('a listener added once its channel ended on the page', () => {
     await expect(page.listenBinary(() => {}).ready).rejects.toBe(closedWith)
   })
 
-  it("an `onOpen()` callback added to a channel that ended unopened registers nothing on its signal and never runs", async () => {
+  it('an `onOpen()` callback added to a channel that ended unopened registers nothing on its signal and never runs', async () => {
     const page = new ClientChannel(channelOptions())
     page.abort('gone')
     await page.closed.catch(() => {})
