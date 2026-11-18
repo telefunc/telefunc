@@ -273,7 +273,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.stopped) return
     this.stopped = true
     const abortError = createAbortError(abortValue, message)
-    this.connection.sendAbort(this, stringify(abortValue))
+    // The newest lossy send, where it hasn't gone, is dropped.
+    this.connection.sendAbort(this, stringify(abortValue), this.newestLossy?.seq)
     this._end(abortError)
   }
 

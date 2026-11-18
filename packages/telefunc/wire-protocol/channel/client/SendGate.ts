@@ -77,6 +77,20 @@ class SendGate {
     this.waitForHeadroom({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
   }
 
+  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits, behind or not, and says whether it did. */
+  replaceHeld(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+    for (const entry of this.waitingForHeadroom) {
+      if (entry.channelIx !== ix || entry.seq !== seq) continue
+      this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
+      entry.frame = frame
+      return true
+    }
+    const held = this.settleQueue().find((entry) => entry.channelIx === ix && entry.seq === seq)
+    if (held === undefined) return false
+    held.frame = frame
+    return true
+  }
+
   /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind, and returns the
    *  bytes it adds over that one: null once it went, as the wire then has it, or while the link keeps up. A page with no
    *  wire, and a channel no wire has opened yet, have no link to keep up with. */

@@ -271,3 +271,10 @@ test("a lossy send out of credit when the server's close comes doesn't go after 
   const sent = held(channel)
   expect(sent.slice(sent.indexOf(`tag ${TAG.CLOSE_ACK}`))).toEqual([`tag ${TAG.CLOSE_ACK}`])
 })
+
+test("a page's abort drops its lossy send that waits after its last plain send, and keeps the plain send", () => {
+  const channel = newChannel()
+  send(channel, 'R1 L1')
+  channel.abort()
+  expect(held(channel)).toEqual(['R1', `tag ${TAG.ABORT}`])
+})

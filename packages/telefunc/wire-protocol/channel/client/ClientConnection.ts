@@ -66,7 +66,9 @@ interface MuxConnection {
   /** Throws where `data`, encoded by `encodeFrame`, is larger than the server accepts, as its send would. */
   assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
-  sendAbort(channel: MuxChannel, abortValue: string): void
+  /** `inPlaceOf`: a lossy send's seq, which the ABORT takes the place of where that still waits and is the channel's
+   *  last, so it never goes. */
+  sendAbort(channel: MuxChannel, abortValue: string, inPlaceOf?: number): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
   sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
@@ -277,9 +279,13 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   /** Sequenced like data, as CLOSE and CLOSE_ACK are, so a closing frame lost with a dead wire is replayed. */
-  sendAbort(channel: MuxChannel, abortValue: string): void {
+  sendAbort(channel: MuxChannel, abortValue: string, inPlaceOf?: number): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
+    if (inPlaceOf === record.replay.seq) {
+      const frame = encode.abort(record.ix, abortValue, inPlaceOf)
+      if (this.gate.replaceHeld(record.ix, inPlaceOf, frame)) return
+    }
     const seq = record.replay.nextSeq()
     this.gate.send(record, seq, encode.abort(record.ix, abortValue, seq), 'control')
   }
