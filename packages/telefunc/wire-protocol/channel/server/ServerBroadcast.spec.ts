@@ -909,6 +909,46 @@ describe("a transport's listener whose broker refuses it", () => {
     }
     return state
   }
+  // A broker client's subscription object, whose `unsubscribe()` uses its own state.
+  class BrokerSubscription {
+    stops = 0
+    readonly ready: Promise<void>
+    constructor(ready: Promise<void>) {
+      this.ready = ready
+    }
+    unsubscribe(): void {
+      this.stops++
+    }
+  }
+  for (const binary of [false, true]) {
+    for (const path of ['removed', 'refused'] as const) {
+      it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): a listener ${path} whose transport returned an object is stopped through that object's \`unsubscribe()\`, once`, async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const subscriptions: BrokerSubscription[] = []
+          const listen = () => {
+            const subscription = new BrokerSubscription(
+              path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
+            )
+            subscriptions.push(subscription)
+            return subscription
+          }
+          const sent = () => ({ seq: 1, timestamp: 1 })
+          configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+          const subscriber = binary
+            ? Broadcast.subscribeBinary('room:object-stop', () => {})
+            : Broadcast.subscribe('room:object-stop', () => {})
+          await subscriber.ready.catch(() => {})
+          subscriber()
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const typeErrors = logged.mock.calls.filter(([error]) => error instanceof TypeError)
+          expect({ stops: subscriptions.map(({ stops }) => stops), typeErrors }).toEqual({ stops: [1], typeErrors: [] })
+        } finally {
+          logged.mockRestore()
+        }
+      })
+    }
+  }
   // A transport may stop its listener asynchronously, as one waiting for its broker's acknowledgment does.
   for (const binary of [false, true]) {
     for (const path of ['refused', 'removed'] as const) {

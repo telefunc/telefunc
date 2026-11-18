@@ -73,23 +73,22 @@ class TransportBroadcastDriver implements BroadcastDriver {
 /** Ready once the transport's listener is: at once where `listen()` returned the function that stops it, else once its
  *  `ready` resolves; closed with the broker's refusal where that rejects, and the listener stopped. */
 class ListenAttempt extends DriverAttempt {
-  private readonly stop: () => void
+  private readonly listening: BroadcastUnsubscribe
   /** What the reactions on the broker's `ready` settle, until it is unsubscribed: a broker may keep `ready` pending for
    *  good, and the reactions then hold none of the attempt. */
   private readonly confirming: Confirming = { attempt: null }
 
   constructor(listening: BroadcastUnsubscribe) {
     super()
+    this.listening = listening
     if (typeof listening === 'function') {
-      this.stop = listening
       this.transition('ready')
       return
     }
-    this.stop = listening.unsubscribe
     const confirming = this.confirming
     confirming.attempt = this
     void listening.ready.then(
-      () => confirming.attempt?.listening(),
+      () => confirming.attempt?.confirmed(),
       (err: unknown) => confirming.attempt?.refused(err),
     )
   }
@@ -97,11 +96,11 @@ class ListenAttempt extends DriverAttempt {
   unsubscribe(): Promise<void> {
     this.confirming.attempt = null
     this.transition('closed')
-    stopLogged(this.stop)
+    this.stop()
     return Promise.resolve()
   }
 
-  private listening(): void {
+  private confirmed(): void {
     this.confirming.attempt = null
     this.transition('ready')
   }
@@ -109,7 +108,13 @@ class ListenAttempt extends DriverAttempt {
   private refused(err: unknown): void {
     this.confirming.attempt = null
     this.transition('closed', refusal(err))
-    stopLogged(this.stop)
+    this.stop()
+  }
+
+  /** As the method it is, where `listen()` returned an object. */
+  private stop(): void {
+    const listening = this.listening
+    stopLogged(typeof listening === 'function' ? listening : () => listening.unsubscribe())
   }
 }
 
