@@ -159,10 +159,7 @@ class Readiness {
   /** One that settles as `promise` does, followed now: a backend's `ready`, observed once for every subscriber. */
   static following(promise: Promise<void>): Readiness {
     const readiness = new Readiness()
-    promise.then(
-      () => readiness.settle(true),
-      (err: unknown) => readiness.settle(err instanceof Error ? err : new Error(String(err))),
-    )
+    void readiness.follow(promise)
     return readiness
   }
 
@@ -185,14 +182,15 @@ class Readiness {
       // A failure nobody reads raises no unhandled rejection.
       this.waiting.promise.catch(() => {})
       if (this.outcome !== undefined) this.waiting.reject(this.outcome)
-      else if (this.until) void this.follow(this.until)
+      else if (this.until) void this.follow(this.until.promise)
     }
     return this.waiting.promise
   }
 
-  private async follow(until: Readiness): Promise<void> {
+  /** Settles as `promise` does: where a backend's `ready` is observed once, or a listener's once it is read. */
+  private async follow(promise: Promise<void>): Promise<void> {
     try {
-      await until.promise
+      await promise
     } catch (err) {
       return this.settle(err instanceof Error ? err : new Error(String(err)))
     }
