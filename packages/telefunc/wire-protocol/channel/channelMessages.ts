@@ -90,7 +90,14 @@ async function* iterateMessages<M extends Message<unknown>>(
     held -= size
     memory?.letGo(size)
   }
+  // The message the loop is at: its listener's promise settles once the loop takes the next step or ends.
+  let current: { consumed: () => void } | undefined
+  const consumeCurrent = () => {
+    current?.consumed()
+    current = undefined
+  }
   const release = () => {
+    consumeCurrent()
     for (let item = queue.shift(); item; item = queue.shift()) {
       letGo(item.size)
       item.consumed()
@@ -147,10 +154,11 @@ async function* iterateMessages<M extends Message<unknown>>(
         continue
       }
       letGo(next.size)
+      current = next
       try {
         yield next.message
       } finally {
-        next.consumed()
+        consumeCurrent()
       }
     }
   } finally {
