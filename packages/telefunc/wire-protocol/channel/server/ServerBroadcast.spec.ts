@@ -909,6 +909,80 @@ describe("a transport's listener whose broker refuses it", () => {
     }
     return state
   }
+  // A transport may deliver what its broker already holds while `listen()` runs, and the listener may replace the
+  // transport on that message.
+  for (const binary of [false, true]) {
+    it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): a subscriber whose listener replaces the transport on a message delivered during \`listen()\` is subscribed on the new one`, async () => {
+      const KEY = 'room:replaced-in-listen'
+      const encode = (text: string) => new TextEncoder().encode(text)
+      const publish = (text: string) =>
+        binary ? Broadcast.publishBinary(KEY, encode(text)) : Broadcast.publish(KEY, text)
+      const info = { seq: 1, timestamp: 1 }
+      const held: { text?: string; binary?: Uint8Array } = {}
+      const holding: BroadcastTransport = {
+        send: (_key, payload) => {
+          held.text = payload
+          return info
+        },
+        sendBinary: (_key, payload) => {
+          held.binary = payload.slice()
+          return info
+        },
+        listen: (_key, onMessage) => {
+          if (held.text !== undefined) onMessage(held.text, info)
+          return () => {}
+        },
+        listenBinary: (_key, onMessage) => {
+          if (held.binary !== undefined) onMessage(held.binary, info)
+          return () => {}
+        },
+      }
+      configureBroadcastTransport(holding)
+      await publish('held')
+      const relayed: { text: ((payload: string) => void)[]; binary: ((payload: Uint8Array) => void)[] } = {
+        text: [],
+        binary: [],
+      }
+      const relaying: BroadcastTransport = {
+        send: (_key, payload) => {
+          for (const onMessage of relayed.text) onMessage(payload)
+          return { seq: 2, timestamp: 1 }
+        },
+        sendBinary: (_key, payload) => {
+          for (const onMessage of relayed.binary) onMessage(payload)
+          return { seq: 2, timestamp: 1 }
+        },
+        listen: (_key, onMessage) => {
+          relayed.text.push((payload) => onMessage(payload, { seq: 2, timestamp: 1 }))
+          return () => {}
+        },
+        listenBinary: (_key, onMessage) => {
+          relayed.binary.push((payload) => onMessage(payload, { seq: 2, timestamp: 1 }))
+          return () => {}
+        },
+      }
+      const heard: string[] = []
+      const hear = (text: string) => {
+        heard.push(text)
+        if (text === 'held') configureBroadcastTransport(relaying)
+      }
+      const subscriber = binary
+        ? Broadcast.subscribeBinary(KEY, (data) => hear(new TextDecoder().decode(data)))
+        : Broadcast.subscribe<string>(KEY, hear)
+      const ready = await Promise.race([
+        subscriber.ready.then(() => 'resolved'),
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 100)),
+      ])
+      await publish('after')
+      subscriber()
+      expect({ ready, listens: relayed[binary ? 'binary' : 'text'].length, heard }).toEqual({
+        ready: 'resolved',
+        listens: 1,
+        heard: ['held', 'after'],
+      })
+    })
+  }
+
   // A broker client's subscription object, whose `unsubscribe()` uses its own state.
   class BrokerSubscription {
     stops = 0

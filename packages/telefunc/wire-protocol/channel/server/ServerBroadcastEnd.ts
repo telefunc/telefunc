@@ -118,10 +118,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.endWithError(ERROR_REASON.NOT_IN_EFFECT, err)
   }
 
-  /** Its subscription in effect was ended for good by its backend: it ends with `err` on the server, and on its page with
-   *  a `ChannelClosedError` that says so. */
-  endEnded(err: Error): void {
-    this.endWithError(ERROR_REASON.ENDED, err)
+  /** Its backend ended its subscription for good: it ends with `err` on the server, and on its page with a
+   *  `ChannelClosedError` that says whether the subscription its page wants now had taken effect. */
+  endSubscriptionFailed(err: Error): void {
+    const tookEffect = this.pageWant.version > 0 && this.pageWantInEffect
+    this.endWithError(tookEffect ? ERROR_REASON.ENDED : ERROR_REASON.NOT_IN_EFFECT, err)
   }
 
   private forward(body: PublishBody): void {
