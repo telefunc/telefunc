@@ -2,8 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
-import { setFlagsFromString } from 'node:v8'
-import { runInNewContext } from 'node:vm'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -22,6 +20,7 @@ import type { BroadcastTransport, BroadcastUnsubscribe } from '../../backend/bro
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
 import { DriverAttempt, type BackendReceiver, type BroadcastRoute } from '../../backend/driver.js'
 import { onBug } from '../../../node/server/runTelefunc/onBug.js'
+import { collectGarbage } from '../../test/collectGarbage.js'
 import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
@@ -2141,14 +2140,3 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(received).toEqual([])
   })
 })
-
-/** Collects what nothing reaches, without the `--expose-gc` flag on the test run. */
-async function collectGarbage(): Promise<void> {
-  setFlagsFromString('--expose-gc')
-  const gc: unknown = runInNewContext('gc')
-  if (typeof gc !== 'function') throw new Error('V8 exposes no gc()')
-  for (let turn = 0; turn < 4; turn++) {
-    await new Promise((resolve) => setImmediate(resolve))
-    gc()
-  }
-}

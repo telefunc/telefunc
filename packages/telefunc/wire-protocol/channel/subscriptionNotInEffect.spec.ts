@@ -3,6 +3,7 @@
 // an SSE wire this test serves.
 
 import { afterEach, expect, test, vi } from 'vitest'
+import { createHook } from 'node:async_hooks'
 
 import { ClientBroadcast } from './client/ClientBroadcast.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -18,6 +19,7 @@ import { BodyReader } from '../wire/BodyReader.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
+import { collectGarbage } from '../test/collectGarbage.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -112,6 +114,34 @@ for (const kind of ['text', 'binary'] as const) {
       )
     })
   }
+}
+
+// A page's subscription its page withdrew before its transport confirmed it holds nothing on the server, while the page
+// stays connected and its transport never answers.
+for (const kind of ['text', 'binary'] as const) {
+  test(`${kind}: the subscriptions a page withdrew while its transport's first confirmation was pending hold nothing on the server`, async () => {
+    const page = await subscribedPage(kind)
+    relay('held').configure()
+    const wanted = await broadcastWantedBy(page, kind)
+    // What waits for each of the page's wants to take effect.
+    const waits: WeakRef<object>[] = []
+    const hook = createHook({
+      init(_id, type, _trigger, resource) {
+        if (type === 'PROMISE' && new Error().stack?.includes('whenInEffect')) waits.push(new WeakRef(resource))
+      },
+    }).enable()
+    let version = 1
+    for (let round = 0; round < 16; round++) {
+      void wanted.want(++version, true)
+      void wanted.want(++version, false)
+    }
+    hook.disable()
+    await collectGarbage()
+    expect({ waited: waits.length > 0, reachable: waits.filter((wait) => wait.deref() !== undefined).length }).toEqual({
+      waited: true,
+      reachable: 0,
+    })
+  })
 }
 
 /** A transport that delivers each publish to every listener on this server, and confirms each listener at once, or where
