@@ -377,10 +377,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     )
   }
 
-  /** Runs `operation` on `owner`'s presence once every write and delete asked of it before has settled, so KV ends with
-   *  the last one asked: the delete of an owner that left follows a write still under way, and the write of one that
-   *  came back follows a delete still under way, which its subscribers' `ready` so waits for. An operation that throws
-   *  at once fails as one KV refuses does. */
+  /** Runs `operation` on `owner`'s presence once every write and delete asked of it before has settled, so they go to
+   *  KV in the order asked: the delete of an owner that left after a write still under way, and the write of one that
+   *  came back after a delete still under way, which its subscribers' `ready` so waits for. An operation that throws at
+   *  once fails as one KV refuses does. */
   private inPresenceOrder(
     key: string,
     owner: string,
@@ -411,7 +411,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private async deletePresence(key: string, owner: string): Promise<void> {
     await warnRefusedWrite(
       this.inPresenceOrder(key, owner, (kv, presenceKey) => kv.delete(presenceKey)),
-      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key may still reach this Durable Object, which no longer needs them, until the record expires, ${PRESENCE_TTL_SECONDS} s after its last write`,
+      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key may still reach this Durable Object until the record expires, ${PRESENCE_TTL_SECONDS} s after its last write`,
     )
   }
 
