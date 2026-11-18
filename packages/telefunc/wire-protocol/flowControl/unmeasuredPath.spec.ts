@@ -80,7 +80,7 @@ describe('ServerHeadroom.headroom', () => {
     ['16 KiB', 16 * 1024],
     ['1 KiB', 1024],
   ])(
-    "a download in %s frames on a link not yet measured leaves another channel's answer little to wait behind",
+    'a download in %s frames on a link not yet measured holds on the link little more than the least send-ahead and what it drains in the queue delay',
     async (_, frameBytes) => {
       const wire = wireBehindSlowLink()
       try {
@@ -90,9 +90,8 @@ describe('ServerHeadroom.headroom', () => {
           wire.send((seq) => encode.binary(1, download, seq))
         await sleep(1_000)
         const ahead = wire.linkBytes()
-        wire.send((seq) => encode.text(2, '"pong"', seq))
-        // What the link holds when the answer goes is what it waits behind: the least send-ahead and what the link
-        // drains in the queue delay, not the download.
+        // What the link holds is what another channel's answer sent now waits behind: the least send-ahead and what
+        // the link drains in the queue delay, not the download.
         expect(ahead).toBeLessThan(2 * WIRE_SEND_AHEAD_MIN_BYTES + LINK_BYTES_PER_MS * WIRE_QUEUE_DELAY_MS)
       } finally {
         wire.stop()
