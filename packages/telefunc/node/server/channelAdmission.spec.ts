@@ -109,3 +109,28 @@ test("a publish that can't fit under the budget ends its own pages only: another
     }
   }
 })
+
+test("a send larger than a channel may ever hold is refused, and another page's broadcast near the budget keeps what it holds", async () => {
+  const broadcast = subscribedPage(crypto.randomUUID(), false)
+  const channel = new ServerChannel<never, string>()
+  channel._registerChannel()
+  const filler: MemoryHolder = { heldBytes: 0 }
+  try {
+    await broadcast.publish('a'.repeat(400_000))
+    await broadcast.publish('b'.repeat(400_000))
+    const held = broadcast.heldBytes
+    // Just below the shedding target: a send of any size would take the ledger past it.
+    hold(filler, (getChannelConfig().maxMemory * 7) / 8 - ledgerTotal() - 1_000)
+    const sent = channel.send('c'.repeat(getChannelConfig().maxMemory + 1))
+    await expect(sent).rejects.toBeInstanceOf(ChannelOverflowError)
+    expect(broadcast.isClosed).toBe(false)
+    expect(broadcast.heldBytes).toBe(held)
+  } finally {
+    letGo(filler, filler.heldBytes)
+    releaseHolder(filler)
+    channel._end()
+    channel._release()
+    broadcast._end()
+    broadcast._release()
+  }
+})

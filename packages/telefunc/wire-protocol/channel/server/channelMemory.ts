@@ -59,9 +59,12 @@ const memory = getGlobalObject('channelMemory.ts', {
  *  equal share is refused, so one still under it has room. A subscriber cut to make room ends after this returns. */
 function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
+  const holderMax = Math.min(maxPendingBytesOf(), maxMemory)
+  // Nothing let go makes room for more than one holder may ever hold.
+  if (bytes > holderMax) return false
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) reclaim(bytes, target)
-  if (holder.heldBytes + bytes > Math.min(maxPendingBytesOf(), maxMemory)) return false
+  if (holder.heldBytes + bytes > holderMax) return false
   if (memory.total + bytes <= target) return true
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
