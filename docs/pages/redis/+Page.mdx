@@ -57,7 +57,7 @@ While Redis is unreachable, a new subscription's `ready` waits until Redis is ba
 
 A subscription fails when Redis refuses it with `NOPERM` (from its ACL): when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows the key again, so subscribe again once you have restored the key's access.
 
-> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes: on the server with an error whose `cause` is Redis's error, and on the client with a `ChannelClosedError` in `onClose()`, and in `ready` if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
+> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error's `cause` is Redis's error. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `ready` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
 
 > A `Broadcast.subscribe()` is removed, and its callback receives nothing more. If its `ready` hadn't resolved, it rejects with an error whose `cause` is Redis's error. Call `Broadcast.subscribe()` again.
 
