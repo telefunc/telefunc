@@ -39,7 +39,7 @@ export {
   REDIS_TOOK_REFUSED_KEY,
 }
 
-import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
+import { page, getServerUrl, expectLog, autoRetry } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
 import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
@@ -250,19 +250,19 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
-/** The server logged `error`, or an error whose text `error` matches: on its stderr, or under Docker on compose's
- *  stdout, each line prefixed with the container's name. */
-function expectServerError(error: string | RegExp, inDocker: boolean) {
-  const fromServer = /^playground-[a-z]-\d+ +\| /
-  expectLog(error, {
-    filter: (log) =>
-      inDocker
-        ? log.logSource === 'stdout' &&
-          (typeof error === 'string'
-            ? log.logText.split('\n').some((line) => line.includes(error) && fromServer.test(line))
-            : fromServer.test(log.logText))
-        : log.logSource === 'stderr',
-  })
+/** The server logged a line with `error`, by now or soon: on its stderr, or under Docker on compose's stdout, each line
+ *  prefixed with the container's name. Its output may reach the test after the page saw the outcome, and one error's lines
+ *  in several chunks. */
+async function expectServerError(error: string, inDocker: boolean): Promise<void> {
+  await autoRetry(() =>
+    expectLog(error, {
+      filter: (log) =>
+        inDocker
+          ? log.logSource === 'stdout' &&
+            log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+          : log.logSource === 'stderr',
+    }),
+  )
 }
 
 /**
