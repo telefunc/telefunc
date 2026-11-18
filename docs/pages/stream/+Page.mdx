@@ -348,6 +348,8 @@ await onIngest(stream, 'data.txt')
 
 > Each chunk reaches your telefunction whole. The server holds a chunk while it arrives, and the chunks your telefunction has yet to read, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>. Past that, reading the stream throws `ChannelOverflowError` after the chunks before it: send smaller chunks.
 
+> If the client's stream errors, reading it in your telefunction throws after the chunks before the error, so a partial upload isn't taken for a whole one. The client's error itself doesn't reach the server.
+
 #### Both directions
 
 Accept a `ReadableStream` *and* return one, transforming the bytes as they pass through.

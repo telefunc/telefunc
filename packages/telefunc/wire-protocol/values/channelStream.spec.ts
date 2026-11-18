@@ -8,7 +8,12 @@ import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
 import { sendChunks } from './sendChunks.js'
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_PART, STREAM_CHUNK_PART_BYTES } from '../constants.js'
+import {
+  CHANNEL_PUMP_TAG_DATA,
+  CHANNEL_PUMP_TAG_ERROR,
+  CHANNEL_PUMP_TAG_PART,
+  STREAM_CHUNK_PART_BYTES,
+} from '../constants.js'
 import { queueMemory } from '../channel/server/channelMemory.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { config } from '../../node/server/serverConfig.js'
@@ -198,5 +203,24 @@ describe('a chunk sent in parts', () => {
     )
     expect(failure).toBeInstanceOf(ChannelOverflowError)
     expect(ledgerTotal()).toBe(0)
+  })
+})
+
+describe("a client's upload stream that fails", () => {
+  test("on a server, reading it throws after the chunks before the failure, with an error that says the client's stream failed", async () => {
+    const channel = memoryChannel()
+    const source = ChannelStreamSource.create(channel, { memory: queueMemory() })
+    const first = source.readNextChunk()
+    await channel.sendBinary(new Uint8Array([CHANNEL_PUMP_TAG_DATA, 7]))
+    expect(await first).toEqual(new Uint8Array([7]))
+    // What the client's pump sends where its source fails: no detail of the client's error.
+    const failed = source.readNextChunk().then(
+      () => undefined,
+      (err: unknown) => err,
+    )
+    await channel.sendBinary(new Uint8Array([CHANNEL_PUMP_TAG_ERROR, ...new TextEncoder().encode('{}')]))
+    const failure = await failed
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure).toHaveProperty('message', "Stream ended: the client's ReadableStream failed before its end")
   })
 })
