@@ -4,7 +4,11 @@ import { WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
 import { encode } from '../../wire/frame.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { config } from '../../../node/server/serverConfig.js'
 import { handleSseChannelRequest } from './sse.js'
+
+// A ping deadline of 2 s.
+config.channel = { pingInterval: 1000 }
 
 function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
@@ -39,4 +43,49 @@ test('a batch POST whose wire closed before its frames ran is refused', async ()
   controller.close()
 
   expect((await answer).statusCode).toBe(400)
+})
+
+test('a page whose upload POST is read only after server code held the event loop past the ping deadline keeps its wire', async () => {
+  const connId = crypto.randomUUID()
+  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  expect(opened.statusCode).toBe(200)
+  // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
+  expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
+
+  // Server code holds the event loop 1 s past the deadline, as a synchronous loop of sends does: the deadline's timer
+  // runs 1 s late, which leaves the read of the upload below room on a loaded machine.
+  const until = performance.now() + 3_000
+  while (performance.now() < until);
+
+  // The page sent its upload POST meanwhile; the server reads it some turns after letting go of the event loop. Its
+  // 200 ms are armed in the first timers phase after the hold, which reads the clock again: a timer armed during the
+  // hold counts from the loop's time read before it, so it would already be due.
+  const ping = encode.ping([])
+  const upload = post(
+    new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        setTimeout(() =>
+          setTimeout(() => {
+            controller.enqueue(encodeSseRequestMetadata({ connId, streamRequest: true }))
+            controller.enqueue(encodeU32(ping.byteLength))
+            controller.enqueue(ping)
+            controller.close()
+          }, 200),
+        )
+      },
+    }),
+  )
+
+  expect((await upload).statusCode).toBe(200)
+})
+
+test('a page that stays silent past the ping deadline loses its wire', async () => {
+  const connId = crypto.randomUUID()
+  const openedAt = performance.now()
+  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  expect(opened.statusCode).toBe(200)
+
+  const events = (opened.body as ReadableStream<Uint8Array>).getReader()
+  while (!(await events.read()).done);
+  expect(performance.now() - openedAt).toBeGreaterThanOrEqual(2_000)
 })
