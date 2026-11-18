@@ -2,6 +2,7 @@ export { refuseChannels }
 
 import { Broadcast } from 'telefunc'
 import type { Redis } from 'ioredis'
+import { broadcastChannel } from '../../../../packages/redis/dist/keys.js'
 import { redis } from '../../redis'
 
 /** Leaves the keys that start with `!` out of this server's channel permissions, until `onRedisAllowsEveryKey()`, and
@@ -10,7 +11,8 @@ import { redis } from '../../redis'
  *  pattern doesn't match the channel names Telefunc subscribes to, which fails the cards that call this. */
 async function refuseChannels(): Promise<boolean> {
   if (!redis) throw new Error('The playground runs without Redis')
-  await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:?:{[^!]*')
+  // A key is its channel's one `{`, encoded, as in `tf:0:t:{room%3A1}`: those whose key starts with `!` are left out.
+  await redis.call('ACL', 'SETUSER', 'default', 'resetchannels', '&tf:*{[^!]*')
   const deadline = Date.now() + 5_000
   while (true) {
     if (await refuses(redis, `!refused:${crypto.randomUUID()}`)) return true
@@ -28,7 +30,9 @@ async function refuses(redis: Redis, key: string): Promise<boolean> {
       () => false,
       () => true,
     )
-    const reply = await redis.call('PUBSUB', 'NUMSUB', `tf:t:{${key}}`)
+    // A standalone Redis's channel names carry its database (RedisConnection's prefix).
+    const channel = broadcastChannel(`tf:${redis.options.db ?? 0}:`, { key, kind: 'text' })
+    const reply = await redis.call('PUBSUB', 'NUMSUB', channel)
     return refused || !Array.isArray(reply) || Number(reply[1]) === 0
   } finally {
     probe()
