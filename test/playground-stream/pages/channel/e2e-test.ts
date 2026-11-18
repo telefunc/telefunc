@@ -128,6 +128,14 @@ function testChannel(isDev: boolean, inDocker = false) {
     throw new Error(`Unsupported channel transport in e2e: ${channelTransport}`)
   }
 
+  /** Waits for the page to reconnect once `proxyCall`, a `docker compose` call, returned. The call blocks the event loop, so
+   *  the wait is armed as it returns, in the same tick: what the page did meanwhile still reaches the wait, and its 15 s
+   *  count the page's time, not `docker compose`'s. */
+  function reconnectAfter(proxyCall: () => void): Promise<void> {
+    proxyCall()
+    return waitForTransportReconnectSignal()
+  }
+
   testChannelApi()
 
   // ── Basic connection ─────────────────────────────────────────────────
@@ -464,13 +472,11 @@ function testChannel(isDev: boolean, inDocker = false) {
       const ticksBefore = stateBefore.tickCount
       const serverCountBefore = stateBefore.lastTickServerCount!
 
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) {
-        // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
-        // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
-        // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
-        restartProxy()
-      } else {
+      // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
+      // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
+      // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
+      const reconnectSignalPromise = inDocker ? reconnectAfter(restartProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) {
         // dev/preview: single-instance, no proxy to restart — setOffline still works
         // because batch-only SSE without streamRequest gets blocked by Chromium's offline
         // mode, and WS also gets severed.
@@ -530,9 +536,8 @@ function testChannel(isDev: boolean, inDocker = false) {
       await page.click('#channel-test-upstream-send')
 
       // Arm reconnect watcher, then come back online.
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
-      else await page.context().setOffline(false)
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
       await reconnectSignalPromise
 
       // Server must have received all 5 messages exactly once, in order, with no gaps
@@ -635,9 +640,8 @@ function testChannel(isDev: boolean, inDocker = false) {
 
       await page.click('#channel-test-client-pending-ack-close-reconnect')
 
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
-      else await page.context().setOffline(false)
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
       await reconnectSignalPromise
 
       await autoRetry(async () => {
@@ -1133,9 +1137,8 @@ function testChannel(isDev: boolean, inDocker = false) {
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
       await page.click('#channel-test-lossy-from-page-send')
-      const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
-      else await page.context().setOffline(false)
+      const reconnectSignalPromise = inDocker ? reconnectAfter(startProxy) : waitForTransportReconnectSignal()
+      if (!inDocker) await page.context().setOffline(false)
       await reconnectSignalPromise
 
       let read: string[] = []
