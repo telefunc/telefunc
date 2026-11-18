@@ -722,13 +722,19 @@ describe('cloudflare broadcast routing', () => {
       const transport = createTransport(1)
       const kv = createMockKV()
       const put = kv.put.bind(kv)
-      /** `held`: where set, KV acknowledges the writes asked of it meanwhile once it settles. */
+      const remove = kv.delete.bind(kv)
+      /** `held`: where set, KV acknowledges the writes and deletes asked of it meanwhile once it settles. */
       const state: { refuse: boolean; held?: Promise<void> } = { refuse: true }
       kv.put = async (...args: Parameters<KVNamespace['put']>) => {
         const { refuse, held } = state
         await held
         if (refuse) throw new Error('KV PUT failed: 429 Too Many Requests')
         return put(...args)
+      }
+      kv.delete = async (...args: Parameters<KVNamespace['delete']>) => {
+        const { held } = state
+        await held
+        return remove(...args)
       }
       transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
       transport.attachKV(kv)
@@ -795,9 +801,8 @@ describe('cloudflare broadcast routing', () => {
         left()
         state.refuse = true
         const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await expect(back.ready).rejects.toThrow('429')
         acknowledge()
-        await vi.advanceTimersByTimeAsync(0)
+        await expect(back.ready).rejects.toThrow('429')
         const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await expect(later.ready).rejects.toThrow('429')
         back()
@@ -869,11 +874,62 @@ describe('cloudflare broadcast routing', () => {
           state.held = undefined
           left()
           const back = comesBack ? inObject(() => Broadcast.subscribe('room:test', () => {})) : undefined
-          await back?.ready
           acknowledge()
           await vi.advanceTimersByTimeAsync(0)
+          await back?.ready
           expect(await presences()).toEqual(comesBack ? written : [])
           back?.()
+        } finally {
+          _resetBroadcastAdapterForTesting(previousTransport)
+          vi.useRealTimers()
+        }
+      })
+    }
+
+    // A Durable Object subscribes again while KV still holds the delete of its presence: that of its release, or the one
+    // after a refresh KV acknowledged once it had left.
+    for (const deleting of ['its release', 'a late refresh'] as const) {
+      it(`a Durable Object that subscribes again while the delete after ${deleting} is under way keeps its presence, and its \`ready\` waits for that delete`, async () => {
+        vi.useFakeTimers()
+        const previousTransport = getBroadcastAdapter()
+        try {
+          const { state, kv, inObject } = refusing()
+          state.refuse = false
+          const presences = async () => (await kv.list({ prefix: 'tfps:' })).keys.map(({ name }) => name)
+          const hold = () => {
+            let acknowledge = () => {}
+            state.held = new Promise((resolve) => {
+              acknowledge = resolve
+            })
+            return acknowledge
+          }
+          const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
+          await left.ready
+          const written = await presences()
+          let acknowledgeDelete: () => void
+          if (deleting === 'its release') {
+            acknowledgeDelete = hold()
+            left()
+            await vi.advanceTimersByTimeAsync(0)
+          } else {
+            const acknowledgeRefresh = hold()
+            await vi.advanceTimersByTimeAsync(30_000)
+            state.held = undefined
+            left()
+            acknowledgeDelete = hold()
+            acknowledgeRefresh()
+            await vi.advanceTimersByTimeAsync(0)
+          }
+          state.held = undefined
+          const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
+          let backReady = false
+          void back.ready?.then(() => (backReady = true))
+          await vi.advanceTimersByTimeAsync(0)
+          expect(backReady).toBe(false)
+          acknowledgeDelete()
+          await back.ready
+          expect(await presences()).toEqual(written)
+          back()
         } finally {
           _resetBroadcastAdapterForTesting(previousTransport)
           vi.useRealTimers()

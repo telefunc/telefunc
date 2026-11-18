@@ -288,6 +288,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private kv: KVNamespace | null = null
   private locationBucket: LocationBucket | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
+  /** Each presence's KV write or delete under way, by presence key: the next one waits for it. */
+  private readonly presenceOperations = new Map<string, Promise<void>>()
   /** Each subscriber with the Durable Object whose context may write to its page. */
   private readonly textSubs = new Map<string, Map<BroadcastOnMessage, string>>()
   private readonly binarySubs = new Map<string, Map<BroadcastBinaryOnMessage, string>>()
@@ -367,14 +369,35 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const wrote = await this.warnRefusedPresence(key, this.writePresence(key, owner))
     if (wrote && unwritten?.failure && memberState.unwritten.get(owner) === unwritten)
       memberState.unwritten.delete(owner)
-    // Its release may have deleted the presence before the put above wrote it. The key's state is the current one: a
-    // release of its last subscriber dropped the one the refresh began with, and one that came back has a new one.
-    if (!this.memberStates.get(key)?.owners.has(owner)) void this.deletePresence(key, owner)
   }
 
-  /** Async, so a write that throws at once fails as one KV refuses does. */
-  private async writePresence(key: string, owner: string): Promise<void> {
-    return this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS })
+  private writePresence(key: string, owner: string): Promise<void> {
+    return this.inPresenceOrder(key, owner, (kv, presenceKey) =>
+      kv.put(presenceKey, owner, { expirationTtl: PRESENCE_TTL_SECONDS }),
+    )
+  }
+
+  /** Runs `operation` on `owner`'s presence once every write and delete asked of it before has settled, so KV ends with
+   *  the last one asked: the delete of an owner that left follows a write still under way, and the write of one that
+   *  came back follows a delete still under way, which its subscribers' `ready` so waits for. An operation that throws
+   *  at once fails as one KV refuses does. */
+  private inPresenceOrder(
+    key: string,
+    owner: string,
+    operation: (kv: KVNamespace, presenceKey: string) => Promise<void>,
+  ): Promise<void> {
+    const presenceKey = this.getPresenceKey(key, owner)
+    const previous = this.presenceOperations.get(presenceKey) ?? Promise.resolve()
+    const done = previous.then(() => operation(this.requireKV(), presenceKey))
+    const settled = done.then(
+      () => {},
+      () => {},
+    )
+    this.presenceOperations.set(presenceKey, settled)
+    void settled.then(() => {
+      if (this.presenceOperations.get(presenceKey) === settled) this.presenceOperations.delete(presenceKey)
+    })
+    return done
   }
 
   private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
@@ -386,14 +409,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private async deletePresence(key: string, owner: string): Promise<void> {
     await warnRefusedWrite(
-      this.removePresence(key, owner),
-      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key keep reaching this Durable Object, which no longer needs them, for up to ${PRESENCE_TTL_SECONDS} s`,
+      this.inPresenceOrder(key, owner, (kv, presenceKey) => kv.delete(presenceKey)),
+      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key may still reach this Durable Object, which no longer needs them, until the record expires, ${PRESENCE_TTL_SECONDS} s after its last write`,
     )
-  }
-
-  /** Async, so a delete that throws at once is warned of as one KV refuses is. */
-  private async removePresence(key: string, owner: string): Promise<void> {
-    return this.requireKV().delete(this.getPresenceKey(key, owner))
   }
 
   private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {
@@ -657,8 +675,6 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     memberState.setupsInFlight--
     // A refused write stays its owner's outcome until the refresh below writes it.
     if (wrote && memberState.unwritten.get(owner) === unwritten) memberState.unwritten.delete(owner)
-    // Its release may have deleted the presence before the put above wrote it.
-    if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)
     if (memberState.setupsInFlight > 0) return
 
     memberState.refreshTimer ??= setInterval(() => {
