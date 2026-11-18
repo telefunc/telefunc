@@ -367,6 +367,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const wrote = await this.warnRefusedPresence(key, this.writePresence(key, owner))
     if (wrote && unwritten?.failure && memberState.unwritten.get(owner) === unwritten)
       memberState.unwritten.delete(owner)
+    // Its release may have deleted the presence before the put above wrote it. The key's state is the current one: a
+    // release of its last subscriber dropped the one the refresh began with, and one that came back has a new one.
+    if (!this.memberStates.get(key)?.owners.has(owner)) void this.deletePresence(key, owner)
   }
 
   /** Async, so a write that throws at once fails as one KV refuses does. */

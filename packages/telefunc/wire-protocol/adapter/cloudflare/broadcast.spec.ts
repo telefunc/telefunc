@@ -849,6 +849,38 @@ describe('cloudflare broadcast routing', () => {
       }
     })
 
+    // KV writes a refresh it acknowledges late after a delete asked of it meanwhile.
+    for (const comesBack of [false, true]) {
+      it(`a refresh KV acknowledges after the Durable Object's last subscriber left${comesBack ? ', and a new one came' : ''} ${comesBack ? 'keeps' : 'leaves no'} presence`, async () => {
+        vi.useFakeTimers()
+        const previousTransport = getBroadcastAdapter()
+        try {
+          const { state, kv, inObject } = refusing()
+          state.refuse = false
+          const presences = async () => (await kv.list({ prefix: 'tfps:' })).keys.map(({ name }) => name)
+          const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
+          await left.ready
+          const written = await presences()
+          let acknowledge = () => {}
+          state.held = new Promise((resolve) => {
+            acknowledge = resolve
+          })
+          await vi.advanceTimersByTimeAsync(30_000)
+          state.held = undefined
+          left()
+          const back = comesBack ? inObject(() => Broadcast.subscribe('room:test', () => {})) : undefined
+          await back?.ready
+          acknowledge()
+          await vi.advanceTimersByTimeAsync(0)
+          expect(await presences()).toEqual(comesBack ? written : [])
+          back?.()
+        } finally {
+          _resetBroadcastAdapterForTesting(previousTransport)
+          vi.useRealTimers()
+        }
+      })
+    }
+
     it("a broadcast that subscribes closes with KV's error", async () => {
       const previousTransport = getBroadcastAdapter()
       const { inObject } = refusing()
