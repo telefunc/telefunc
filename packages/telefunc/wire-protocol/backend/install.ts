@@ -26,7 +26,7 @@ type Installed = {
 }
 
 /** An extension's supervised plane; `disposeBackend()` stops it. */
-type BackendPlane = { dispose(): Promise<void> }
+type BackendPlane = { dispose(): void }
 
 type PlaneDriver = SubscriptionDriver<never>
 
@@ -79,7 +79,7 @@ function configureBroadcastTransport(transport: BroadcastTransport): void {
   state.broadcast = null
   // Live subscriptions move to the new plane before the retired ones stop.
   for (const follower of [...state.planeFollowers]) follower.planeReplaced()
-  void retired?.dispose()
+  retired?.dispose()
 }
 
 /** Has `follower.planeReplaced()` called, once the new plane is in effect, each time a transport replaces the plane. */
@@ -122,15 +122,15 @@ function backendPlane<Kit, Driver extends PlaneDriver, Plane extends BackendPlan
 }
 
 /** For tests: forgets the backend, the transport override and the plane's followers, and stops their subscriptions. */
-async function disposeBackend(): Promise<void> {
+function disposeBackend(): void {
   const installed = state.installed
   const broadcast = state.broadcast
   state.installed = null
   state.broadcast = null
   delete state.transport
   state.planeFollowers.clear()
-  const planes = [...(installed?.planes.values() ?? [])]
-  await Promise.all([broadcast?.dispose(), ...planes.map((plane) => plane.dispose())])
+  broadcast?.dispose()
+  for (const plane of installed?.planes.values() ?? []) plane.dispose()
 }
 
 function install(factory: () => BroadcastDriver, key: readonly unknown[], fallback: boolean): Installed {

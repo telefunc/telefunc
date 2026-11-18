@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -16,7 +18,7 @@ import {
   getBroadcastPlane,
   installBackend,
 } from '../../backend/install.js'
-import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
+import type { BroadcastTransport, BroadcastUnsubscribe } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
 import { DriverAttempt, type BackendReceiver, type BroadcastRoute } from '../../backend/driver.js'
 import { onBug } from '../../../node/server/runTelefunc/onBug.js'
@@ -843,6 +845,184 @@ describe("a transport's listener whose broker refuses it", () => {
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
     return state
   }
+  // A broker may keep the promise it gave pending for good, as one whose connection dropped does: what telefunc attached
+  // to it holds no stopped listener.
+  // Made here: an error made in the stop would keep the stop reachable from its stack, and the log keeps the error.
+  const teardownFailed = new Error('teardown failed')
+  // The broker keeps the stop it never answers.
+  const unanswered = new Promise<void>(() => {})
+  const STOPS = {
+    'never settles': () => unanswered,
+    rejects: () => Promise.reject(teardownFailed),
+    throws: () => {
+      throw teardownFailed
+    },
+  }
+  for (const binary of [false, true]) {
+    const surface = binary ? 'subscribeBinary' : 'subscribe'
+    for (const [stop, stopped] of Object.entries(STOPS)) {
+      it(`Broadcast.${surface}(): a transport's \`unsubscribe()\` that ${stop} is called once a round, its failure logged, and keeps no listener reachable`, async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const state = subscribeRounds(binary, (onMessage, counted) => () => {
+            // As a broker client's stop refers to the listener it stops.
+            void onMessage
+            counted.stops++
+            return stopped()
+          })
+          await collectGarbage()
+          expect({ stops: state.stops, logged: logged.mock.calls.length, reachable: state.reachable() }).toEqual({
+            stops: 8,
+            logged: stop === 'never settles' ? 0 : 8,
+            reachable: 0,
+          })
+        } finally {
+          logged.mockRestore()
+        }
+      })
+    }
+    it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`ready\` pending keeps none of it reachable`, async () => {
+      const pending = new Promise<void>(() => {})
+      const state = subscribeRounds(binary, (onMessage) => ({ unsubscribe: () => void onMessage, ready: pending }))
+      await collectGarbage()
+      expect(state.reachable()).toBe(0)
+    })
+  }
+  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`. */
+  const subscribeRounds = (
+    binary: boolean,
+    listening: (onMessage: object, counted: { stops: number }) => BroadcastUnsubscribe,
+  ) => {
+    const listeners: WeakRef<object>[] = []
+    const state = { stops: 0, reachable: () => listeners.filter((listener) => listener.deref() !== undefined).length }
+    const listen = (_key: string, onMessage: object) => {
+      listeners.push(new WeakRef(onMessage))
+      return listening(onMessage, state)
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+    for (let round = 0; round < 8; round++) {
+      const remove = binary
+        ? Broadcast.subscribeBinary('room:held', () => {})
+        : Broadcast.subscribe('room:held', () => {})
+      remove()
+    }
+    return state
+  }
+  // A transport may deliver what its broker already holds while `listen()` runs, and the listener may replace the
+  // transport on that message.
+  for (const binary of [false, true]) {
+    it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): a subscriber whose listener replaces the transport on a message delivered during \`listen()\` is subscribed on the new one`, async () => {
+      const KEY = 'room:replaced-in-listen'
+      const encode = (text: string) => new TextEncoder().encode(text)
+      const publish = (text: string) =>
+        binary ? Broadcast.publishBinary(KEY, encode(text)) : Broadcast.publish(KEY, text)
+      const info = { seq: 1, timestamp: 1 }
+      const held: { text?: string; binary?: Uint8Array } = {}
+      const holding: BroadcastTransport = {
+        send: (_key, payload) => {
+          held.text = payload
+          return info
+        },
+        sendBinary: (_key, payload) => {
+          held.binary = payload.slice()
+          return info
+        },
+        listen: (_key, onMessage) => {
+          if (held.text !== undefined) onMessage(held.text, info)
+          return () => {}
+        },
+        listenBinary: (_key, onMessage) => {
+          if (held.binary !== undefined) onMessage(held.binary, info)
+          return () => {}
+        },
+      }
+      configureBroadcastTransport(holding)
+      await publish('held')
+      const relayed: { text: ((payload: string) => void)[]; binary: ((payload: Uint8Array) => void)[] } = {
+        text: [],
+        binary: [],
+      }
+      const relaying: BroadcastTransport = {
+        send: (_key, payload) => {
+          for (const onMessage of relayed.text) onMessage(payload)
+          return { seq: 2, timestamp: 1 }
+        },
+        sendBinary: (_key, payload) => {
+          for (const onMessage of relayed.binary) onMessage(payload)
+          return { seq: 2, timestamp: 1 }
+        },
+        listen: (_key, onMessage) => {
+          relayed.text.push((payload) => onMessage(payload, { seq: 2, timestamp: 1 }))
+          return () => {}
+        },
+        listenBinary: (_key, onMessage) => {
+          relayed.binary.push((payload) => onMessage(payload, { seq: 2, timestamp: 1 }))
+          return () => {}
+        },
+      }
+      const heard: string[] = []
+      const hear = (text: string) => {
+        heard.push(text)
+        if (text === 'held') configureBroadcastTransport(relaying)
+      }
+      const subscriber = binary
+        ? Broadcast.subscribeBinary(KEY, (data) => hear(new TextDecoder().decode(data)))
+        : Broadcast.subscribe<string>(KEY, hear)
+      const ready = await Promise.race([
+        subscriber.ready.then(() => 'resolved'),
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 100)),
+      ])
+      await publish('after')
+      subscriber()
+      expect({ ready, listens: relayed[binary ? 'binary' : 'text'].length, heard }).toEqual({
+        ready: 'resolved',
+        listens: 1,
+        heard: ['held', 'after'],
+      })
+    })
+  }
+
+  // A broker client's subscription object, whose `unsubscribe()` uses its own state.
+  class BrokerSubscription {
+    stops = 0
+    readonly ready: Promise<void>
+    constructor(ready: Promise<void>) {
+      this.ready = ready
+    }
+    unsubscribe(): void {
+      this.stops++
+    }
+  }
+  for (const binary of [false, true]) {
+    for (const path of ['removed', 'refused'] as const) {
+      it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): a listener ${path} whose transport returned an object is stopped through that object's \`unsubscribe()\`, once`, async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const subscriptions: BrokerSubscription[] = []
+          const listen = () => {
+            const subscription = new BrokerSubscription(
+              path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
+            )
+            subscriptions.push(subscription)
+            return subscription
+          }
+          const sent = () => ({ seq: 1, timestamp: 1 })
+          configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+          const subscriber = binary
+            ? Broadcast.subscribeBinary('room:object-stop', () => {})
+            : Broadcast.subscribe('room:object-stop', () => {})
+          await subscriber.ready.catch(() => {})
+          subscriber()
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          const typeErrors = logged.mock.calls.filter(([error]) => error instanceof TypeError)
+          expect({ stops: subscriptions.map(({ stops }) => stops), typeErrors }).toEqual({ stops: [1], typeErrors: [] })
+        } finally {
+          logged.mockRestore()
+        }
+      })
+    }
+  }
   // A transport may stop its listener asynchronously, as one waiting for its broker's acknowledgment does.
   for (const binary of [false, true]) {
     for (const path of ['refused', 'removed'] as const) {
@@ -879,6 +1059,77 @@ describe("a transport's listener whose broker refuses it", () => {
     }
   }
 
+  // A broker may refuse with a status of its own, which may not even convert to a string.
+  const STATUSES = {
+    'a plain object': () => ({ code: 'NOPERM', detail: 'subscription ACL changed' }),
+    'an object without a prototype': () => ({ __proto__: null, code: 'NOPERM', detail: 'subscription ACL changed' }),
+  }
+  for (const [given, status] of Object.entries(STATUSES)) {
+    it(`a broker that rejects a listener's \`ready\` with ${given} gives the subscriber that value as the cause, and its listener is stopped`, async () => {
+      const refused = status()
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        let stops = 0
+        const listen = () => ({ ready: Promise.reject(refused), unsubscribe: () => void stops++ })
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+        const subscriber = Broadcast.subscribe('room:broker-status', () => {})
+        const cause = await subscriber.ready.then(
+          () => 'resolved',
+          (err: unknown) => err instanceof Error && err.cause,
+        )
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect({ causeIsStatus: cause === refused, stops, unhandled }).toEqual({
+          causeIsStatus: true,
+          stops: 1,
+          unhandled: [],
+        })
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+        logged.mockRestore()
+      }
+    })
+  }
+
+  // A monitoring client an app reports bugs to may fail on its own.
+  for (const fails of ['throws', 'returns a rejected promise'] as const) {
+    it(`a refusal reported to an \`onBug()\` listener that ${fails} still rejects the subscriber's \`ready\`, the listener's failure logged, not left unhandled`, async () => {
+      const monitoringFailed = new Error('monitoring client failed')
+      failingBugListener =
+        fails === 'throws'
+          ? () => {
+              throw monitoringFailed
+            }
+          : () => Promise.reject(monitoringFailed)
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const { refuse } = refusingBroker()
+        const subscriber = Broadcast.subscribe('room:failing-monitoring', () => {})
+        refuse()
+        const cause = await subscriber.ready.then(
+          () => 'resolved',
+          (err: unknown) => err instanceof Error && err.cause instanceof Error && err.cause.message,
+        )
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect({
+          cause,
+          unhandled,
+          logged: logged.mock.calls.some(([error]) => String(error).includes('monitoring client failed')),
+        }).toEqual({ cause: 'NOPERM', unhandled: [], logged: true })
+      } finally {
+        failingBugListener = undefined
+        process.off('unhandledRejection', onUnhandled)
+        logged.mockRestore()
+      }
+    })
+  }
+
   for (const refusesInListen of [false, true]) {
     it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
       const broker = reservingBroker(refusesInListen)
@@ -898,6 +1149,9 @@ describe("a transport's listener whose broker refuses it", () => {
 /** The failures the server reported through `onBug()`, by the message of their cause. */
 const reported: string[] = []
 onBug((err) => reported.push(err instanceof Error && err.cause instanceof Error ? err.cause.message : String(err)))
+/** What an `onBug()` listener a test sets does with each bug: throw, or return a promise that rejects. */
+let failingBugListener: (() => unknown) | undefined
+onBug(() => failingBugListener?.())
 
 /** Ready at once, as a memory subscription is, until the test loses it or ends it, as a backend does that loses its
  *  connection or whose renewal is refused. */
@@ -1887,3 +2141,14 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(received).toEqual([])
   })
 })
+
+/** Collects what nothing reaches, without the `--expose-gc` flag on the test run. */
+async function collectGarbage(): Promise<void> {
+  setFlagsFromString('--expose-gc')
+  const gc: unknown = runInNewContext('gc')
+  if (typeof gc !== 'function') throw new Error('V8 exposes no gc()')
+  for (let turn = 0; turn < 4; turn++) {
+    await new Promise((resolve) => setImmediate(resolve))
+    gc()
+  }
+}

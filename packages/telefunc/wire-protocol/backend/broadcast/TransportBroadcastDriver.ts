@@ -12,6 +12,7 @@ import {
 } from '../driver.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { stopLogged } from '../stopLogged.js'
 
 /** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
 type BroadcastTransport = {
@@ -32,9 +33,12 @@ type BroadcastTransport = {
 
 /** What stops a listener: the function, where the listener receives what any server publishes from the moment `listen()`
  *  returns; with `ready`, where the broker confirms the listener later: it resolves once the listener receives what any
- *  server publishes to the key, and rejects where the broker refuses it. Telefunc calls `unsubscribe()` once for every
- *  `listen()` that returned, also where its `ready` rejected; it may return a promise, and what it throws or that promise
- *  rejects with is logged. A `listen()` that throws returns nothing to call, so it releases what it took before it throws. */
+ *  server publishes to the key, and rejects where the broker refuses it. Once the listener receives, the transport keeps it
+ *  receiving across its reconnects: it has no way to end it. Telefunc calls `unsubscribe()` once for every `listen()` that
+ *  returned, also where its `ready` rejected. It waits on nothing `unsubscribe()` returns and logs what it throws or what a
+ *  promise it returns rejects with; it may call `listen()` for the key again meanwhile. On a Worker, an `unsubscribe()`
+ *  that does I/O passes its promise to `ctx.waitUntil()` itself. A `listen()` that throws returns nothing to call, so it
+ *  releases what it took before it throws. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 type TransportBroadcastDriverOptions = { transport: BroadcastTransport }
@@ -72,46 +76,52 @@ class TransportBroadcastDriver implements BroadcastDriver {
 /** Ready once the transport's listener is: at once where `listen()` returned the function that stops it, else once its
  *  `ready` resolves; closed with the broker's refusal where that rejects, and the listener stopped. */
 class ListenAttempt extends DriverAttempt {
-  private readonly stop: () => void
+  private readonly listening: BroadcastUnsubscribe
+  /** What the reactions on the broker's `ready` settle, until it is unsubscribed: a broker may keep `ready` pending for
+   *  good, and the reactions then hold none of the attempt. */
+  private readonly confirming: Confirming = { attempt: null }
 
   constructor(listening: BroadcastUnsubscribe) {
     super()
+    this.listening = listening
     if (typeof listening === 'function') {
-      this.stop = listening
       this.transition('ready')
       return
     }
-    this.stop = listening.unsubscribe
-    void this.whenListening(listening.ready)
-  }
-
-  private async whenListening(ready: Promise<void>): Promise<void> {
-    try {
-      await ready
-    } catch (err) {
-      // Unsubscribed first: that stopped it.
-      if (this.state() === 'closed') return
-      this.transition('closed', refusal(err))
-      return stopListener(this.stop)
-    }
-    this.transition('ready')
+    const confirming = this.confirming
+    confirming.attempt = this
+    void listening.ready.then(
+      () => confirming.attempt?.confirmed(),
+      (err: unknown) => confirming.attempt?.refused(err),
+    )
   }
 
   unsubscribe(): Promise<void> {
+    this.confirming.attempt = null
     this.transition('closed')
-    return stopListener(this.stop)
+    this.stop()
+    return Promise.resolve()
+  }
+
+  private confirmed(): void {
+    this.confirming.attempt = null
+    this.transition('ready')
+  }
+
+  private refused(err: unknown): void {
+    this.confirming.attempt = null
+    this.transition('closed', refusal(err))
+    this.stop()
+  }
+
+  /** As the method it is, where `listen()` returned an object. */
+  private stop(): void {
+    const listening = this.listening
+    stopLogged(typeof listening === 'function' ? listening : () => listening.unsubscribe())
   }
 }
 
-/** Calls a transport's `unsubscribe()`, which may be async: what it throws, or what the promise it returns rejects
- *  with, is logged, as the attempt is over either way. */
-async function stopListener(stop: () => void): Promise<void> {
-  try {
-    await stop()
-  } catch (error) {
-    console.error(error)
-  }
-}
+type Confirming = { attempt: ListenAttempt | null }
 
 /** What the broker refused a listener with: a close without a reason is a backend's on purpose, which isn't reported,
  *  while a refusal always is. */

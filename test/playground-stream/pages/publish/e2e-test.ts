@@ -697,7 +697,14 @@ function testSubscribeOrder(inDocker = false) {
         { timeout: 30_000 },
       )
       if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
-      expectServerError('NOPERM', inDocker)
+      // The refused-key canary's report (`refuseChannels()`), then each renewal's own, with Redis's refusal as its cause.
+      expectServerError('Backend subscription closed: text:!refused%3A', inDocker)
+      for (const route of ['text:!renewal-text', 'binary:!renewal-binary']) {
+        expectServerError(
+          new RegExp(`Backend subscription closed: ${route}%3A[\\s\\S]*\\[cause\\]: ReplyError: NOPERM`),
+          inDocker,
+        )
+      }
       // The dropped connection is logged with the error its socket reported, if any: over a Unix socket, `write EPIPE`.
       expectLog(/Redis subscriber connection closed|\bE(PIPE|CONNRESET)\b/)
     })

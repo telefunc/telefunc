@@ -134,7 +134,7 @@ class LaneSubscription {
     this.subscription = null
     this.unobserve?.()
     this.unobserve = null
-    if (subscription) void subscription.unsubscribe()
+    if (subscription) subscription.unsubscribe()
   }
 
   private ensurePendingReady(): Deferred<void> {

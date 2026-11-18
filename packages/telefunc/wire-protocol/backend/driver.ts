@@ -115,7 +115,8 @@ type BackendReceiver = {
 
 type AttemptState = 'establishing' | 'ready' | 'lost' | 'closed'
 
-type StateListener = (state: Exclude<AttemptState, 'establishing'>, reason?: Error) => void
+/** `reason` is what the backend gave, as it gave it: a broker may refuse with any value. */
+type StateListener = (state: Exclude<AttemptState, 'establishing'>, reason?: unknown) => void
 
 /**
  * One driver subscription to a source. It starts `establishing`; the driver makes it `ready` once every publish made
@@ -136,15 +137,14 @@ abstract class DriverAttempt {
     return () => this.listeners.delete(listener)
   }
 
-  /** Settles after the driver's own cleanup. Core calls it at most once, never on a closed attempt, and stops
-   *  listening first. */
+  /** Core stops listening first, calls it at most once and never on a closed attempt, and waits on nothing it returns:
+   *  what it throws or rejects with is logged. */
   abstract unsubscribe(): Promise<void>
 
   /** `lost` on a drop, `ready` again after it, `closed` with the reason. */
   protected transition(state: Exclude<AttemptState, 'establishing'>, reason?: unknown): void {
     if (this.current === state || this.current === 'closed') return
     this.current = state
-    const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
-    for (const listener of this.listeners) listener(state, error)
+    for (const listener of this.listeners) listener(state, reason)
   }
 }

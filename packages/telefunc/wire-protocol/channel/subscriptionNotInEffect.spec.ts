@@ -17,7 +17,7 @@ import { parseSseRequestMetadata } from '../wire/envelope.js'
 import { BodyReader } from '../wire/BodyReader.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
-import { createDeferred } from '../../utils/createDeferred.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -57,7 +57,8 @@ for (const kind of ['text', 'binary'] as const) {
     test(`${kind}: a page whose subscription ${before} gets "${outcome}" where a transport that replaced its own refuses it`, async () => {
       const heard: string[] = []
       const page = await subscribedPage(kind, heard)
-      const wanted = await broadcastWantedBy(page, kind, before === 'never took effect')
+      relay(before === 'never took effect' ? 'held' : 'at once').configure()
+      const wanted = await broadcastWantedBy(page, kind)
       if (before !== 'never took effect') {
         await wanted.inEffect
         await (kind === 'text'
@@ -75,26 +76,77 @@ for (const kind of ['text', 'binary'] as const) {
   }
 }
 
-/** A broadcast whose call carries `page`'s subscription of `kind`, on a transport that delivers each publish at once and
- *  confirms each listener at once, or never where `held`; what the server sends the page reaches it as sent. */
-async function broadcastWantedBy(
-  page: Awaited<ReturnType<typeof subscribedPage>>,
-  kind: 'text' | 'binary',
-  held: boolean,
-) {
+// Whether a page's subscription took effect is said of the subscription it wants now, on the plane in effect now.
+for (const kind of ['text', 'binary'] as const) {
+  test(`${kind}: a page's subscription still being established when a transport replaces its own is confirmed, and its call goes on, once the new transport's listener is`, async () => {
+    const page = await subscribedPage(kind)
+    relay('held').configure()
+    const wanted = await broadcastWantedBy(page, kind)
+    relay('at once').configure()
+    const settled = await Promise.race([
+      Promise.all([page.ready, wanted.inEffect]).then(() => 'confirmed'),
+      new Promise((resolve) => setTimeout(() => resolve('waiting'), 500)),
+    ])
+    expect(settled).toBe('confirmed')
+  })
+
+  for (const first of ['at once', 'held'] as const) {
+    test(`${kind}: a page's new subscription that a replacing transport refuses gets "did not take effect", though a server-side listener on its broadcast kept the earlier one, which its transport confirmed ${first === 'held' ? 'later' : 'at once'}, in effect`, async () => {
+      const page = await subscribedPage(kind)
+      const transport = relay(first)
+      transport.configure()
+      const wanted = await broadcastWantedBy(page, kind)
+      transport.confirm()
+      await wanted.inEffect
+      const listener =
+        kind === 'text' ? wanted.broadcast.subscribe(() => {}) : wanted.broadcast.subscribeBinary(() => {})
+      await listener.ready
+      const replacement = relay('held')
+      replacement.configure()
+      await wanted.want(2, false)
+      void wanted.want(3, true)
+      replacement.refuse()
+      const given = await page.given()
+      expect(given.onClose instanceof Error && given.onClose.message).toContain(
+        'its subscription did not take effect on the server',
+      )
+    })
+  }
+}
+
+/** A transport that delivers each publish to every listener on this server, and confirms each listener at once, or where
+ *  `held` once `confirm()` confirms or `refuse()` refuses those it hasn't settled. */
+function relay(confirms: 'at once' | 'held') {
   const listeners = new Set<(payload: never, info: { seq: number; timestamp: number }) => void>()
+  const unconfirmed: Deferred<void>[] = []
   let seq = 0
   const listen = (_key: string, onMessage: (payload: never, info: { seq: number; timestamp: number }) => void) => {
     listeners.add(onMessage)
     const unsubscribe = () => void listeners.delete(onMessage)
-    return held ? { unsubscribe, ready: new Promise<void>(() => {}) } : unsubscribe
+    if (confirms === 'at once') return unsubscribe
+    const ready = createDeferred<void>()
+    unconfirmed.push(ready)
+    return { unsubscribe, ready: ready.promise }
   }
   const send = (_key: string, payload: never) => {
     const info = { seq: ++seq, timestamp: 1 }
     for (const onMessage of listeners) onMessage(payload, info)
     return info
   }
-  configureBroadcastTransport({ send, sendBinary: send, listen, listenBinary: listen })
+  return {
+    configure: () => configureBroadcastTransport({ send, sendBinary: send, listen, listenBinary: listen }),
+    confirm: () => {
+      for (const ready of unconfirmed.splice(0)) ready.resolve()
+    },
+    refuse: () => {
+      for (const ready of unconfirmed.splice(0)) ready.reject(new Error('NOPERM: replacement refused'))
+    },
+  }
+}
+
+/** A broadcast whose first call carries `page`'s subscription of `kind`, on the transport configured now; what the server
+ *  sends the page reaches it as sent, and `want()` is a later call's want of the same kind. */
+async function broadcastWantedBy(page: Awaited<ReturnType<typeof subscribedPage>>, kind: 'text' | 'binary') {
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
   const end = broadcast._end
   const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
@@ -113,10 +165,11 @@ async function broadcastWantedBy(
   const replay = end._replayBuffer
   if (!replay) throw new Error('A registered broadcast has its replay')
   end._attachPeer(new IndexedPeer({ sender, index: page.index, replay }), {})
-  const inEffect = getChannelMux().applyCallWants(call, [
-    { channel: broadcast.id, version: 1, text: kind === 'text', binary: kind === 'binary' },
-  ])
-  return { broadcast, inEffect }
+  const want = (version: number, on: boolean) =>
+    getChannelMux().applyCallWants(call, [
+      { channel: broadcast.id, version, text: on && kind === 'text', binary: on && kind === 'binary' },
+    ])
+  return { broadcast, inEffect: want(1, true), want }
 }
 
 /** A page's broadcast, subscribed, on an SSE wire this test serves once it reconciled: `receive()` hands it a frame the
@@ -160,6 +213,7 @@ async function subscribedPage(kind: 'text' | 'binary' = 'text', heard: string[] 
   return {
     index,
     receive: push,
+    ready: subscription.ready,
     given: async () => ({ ready: await subscription.ready.catch((err: unknown) => err), onClose: await onClose }),
   }
 }

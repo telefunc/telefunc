@@ -77,15 +77,13 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
         route: { key: this.key, kind: 'text' },
         receiver: (payload, rawInfo) => this.deliverBroadcastMessage(payload, rawInfo),
         onReady: () => settleAll(this.waiting.text, true),
-        onFailed: (err) => this._end.endNotInEffect(err),
-        onEnded: (err) => this._end.endEnded(err),
+        onFailed: (err) => this._end.endSubscriptionFailed(err),
       }),
       binary: new RouteSubscription({
         route: { key: this.key, kind: 'binary' },
         receiver: (payload, rawInfo) => this.deliverBroadcastBinaryMessage(payload, rawInfo),
         onReady: () => settleAll(this.waiting.binary, true),
-        onFailed: (err) => this._end.endNotInEffect(err),
-        onEnded: (err) => this._end.endEnded(err),
+        onFailed: (err) => this._end.endSubscriptionFailed(err),
       }),
     }
     this._end.onClose(() => {
@@ -462,11 +460,11 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
       callStaticListener(callback, decode(payload), { key: route.key, seq: info.seq, timestamp: info.timestamp })
     },
     onReady: () => readiness.settle(true),
+    // A `ready` that resolved stays resolved.
     onFailed: (err) => {
       signal?.removeEventListener('abort', remove)
       readiness.settle(err)
     },
-    onEnded: () => signal?.removeEventListener('abort', remove),
   })
   const remove = () => {
     signal?.removeEventListener('abort', remove)
@@ -509,10 +507,8 @@ type RouteSubscriptionOptions<Kind extends BroadcastKind> = {
   receiver: RouteReceiver<Kind>
   /** A subscription it opened takes effect: its backend delivers to it what any server publishes to the route. */
   onReady: () => void
-  /** A subscription it opened ended for good with `err` before it took effect: it is closed. */
+  /** A subscription it opened ended for good with `err`: it is closed. */
   onFailed: (err: Error) => void
-  /** A subscription it opened that took effect was ended for good with `err`: it is closed. */
-  onEnded: (err: Error) => void
 }
 
 /** A route's subscription while wanted, until its backend ends it for good; a transport that replaces the plane gets
@@ -522,63 +518,76 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private readonly receiver: RouteReceiver<Kind>
   private readonly onReady: () => void
   private readonly onFailed: (err: Error) => void
-  private readonly onEnded: (err: Error) => void
   private opened = false
-  /** Inside its backend's subscribe, which may deliver a message whose listener opens or closes it again. */
+  /** Inside its backend's subscribe, which may deliver a message whose listener opens or closes it again, or replaces
+   *  the plane. */
   private starting = false
+  /** A transport replaced the plane inside its backend's subscribe: it subscribes again on the new one. */
+  private replacedWhileStarting = false
   private current: BackendSubscription | null = null
-  /** The start of `current`, until it took effect; null once it did. */
-  private start: Readiness | null = null
-  /** Whether it took effect since it opened, on any plane: a plane that replaced its own may still refuse it. */
-  private everInEffect = false
+  /** Whether `current` took effect. */
+  private currentInEffect = false
+  /** What waits for it to take effect: settled by the first subscription that takes effect or fails, on whichever plane
+   *  is in effect by then. A wait that comes once it was in effect gets its own. */
+  private establishing: Readiness | null = null
 
-  constructor({ route, receiver, onReady, onFailed, onEnded }: RouteSubscriptionOptions<Kind>) {
+  constructor({ route, receiver, onReady, onFailed }: RouteSubscriptionOptions<Kind>) {
     this.route = route
     this.receiver = receiver
     this.onReady = onReady
     this.onFailed = onFailed
-    this.onEnded = onEnded
   }
 
   /** Whether a subscription it opened is in effect. */
   get inEffect(): boolean {
-    return this.current !== null && this.start === null
+    return this.current !== null && this.currentInEffect
   }
 
-  /** Settles as the start of the subscription it opened last does; `undefined` once that took effect. */
+  /** `undefined` while in effect; else settles once a subscription on the plane in effect takes effect, and rejects
+   *  where one fails first. */
   get ready(): Promise<void> | undefined {
-    return this.start?.promise
+    if (this.inEffect) return undefined
+    this.establishing ??= new Readiness()
+    return this.establishing.promise
   }
 
   /** Subscribes unless a subscription is live; throws outside a Cloudflare session. */
   open(): void {
     this.opened = true
-    if (this.current === null && !this.starting) this.subscribe()
     followBroadcastPlane(this)
+    if (this.current === null && !this.starting) this.subscribe()
   }
 
   close(): void {
-    this.everInEffect = false
-    this.stop()
-  }
-
-  /** Subscribes on the plane that replaced this subscription's. */
-  planeReplaced(): void {
-    this.stop()
-    this.open()
-  }
-
-  private stop(): void {
     this.opened = false
     unfollowBroadcastPlane(this)
     const current = this.current
     this.current = null
-    void current?.unsubscribe()
+    this.currentInEffect = false
+    current?.unsubscribe()
+  }
+
+  /** Subscribes on the plane that replaced this subscription's. */
+  planeReplaced(): void {
+    if (this.starting) {
+      this.replacedWhileStarting = true
+      return
+    }
+    this.close()
+    this.open()
+  }
+
+  /** Settles what waits for it to take effect: a wait that comes later gets its own. */
+  private settleEstablishing(outcome: true | Error): void {
+    const establishing = this.establishing
+    this.establishing = null
+    establishing?.settle(outcome)
   }
 
   /** On the plane in effect now; the subscription keeps its own handle. */
   private startSubscription(): BackendSubscription {
     this.starting = true
+    this.replacedWhileStarting = false
     try {
       return getBroadcastPlane().subscribe(this.route, this.receiver)
     } finally {
@@ -589,17 +598,16 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private subscribe(): void {
     const subscription = this.startSubscription()
     // A listener of a message its subscribe delivered closed it.
-    if (!this.opened) return void subscription.unsubscribe()
+    if (!this.opened) return subscription.unsubscribe()
+    if (this.replacedWhileStarting) {
+      subscription.unsubscribe()
+      return this.subscribe()
+    }
     this.current = subscription
-    const start = new Readiness()
-    this.start = start
-    let wasReady = false
     const tookEffect = () => {
-      if (wasReady || this.current !== subscription) return
-      wasReady = true
-      this.everInEffect = true
-      this.start = null
-      start.settle(true)
+      if (this.current !== subscription || this.currentInEffect) return
+      this.currentInEffect = true
+      this.settleEstablishing(true)
       this.onReady()
     }
     // Only a failure rejects `ready`, after the shared subscriptions retired and reported the subscription; an
@@ -609,11 +617,9 @@ class RouteSubscription<Kind extends BroadcastKind> {
         await subscription.ready
       } catch (err) {
         if (this.current !== subscription) return
-        const wasInEffect = this.everInEffect
         this.close()
         const failure = err instanceof Error ? err : new Error(String(err))
-        if (wasInEffect) return this.onEnded(failure)
-        start.settle(failure)
+        this.settleEstablishing(failure)
         this.onFailed(failure)
       }
     }
