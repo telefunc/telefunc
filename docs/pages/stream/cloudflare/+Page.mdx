@@ -206,9 +206,11 @@ A Durable Object registers with the authority on its first subscription to a key
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order, which is call order for the publishes of one Durable Object's telefunctions and channel handlers. |
 | Delivery | `publish()` resolves once the message has reached every Durable Object with subscribers. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
-| Refused presence | If the key's authority doesn't store a Durable Object's first presence for a key, the server-side `ready` of its subscribers to the key rejects with an error whose `cause` is the authority's. A `BroadcastChannel` closes, and its page's `ready` and `onClose()` get a `ChannelClosedError` that says its subscription didn't take effect. A `Broadcast.subscribe()` is removed: subscribe again when its `ready` rejects. Where Cloudflare marks the failure `.retryable` and not `.overloaded`, Telefunc writes the presence again 30 s later instead, and `ready` waits. Once stored, a presence that fails to refresh is restored by a later refresh. The refusal doesn't fail publishes to the key, unlike <Link href="/redis#errors">on Redis</Link>. |
+| Failed registration | A subscription takes effect once its Durable Object is <Link href="#presence">registered</Link> for the key. If that first registration fails, the subscription fails. A failure Cloudflare marks `.retryable` and not `.overloaded` is tried again every 30 seconds instead, for as long as it fails that way, and `ready` waits meanwhile. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
+
+When a subscription's registration fails, the server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. A `BroadcastChannel` closes, and the client's `ready` and `onClose()` get a `ChannelClosedError`: call its telefunction again and subscribe to the broadcast it returns. A `Broadcast.subscribe()` is removed, and its `ready` rejects with an error whose `cause` is the error the registration failed with: call `Broadcast.subscribe()` again. A failed registration doesn't fail publishes to the key. A refresh that fails ends no subscription (see <Link href="#presence">Presence</Link>).
 
 
 ## Configuration

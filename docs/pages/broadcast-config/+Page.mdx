@@ -36,9 +36,9 @@ type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Pro
 
 > `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
 
-> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`. Resolve `ready` once the listener can receive what any server publishes to the key, and reject it if the broker refuses the subscription. The <Link href="/channel#chat-example">`ready`</Link> of the server's subscribers then resolves with it, or rejects with an error whose `cause` is the broker's, and a `BroadcastChannel` closes: on the server with that error, and on its page with a `ChannelClosedError` that says its subscription didn't take effect. A `listen()` that throws fails the subscription the same way.
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, ready }`. Resolve `ready` once the listener receives what any server publishes to the key: a message sent from then on must reach it. Reject `ready` if the broker refuses the subscription. The <Link href="/channel#chat-example">`ready`</Link> of the server's subscribers to the key resolves with yours. If yours rejects, theirs rejects with an error whose `cause` is the broker's error, and a `BroadcastChannel` closes: on the server with that error, and on the client with a `ChannelClosedError`. A `listen()` that throws fails the subscription the same way.
 
-> Telefunc calls `unsubscribe()` once for every `listen()` that returned, also where its `ready` rejected. A `listen()` that throws returns nothing to call, so it releases what it took before it throws.
+> Telefunc calls `unsubscribe()` once for every `listen()` that returned: when it stops the listener, or once `ready` rejects. `unsubscribe()` may return a promise, and Telefunc logs what it throws or what that promise rejects with. If `listen()` throws, release what it acquired before it throws, as Telefunc has no `unsubscribe()` to call.
 
 ```ts
 // server/broadcastTransport.ts

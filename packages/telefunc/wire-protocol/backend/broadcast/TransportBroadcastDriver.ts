@@ -33,8 +33,8 @@ type BroadcastTransport = {
 /** What stops a listener: the function, where the listener receives what any server publishes from the moment `listen()`
  *  returns; with `ready`, where the broker confirms the listener later: it resolves once the listener receives what any
  *  server publishes to the key, and rejects where the broker refuses it. Telefunc calls `unsubscribe()` once for every
- *  `listen()` that returned, also where its `ready` rejected; a `listen()` that throws returns nothing to call, so it
- *  releases what it took before it throws. */
+ *  `listen()` that returned, also where its `ready` rejected; it may return a promise, and what it throws or that promise
+ *  rejects with is logged. A `listen()` that throws returns nothing to call, so it releases what it took before it throws. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 type TransportBroadcastDriverOptions = { transport: BroadcastTransport }
