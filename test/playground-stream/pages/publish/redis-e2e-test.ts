@@ -31,6 +31,21 @@ function testRedisReconnect() {
     })
   })
 
+  test("broadcast: publishes across a key's 2^32nd sequence number in Redis reach its subscriber with the seq each publish returned", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-seq-boundary')
+    await autoRetry(async () => {
+      expect(await getResult('#redis-seq-boundary-result')).deep.equal({
+        published: [2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1],
+        received: [
+          { text: 'a', seq: 2 ** 32 - 1 },
+          { text: 'b', seq: 2 ** 32 },
+          { text: 'c', seq: 2 ** 32 + 1 },
+        ],
+      })
+    })
+  })
+
   test('broadcast: binary frames published from one reused buffer while Redis reconnects arrive as published', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-redis-reconnect')

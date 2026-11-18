@@ -1,4 +1,9 @@
-export { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure, onPublishBesideRefusedSubscribe }
+export {
+  onBinaryBroadcastAcrossReconnect,
+  onRedisSubscribeFailure,
+  onPublishBesideRefusedSubscribe,
+  onPublishAcrossSeqBoundary,
+}
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
 import { redis } from '../../redis'
@@ -62,6 +67,30 @@ async function onRedisSubscribeFailure() {
     publisher.disconnect()
     // Also closes the transport's subscriber connection, which runs as `user` too.
     await redis!.acl('DELUSER', user)
+  }
+}
+
+/** Starts a key's sequence in Redis 2 short of 2^32, then publishes 3 texts on it: the seq each publish returned, and
+ *  what this server's subscriber received. */
+async function onPublishAcrossSeqBoundary() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  const key = `room:seq-boundary:${crypto.randomUUID()}`
+  // The transport's counter for the key, under its default prefix.
+  const seqKey = `tf:seq:{${key}}`
+  await redis.set(seqKey, 2 ** 32 - 2)
+  const received: { text: string; seq: number }[] = []
+  const unsubscribe = Broadcast.subscribe<string>(key, (text, { seq }) => {
+    received.push({ text, seq })
+  })
+  try {
+    await unsubscribe.ready
+    const published: number[] = []
+    for (const text of ['a', 'b', 'c']) published.push((await Broadcast.publish(key, text)).seq)
+    for (let i = 0; i < 25 && received.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    return { published, received }
+  } finally {
+    unsubscribe()
+    await redis.del(seqKey)
   }
 }
 

@@ -5,12 +5,14 @@ import {
   onBinaryBroadcastAcrossReconnect,
   onRedisSubscribeFailure,
   onPublishBesideRefusedSubscribe,
+  onPublishAcrossSeqBoundary,
 } from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
   const [beside, setBeside] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
+  const [seqBoundary, setSeqBoundary] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
@@ -31,6 +33,14 @@ function RedisReconnect() {
         onClick={async () => setBeside(await onPublishBesideRefusedSubscribe())}
       >
         Publish on one key while Redis refuses another key's subscription
+      </button>
+      <pre id="redis-seq-boundary-result">{JSON.stringify(seqBoundary)}</pre>
+      <button
+        type="button"
+        id="test-redis-seq-boundary"
+        onClick={async () => setSeqBoundary(await onPublishAcrossSeqBoundary())}
+      >
+        Publish across a key's 2^32nd sequence number in Redis
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>
