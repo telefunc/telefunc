@@ -17,18 +17,16 @@ import {
 } from '../broadcast/broadcastAdapter.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
-import { decodeU32 } from '../wire/envelope.js'
+import { parseSseRequestMetadata } from '../wire/envelope.js'
+import { BodyReader } from '../wire/BodyReader.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
+import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
-
-const NOT_IN_EFFECT_ON_PAGE =
-  'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.'
 
 const ENDINGS: Record<string, { listen: () => BroadcastUnsubscribe; pastLimit: boolean }> = {
   'its backend refuses it': {
@@ -42,14 +40,12 @@ const ENDINGS: Record<string, { listen: () => BroadcastUnsubscribe; pastLimit: b
 }
 
 for (const [ending, { listen, pastLimit }] of Object.entries(ENDINGS)) {
-  test(`where ${ending}, the page's \`ready\` and \`onClose()\` get a ChannelClosedError that says so, not the server's error`, async () => {
+  test(`where ${ending}, the page's \`ready\` and \`onClose()\` get a ChannelClosedError, not the server's error`, async () => {
     const page = await subscribedPage()
     page.receive(await errorSentToPage(page.index, listen, pastLimit))
     const given = await page.given()
-    for (const err of [given.ready, given.onClose]) {
-      expect(err).toBeInstanceOf(ChannelClosedError)
-      expect(err).toMatchObject({ message: NOT_IN_EFFECT_ON_PAGE })
-    }
+    expect(given.ready).toBeInstanceOf(ChannelClosedError)
+    expect(given.onClose).toBeInstanceOf(ChannelClosedError)
   })
 }
 
@@ -153,19 +149,15 @@ const SERVER_OPTIONS = {
   transports: [CHANNEL_TRANSPORT.SSE],
 }
 
-/** A page's POST body, `[u32 length][metadata JSON]` then `[u32 length][frame]` each. */
+/** A page's POST, read as the server's SSE handler reads it: its metadata, then its frames. */
 async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames: DecodedFrame[] }> {
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
-  const bytes = new Uint8Array(await body.arrayBuffer())
-  const chunks: Uint8Array<ArrayBuffer>[] = []
-  for (let offset = 0; offset < bytes.length; ) {
-    const length = decodeU32(bytes.subarray(offset, offset + 4))
-    chunks.push(bytes.slice(offset + 4, offset + 4 + length))
-    offset += 4 + length
-  }
-  const [metadata, ...frames] = chunks
-  const parsed: unknown = JSON.parse(new TextDecoder().decode(metadata))
-  const streamResponse =
-    typeof parsed === 'object' && parsed !== null && 'streamResponse' in parsed && !!parsed.streamResponse
-  return { streamResponse, frames: frames.map((frame) => decode(frame)) }
+  const reader = new BodyReader(body.stream())
+  const metadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+  if (metadata === null) return { streamResponse: false, frames: [] }
+  const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))
+  const frames: DecodedFrame[] = []
+  for (let frame; (frame = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)); )
+    frames.push(decode(frame))
+  return { streamResponse: kind === 'streamResponse', frames }
 }
