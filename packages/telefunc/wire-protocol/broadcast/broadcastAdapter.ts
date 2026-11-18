@@ -323,6 +323,8 @@ function startListening(
     ready.settle(err instanceof Error ? err : new Error(String(err)))
     throw err
   }
+  // Nothing can roll the start back now: a subscriber that comes from here on gets no signal to hold.
+  listening.removed = undefined
   if (typeof started === 'function') {
     listening.unsubscribe = started
     listening.ready = undefined

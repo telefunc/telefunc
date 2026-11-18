@@ -776,6 +776,34 @@ describe("a transport's listen() that delivers a message, then throws", () => {
   }
 })
 
+// An app that subscribes and unsubscribes with one long-lived signal while its key stays subscribed.
+describe('static subscribers that come and go with one signal on a key a healthy start listens to', () => {
+  for (const binary of [false, true]) {
+    it(`${binary ? 'Broadcast.subscribeBinary()' : 'Broadcast.subscribe()'}: leave nothing registered on that signal or the start's`, () => {
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      const listen = () => () => {}
+      _resetBroadcastAdapterForTesting(
+        new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+      )
+      const key = 'room:signal-churn'
+      const subscribe = (signal?: AbortSignal) =>
+        binary ? Broadcast.subscribeBinary(key, () => {}, { signal }) : Broadcast.subscribe(key, () => {}, { signal })
+      const holder = subscribe()
+      const signal = new AbortController().signal
+      for (let i = 0; i < 100; i++) subscribe(signal)()
+      const adapter = getBroadcastAdapter()
+      const { removed, unsubscribe } = binary ? adapter.subscribeBinary(key, () => {}) : adapter.subscribe(key, () => {})
+      const registered = {
+        signal: getEventListeners(signal, 'abort').length,
+        start: removed ? getEventListeners(removed, 'abort').length : 0,
+      }
+      unsubscribe()
+      holder()
+      expect(registered).toEqual({ signal: 0, start: 0 })
+    })
+  }
+})
+
 // A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the
 // key has a listener.
 describe('a message the transport delivers inside listen()', () => {
