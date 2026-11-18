@@ -165,17 +165,53 @@ const INSTALLED_BROADCAST: Channel = {
   subscribe: (key, listener) => getBroadcastPlane().subscribe({ key, kind: 'text' }, listener),
 }
 
-/** An app's transport: its `listen()` misses nothing from the moment it returns, as core's Broadcast takes it. */
+/** An app's transport, as core's Broadcast takes it: a listener misses nothing from the moment `listen()` returns the
+ *  function that stops it, or, where it returns `{ unsubscribe, ready }`, from the moment `ready` resolves. */
 function channelOf(transport: BroadcastTransport): Channel {
   return {
     publish: (key, payload) => transport.send(key, payload),
     subscribe(key, listener) {
-      const stop = transport.listen(key, listener)
+      const listening = transport.listen(key, listener)
+      if (typeof listening === 'function')
+        return {
+          ready: Promise.resolve(),
+          state: () => 'ready',
+          onStateChange: () => () => {},
+          unsubscribe: async () => listening(),
+        }
+      let state: 'establishing' | 'ready' | 'closed' = 'establishing'
+      const listeners = new Set<(state: 'ready' | 'closed') => void>()
+      const settle = (next: 'ready' | 'closed') => {
+        if (state === 'closed') return
+        state = next
+        for (const onState of listeners) onState(next)
+      }
+      const ready = markHandled(
+        listening.ready.then(
+          () => settle('ready'),
+          async (error: unknown) => {
+            // Released before the read hears of the refusal, so that its next attempt isn't refused for this one.
+            try {
+              await listening.unsubscribe()
+            } catch (releaseError) {
+              console.error(releaseError)
+            }
+            settle('closed')
+            throw error
+          },
+        ),
+      )
       return {
-        ready: Promise.resolve(),
-        state: () => 'ready',
-        onStateChange: () => () => {},
-        unsubscribe: async () => stop(),
+        ready,
+        state: () => state,
+        onStateChange(onState) {
+          listeners.add(onState)
+          return () => listeners.delete(onState)
+        },
+        async unsubscribe() {
+          state = 'closed'
+          listening.unsubscribe()
+        },
       }
     },
   }

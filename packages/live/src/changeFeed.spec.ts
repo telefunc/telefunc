@@ -91,6 +91,44 @@ describe('ChangeFeed', () => {
     expect(received).toEqual([todo2, todo1, { table: 'public.todos', kind: 'unknown' }])
   })
 
+  it("waits for an app transport's listener that the broker confirms later, and listens again once it refuses one", async () => {
+    const confirmations: { resolve: () => void; reject: (error: Error) => void }[] = []
+    // Like a broker client that holds a key from `listen()` until `unsubscribe()` let it go, a tick later, and then failed.
+    const held = new Set<string>()
+    const releaseErrors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const transport = {
+      listen: (key: string) => {
+        if (held.has(key)) return { unsubscribe: () => {}, ready: Promise.reject(new Error(`${key} is held`)) }
+        held.add(key)
+        const { promise, resolve, reject } = Promise.withResolvers<void>()
+        confirmations.push({ resolve, reject })
+        const unsubscribe = async () => {
+          await Promise.resolve()
+          held.delete(key)
+          throw new Error('connection lost while releasing')
+        }
+        return { unsubscribe, ready: promise }
+      },
+    } as unknown as BroadcastTransport
+    const feed = new ChangeFeed(transport, 'app', () => {})
+    let confirmed = false
+    void feed.watch(['public.todos'])!.then(() => (confirmed = true))
+    await Promise.resolve()
+    expect(confirmed).toBe(false)
+    confirmations[0]!.resolve()
+    await vi.waitFor(() => expect(confirmed).toBe(true))
+    expect(feed.watch(['public.todos'])).toBeUndefined()
+
+    const refused = feed.watch(['public.notes'])!
+    confirmations[1]!.reject(new Error('refused'))
+    await expect(refused).rejects.toThrow('refused')
+    const again = feed.watch(['public.notes'])!
+    confirmations[2]!.resolve()
+    await expect(again).resolves.toBeUndefined()
+    expect(releaseErrors).toHaveBeenCalledOnce()
+    releaseErrors.mockRestore()
+  })
+
   for (const failure of ['throws', 'never settles'] as const) {
     it(`sends a change again once its publish ${failure}`, async () => {
       const transport = failingOnce(failure)
