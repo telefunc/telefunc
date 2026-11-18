@@ -369,7 +369,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     expect(request.signal.aborted).toBe(true)
   })
 
-  test('onText() with a function argument: 422, and the function it was passed closes at once', async () => {
+  test('onText() with a function argument: 422, and starts closing the function it was passed', async () => {
     const close = vi.spyOn(ServerChannel.prototype, 'close')
     onTestFinished(() => close.mockRestore())
     const channelId = crypto.randomUUID()
