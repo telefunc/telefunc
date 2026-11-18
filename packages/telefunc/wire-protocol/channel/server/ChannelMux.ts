@@ -923,7 +923,8 @@ class ChannelMux implements UpgradeStagesOwner {
         // Timers run before the sockets are read: after server code that held the event loop past the deadline, the
         // page's PING may be waiting unread, on a POST the server reads only some turns later. The page gets back the
         // time the timer ran late, when the server read nothing.
-        if (!recheck) return this.armPingDeadline(entry, Math.min(now - dueAt, TIMER_DELAY_MAX_MS), true)
+        // `dueAt` is on the performance clock, which runs ahead of the timers' within a turn: a timer may run before it.
+        if (!recheck) return this.armPingDeadline(entry, Math.min(Math.max(0, now - dueAt), TIMER_DELAY_MAX_MS), true)
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
         transport.terminateWire(wire)

@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
@@ -88,4 +88,52 @@ test('a page that stays silent past the ping deadline loses its wire', async () 
   const events = (opened.body as ReadableStream<Uint8Array>).getReader()
   while (!(await events.read()).done);
   expect(performance.now() - openedAt).toBeGreaterThanOrEqual(2_000)
+})
+
+test('a ping deadline judged while its timer runs ahead of the performance clock rechecks one timer later, with no negative delay', async () => {
+  // Node runs a timer by the loop's clock, read as its turn began; `performance.now()` moves on as the turn works. Here
+  // it reads 1 ms later at each read in a turn, so a timer armed after some reads runs before its time on that clock.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  let readsThisTurn = 0
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => Date.now() + readsThisTurn++)
+  const delays: number[] = []
+  let turns = 0
+  // The timer turn that armed a timer due at once: the recheck's.
+  let armedNowAt: number | undefined
+  const realSetTimeout = globalThis.setTimeout
+  const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    callback: () => void,
+    delay?: number,
+  ) => {
+    delays.push(delay ?? 0)
+    if ((delay ?? 0) <= 0) armedNowAt ??= turns
+    return realSetTimeout(callback, delay)
+  }) as typeof setTimeout)
+  try {
+    const connId = crypto.randomUUID()
+    const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+    expect(opened.statusCode).toBe(200)
+    const events = (opened.body as ReadableStream<Uint8Array>).getReader()
+    let ended = false
+    let endedAt: number | undefined
+    void (async () => {
+      while (!(await events.read()).done);
+      ended = true
+      endedAt = turns
+    })()
+    // The page stays silent: each turn of timers, until the wire is cut.
+    while (!ended && turns < 100) {
+      readsThisTurn = 0
+      await vi.advanceTimersToNextTimerAsync()
+      turns++
+    }
+    expect(ended).toBe(true)
+    expect(delays.filter((delay) => delay < 0)).toEqual([])
+    expect(armedNowAt).toBeDefined()
+    expect(endedAt).toBeGreaterThan(armedNowAt ?? Infinity)
+  } finally {
+    setTimeoutSpy.mockRestore()
+    now.mockRestore()
+    vi.useRealTimers()
+  }
 })
