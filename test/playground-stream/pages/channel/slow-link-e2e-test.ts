@@ -1,5 +1,6 @@
 export { testSlowLink }
 
+import { Worker } from 'node:worker_threads'
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, withPacedLink, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
 import { withNetworkConditions } from '../../../utils'
@@ -164,16 +165,16 @@ function testSlowLink(isDev: boolean) {
 
   // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms. A pause of the
   // whole machine about as long as `LOSSY_CONFIRM_SLACK_MS` (300 ms) delays them past what the server allows a page that
-  // keeps up, and that run may lose messages. A message more than 150 ms later than the link's delay shows such a pause:
-  // the ticker then runs again, up to three times, and the run asserted is the first without one, else the third.
+  // keeps up, and that run may lose messages. A run that lost some while a thread of the test's own woke 100 ms late or
+  // more, a stall of the machine, runs again, up to three times in all; any other run's count is the card's.
   test('channel: on a 900 ms round trip that keeps up, a lossy broadcast delivers every message', async () => {
-    const delayMs = 450
     await withPacedLink(
-      { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs },
+      { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs: 450 },
       async () => {
-        let ticker = await runSmallTicker()
-        for (let runs = 1; runs < 3 && ticker.worstMs > delayMs + 150; runs++) ticker = await runSmallTicker()
-        expect(ticker).deep.equal({ ...ticker, received: 300, last: 299 })
+        let run = await whileTimingStalls(runSmallTicker)
+        for (let runs = 1; runs < 3 && run.result.received < 300 && run.stalledMs >= 100; runs++)
+          run = await whileTimingStalls(runSmallTicker)
+        expect(run.result).deep.equal({ ...run.result, received: 300, last: 299 })
       },
     )
   })
@@ -214,4 +215,31 @@ async function runSmallTicker() {
     },
     { timeout: 40_000 },
   )
+}
+
+/** Runs `run` while a thread of the test's own wakes every 10 ms, and returns its result with the longest that thread
+ *  overslept meanwhile: a stall of the machine, which the channel, running in other processes and threads, can't cause. */
+async function whileTimingStalls<T>(run: () => Promise<T>): Promise<{ result: T; stalledMs: number }> {
+  const timer = new Worker(
+    `const { parentPort } = require('node:worker_threads')
+    let last = performance.now()
+    let stalledMs = 0
+    setInterval(() => {
+      const now = performance.now()
+      stalledMs = Math.max(stalledMs, now - last - 10)
+      last = now
+    }, 10)
+    parentPort.on('message', () => parentPort.postMessage(stalledMs))`,
+    { eval: true },
+  )
+  try {
+    const result = await run()
+    const stalledMs = await new Promise<number>((resolve) => {
+      timer.once('message', resolve)
+      timer.postMessage(null)
+    })
+    return { result, stalledMs }
+  } finally {
+    await timer.terminate()
+  }
 }

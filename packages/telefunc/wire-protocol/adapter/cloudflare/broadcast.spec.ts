@@ -598,6 +598,35 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         })
       }
 
+      // A Durable Object subscribes again while the withdrawal of its presence is on its way: that of its release, or the
+      // one after a refresh the authority answered once it had left. Its one stub to the authority carries the withdrawal
+      // ahead of the new registration (OrderedStubs), so the authority applies them in that order.
+      for (const withdrawing of ['its release', 'a late refresh'] as const) {
+        it(`a Durable Object that subscribes again while the withdrawal after ${withdrawing} is under way keeps its presence`, async () => {
+          vi.useFakeTimers()
+          const { state, inObject, present, presences } = worker()
+          const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
+          await vi.advanceTimersByTimeAsync(0)
+          await left.ready
+          const written = present('room:test').map(({ member }) => member)
+          const answer = Promise.withResolvers<void>()
+          state.held = answer.promise
+          if (withdrawing === 'a late refresh') await vi.advanceTimersByTimeAsync(30_000)
+          left()
+          await vi.advanceTimersByTimeAsync(0)
+          state.held = undefined
+          const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
+          answer.resolve()
+          await vi.advanceTimersByTimeAsync(0)
+          await back.ready
+          expect({
+            asked: presences.map(({ bucket }) => (bucket === null ? 'withdraw' : 'record')).slice(-2),
+            present: present('room:test').map(({ member }) => member),
+          }).toEqual({ asked: ['withdraw', 'record'], present: written })
+          back()
+        })
+      }
+
       it("a broadcast that subscribes closes with the authority's error", async () => {
         const { state, inObject } = worker()
         state.refuse = true

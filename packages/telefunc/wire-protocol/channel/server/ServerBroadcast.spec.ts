@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
+import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -9,9 +10,15 @@ import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { Channel } from './ServerChannel.js'
-import { configureBroadcastTransport, disposeBackend, installBackend } from '../../backend/install.js'
+import {
+  configureBroadcastTransport,
+  disposeBackend,
+  getBroadcastPlane,
+  installBackend,
+} from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
+import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
 
@@ -837,6 +844,57 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       expect({ heard, listening: transport.listening() }).toEqual({ heard: end ? [] : [2], listening: 0 })
     })
   }
+
+  // An app that subscribes with one long-lived signal: each attempt that fails must leave nothing on it.
+  const WITH_SIGNAL: Record<string, (signal: AbortSignal) => (onMessage: () => void) => Unsubscribe> = {
+    'Broadcast.subscribe()': (signal) => (onMessage) => Broadcast.subscribe(KEY, onMessage, { signal }),
+    'Broadcast.subscribeBinary()': (signal) => (onMessage) => Broadcast.subscribeBinary(KEY, onMessage, { signal }),
+    'BroadcastChannel.subscribe()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribe(onMessage, { signal })
+    },
+    'BroadcastChannel.subscribeBinary()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribeBinary(onMessage, { signal })
+    },
+  }
+  // A failed start ends a `BroadcastChannel`, which removes its listeners; a static subscriber subscribes again, so it
+  // stays on its signal until it is removed.
+  for (const [surface, of] of Object.entries(WITH_SIGNAL)) {
+    const isStatic = surface.startsWith('Broadcast.')
+    it(`${surface}: a ${isStatic ? 'subscriber' : 'listener'} with a signal ${isStatic ? 'whose start failed stays on it while it subscribes again, and leaves no abort listener on it once removed' : 'leaves no abort listener on it once the failed start ended its broadcast'}`, async () => {
+      deliveringThenThrowing()
+      const signal = new AbortController().signal
+      const subscribed = of(signal)(() => {})
+      await expect(subscribed.ready).rejects.toThrow()
+      if (isStatic) {
+        expect(getEventListeners(signal, 'abort')).toHaveLength(1)
+        subscribed()
+      }
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0)
+    })
+  }
+
+  // One receiver subscribed again on a key's route after a start that failed: each subscription is its own consumer of
+  // the slot it joined, and a failed start's slot is left, so the first one's remover leaves the later one be.
+  for (const kind of ['text', 'binary'] as const) {
+    it(`the backend's ${kind} subscribe(): the remover of a receiver's subscription the failed start closed leaves that receiver's later subscription be`, async () => {
+      const transport = deliveringThenThrowing()
+      const heard: number[] = []
+      const receiver = (payload: string | Uint8Array) =>
+        typeof payload === 'string' ? heard.push(Number(payload)) : heard.push(...binaryData(payload))
+      const route = { key: KEY, kind }
+      const failed = getBroadcastPlane().subscribe(route, receiver)
+      await expect(failed.ready).rejects.toThrow()
+      const later = getBroadcastPlane().subscribe(route, receiver)
+      await later.ready
+      void failed.unsubscribe()
+      await (kind === 'binary' ? Broadcast.publishBinary(KEY, Uint8Array.of(2)) : Broadcast.publish(KEY, 2))
+      const listening = transport.listening()
+      void later.unsubscribe()
+      expect({ heard, listening }).toEqual({ heard: [2], listening: 1 })
+    })
+  }
 })
 
 // A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the
@@ -1067,6 +1125,33 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
       expect(ready).toBe(await room.closed.catch((err: unknown) => err))
     })
   }
+})
+
+// Its close's outcome is decided after its callbacks start: here the cleanup one of them runs outlasts the close.
+describe("a broadcast whose graceful close times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
+  for (const binary of [false, true])
+    for (const removes of [false, true]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+        configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+        const room = new ServerBroadcast<string>({ key: 'room:close-times-out' })
+        const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+        room.onClose(() => {
+          if (removes) stop()
+          return new Promise<void>(() => {})
+        })
+        await room.close({ timeout: 10 })
+        const ended = await room.closed.catch((err: unknown) => err)
+        expect(ended).toMatchObject({ message: 'Channel close timed out' })
+        expect(
+          await stop.ready.then(
+            () => 'resolved',
+            (err: unknown) => err,
+          ),
+        ).toBe(ended)
+      })
+    }
 })
 
 describe('Broadcast disallows channel methods', () => {

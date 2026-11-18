@@ -87,8 +87,11 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       }),
     }
     this._end.onClose(() => {
-      // Ahead of clearing its subscribers, which settles their `ready` as removed: those still waiting get the end.
-      this.failWaiting()
+      // What waits gets the end the close ends with, once that is decided: one its close callbacks removed too.
+      void this._end.closed.then(
+        () => this.failWaiting(),
+        () => this.failWaiting(),
+      )
       for (const route of Object.values(this.routes)) route.close()
       this.subscribers.text.clear()
       this.subscribers.binary.clear()
@@ -237,8 +240,11 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const remove = this.subscribers[kind].add(callback, {
       ...options,
       onRemove: () => {
-        this.waiting[kind].delete(readiness)
-        readiness.settle(true)
+        // Once its close callbacks ran, one that waits gets the end, whatever they do.
+        if (!this._end._closeFired) {
+          this.waiting[kind].delete(readiness)
+          readiness.settle(true)
+        }
         this.syncSubscription(kind)
       },
     })
@@ -320,12 +326,6 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       return Promise.reject(err)
     }
     return on ? this.routes[kind].ready : undefined
-  }
-
-  /** @internal `BroadcastEndOwner`: ahead of its close callbacks, one of which may remove a subscriber that waits: that
-   *  one gets the end. */
-  _closing(): void {
-    this.failWaiting()
   }
 
   /** @internal `BroadcastEndOwner`: the kind `stream` is of, or either kind without one. */

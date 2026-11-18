@@ -199,6 +199,32 @@ describe("a page's broadcast that ends while a subscriber waits, its `onClose()`
   }
 })
 
+// Its close's outcome is decided after its callbacks start: here the cleanup one of them runs outlasts the close.
+describe("a page's broadcast whose close, asked by the server, times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
+  for (const binary of [false, true])
+    for (const removes of [false, true]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+        const page = new ClientBroadcast(channelOptions())
+        const stop = binary ? page.subscribeBinary(() => {}) : page.subscribe(() => {})
+        page.onClose(() => {
+          if (removes) stop()
+          return new Promise<void>(() => {})
+        })
+        page._dispatchFrame(received(encode.close(0, 10, 1)))
+        // This file's timers are fake: the close runs out once 10 ms pass.
+        await vi.advanceTimersByTimeAsync(10)
+        const ended = await page.closed.catch((err: unknown) => err)
+        expect(ended).toMatchObject({ message: 'Channel close timed out' })
+        expect(
+          await stop.ready.then(
+            () => 'resolved',
+            (err: unknown) => err,
+          ),
+        ).toBe(ended)
+      })
+    }
+})
+
 // A call carries each want the server hasn't confirmed yet, and none of a channel once it confirmed them or ended.
 it("a call carries the page's wants the server hasn't confirmed", () => {
   const page = new ClientBroadcast(channelOptions())

@@ -36,8 +36,6 @@ type BroadcastEndOwner = {
    *  server hasn't confirmed them. The page learns it is in effect, and such a call goes on, once what it returns
    *  settles; where that rejects, the broadcast ends with the page told its subscription didn't take effect. */
   _onPageSubscription?(kind: BroadcastKind, on: boolean): Promise<void> | void
-  /** Ahead of its close callbacks. */
-  _closing?(): void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
   /** Whether its page reads the publishes of `stream`; without one, whether it reads any. Left out, it reads them all. */
@@ -320,9 +318,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.releaseCallWaits()
   }
 
-  /** @internal */
-  override _closing(): void {
-    this.owner?._closing?.()
+  /** @internal Its close callbacks have been called. */
+  get _closeFired(): boolean {
+    return this.lifecycle.closeFired
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {

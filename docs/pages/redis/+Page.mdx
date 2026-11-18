@@ -53,9 +53,9 @@ Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `pu
 
 ## Errors
 
-While Redis is unreachable, a new subscription waits, and so does its `ready`. The subscription fails when Redis refuses it, or when ioredis gives up on its `SUBSCRIBE` command. With ioredis's default `maxRetriesPerRequest` of 20, that takes about 10 s where each connection is refused at once. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes: on the server with the error, and on its page with a `ChannelClosedError` that says its subscription didn't take effect. The `ready` of a `Broadcast.subscribe()` rejects with the error.
+While Redis is unreachable, a new subscription waits, and so does its `ready`. The subscription fails when Redis refuses it, or when ioredis gives up on its `SUBSCRIBE` command. With ioredis's default `maxRetriesPerRequest` of 20, that takes about 10 s where each connection is refused at once. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes: on the server with an error whose `cause` is Redis's, and on its page with a `ChannelClosedError` that says its subscription didn't take effect. The `ready` of a `Broadcast.subscribe()` rejects with that error, and the subscriber subscribes once more.
 
-> After a `Broadcast.subscribe()` fails, the server's `publish()` calls to that key fail with the same error until you call the function that unsubscribes. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. Publishes to other keys go on.
+> A `publish()` the server makes to a key while its subscription to that key's text messages is new waits for it, and fails with Redis's error where Redis refuses it: the server's own subscribers would miss it. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. A publish made once the failed subscription is over goes out, and so do publishes of the key's other kind and to other keys.
 
 ## Channels
 
