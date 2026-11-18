@@ -29,8 +29,9 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
 
 /** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
  *  is returned; else that function as `unsubscribe`, with `ready`, which resolves once the listener gets what any server
- *  publishes to its key and rejects where it never will: its subscribers' `ready` then rejects with that error, and a
- *  `BroadcastChannel` closes with it. */
+ *  publishes to its key and rejects where it never will: its server subscribers' `ready` then rejects with that error,
+ *  and a `BroadcastChannel` closes with it on the server, its page getting a `ChannelClosedError` that says its
+ *  subscription didn't take effect. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 /** A `BroadcastUnsubscribe` in one form: `ready` is undefined where the listener is in effect already, else the one

@@ -671,7 +671,8 @@ type BroadcastChannel<T = unknown> = {
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
   /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
    *  publishes to the key (`ready`): while the broadcast backend is unreachable, that waits, and where the backend gives
-   *  it up, the broadcast ends with its error. A telefunction the page calls after `subscribe()` runs once the
+   *  it up, the broadcast ends: with its error on the server, and on its page with a `ChannelClosedError` that says its
+   *  subscription didn't take effect. A telefunction the page calls after `subscribe()` runs once the
    *  subscription is in effect, or once the broadcast ended.
    *
    *  https://telefunc.com/channel#chat-example */
