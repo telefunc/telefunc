@@ -98,6 +98,18 @@ test("a call that names another session's broadcast changes nothing", async () =
   page.broadcast.abort()
 })
 
+// A want reaches only a broadcast that a call of its own session returned: two calls that name no session are not one
+// session, so neither changes the other's broadcast.
+test('a call without a session token applies no want to any channel, though the broadcast came from a call without one', async () => {
+  const page = attachedBroadcast('session-a')
+  const tokenless = () => new Request('https://example.test/_telefunc', { method: 'POST' })
+  page.end._callRequest = tokenless()
+  expect(getChannelMux().applyCallWants(tokenless(), [{ channel: page.broadcast.id, ...on(1) }])).toBe(undefined)
+  expect(await page.hears()).toBe(false)
+  expect(page.wanted()).toEqual([])
+  page.broadcast.abort()
+})
+
 test('a call of a session that names a broadcast no session holds changes nothing', async () => {
   const page = attachedBroadcast('session-a')
   const call = [{ channel: crypto.randomUUID(), ...on(1) }]
