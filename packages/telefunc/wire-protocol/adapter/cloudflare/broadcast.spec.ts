@@ -819,7 +819,7 @@ describe('cloudflare broadcast routing', () => {
       await expect(subscriber.ready).rejects.toThrow('KV binding invocation failed')
       // A publish from here waits for the presence writes in flight here.
       const published = await Promise.race([
-        inObject(() => Broadcast.publish('room:test', 'hello')).then(() => 'published'),
+        Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).then(() => 'published'),
         new Promise((resolve) => setTimeout(() => resolve('held'), 1_000)),
       ])
       expect(published).toBe('published')
