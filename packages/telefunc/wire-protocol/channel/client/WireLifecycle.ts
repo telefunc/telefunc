@@ -430,6 +430,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
         break
       case 'flipped':
+        // The barrier is the WebSocket's RECONCILE: it beats from here, as any wire does from its RECONCILE, and the
+        // server, which judges it from the barrier on, hears from the page while its RECONCILED is on the way.
+        this.liveness.beatFromReconcile(this.transport, this.exchange.sessionId)
         for (const frame of end.completion) this.applyCompletionFrame(frame)
         this.releaseJoin(this.upgrade.tryComplete())
         break
@@ -468,6 +471,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private fallbackToSse(err: Error): void {
     if (this.closed) return
     const abandoned = this.upgrade.abandon()
+    this.transport.detachHeartbeat()
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
