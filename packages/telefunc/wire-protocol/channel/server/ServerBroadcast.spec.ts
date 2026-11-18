@@ -1059,6 +1059,42 @@ describe("a transport's listener whose broker refuses it", () => {
     }
   }
 
+  // A monitoring client an app reports bugs to may fail on its own.
+  for (const fails of ['throws', 'returns a rejected promise'] as const) {
+    it(`a refusal reported to an \`onBug()\` listener that ${fails} still rejects the subscriber's \`ready\`, the listener's failure logged, not left unhandled`, async () => {
+      const monitoringFailed = new Error('monitoring client failed')
+      failingBugListener =
+        fails === 'throws'
+          ? () => {
+              throw monitoringFailed
+            }
+          : () => Promise.reject(monitoringFailed)
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        const { refuse } = refusingBroker()
+        const subscriber = Broadcast.subscribe('room:failing-monitoring', () => {})
+        refuse()
+        const cause = await subscriber.ready.then(
+          () => 'resolved',
+          (err: unknown) => err instanceof Error && err.cause instanceof Error && err.cause.message,
+        )
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect({
+          cause,
+          unhandled,
+          logged: logged.mock.calls.some(([error]) => String(error).includes('monitoring client failed')),
+        }).toEqual({ cause: 'NOPERM', unhandled: [], logged: true })
+      } finally {
+        failingBugListener = undefined
+        process.off('unhandledRejection', onUnhandled)
+        logged.mockRestore()
+      }
+    })
+  }
+
   for (const refusesInListen of [false, true]) {
     it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
       const broker = reservingBroker(refusesInListen)
@@ -1078,6 +1114,9 @@ describe("a transport's listener whose broker refuses it", () => {
 /** The failures the server reported through `onBug()`, by the message of their cause. */
 const reported: string[] = []
 onBug((err) => reported.push(err instanceof Error && err.cause instanceof Error ? err.cause.message : String(err)))
+/** What an `onBug()` listener a test sets does with each bug: throw, or return a promise that rejects. */
+let failingBugListener: (() => unknown) | undefined
+onBug(() => failingBugListener?.())
 
 /** Ready at once, as a memory subscription is, until the test loses it or ends it, as a backend does that loses its
  *  connection or whose renewal is refused. */
