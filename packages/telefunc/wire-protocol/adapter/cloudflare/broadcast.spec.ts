@@ -553,9 +553,10 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, presences, inObject } = worker()
         state.fail = transient(true)
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        const ready = outcome(subscriber.ready)
+        let ready = 'pending'
+        void outcome(subscriber.ready).then((settled) => (ready = settled))
         await vi.advanceTimersByTimeAsync(30_000)
-        expect({ ready: await ready, written: presences.length }).toEqual({
+        expect({ ready, written: presences.length }).toEqual({
           ready: 'Durable Object is overloaded or reset',
           written: 1,
         })
