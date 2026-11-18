@@ -472,6 +472,21 @@ describe("a static subscriber's `ready` once its backend refused the key's subsc
         await expect(ready).rejects.toThrow('NOPERM')
       })
     }
+    it(`${name}: a refusal nobody reads makes no unhandled rejection`, async () => {
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        refusing()
+        const remove = subscribe()
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        remove()
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect(unhandled).toEqual([])
+      } finally {
+        process.off('unhandledRejection', onUnhandled)
+      }
+    })
   }
 })
 
