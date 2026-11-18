@@ -46,9 +46,82 @@ for (const [ending, { listen, pastLimit }] of Object.entries(ENDINGS)) {
   })
 }
 
+// A page's subscription that took effect stays one that did when `config.broadcast.transport` is replaced under it.
+for (const kind of ['text', 'binary'] as const) {
+  const ENDED = 'its subscription was in effect on the server until its backend ended it'
+  const NOT_IN_EFFECT = 'its subscription did not take effect on the server'
+  for (const [before, outcome] of [
+    ['took effect and heard a publish', ENDED],
+    ['never took effect', NOT_IN_EFFECT],
+  ] as const) {
+    test(`${kind}: a page whose subscription ${before} gets "${outcome}" where a transport that replaced its own refuses it`, async () => {
+      const heard: string[] = []
+      const page = await subscribedPage(kind, heard)
+      const wanted = await broadcastWantedBy(page, kind, before === 'never took effect')
+      if (before !== 'never took effect') {
+        await wanted.inEffect
+        await (kind === 'text'
+          ? wanted.broadcast.publish('live')
+          : wanted.broadcast.publishBinary(new TextEncoder().encode('live')))
+        await vi.waitFor(() => expect(heard).toEqual(['live']))
+      }
+      const refused = () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: replacement refused')) })
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen: refused, listenBinary: refused })
+      const given = await page.given()
+      expect(given.onClose).toBeInstanceOf(ChannelClosedError)
+      expect(given.onClose instanceof Error && given.onClose.message).toContain(outcome)
+    })
+  }
+}
+
+/** A broadcast whose call carries `page`'s subscription of `kind`, on a transport that delivers each publish at once and
+ *  confirms each listener at once, or never where `held`; what the server sends the page reaches it as sent. */
+async function broadcastWantedBy(
+  page: Awaited<ReturnType<typeof subscribedPage>>,
+  kind: 'text' | 'binary',
+  held: boolean,
+) {
+  const listeners = new Set<(payload: never, info: { seq: number; timestamp: number }) => void>()
+  let seq = 0
+  const listen = (_key: string, onMessage: (payload: never, info: { seq: number; timestamp: number }) => void) => {
+    listeners.add(onMessage)
+    const unsubscribe = () => void listeners.delete(onMessage)
+    return held ? { unsubscribe, ready: new Promise<void>(() => {}) } : unsubscribe
+  }
+  const send = (_key: string, payload: never) => {
+    const info = { seq: ++seq, timestamp: 1 }
+    for (const onMessage of listeners) onMessage(payload, info)
+    return info
+  }
+  configureBroadcastTransport({ send, sendBinary: send, listen, listenBinary: listen })
+  const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+  const end = broadcast._end
+  const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
+  end._callRequest = call
+  getChannelMux().registerChannel(end)
+  const sender: PeerSender = {
+    send: (frame) => page.receive(new Uint8Array(frame)),
+    carry() {},
+    bufferedAmount: () => 0,
+    behindAfter: () => Number.POSITIVE_INFINITY,
+    deliveredBefore: () => 0,
+    sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+    terminate() {},
+  }
+  const replay = end._replayBuffer
+  if (!replay) throw new Error('A registered broadcast has its replay')
+  end._attachPeer(new IndexedPeer({ sender, index: page.index, replay }), {})
+  const inEffect = getChannelMux().applyCallWants(call, [
+    { channel: broadcast.id, version: 1, text: kind === 'text', binary: kind === 'binary' },
+  ])
+  return { broadcast, inEffect }
+}
+
 /** A page's broadcast, subscribed, on an SSE wire this test serves once it reconciled: `receive()` hands it a frame the
  *  server sent, and `given()` is what its `ready` rejects with and its `onClose()` callback gets. */
-async function subscribedPage() {
+async function subscribedPage(kind: 'text' | 'binary' = 'text', heard: string[] = []) {
   const reconciled = createDeferred<{ index: number; push: (frame: Uint8Array<ArrayBuffer>) => void }>()
   vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
     const { streamResponse, frames } = await batchOf(init.body)
@@ -79,7 +152,10 @@ async function subscribedPage() {
     },
   })
   const onClose = new Promise<unknown>((resolve) => page.onClose(resolve))
-  const subscription = page.subscribe(() => {})
+  const subscription =
+    kind === 'text'
+      ? page.subscribe((message) => heard.push(String(message)))
+      : page.subscribeBinary((data) => heard.push(new TextDecoder().decode(data)))
   const { index, push } = await reconciled.promise
   return {
     index,

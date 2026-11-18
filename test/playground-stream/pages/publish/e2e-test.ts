@@ -698,7 +698,8 @@ function testSubscribeOrder(inDocker = false) {
       )
       if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
       expectServerError('NOPERM', inDocker)
-      expectLog('Redis subscriber connection closed')
+      // The dropped connection is logged with the error its socket reported, if any: over a Unix socket, `write EPIPE`.
+      expectLog(/Redis subscriber connection closed|\bE(PIPE|CONNRESET)\b/)
     })
   }
 

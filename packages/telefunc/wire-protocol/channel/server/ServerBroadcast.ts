@@ -529,6 +529,8 @@ class RouteSubscription<Kind extends BroadcastKind> {
   private current: BackendSubscription | null = null
   /** The start of `current`, until it took effect; null once it did. */
   private start: Readiness | null = null
+  /** Whether it took effect since it opened, on any plane: a plane that replaced its own may still refuse it. */
+  private everInEffect = false
 
   constructor({ route, receiver, onReady, onFailed, onEnded }: RouteSubscriptionOptions<Kind>) {
     this.route = route
@@ -556,17 +558,22 @@ class RouteSubscription<Kind extends BroadcastKind> {
   }
 
   close(): void {
+    this.everInEffect = false
+    this.stop()
+  }
+
+  /** Subscribes on the plane that replaced this subscription's. */
+  planeReplaced(): void {
+    this.stop()
+    this.open()
+  }
+
+  private stop(): void {
     this.opened = false
     unfollowBroadcastPlane(this)
     const current = this.current
     this.current = null
     void current?.unsubscribe()
-  }
-
-  /** Subscribes on the plane that replaced this subscription's. */
-  planeReplaced(): void {
-    this.close()
-    this.open()
   }
 
   /** On the plane in effect now; the subscription keeps its own handle. */
@@ -590,6 +597,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
     const tookEffect = () => {
       if (wasReady || this.current !== subscription) return
       wasReady = true
+      this.everInEffect = true
       this.start = null
       start.settle(true)
       this.onReady()
@@ -601,9 +609,10 @@ class RouteSubscription<Kind extends BroadcastKind> {
         await subscription.ready
       } catch (err) {
         if (this.current !== subscription) return
+        const wasInEffect = this.everInEffect
         this.close()
         const failure = err instanceof Error ? err : new Error(String(err))
-        if (wasReady) return this.onEnded(failure)
+        if (wasInEffect) return this.onEnded(failure)
         start.settle(failure)
         this.onFailed(failure)
       }

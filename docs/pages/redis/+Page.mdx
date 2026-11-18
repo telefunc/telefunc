@@ -53,7 +53,13 @@ Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `pu
 
 ## Errors
 
-While Redis is unreachable, a new subscription waits, and so does its `ready`; a subscription in effect is renewed once Redis is back. A subscription fails when Redis refuses it (`NOPERM`, from its ACL), also when it renews one that was in effect. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes: on the server with an error whose `cause` is Redis's, and on its page with a `ChannelClosedError` that says its subscription didn't take effect, or, where it was in effect, that its backend ended it. A `Broadcast.subscribe()` is removed: its `ready` rejects with that error if it hadn't resolved yet, and the server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. It stays removed once Redis allows the key again: subscribe again.
+While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
+
+A subscription fails when Redis refuses it with `NOPERM` (from its ACL): when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows the key again, so subscribe again once you have restored the key's access.
+
+> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error's `cause` is Redis's error. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `ready` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
+
+> A `Broadcast.subscribe()` is removed, and its callback receives nothing more. If its `ready` hadn't resolved, it rejects with an error whose `cause` is Redis's error. Call `Broadcast.subscribe()` again.
 
 > A `publish()` the server makes to a key while its subscription to that key's text messages is new waits for it, and fails with Redis's error where Redis refuses it: the server's own subscribers would miss it. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. A publish made once the failed subscription is over goes out, and so do publishes of the key's other kind and to other keys.
 
