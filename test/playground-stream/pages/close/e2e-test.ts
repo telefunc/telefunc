@@ -231,7 +231,7 @@ function testClose(inDocker = false) {
     await autoRetry(async () => {
       expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
     })
-    expectServerError('Could not release the lock', inDocker)
+    await expectServerError('Could not release the lock', inDocker)
   })
 
   // ── context.onClose waits for channel to close ───────────────────────

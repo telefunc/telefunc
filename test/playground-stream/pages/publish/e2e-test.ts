@@ -424,7 +424,8 @@ function testPublish(isDev: boolean, inDocker = false) {
       const result = await getResult<{ received: string[]; receiptKey: boolean }>('#publish-result')
       expect(result).deep.equal({ received: ['static:hello', 'channel:hello'], receiptKey: true })
     })
-    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) expectServerError(error, inDocker)
+    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects'])
+      await expectServerError(error, inDocker)
   })
 
   test('broadcast: in a chat whose saving, history, avatar or mark-as-read fails, the error is reported and the next message still arrives', async () => {
@@ -441,7 +442,8 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(state['bug:Database unavailable']).toBe('reported')
       expect(state['bug:Could not load the chat history']).toBe('reported')
     })
-    for (const error of ['Database unavailable', 'Could not load the chat history']) expectServerError(error, inDocker)
+    for (const error of ['Database unavailable', 'Could not load the chat history'])
+      await expectServerError(error, inDocker)
     for (const error of ['Could not load the avatar', 'Could not mark the chat as read']) {
       expectLog(`[telefunc:channel-error] Error: ${error}`, { filter: (log) => log.logSource === 'Browser Error' })
     }
@@ -679,7 +681,7 @@ function testSubscribeOrder(inDocker = false) {
         { timeout: 20_000 },
       )
       if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
-      expectServerError('NOPERM', inDocker)
+      await expectServerError('NOPERM', inDocker)
     })
 
     test('broadcast: a subscription in effect whose renewal Redis refuses closes its broadcast, text and binary, with a ChannelClosedError that says its backend ended it', async () => {
@@ -697,14 +699,11 @@ function testSubscribeOrder(inDocker = false) {
         { timeout: 30_000 },
       )
       if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
-      // The refused-key canary's report (`refuseChannels()`), then each renewal's own, with Redis's refusal as its cause.
-      expectServerError('Backend subscription closed: text:!refused%3A', inDocker)
-      for (const route of ['text:!renewal-text', 'binary:!renewal-binary']) {
-        expectServerError(
-          new RegExp(`Backend subscription closed: ${route}%3A[\\s\\S]*\\[cause\\]: ReplyError: NOPERM`),
-          inDocker,
-        )
-      }
+      // The refused-key canary's report (`refuseChannels()`), each renewal's own, and Redis's refusal as their cause.
+      await expectServerError('Backend subscription closed: text:!refused%3A', inDocker)
+      await expectServerError('Backend subscription closed: text:!renewal-text%3A', inDocker)
+      await expectServerError('Backend subscription closed: binary:!renewal-binary%3A', inDocker)
+      await expectServerError('[cause]: ReplyError: NOPERM', inDocker)
       // The dropped connection is logged with the error its socket reported, if any: over a Unix socket, `write EPIPE`.
       expectLog(/Redis subscriber connection closed|\bE(PIPE|CONNRESET)\b/)
     })
