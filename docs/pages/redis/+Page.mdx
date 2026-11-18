@@ -51,6 +51,12 @@ Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other p
 
 Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `publishBinary()` over that rejects with `ChannelOverflowError`. Telefunc chose this ceiling because, at its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection of a server it sends a larger message (measured on Redis 7.4). Raising those limits doesn't lift the ceiling.
 
+## Errors
+
+While Redis is unreachable, a new subscription waits, and so does its `ready`. The subscription fails when Redis refuses it, or when ioredis gives up on its `SUBSCRIBE` command. With ioredis's default `maxRetriesPerRequest` of 20, that takes about 10 s where each connection is refused at once. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> then closes: on the server with an error whose `cause` is Redis's, and on its page with a `ChannelClosedError` that says its subscription didn't take effect. The `ready` of a `Broadcast.subscribe()` rejects with that error, and the subscriber subscribes once more.
+
+> A `publish()` the server makes to a key while its subscription to that key's text messages is new waits for it, and fails with Redis's error where Redis refuses it: the server's own subscribers would miss it. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. A publish made once the failed subscription is over goes out, and so do publishes of the key's other kind and to other keys.
+
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.

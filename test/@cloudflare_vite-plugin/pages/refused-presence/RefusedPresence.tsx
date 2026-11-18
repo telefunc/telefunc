@@ -5,16 +5,17 @@ import { onPublish, onSubscribe } from './RefusedPresence.telefunc'
 
 function RefusedPresence() {
   const [key] = useState(() => `refused-presence:${Math.random()}`)
-  const [state, setState] = useState<{ published: boolean; received: string[] | null }>({
+  const [state, setState] = useState<{ published: boolean; ready: string | null; received: string[] | null }>({
     published: false,
+    ready: null,
     received: null,
   })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
 
   const subscribe = async () => {
-    await onSubscribe(key)
-    setState((s) => ({ ...s, published: true }))
+    const { ready } = await onSubscribe(key)
+    setState((s) => ({ ...s, published: true, ready }))
   }
 
   const publish = async () => {

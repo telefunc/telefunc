@@ -35,7 +35,7 @@ function subscribedPage(key: string) {
   broadcast._end._attachPeer(
     new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._end._replayBuffer! }),
     {
-      broadcast: { text: true, binary: false },
+      want: { version: 1, text: true, binary: false },
     },
   )
   return broadcast
@@ -47,7 +47,7 @@ test("a reliable broadcast near the budget stays open when another channel's tex
   broadcast._end._attachPeer(
     new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._end._replayBuffer! }),
     {
-      broadcast: { text: true, binary: false },
+      want: { version: 1, text: true, binary: false },
     },
   )
   const channel = new ServerChannel<never, string>()

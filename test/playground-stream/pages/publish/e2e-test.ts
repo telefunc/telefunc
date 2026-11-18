@@ -1,4 +1,4 @@
-export { testPublish, testPublishHold, testPublishFailingBackend }
+export { testPublish, testPublishHold, testPublishFailingBackend, testSubscribeOrder }
 
 import type { ConsoleMessage, WebSocket } from 'playwright-chromium'
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
@@ -15,7 +15,9 @@ import {
   serverHeapUsed,
   serverRuntime,
   expectServerError,
+  REDIS_TOOK_REFUSED_KEY,
 } from '../../e2e-utils'
+import { newCDPSession } from '../../../utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -48,6 +50,8 @@ function consecutive(first: number): number[] {
 function testPublish(isDev: boolean, inDocker = false) {
   const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
   const transport = transports.at(-1)
+
+  testSubscribeOrder(inDocker)
 
   test('broadcast: a messages() loop that falls 2 MiB behind a busy broadcast ends with ChannelOverflowError, on the page and on the server, and the page is sent nothing published after', async () => {
     let wsBytes = 0
@@ -568,13 +572,13 @@ function testPublish(isDev: boolean, inDocker = false) {
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
 function testPublishFailingBackend() {
-  test('broadcast: a subscribe the store refuses is reported once, and the channel subscribes again', async () => {
+  test("broadcast: a subscribe the store refuses is reported once, and ends its server-side channel, so the subscriber's `ready` rejects", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await failBackend({ op: 'subscribe', key: 'room:subscribe-refused:' })
     await page.click('#test-subscribe-refused')
 
     await autoRetry(async () => {
-      expect(await getResult('#publish-result')).deep.equal({ seen: ['first:1'] })
+      expect(await getResult('#publish-result')).deep.equal({ ready: 'rejected', closed: 'rejected' })
     })
     expectLog('Backend subscription closed: text:room%3Asubscribe-refused%3A', {
       filter: (log) => log.logSource === 'stderr',
@@ -640,5 +644,82 @@ function testPublishHold() {
         seen: ['1', '2', '3'],
       })
     })
+  })
+}
+
+/** When a page's subscription takes effect. */
+function testSubscribeOrder(inDocker = false) {
+  // On SSE alone, over HTTP/1.1, the page holds the POST that carries its subscription (Publish.tsx `holdsPosts()`).
+  const sseOnly = JSON.stringify(JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+  const holdsPosts = () => sseOnly && getServerUrl().startsWith('http:')
+
+  test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-subscribe-again')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({ first: [], second: ['after-subscribe-again'] })
+      },
+      { timeout: 20_000 },
+    )
+  })
+
+  // On Redis: the Docker suite and a lane with REDIS_URL.
+  if (inDocker || process.env.REDIS_URL) {
+    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `ready` rejects", async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-refused')
+      let refuses = true
+      await autoRetry(
+        async () => {
+          const result = await getResult('#publish-result')
+          refuses = result.refusesChannels !== false
+          if (refuses) expect(result).deep.equal({ ready: 'rejected', closed: 'with an error', received: [] })
+        },
+        { timeout: 20_000 },
+      )
+      if (!refuses) throw new Error(REDIS_TOOK_REFUSED_KEY)
+      expectServerError('NOPERM', inDocker)
+    })
+  }
+
+  test("broadcast: a subscription is in effect for the telefunction call the page makes right after it, on a slow page too, and on SSE while the server holds the page's POST that carries it", async () => {
+    const cdp = await newCDPSession()
+    // A slow page's wire declares the subscription late, which a call made right after it doesn't wait for.
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 6 })
+    try {
+      for (let run = 0; run < 4; run++) {
+        await navigate(`${getServerUrl()}/publish`)
+        await page.click('#test-broadcast-subscribe-then-call')
+        await autoRetry(
+          async () => {
+            expect(await getResult('#publish-result')).deep.equal({
+              received: ['after-subscribe'],
+              held: holdsPosts() ? 1 : null,
+            })
+          },
+          { timeout: 20_000 },
+        )
+      }
+    } finally {
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 })
+      await cdp.detach()
+    }
+  })
+
+  test("broadcast: a subscriber's `ready` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `ready` rejects with the error its broadcast ends with first", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-ready')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#publish-result')).deep.equal({
+          readyWhileHeld: holdsPosts() ? 'pending' : null,
+          held: holdsPosts() ? 1 : null,
+          received: ['from a server action'],
+          abortedReady: 'Abort',
+        })
+      },
+      { timeout: 20_000 },
+    )
   })
 }

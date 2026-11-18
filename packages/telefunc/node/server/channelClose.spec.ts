@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest'
 
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
+
 import { ServerReplay } from '../../wire-protocol/channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type AckResultStatus, type ChannelFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
@@ -7,6 +10,8 @@ import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolati
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { createDeferred } from '../../utils/createDeferred.js'
+import { createRequestContext } from './context/requestContext.js'
+import { carryChannel } from './runTelefunc/carryChannel.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
@@ -578,3 +583,38 @@ describe('a listen() callback that an earlier one stopped during the same messag
     expect(asked).toEqual([])
   })
 })
+
+// A host's request may reach back to what its call returned: srvx's on Node.js builds an undici Request on its own signal,
+// which undici's FinalizationRegistry holds until that Request is collected, and the close that ends the call aborts that
+// signal's request context with an error whose stack holds the channel.
+describe("a channel a call returned, once its page closed it, isn't kept by its call's request", () => {
+  setFlagsFromString('--expose-gc')
+  const gc: () => void = runInNewContext('gc')
+
+  test('one the call returned', async () => {
+    const channel = closedByItsPage()
+    // Read only once collected: a WeakRef read keeps what it refers to till the end of that job.
+    for (let i = 0; i < 4; i++) {
+      gc()
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(channel.deref()).toBe(undefined)
+  })
+})
+
+/** A request as srvx's on Node.js: an undici Request of its own on its signal. */
+class HostRequest extends Request {
+  readonly native = new Request(this.url, { signal: this.signal })
+}
+
+/** A channel a call returned, and the page closed once the call was over. */
+function closedByItsPage(): WeakRef<ServerChannel> {
+  const requestContext = createRequestContext(new HostRequest('http://test.local/_telefunc'))
+  const channel = new ServerChannel({ id: crypto.randomUUID() })
+  carryChannel(channel, requestContext)
+  channel._attachPeer(createPeer([]))
+  requestContext.markComplete()
+  fromPage(channel, []).closeRequest(100)
+  expect(channel._phase).toBe('ended')
+  return new WeakRef(channel)
+}

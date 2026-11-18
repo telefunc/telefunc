@@ -8,6 +8,7 @@ import type { RequestContext } from '../context/requestContext.js'
 function carryChannel(channel: ServerChannel<any, any>, requestContext: RequestContext): void {
   // Wired first: registering attaches a page that waits for the channel, which runs its `onOpen` callbacks.
   channel._setResponseAbort(requestContext.responseAbort.abort)
+  channel._callRequest = requestContext.request
   getChannelMux().registerChannel(channel)
   channel.onClose(requestContext.trackPending())
 }

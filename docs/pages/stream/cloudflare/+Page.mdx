@@ -31,11 +31,12 @@ export default {
 ```
 
 {/* spellcheck-ignore:on */}
+
 ```jsonc
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_als (or nodejs_compat): Broadcast and Room need it.
+  // nodejs_als (or nodejs_compat): Room, and server code that subscribes to a broadcast, need it.
   // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
@@ -48,6 +49,9 @@ export default {
   ]
 }
 ```
+
+> `nodejs_als` (or `nodejs_compat`, which includes it) is needed only when your server code subscribes to a broadcast. Without it, `Broadcast.subscribe()` throws an error that names the flag. So does `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
+
 {/* spellcheck-ignore:off */}
 
 > `enable_request_signal` is what lets <Link href="/onClose#context-signal">`context.signal` and `onClose()`</Link> see a client that disconnects before its telefunction answers.
@@ -202,6 +206,7 @@ A Durable Object registers with the authority on its first subscription to a key
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order, which is call order for the publishes of one Durable Object's telefunctions and channel handlers. |
 | Delivery | `publish()` resolves once the message has reached every Durable Object with subscribers. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
+| Refused presence | If the key's authority doesn't store a Durable Object's first presence for a key, the server-side `ready` of its subscribers to the key rejects with an error whose `cause` is the authority's. A `BroadcastChannel` closes, and its page's `ready` and `onClose()` get a `ChannelClosedError` that says its subscription didn't take effect. A `Broadcast.subscribe()` stays subscribed: Telefunc registers its presence again, and its `ready` stays rejected. The refusal doesn't fail publishes to the key, unlike <Link href="/redis#errors">on Redis</Link>. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 

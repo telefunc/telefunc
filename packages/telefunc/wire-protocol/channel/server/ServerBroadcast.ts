@@ -14,7 +14,7 @@ import type {
   ChannelPublishInfo,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { stringifyMessage } from '../channel.js'
+import { Readiness, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { binaryData, binaryPayload, isLossy, textPayload } from '../broadcastPayload.js'
@@ -41,7 +41,6 @@ import { isAbort } from '../../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
-type BroadcastUnsubscribe = () => void
 
 class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   readonly [SERVER_BROADCAST_BRAND] = true
@@ -61,6 +60,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
+  /** What waits for each kind's subscription to take effect: its subscribers' and its page's. */
+  private readonly waiting: Record<BroadcastKind, Set<Readiness>> = { text: new Set(), binary: new Set() }
   /** The stream of each kind's lossy publishes: a text message doesn't take a binary one's place. */
   private readonly streams: Record<BroadcastKind, string>
 
@@ -75,13 +76,22 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       text: new RouteSubscription({
         route: { key: this.key, kind: 'text' },
         receiver: (payload, rawInfo) => this.deliverBroadcastMessage(payload, rawInfo),
+        onReady: () => settleAll(this.waiting.text, true),
+        onFailed: (err) => this._end.endNotInEffect(err),
       }),
       binary: new RouteSubscription({
         route: { key: this.key, kind: 'binary' },
         receiver: (payload, rawInfo) => this.deliverBroadcastBinaryMessage(payload, rawInfo),
+        onReady: () => settleAll(this.waiting.binary, true),
+        onFailed: (err) => this._end.endNotInEffect(err),
       }),
     }
     this._end.onClose(() => {
+      // What waits gets the end the close ends with, once that is decided: one its close callbacks removed too.
+      void this._end.closed.then(
+        () => this.failWaiting(),
+        () => this.failWaiting(),
+      )
       for (const route of Object.values(this.routes)) route.close()
       this.subscribers.text.clear()
       this.subscribers.binary.clear()
@@ -134,7 +144,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this.publishTracked('text', textPayload(stringifyMessage(data, 'publish'), options?.lossy))
   }
 
-  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
+  /** In effect once its backend delivers what any server publishes to the key. */
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
     return this.subscribeKind('text', callback, options)
   }
 
@@ -142,7 +153,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this.publishTracked('binary', binaryPayload(data, options?.lossy))
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
     return this.subscribeKind('binary', callback, options)
   }
 
@@ -212,14 +223,58 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
 
   // --- Internal broadcast helpers ---
 
+  /** Its `ready` settles as a page's does: once the backend delivers to it what any server publishes to the key, or once
+   *  it is removed, and it rejects where the broadcast ends first. One added to a closed broadcast whose kind isn't in
+   *  effect never takes effect. */
   private subscribeKind<K extends BroadcastKind>(
     kind: K,
     callback: BroadcastListenerByKind<T>[K],
     options: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
-    if (options.signal?.aborted) return () => {}
-    if (!this._end.isClosed) this.routes[kind].open()
-    return this.subscribers[kind].add(callback, { ...options, onRemove: () => this.syncSubscription(kind) })
+  ): Unsubscribe {
+    if (options.signal?.aborted) return withReady(() => {})
+    const route = this.routes[kind]
+    if (this._end.isClosed && !route.inEffect) return neverInEffect(this._end._endError())
+    // Both before its backend starts: it may deliver a message before its subscribe returns, which the listener hears,
+    // and to which a listener may end the broadcast, which settles what waits with that end.
+    const readiness = this.waitFor(kind)
+    const remove = this.subscribers[kind].add(callback, {
+      ...options,
+      onRemove: () => {
+        // Once its close callbacks ran, one that waits gets the end, whatever they do.
+        if (!this._end._closeFired) {
+          this.waiting[kind].delete(readiness)
+          readiness.settle(true)
+        }
+        this.syncSubscription(kind)
+      },
+    })
+    if (!this._end.isClosed) this.openRoute(kind, remove)
+    return withReady(remove, readiness)
+  }
+
+  /** What waits for `kind`'s subscription to take effect, settled at once where it is in effect. */
+  private waitFor(kind: BroadcastKind): Readiness {
+    const readiness = new Readiness()
+    if (this.routes[kind].inEffect) readiness.settle(true)
+    else this.waiting[kind].add(readiness)
+    return readiness
+  }
+
+  /** Where it throws (outside a Cloudflare session), it keeps no subscriber of the call that threw. */
+  private openRoute(kind: BroadcastKind, remove: () => void): void {
+    try {
+      this.routes[kind].open()
+    } catch (err) {
+      remove()
+      throw err
+    }
+  }
+
+  /** Its subscribers and its page waiting for their subscription to take effect get its end. */
+  private failWaiting(): void {
+    const endError = this._end._endError()
+    settleAll(this.waiting.text, endError)
+    settleAll(this.waiting.binary, endError)
   }
 
   private syncSubscription(kind: BroadcastKind): void {
@@ -258,10 +313,19 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     return this.publishPayload('binary', data)
   }
 
-  /** @internal */
-  _onPageSubscription(kind: BroadcastKind, on: boolean): void {
+  /** @internal `BroadcastEndOwner`: in effect once its kind's backend subscription is, at once to leave it. One its
+   *  backend refuses at once fails as one it gives up later does. */
+  _onPageSubscription(kind: BroadcastKind, on: boolean): Promise<void> | undefined {
     this.peerSubscriptions[kind] = on
-    this.syncSubscription(kind)
+    if (!on) this._end._dropHeldOf(kind)
+    try {
+      this.syncSubscription(kind)
+    } catch (err) {
+      if (!on) throw err
+      handleCallbackBug(err)
+      return Promise.reject(err)
+    }
+    return on ? this.routes[kind].ready : undefined
   }
 
   /** @internal `BroadcastEndOwner`: the kind `stream` is of, or either kind without one. */
@@ -290,9 +354,17 @@ type BroadcastChannel<T = unknown> = {
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
+  /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
+   *  publishes to the key (`ready`): while the broadcast backend is unreachable, that waits, and where the backend gives
+   *  it up, the broadcast ends: with its error on the server, and on its page with a `ChannelClosedError` that says its
+   *  subscription didn't take effect. A telefunction the page calls after `subscribe()` runs once the
+   *  subscription is in effect, or once the broadcast ended.
+   *
+   *  https://telefunc.com/channel#chat-example */
+  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
   publishBinary(data: Uint8Array, options?: BroadcastPublishOptions): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
+  /** As `subscribe()`, for binary publishes. */
+  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): void
@@ -348,14 +420,11 @@ const Broadcast = {
     assertBroadcastKey(key)
     return publishOnPlane({ key, kind: 'text' }, textPayload(stringifyMessage(data, 'publish'), options?.lossy))
   },
-  subscribe<U = unknown>(
-    key: string,
-    callback: BroadcastListener<U>,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
-    if (options?.signal?.aborted) return () => {}
-    const unsubscribe = subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
-    return unsubscribeOnAbort(unsubscribe, options?.signal)
+  /** Receive `(data, info)` for each publish to `key`, in effect once it gets what any server publishes to `key`. */
+  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
+    if (options?.signal?.aborted) return withReady(() => {})
+    const subscribed = subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
+    return removedOnAbort(subscribed, options?.signal)
   },
   publishBinary(
     key: string,
@@ -365,36 +434,38 @@ const Broadcast = {
     assertBroadcastKey(key)
     return publishOnPlane({ key, kind: 'binary' }, binaryPayload(data, options?.lossy))
   },
-  subscribeBinary(
-    key: string,
-    callback: BroadcastBinaryListener,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
-    if (options?.signal?.aborted) return () => {}
+  /** As `subscribe()`, for binary publishes. */
+  subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
+    if (options?.signal?.aborted) return withReady(() => {})
     // A copy of its own, as a `BroadcastChannel` listener gets.
-    const unsubscribe = subscribeRoute(
+    const subscribed = subscribeRoute(
       { key, kind: 'binary' },
       (payload) => new Uint8Array(binaryData(payload)),
       callback,
     )
-    return unsubscribeOnAbort(unsubscribe, options?.signal)
+    return removedOnAbort(subscribed, options?.signal)
   },
 }
 
+/** A static subscriber stays subscribed: its subscription is replaced after a loss, and its `ready` keeps the outcome of
+ *  the first subscription's start, also once it is removed. */
 function subscribeRoute<Kind extends BroadcastKind, Data>(
   route: BroadcastRoute<Kind>,
   decode: (payload: BroadcastPayload<Kind>) => Data,
   callback: (data: Data, info: ChannelPublishInfo) => unknown,
-): BroadcastUnsubscribe {
+): { unsubscribe: () => void; readiness: Readiness } {
   assertBroadcastKey(route.key)
+  const readiness = new Readiness()
   const subscription = new RouteSubscription({
     route,
     receiver: (payload, info) => {
       callStaticListener(callback, decode(payload), { key: route.key, seq: info.seq, timestamp: info.timestamp })
     },
+    onReady: () => readiness.settle(true),
+    onFailed: (err) => readiness.settle(err),
   })
   subscription.open()
-  return () => subscription.close()
+  return { unsubscribe: () => subscription.close(), readiness }
 }
 
 /** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
@@ -415,18 +486,28 @@ function reportStaticListenerError(err: unknown): void {
   if (!isAbort(err)) handleCallbackBug(err)
 }
 
-/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs. */
-function unsubscribeOnAbort(unsubscribe: () => void, signal: AbortSignal | undefined): () => void {
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
+ *  `ready` resolves once the subscription is in effect or removed, and rejects where its backend failed it first. */
+function removedOnAbort(
+  { unsubscribe, readiness }: { unsubscribe: () => void; readiness: Readiness },
+  signal: AbortSignal | undefined,
+): Unsubscribe {
   let current: (() => void) | undefined = unsubscribe
   const remove = () => {
     const pending = current
     current = undefined
     signal?.removeEventListener('abort', remove)
+    readiness.settle(true)
     pending?.()
   }
   signal?.addEventListener('abort', remove, { once: true })
   if (signal?.aborted) remove()
-  return remove
+  return withReady(remove, readiness)
+}
+
+function settleAll(waiting: Set<Readiness>, outcome: true | Error): void {
+  for (const readiness of waiting) readiness.settle(outcome)
+  waiting.clear()
 }
 
 type RouteReceiver<Kind extends BroadcastKind> = (payload: BroadcastPayload<Kind>, ordering: OrderingInfo) => void
@@ -434,27 +515,52 @@ type RouteReceiver<Kind extends BroadcastKind> = (payload: BroadcastPayload<Kind
 type RouteSubscriptionOptions<Kind extends BroadcastKind> = {
   route: BroadcastRoute<Kind>
   receiver: RouteReceiver<Kind>
+  /** A subscription it opened takes effect: its backend delivers to it what any server publishes to the route. */
+  onReady: () => void
+  /** A subscription it opened ended before it took effect, with `err`. */
+  onFailed: (err: Error) => void
 }
 
-/** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
- *  replaces the plane gets it. */
+/** A route's subscription while wanted; one that ends on its own is reported and replaced once, unless `onFailed`
+ *  closed it, and a transport that replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
   private readonly route: BroadcastRoute<Kind>
   private readonly receiver: RouteReceiver<Kind>
+  private readonly onReady: () => void
+  private readonly onFailed: (err: Error) => void
+  private opened = false
+  /** Inside its backend's subscribe, which may deliver a message whose listener opens or closes it again. */
+  private starting = false
   private current: BackendSubscription | null = null
+  /** The start of `current`, until it took effect; null once it did. */
+  private start: Readiness | null = null
 
-  constructor({ route, receiver }: RouteSubscriptionOptions<Kind>) {
+  constructor({ route, receiver, onReady, onFailed }: RouteSubscriptionOptions<Kind>) {
     this.route = route
     this.receiver = receiver
+    this.onReady = onReady
+    this.onFailed = onFailed
+  }
+
+  /** Whether a subscription it opened is in effect. */
+  get inEffect(): boolean {
+    return this.current !== null && this.start === null
+  }
+
+  /** Settles as the start of the subscription it opened last does; `undefined` once that took effect. */
+  get ready(): Promise<void> | undefined {
+    return this.start?.promise
   }
 
   /** Subscribes unless a subscription is live; throws outside a Cloudflare session. */
   open(): void {
-    if (this.current === null) this.subscribe(false)
+    this.opened = true
+    if (this.current === null && !this.starting) this.subscribe(false)
     followBroadcastPlane(this)
   }
 
   close(): void {
+    this.opened = false
     unfollowBroadcastPlane(this)
     const current = this.current
     this.current = null
@@ -467,26 +573,53 @@ class RouteSubscription<Kind extends BroadcastKind> {
     this.open()
   }
 
+  /** On the plane in effect now; the subscription keeps its own handle. */
+  private startSubscription(): BackendSubscription {
+    this.starting = true
+    try {
+      return getBroadcastPlane().subscribe(this.route, this.receiver)
+    } finally {
+      this.starting = false
+    }
+  }
+
   private subscribe(replacing: boolean): void {
-    // The plane in effect now; the subscription keeps its own handle.
-    const subscription = getBroadcastPlane().subscribe(this.route, this.receiver)
+    const subscription = this.startSubscription()
+    // A listener of a message its subscribe delivered closed it.
+    if (!this.opened) return void subscription.unsubscribe()
     this.current = subscription
-    let wasReady = subscription.state() === 'ready'
+    const start = new Readiness()
+    this.start = start
+    let wasReady = false
+    const tookEffect = () => {
+      if (wasReady || this.current !== subscription) return
+      wasReady = true
+      this.start = null
+      start.settle(true)
+      this.onReady()
+    }
     // Only a terminal end rejects `ready`, after the shared subscriptions retired and reported the subscription; an
     // unsubscribe resolves it.
     const ended = async () => {
       try {
         await subscription.ready
-      } catch {
+      } catch (err) {
         if (this.current !== subscription) return
         this.current = null
-        if (!replacing || wasReady) this.subscribe(true)
+        if (!wasReady) {
+          const failure = err instanceof Error ? err : new Error(String(err))
+          start.settle(failure)
+          this.onFailed(failure)
+        }
+        if (this.opened && (!replacing || wasReady)) this.subscribe(true)
       }
     }
     if (subscription.state() === 'closed') return void ended()
+    if (subscription.state() === 'ready') tookEffect()
     subscription.onStateChange((state) => {
-      if (state === 'ready') wasReady = true
-      else if (state === 'closed') void ended()
+      if (state === 'ready') tookEffect()
+      // Its own close unsubscribed it first: no end.
+      else if (state === 'closed' && this.current === subscription) void ended()
     })
   }
 }

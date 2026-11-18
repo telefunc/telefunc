@@ -1,6 +1,7 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/ChannelMux.js'
 import { ServerChannel } from './server/ServerChannel.js'
+import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { WIRE_MAX_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
@@ -38,7 +39,7 @@ function createHarness() {
   const received: number[] = []
   channel.listen((value) => received.push(value))
   mux.registerChannel(channel)
-  return { wire, received }
+  return { mux, wire, received }
 }
 
 async function setupUpgrade() {
@@ -106,4 +107,73 @@ test('a control frame is bounded by what the protocol can describe, a data frame
   expect(big.byteLength).toBeLessThan(WIRE_MAX_RAW_FRAME_BYTES)
   await data.deliver(big)
   expect(data.terminated()).toBe(false)
+})
+
+test("a RECONCILE that names a channel at a second index of the page's session ends its wire", async () => {
+  const h = createHarness()
+  const twice = h.wire()
+  await twice.deliver(
+    encode.reconcile({
+      open: [
+        { id: 'A', ix: 0, lastSeq: 0, initial: true },
+        { id: 'A', ix: 1, lastSeq: 0, initial: true },
+      ],
+    }),
+  )
+  expect(twice.terminated()).toBe(true)
+  expect(twice.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(0)
+
+  const wire = h.wire()
+  await wire.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  const opens = (ix: number) =>
+    encode.reconcile({ sessionId: wire.sessionId(), released: [], open: [{ id: 'A', ix, lastSeq: 0 }] })
+  // The page names the channel again where it holds it: that's no violation.
+  await wire.deliver(opens(0))
+  expect(wire.terminated()).toBe(false)
+  await wire.deliver(opens(1))
+  expect(wire.terminated()).toBe(true)
+  expect(wire.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(2)
+})
+
+test('a page that awaits one channel at two indexes of its session has its wire ended as the channel registers', async () => {
+  const h = createHarness()
+  const wire = h.wire()
+  await wire.deliver(encode.reconcile({ open: [] }))
+  for (const ix of [0, 1])
+    await wire.deliver(
+      encode.reconcile({
+        sessionId: wire.sessionId(),
+        released: [],
+        open: [{ id: 'B', ix, lastSeq: 0, initial: true }],
+      }),
+    )
+  expect(wire.terminated()).toBe(false)
+  h.mux.registerChannel(new ServerChannel({ id: 'B' }))
+  expect(wire.terminated()).toBe(true)
+})
+
+test('a bug in handling a frame is reported, and the server goes on handling the frames after it', async () => {
+  const h = createHarness()
+  class ChannelWithABug extends ServerChannel<number, never> {
+    override _dispatchFrame(): void {
+      throw new Error('a bug in handling a frame')
+    }
+  }
+  h.mux.registerChannel(new ChannelWithABug({ id: 'B' }))
+  const bugs: unknown[] = []
+  onBug((err) => bugs.push(err))
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const buggy = h.wire()
+  const other = h.wire()
+  await buggy.deliver(encode.reconcile({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
+  await other.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+
+  // As a WebSocket host calls it: the promise is dropped, so a rejection would be unhandled.
+  void buggy.deliver(encode.text(0, '111', 1))
+  await other.deliver(encode.text(0, '222', 1))
+
+  expect(bugs).toEqual([new Error('a bug in handling a frame')])
+  expect(h.received).toEqual([222])
+  expect(buggy.terminated()).toBe(false)
+  vi.restoreAllMocks()
 })

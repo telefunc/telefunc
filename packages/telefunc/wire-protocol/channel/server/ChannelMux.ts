@@ -24,10 +24,17 @@ import {
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
+import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
-import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
+import type {
+  BarrierPayload,
+  CallWant,
+  PreparePayload,
+  ReconcileOpenEntry,
+  ReconcilePayload,
+} from '../../wire/payloads.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
@@ -198,6 +205,22 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     }
   }
 
+  /** Applies the wants `call` carries to the channels its session's earlier calls returned, and settles once each is in
+   *  effect or its channel ended (`_applyCallWant`, which ends one still on its way after `connectTtl`). A want of a
+   *  channel another session holds, or none, changes nothing.
+   *  Undefined where nothing has to happen first. */
+  applyCallWants(call: Request, wants: CallWant[]): Promise<unknown> | undefined {
+    const session = getSessionToken(call)
+    const pending: Promise<void>[] = []
+    for (const want of wants) {
+      const channel = this.channels.get(want.channel)
+      if (session === undefined || !channel?._callRequest || getSessionToken(channel._callRequest) !== session) continue
+      const inEffect = channel._applyCallWant(want, call.signal, this.options.connectTtl)
+      if (inEffect) pending.push(inEffect)
+    }
+    return pending.length === 0 ? undefined : Promise.all(pending)
+  }
+
   private unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
     this.sessions.removeChannel(channelId)
@@ -275,6 +298,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
         transports: this.options.transports,
       }),
     )
+    for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
@@ -455,8 +479,9 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       entry.state.deliveries.handle(delivery)
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
-      this.terminateWire(err.target ?? entry.wire)
+      // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
+      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire)
+      else handleTelefunctionBug(err)
       return null
     } finally {
       entry.state.recvBacklog.bytes -= byteLength
@@ -710,8 +735,10 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
     for (const { id, ix } of open) {
       const heldAs = heldId(ix)
-      // An index names one channel until the page releases it.
+      // An index names one channel until the page releases it, and a page holds one end of a channel.
       assertProtocol(heldAs === undefined || heldAs === id, 'RECONCILE names a held index under another id')
+      const heldAt = this.sessions.indexOf(sessionId, id)
+      assertProtocol(heldAt === undefined || heldAt === ix, 'RECONCILE names a held channel under another index')
       if (heldAs === undefined) held++
     }
     assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the wire channel cap')
@@ -769,6 +796,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     const { entry } = awaited
     const sessionId = entry.transport.getSessionId(entry.wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
+    // A page holds one end of a channel: one that awaits it at a second index broke the protocol.
+    if (this.sessions.indexOf(sessionId, channel.id) !== undefined) return this.terminateWire(entry.wire)
     entry.state.attaching.add(channel)
     const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)
@@ -782,7 +811,9 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     // lastSeq counts them.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
-      if (this.dispatchHeld(awaited)) entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
+      if (!this.dispatchHeld(awaited)) return
+      entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
+      channel._confirmWant()
     }
     void this.chainRecv(entry, settle).catch(handleTelefunctionBug)
   }

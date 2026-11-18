@@ -1,5 +1,5 @@
 export { TransportBroadcastDriver }
-export type { BroadcastTransport }
+export type { BroadcastTransport, BroadcastUnsubscribe }
 
 import { isOrdering } from '../driverOrdering.js'
 import {
@@ -16,7 +16,10 @@ import { isPromise } from '../../../utils/isPromise.js'
 /** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listen(
+    key: string,
+    onMessage: (payload: string, info: { seq: number; timestamp: number }) => void,
+  ): BroadcastUnsubscribe
   sendBinary(
     key: string,
     payload: Uint8Array,
@@ -24,8 +27,13 @@ type BroadcastTransport = {
   listenBinary(
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
-  ): () => void
+  ): BroadcastUnsubscribe
 }
+
+/** What stops a listener: the function, where the listener receives what any server publishes from the moment `listen()`
+ *  returns; with `ready`, where the broker confirms the listener later: it resolves once the listener receives what any
+ *  server publishes to the key, and rejects where the broker refuses it. */
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 
 type TransportBroadcastDriverOptions = { transport: BroadcastTransport }
 
@@ -46,23 +54,36 @@ class TransportBroadcastDriver implements BroadcastDriver {
   }
 
   subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    const stop =
+    const listening =
       route.kind === 'text'
         ? this.transport.listen(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
         : this.transport.listenBinary(route.key, (payload, info) => receiver.deliver(payload, checkOrdering(info)))
-    return new ListenAttempt({ stop })
+    return new ListenAttempt(listening)
   }
 }
 
-type ListenAttemptOptions = { stop: () => void }
-
-/** Ready at once: a user transport's listen() has no establishment to wait for. */
+/** Ready once the transport's listener is: at once where `listen()` returned the function that stops it, else once its
+ *  `ready` resolves; closed with the broker's refusal where that rejects. */
 class ListenAttempt extends DriverAttempt {
   private readonly stop: () => void
 
-  constructor({ stop }: ListenAttemptOptions) {
+  constructor(listening: BroadcastUnsubscribe) {
     super()
-    this.stop = stop
+    if (typeof listening === 'function') {
+      this.stop = listening
+      this.transition('ready')
+      return
+    }
+    this.stop = listening.unsubscribe
+    void this.whenListening(listening.ready)
+  }
+
+  private async whenListening(ready: Promise<void>): Promise<void> {
+    try {
+      await ready
+    } catch (err) {
+      return this.transition('closed', err)
+    }
     this.transition('ready')
   }
 

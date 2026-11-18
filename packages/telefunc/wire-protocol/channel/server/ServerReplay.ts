@@ -107,6 +107,16 @@ class ServerReplay {
     return held
   }
 
+  /** How many of its newest `count` publishes came after its newest frame. A frame its page confirmed is gone, and so is
+   *  every publish before it. */
+  sinceFrame(count: number): number {
+    const frame = this.frames.length > 0 ? this.frames.seqAt(this.frames.length - 1) : 0
+    const publishes = this.publishes
+    let since = 0
+    while (since < count && since < publishes.length && publishes.seqAt(publishes.length - 1 - since) > frame) since++
+    return since
+  }
+
   /** Its newest `droppable` publishes go, for a newer one to take their place: the page's `info.seq` shows what it
    *  skipped. Receipts stay. The older ones are on the wire, which a reconnect may have to send again. */
   dropUnhanded(droppable: number): Dropped {

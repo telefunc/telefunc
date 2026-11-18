@@ -112,12 +112,14 @@ type ChannelConfigUser = {
    * @default a quarter of the memory the process may use
    */
   maxMemory?: number | string
-  /** The most one channel holds for its client, of its sends and of what awaits acknowledgement, in bytes, within
-   *  `maxMemory`. @default 335544320 */
+  /** The most one channel holds for its client, of its sends, of what awaits acknowledgement and of the messages its
+   *  listeners work on, in bytes, within `maxMemory`. @default 335544320 */
   maxPendingBytes?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
-   * connect before it is closed automatically.
+   * connect before it is closed automatically, and a telefunction call waits for
+   * a broadcast subscription its client made before it to take effect before
+   * that broadcast is closed.
    */
   connectTtl?: number
   /**

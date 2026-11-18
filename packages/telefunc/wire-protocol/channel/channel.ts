@@ -1,4 +1,4 @@
-export { invokeChannelListener, stringifyMessage, LOSSY_WITH_ACK_TEXT }
+export { invokeChannelListener, stringifyMessage, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -18,6 +18,7 @@ export type {
   BroadcastBinaryListener,
   BroadcastListenerByKind,
   BroadcastListeners,
+  Unsubscribe,
 }
 
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
@@ -25,6 +26,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { Listeners } from '../../utils/Listeners.js'
+import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
@@ -98,6 +100,11 @@ type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => u
 type BroadcastListenerByKind<T> = { text: BroadcastListener<T>; binary: BroadcastBinaryListener }
 /** A broadcast's local listeners, by kind. */
 type BroadcastListeners<T> = { [K in keyof BroadcastListenerByKind<T>]: Listeners<BroadcastListenerByKind<T>[K]> }
+/** Removes the listener. `ready` resolves once the listener is in effect, at once where nothing has to reach the other
+ *  side first, or once the listener is removed; it rejects where it never will be in effect: its channel ended first,
+ *  or before the listener was added, or, without a channel (`Broadcast.subscribe()`), the broadcast backend gave the
+ *  subscription up. So on the page and on the server alike. */
+type Unsubscribe = (() => void) & { readonly ready: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -139,9 +146,11 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
    *
    *  https://telefunc.com/channel#skip-to-the-newest */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
-  /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
-  listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): () => void
-  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): () => void
+  /** Receive messages. Return a value to ack the sender. Returns an unlisten function, whose `ready` resolves at once:
+   *  the listener is in effect once `listen()` returns. On a channel that ended, it registers nothing, and `ready`
+   *  rejects with the channel's end. */
+  listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): Unsubscribe
+  listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
   /** Called when the channel closes. Returns a function that removes the callback. */
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   /** Called when the channel opens. Returns a function that removes the callback. */
@@ -173,3 +182,74 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
   TDefault
 > &
   ChannelShield<ClientToServer, ServerToClient>
+
+/** A listener's way to being in effect, settled at its first outcome: `true` once it is in effect or removed, or the
+ *  error it never will be with. Its promise is made only where its `ready` is read. */
+class Readiness {
+  private outcome: true | Error | undefined = undefined
+  private waiting: Deferred<void> | undefined = undefined
+  /** Settles as `until` does: followed only once `ready` is read. */
+  private readonly until: Readiness | undefined
+
+  constructor(until?: Readiness) {
+    this.until = until
+  }
+
+  /** One that settles as `promise` does, followed now: a backend's `ready`, observed once for every subscriber. */
+  static following(promise: Promise<void>): Readiness {
+    const readiness = new Readiness()
+    void readiness.follow(promise)
+    return readiness
+  }
+
+  /** The error it settled with, where it did. */
+  get failure(): Error | undefined {
+    return this.outcome === true ? undefined : this.outcome
+  }
+
+  settle(outcome: true | Error): void {
+    if (this.outcome !== undefined) return
+    this.outcome = outcome
+    if (outcome === true) this.waiting?.resolve()
+    else this.waiting?.reject(outcome)
+  }
+
+  get promise(): Promise<void> {
+    if (this.outcome === true) return IN_EFFECT
+    if (this.waiting === undefined) {
+      this.waiting = createDeferred()
+      // A failure nobody reads raises no unhandled rejection.
+      this.waiting.promise.catch(() => {})
+      if (this.outcome !== undefined) this.waiting.reject(this.outcome)
+      else if (this.until) void this.follow(this.until.promise)
+    }
+    return this.waiting.promise
+  }
+
+  /** Settles as `promise` does: where a backend's `ready` is observed once, or a listener's once it is read. */
+  async follow(promise: Promise<void>): Promise<void> {
+    try {
+      await promise
+    } catch (err) {
+      return this.settle(err instanceof Error ? err : new Error(String(err)))
+    }
+    this.settle(true)
+  }
+}
+
+/** What the `ready` of every listener in effect at once is. */
+const IN_EFFECT = Promise.resolve()
+
+/** `remove` with `ready`: in effect at once without `readiness`. */
+function withReady(remove: () => void, readiness?: Readiness): Unsubscribe {
+  const unsubscribe = Object.assign(remove, { ready: IN_EFFECT })
+  if (readiness) Object.defineProperty(unsubscribe, 'ready', { get: () => readiness.promise })
+  return unsubscribe
+}
+
+/** The remover of a listener added once its channel ended, which registered nothing: its `ready` rejects with `err`. */
+function neverInEffect(err: Error): Unsubscribe {
+  const readiness = new Readiness()
+  readiness.settle(err)
+  return withReady(() => {}, readiness)
+}

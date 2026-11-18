@@ -15,7 +15,7 @@ function handleError(err: unknown) {
     return
 
   // We ensure we print a string; Cloudflare Workers doesn't seem to properly stringify `Error` objects.
-  const errStr = (hasProp(err, 'stack') && String(err.stack)) || String(err)
+  const errStr = describeError(err)
 
   const viteDevServer = getViteDevServer()
   if (viteAlreadyLoggedError(err, viteDevServer)) {
@@ -41,4 +41,18 @@ function viteErrorCleanup(err: unknown, viteDevServer: ViteDevServer | null) {
     // Apply source maps
     viteDevServer.ssrFixStacktrace(err as Error)
   }
+}
+
+/** Its stack, then each of its causes', as Node.js prints an error: a cause often says why, such as the broker's refusal
+ *  under a backend subscription that closed. */
+function describeError(err: unknown): string {
+  const texts: string[] = []
+  const seen = new Set<unknown>()
+  let error = err
+  while (error !== undefined && !seen.has(error)) {
+    seen.add(error)
+    texts.push((hasProp(error, 'stack') && String(error.stack)) || String(error))
+    error = hasProp(error, 'cause') ? error.cause : undefined
+  }
+  return texts.join('\n[cause]: ')
 }

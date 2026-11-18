@@ -150,10 +150,11 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     return consumer
   }
 
-  async detach(consumer: Consumer): Promise<void> {
+  /** Makes no promise while other consumers stay, so consumers that come and go cost none. */
+  detach(consumer: Consumer): Promise<void> {
     this.attached.delete(consumer)
     this.snapshot = null
-    if (this.attached.size === 0) await this.stop()
+    return this.attached.size === 0 ? this.stop() : DETACHED
   }
 
   /** The last consumer left, or the plane is disposed. */
@@ -305,12 +306,12 @@ class Consumer implements BackendSubscription {
     return () => this.stateListeners.delete(listener)
   }
 
-  async unsubscribe(): Promise<void> {
-    if (!this.attached) return
+  unsubscribe(): Promise<void> {
+    if (!this.attached) return DETACHED
     this.attached = false
     if (this.slot.state !== 'closed') this.notify('closed')
     this.stateListeners.clear()
-    await this.slot.detach(this)
+    return this.slot.detach(this)
   }
 
   notify(state: AttemptState): void {
@@ -323,6 +324,9 @@ class Consumer implements BackendSubscription {
     }
   }
 }
+
+/** What a detach that stops nothing returns: one settled promise for all of them. */
+const DETACHED = Promise.resolve()
 
 function createReadiness(): Deferred<void> {
   const readiness = createDeferred()

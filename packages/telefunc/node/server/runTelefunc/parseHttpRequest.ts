@@ -15,10 +15,12 @@ import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChann
 import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
 import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
+import { queueMemory } from '../../../wire-protocol/channel/server/channelMemory.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
@@ -54,6 +56,8 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      /** The wants of the page's broadcasts the server hasn't confirmed to it, where there are any. */
+      wants: CallWant[] | undefined
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
       isSseRequest: false
       isMalformedRequest: false
@@ -91,7 +95,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     registerFile,
     consumeFile,
     createChannel,
-    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) =>
+      ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
   }
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;
@@ -99,10 +104,17 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
+  const wants = wantsOf(envelope.raw)
+  if (wants === null) {
+    logParseError('Telefunc request body has unexpected `wants`', runContext)
+    return { isMalformedRequest: true }
+  }
+
   return {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    wants,
     isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
@@ -238,6 +250,13 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
         ? (parsed.extensions as Record<string, Record<string, unknown>>)
         : {},
   }
+}
+
+/** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | undefined | null {
+  if (!hasProp(raw, 'wants')) return undefined
+  const { wants } = raw
+  return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
 }
 
 function logParseException(err: unknown, runContext: RunContext) {

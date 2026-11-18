@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
+import { createHook } from 'node:async_hooks'
+import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -7,11 +9,18 @@ import { ServerReplay } from './ServerReplay.js'
 import { ACK_STATUS, decode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { configureBroadcastTransport, disposeBackend } from '../../backend/install.js'
+import { Channel } from './ServerChannel.js'
+import {
+  configureBroadcastTransport,
+  disposeBackend,
+  getBroadcastPlane,
+  installBackend,
+} from '../../backend/install.js'
 import type { BroadcastTransport } from '../../backend/broadcast/TransportBroadcastDriver.js'
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
+import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
-import type { BroadcastPublishOptions } from '../channel.js'
+import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
 
 afterEach(() => disposeBackend())
 
@@ -228,6 +237,31 @@ describe('in-memory publishes in answer', () => {
     expect(received).toBe(5001)
   })
 
+  it('delivers the bytes an answer published, though its publisher reuses its buffer once publishBinary() returns', async () => {
+    const backend = new MemoryBackend()
+    const received: number[][] = []
+    const binary = backend.subscribe(
+      { key: 'room:reused', kind: 'binary' },
+      { deliver: (data) => received.push(typeof data === 'string' ? [] : Array.from(data)) },
+    )
+    const text = backend.subscribe(
+      { key: 'room:reused', kind: 'text' },
+      {
+        deliver() {
+          const bytes = new Uint8Array([1, 2, 3])
+          void backend.publish({ key: 'room:reused', kind: 'binary' }, bytes)
+          bytes.fill(0)
+        },
+      },
+    )
+    await backend.publish({ key: 'room:reused', kind: 'text' }, 'question')
+    const unsubscribe = () => void text.unsubscribe()
+    const unsubscribeBinary = () => void binary.unsubscribe()
+    unsubscribe()
+    unsubscribeBinary()
+    expect(received).toEqual([[1, 2, 3]])
+  })
+
   it('rejects a listener that answers its own messages without end, and timers run again', async () => {
     const backend = new MemoryBackend()
     const route = { key: 'room:endless', kind: 'text' } as const
@@ -425,7 +459,7 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
     // Its own replay: what it hasn't confirmed there is what makes its page behind.
     replay: end._replayBuffer!,
   })
-  end._attachPeer(peer, { broadcast: { text: true, binary: true } })
+  end._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
   return { end, peer, sent, seqs, binary }
 }
 
@@ -433,6 +467,692 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
 // Channel-method gating — the type hides send/listen/sendBinary/listenBinary,
 // and calling one at runtime still throws a usage error.
 // ───────────────────────────────────────────────────────────────────────────
+
+// The Cloudflare backend refuses a server-side subscription on a Worker without AsyncLocalStorage, where its host has no
+// session; the app may catch it.
+class BackendRefusingFirstSubscription extends MemoryBackend {
+  private refuse = true
+  hostKey(): string {
+    if (this.refuse) {
+      this.refuse = false
+      throw new Error('subscription refused')
+    }
+    return ''
+  }
+}
+
+describe('a subscription the adapter refused', () => {
+  it('subscribe(): its callback gets no later publish', () => {
+    installBackend(() => new BackendRefusingFirstSubscription(), [crypto.randomUUID()])
+    const broadcast = new ServerBroadcast<string>({ key: 'room:refused' })
+    broadcast._end._registerChannel()
+    const refused: string[] = []
+    const later: string[] = []
+    expect(() => broadcast.subscribe((msg) => refused.push(msg))).toThrow('subscription refused')
+    broadcast.subscribe((msg) => later.push(msg))
+    broadcast.publish('hello')
+    expect(later).toEqual(['hello'])
+    expect(refused).toEqual([])
+  })
+
+  it('subscribeBinary(): its callback gets no later publish', () => {
+    installBackend(() => new BackendRefusingFirstSubscription(), [crypto.randomUUID()])
+    const broadcast = new ServerBroadcast<string>({ key: 'room:refused-binary' })
+    broadcast._end._registerChannel()
+    const refused: Uint8Array[] = []
+    const later: Uint8Array[] = []
+    expect(() => broadcast.subscribeBinary((data) => refused.push(data))).toThrow('subscription refused')
+    broadcast.subscribeBinary((data) => later.push(data))
+    broadcast.publishBinary(new Uint8Array([1, 2, 3]))
+    expect(later).toEqual([new Uint8Array([1, 2, 3])])
+    expect(refused).toEqual([])
+  })
+})
+
+// The same rule as a page's `ready`: it resolves once the listener is in effect or removed, and rejects where the
+// broadcast ends first. The backend here confirms no subscription until each test is over.
+describe("a server subscriber's `ready` while its backend hasn't confirmed the subscription", () => {
+  const pending = new Promise<void>(() => {})
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  const unconfirmed = () =>
+    configureBroadcastTransport({
+      send: sent,
+      sendBinary: sent,
+      listen,
+      listenBinary: listen,
+    })
+  const settled = async (ready: Promise<void>) => {
+    let state = 'pending'
+    ready.then(
+      () => (state = 'resolved'),
+      () => (state = 'rejected'),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return state
+  }
+  type Subscribe = (signal: AbortSignal) => { remove: () => void; ready: Promise<void>; end?: () => void }
+  const instance =
+    (binary: boolean): Subscribe =>
+    (signal) => {
+      const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+      const remove = binary
+        ? broadcast.subscribeBinary(() => {}, { signal })
+        : broadcast.subscribe(() => {}, { signal })
+      return { remove, ready: remove.ready, end: () => broadcast.abort() }
+    }
+  const statically =
+    (binary: boolean): Subscribe =>
+    (signal) => {
+      const key = crypto.randomUUID()
+      const remove = binary
+        ? Broadcast.subscribeBinary(key, () => {}, { signal })
+        : Broadcast.subscribe(key, () => {}, { signal })
+      return { remove, ready: remove.ready }
+    }
+  const SUBSCRIBERS: Record<string, Subscribe> = {
+    'subscribe()': instance(false),
+    'subscribeBinary()': instance(true),
+    'Broadcast.subscribe()': statically(false),
+    'Broadcast.subscribeBinary()': statically(true),
+  }
+  for (const [name, subscribe] of Object.entries(SUBSCRIBERS)) {
+    it(`${name}: resolves once removed by its remover`, async () => {
+      unconfirmed()
+      const subscriber = subscribe(new AbortController().signal)
+      subscriber.remove()
+      expect(await settled(subscriber.ready)).toBe('resolved')
+      subscriber.end?.()
+    })
+    it(`${name}: resolves once removed by its signal`, async () => {
+      unconfirmed()
+      const controller = new AbortController()
+      const subscriber = subscribe(controller.signal)
+      controller.abort()
+      expect(await settled(subscriber.ready)).toBe('resolved')
+      subscriber.end?.()
+    })
+  }
+  const ENDING: Record<string, Subscribe> = { 'subscribe()': instance(false), 'subscribeBinary()': instance(true) }
+  for (const [name, subscribe] of Object.entries(ENDING)) {
+    it(`${name}: rejects once its broadcast ends first`, async () => {
+      unconfirmed()
+      const subscriber = subscribe(new AbortController().signal)
+      subscriber.end?.()
+      expect(await settled(subscriber.ready)).toBe('rejected')
+    })
+  }
+})
+
+// A backend that refused a key's subscription keeps that outcome: removing a subscriber afterwards doesn't turn its
+// `ready` into a success, whether the app read `ready` before the removal or not.
+describe("a static subscriber's `ready` once its backend refused the key's subscription", () => {
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const refusing = () => {
+    const ready = Promise.reject(new Error('NOPERM'))
+    const listen = () => ({ unsubscribe: () => {}, ready })
+    configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+  }
+  const SUBSCRIBE: Record<string, () => Unsubscribe> = {
+    'Broadcast.subscribe()': () => Broadcast.subscribe('room:refused', () => {}),
+    'Broadcast.subscribeBinary()': () => Broadcast.subscribeBinary('room:refused', () => {}),
+  }
+  for (const [name, subscribe] of Object.entries(SUBSCRIBE)) {
+    for (const removed of ['after', 'before']) {
+      it(`${name}: rejects with the refusal when removed ${removed} its first read`, async () => {
+        refusing()
+        const remove = subscribe()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        let ready: Promise<void> | undefined
+        if (removed === 'after') ready = remove.ready
+        remove()
+        ready ??= remove.ready
+        await expect(ready).rejects.toMatchObject({ cause: { message: 'NOPERM' } })
+      })
+    }
+  }
+})
+
+// A `ready` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
+describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
+  const pending = new Promise<void>(() => {})
+  const sent = () => ({ seq: 1, timestamp: 1 })
+  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  /** How many promises `run` made. */
+  const promisesMadeBy = (run: () => void) => {
+    let made = 0
+    const hook = createHook({
+      init(_id, type) {
+        if (type === 'PROMISE') made++
+      },
+    }).enable()
+    try {
+      run()
+    } finally {
+      hook.disable()
+    }
+    return made
+  }
+  const broadcasts = new Map<string, ServerBroadcast<string>>()
+  const broadcastOf = (key: string) => {
+    let broadcast = broadcasts.get(key)
+    if (broadcast === undefined) broadcasts.set(key, (broadcast = new ServerBroadcast<string>({ key })))
+    return broadcast
+  }
+  const channels = new Map<string, Channel<never, string>>()
+  const channelOf = (key: string) => {
+    let channel = channels.get(key)
+    if (channel === undefined) channels.set(key, (channel = new Channel<never, string>()))
+    return channel
+  }
+  const CHURN: Record<string, (key: string) => Unsubscribe> = {
+    'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
+    'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
+    // In effect at once: its `ready`, read, is one promise every such listener shares.
+    'Broadcast.subscribe()': (key) => Broadcast.subscribe(key, () => {}),
+    'Broadcast.subscribeBinary()': (key) => Broadcast.subscribeBinary(key, () => {}),
+    "a channel's listen(), its `ready` read": (key) => {
+      const remove = channelOf(key).listen(() => {})
+      void remove.ready
+      return remove
+    },
+  }
+  for (const [name, subscribe] of Object.entries(CHURN)) {
+    it(`${name}: 1,000 subscribers added and removed make no promise`, () => {
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+      const key = crypto.randomUUID()
+      // Holds the key's subscription, which waits for its backend.
+      const holder = subscribe(key)
+      const made = promisesMadeBy(() => {
+        for (let i = 0; i < 1_000; i++) subscribe(key)()
+      })
+      expect(made).toBe(0)
+      holder()
+      broadcasts.get(key)?.abort()
+      channels.get(key)?.abort()
+    })
+  }
+})
+
+// A broker's subscribe can throw, as NATS's does while its connection is closed or draining; the app retries.
+describe("a transport's listen() that throws", () => {
+  type Info = { seq: number; timestamp: number }
+  /** A transport whose first `listen()` and first `listenBinary()` throw, counting the listeners it holds. */
+  const failingFirst = () => {
+    const state = {
+      attempts: 0,
+      active: 0,
+      text: (_payload: string, _info: Info) => {},
+      binary: (_payload: Uint8Array, _info: Info) => {},
+    }
+    const hold = () => {
+      if (++state.attempts === 1) throw new Error('broker connection closed')
+      state.active++
+      return () => {
+        state.active--
+      }
+    }
+    const sent = () => ({ seq: 1, timestamp: 1 })
+    configureBroadcastTransport({
+      send: sent,
+      sendBinary: sent,
+      listen: (_key, onMessage) => {
+        const stop = hold()
+        state.text = onMessage
+        return stop
+      },
+      listenBinary: (_key, onMessage) => {
+        const stop = hold()
+        state.binary = onMessage
+        return stop
+      },
+    })
+    return state
+  }
+
+  // The throw is the start's failure, as a refusal is: a static subscriber's `ready` keeps it, and the subscriber
+  // subscribes again; a `BroadcastChannel` ends, its subscription not in effect.
+  it('Broadcast.subscribe(): `ready` rejects with the throw, and the subscriber subscribes again and hears what follows', async () => {
+    const transport = failingFirst()
+    const heard: string[] = []
+    const stop = Broadcast.subscribe<string>('room:throws', (text) => heard.push(text))
+    await expect(stop.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+    await vi.waitFor(() => expect(transport.active).toBe(1))
+    transport.text('"hello"', { seq: 1, timestamp: 1 })
+    stop()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['hello'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+
+  it('Broadcast.subscribeBinary(): `ready` rejects with the throw, and the subscriber subscribes again and hears what follows', async () => {
+    const transport = failingFirst()
+    const heard: string[] = []
+    const stop = Broadcast.subscribeBinary('room:throws', (data) => heard.push(`${data}`))
+    await expect(stop.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+    await vi.waitFor(() => expect(transport.active).toBe(1))
+    transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
+    stop()
+    expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
+      heard: ['1,2,3'],
+      active: 0,
+      attempts: 2,
+    })
+  })
+
+  for (const binary of [false, true]) {
+    it(`BroadcastChannel.${binary ? 'subscribeBinary' : 'subscribe'}(): the broadcast ends, its subscription not in effect, and the transport holds no listener`, async () => {
+      const transport = failingFirst()
+      const room = new ServerBroadcast<string>({ key: 'room:throws' })
+      const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+      await expect(stop.ready).rejects.toThrow()
+      await expect(room.closed).rejects.toThrow()
+      expect({ active: transport.active, attempts: transport.attempts }).toEqual({ active: 0, attempts: 1 })
+    })
+  }
+})
+
+// A broker that replays on connect can deliver a message, then fail to connect: a listener added on that message came
+// for the start that failed, and goes with it.
+describe("a transport's listen() that delivers a message, then throws", () => {
+  type Info = { seq: number; timestamp: number }
+  const KEY = 'room:delivers-then-throws'
+  /** A transport whose first `listen()` and first `listenBinary()` deliver `1`, then throw; it counts the listeners it
+   *  holds. */
+  const deliveringThenThrowing = () => {
+    let attempts = 0
+    let seq = 0
+    const text = new Set<(payload: string, info: Info) => void>()
+    const binary = new Set<(payload: Uint8Array, info: Info) => void>()
+    const info = () => ({ seq: ++seq, timestamp: 1 })
+    configureBroadcastTransport({
+      send: (_key, payload) => {
+        const sent = info()
+        for (const onMessage of text) onMessage(payload, sent)
+        return sent
+      },
+      sendBinary: (_key, payload) => {
+        const sent = info()
+        for (const onMessage of binary) onMessage(payload, sent)
+        return sent
+      },
+      listen: (_key, onMessage) => {
+        if (++attempts === 1) {
+          onMessage('1', info())
+          throw new Error('broker connection closed')
+        }
+        text.add(onMessage)
+        return () => text.delete(onMessage)
+      },
+      listenBinary: (_key, onMessage) => {
+        if (++attempts === 1) {
+          onMessage(Uint8Array.of(1), info())
+          throw new Error('broker connection closed')
+        }
+        binary.add(onMessage)
+        return () => binary.delete(onMessage)
+      },
+    })
+    return { listening: () => text.size + binary.size }
+  }
+  /** Each surface's subscribe of `onMessage`, which hears numbers, and its publish of `2`. */
+  const SURFACES: Record<
+    string,
+    () => { subscribe: (onMessage: (n: number) => void) => Unsubscribe; publish: () => unknown; end?: () => void }
+  > = {
+    'Broadcast.subscribe()': () => ({
+      subscribe: (onMessage) => Broadcast.subscribe<number>(KEY, onMessage),
+      publish: () => Broadcast.publish(KEY, 2),
+    }),
+    'Broadcast.subscribeBinary()': () => ({
+      subscribe: (onMessage) => Broadcast.subscribeBinary(KEY, (data) => data.forEach((n) => onMessage(n))),
+      publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+    }),
+    'BroadcastChannel.subscribe()': () => {
+      const broadcast = new ServerBroadcast<number>({ key: KEY })
+      return {
+        subscribe: (onMessage) => broadcast.subscribe(onMessage),
+        publish: () => Broadcast.publish(KEY, 2),
+        end: () => broadcast.abort(),
+      }
+    },
+    'BroadcastChannel.subscribeBinary()': () => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return {
+        subscribe: (onMessage) => broadcast.subscribeBinary((data) => data.forEach((n) => onMessage(n))),
+        publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+        end: () => broadcast.abort(),
+      }
+    },
+  }
+
+  // A message comes to a consumer only once its start is ready, so one of a start that failed reaches no listener.
+  for (const [surface, of] of Object.entries(SURFACES)) {
+    it(`${surface}: that message reaches no listener, and only what the next start delivers does`, async () => {
+      const transport = deliveringThenThrowing()
+      const { subscribe, publish, end } = of()
+      const heard: number[] = []
+      const stop = subscribe((n) => heard.push(n))
+      await expect(stop.ready).rejects.toThrow()
+      if (end === undefined) {
+        await vi.waitFor(() => expect(transport.listening()).toBe(1))
+        await publish()
+        stop()
+      } else end()
+      expect({ heard, listening: transport.listening() }).toEqual({ heard: end ? [] : [2], listening: 0 })
+    })
+  }
+
+  // An app that subscribes with one long-lived signal: each attempt that fails must leave nothing on it.
+  const WITH_SIGNAL: Record<string, (signal: AbortSignal) => (onMessage: () => void) => Unsubscribe> = {
+    'Broadcast.subscribe()': (signal) => (onMessage) => Broadcast.subscribe(KEY, onMessage, { signal }),
+    'Broadcast.subscribeBinary()': (signal) => (onMessage) => Broadcast.subscribeBinary(KEY, onMessage, { signal }),
+    'BroadcastChannel.subscribe()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribe(onMessage, { signal })
+    },
+    'BroadcastChannel.subscribeBinary()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribeBinary(onMessage, { signal })
+    },
+  }
+  // A failed start ends a `BroadcastChannel`, which removes its listeners; a static subscriber subscribes again, so it
+  // stays on its signal until it is removed.
+  for (const [surface, of] of Object.entries(WITH_SIGNAL)) {
+    const isStatic = surface.startsWith('Broadcast.')
+    it(`${surface}: a ${isStatic ? 'subscriber' : 'listener'} with a signal ${isStatic ? 'whose start failed stays on it while it subscribes again, and leaves no abort listener on it once removed' : 'leaves no abort listener on it once the failed start ended its broadcast'}`, async () => {
+      deliveringThenThrowing()
+      const signal = new AbortController().signal
+      const subscribed = of(signal)(() => {})
+      await expect(subscribed.ready).rejects.toThrow()
+      if (isStatic) {
+        expect(getEventListeners(signal, 'abort')).toHaveLength(1)
+        subscribed()
+      }
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0)
+    })
+  }
+
+  // One receiver subscribed again on a key's route after a start that failed: each subscription is its own consumer of
+  // the slot it joined, and a failed start's slot is left, so the first one's remover leaves the later one be.
+  for (const kind of ['text', 'binary'] as const) {
+    it(`the backend's ${kind} subscribe(): the remover of a receiver's subscription the failed start closed leaves that receiver's later subscription be`, async () => {
+      const transport = deliveringThenThrowing()
+      const heard: number[] = []
+      const receiver = (payload: string | Uint8Array) =>
+        typeof payload === 'string' ? heard.push(Number(payload)) : heard.push(...binaryData(payload))
+      const route = { key: KEY, kind }
+      const failed = getBroadcastPlane().subscribe(route, receiver)
+      await expect(failed.ready).rejects.toThrow()
+      const later = getBroadcastPlane().subscribe(route, receiver)
+      await later.ready
+      void failed.unsubscribe()
+      await (kind === 'binary' ? Broadcast.publishBinary(KEY, Uint8Array.of(2)) : Broadcast.publish(KEY, 2))
+      const listening = transport.listening()
+      void later.unsubscribe()
+      expect({ heard, listening }).toEqual({ heard: [2], listening: 1 })
+    })
+  }
+})
+
+// A broker may deliver a message before its subscribe returns: an in-process one whose producer publishes as soon as the
+// key has a listener.
+describe('a message the transport delivers inside listen()', () => {
+  type Info = { seq: number; timestamp: number }
+  const KEY = 'room:inside-listen'
+  /** A transport whose `listen()` and `listenBinary()` deliver `1` to their key before they return. */
+  const deliveringInsideListen = () => {
+    let seq = 0
+    let starts = 0
+    let active = 0
+    let text: ((payload: string, info: Info) => void) | undefined
+    let binary: ((payload: Uint8Array, info: Info) => void) | undefined
+    const send = (_key: string, payload: string) => {
+      const sent = { seq: ++seq, timestamp: 1 }
+      text?.(payload, sent)
+      return sent
+    }
+    const sendBinary = (_key: string, payload: Uint8Array) => {
+      const sent = { seq: ++seq, timestamp: 1 }
+      binary?.(payload, sent)
+      return sent
+    }
+    configureBroadcastTransport({
+      send,
+      sendBinary,
+      listen: (key, onMessage) => {
+        starts++
+        active++
+        text = onMessage
+        send(key, '1')
+        return () => {
+          active--
+          text = undefined
+        }
+      },
+      listenBinary: (key, onMessage) => {
+        starts++
+        active++
+        binary = onMessage
+        sendBinary(key, Uint8Array.of(1))
+        return () => {
+          active--
+          binary = undefined
+        }
+      },
+    })
+    return { listening: () => active > 0, starts: () => starts }
+  }
+  const room = () => new ServerBroadcast<number>({ key: KEY })
+  const SURFACES: Record<string, (heard: number[]) => { stop: Unsubscribe; publish: () => unknown; end?: () => void }> =
+    {
+      'Broadcast.subscribe()': (heard) => ({
+        stop: Broadcast.subscribe<number>(KEY, (n) => heard.push(n)),
+        publish: () => Broadcast.publish(KEY, 2),
+      }),
+      'Broadcast.subscribeBinary()': (heard) => ({
+        stop: Broadcast.subscribeBinary(KEY, (data) => heard.push(...data)),
+        publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+      }),
+      'BroadcastChannel.subscribe()': (heard) => {
+        const broadcast = room()
+        return {
+          stop: broadcast.subscribe((n) => heard.push(n)),
+          publish: () => Broadcast.publish(KEY, 2),
+          end: () => broadcast.abort(),
+        }
+      },
+      'BroadcastChannel.subscribeBinary()': (heard) => {
+        const broadcast = room()
+        return {
+          stop: broadcast.subscribeBinary((data) => heard.push(...data)),
+          publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)),
+          end: () => broadcast.abort(),
+        }
+      },
+    }
+
+  for (const [surface, subscribe] of Object.entries(SURFACES)) {
+    it(`${surface}: the subscriber hears it, then the next publish`, async () => {
+      const transport = deliveringInsideListen()
+      const heard: number[] = []
+      const { stop, publish, end } = subscribe(heard)
+      await stop.ready
+      await publish()
+      stop()
+      end?.()
+      expect({ heard, listening: transport.listening() }).toEqual({ heard: [1, 2], listening: false })
+    })
+  }
+
+  // A static subscriber's signal is listened to once its subscribe returns.
+  const LEAVING: Record<string, (onMessage: () => void, signal: AbortSignal) => void> = {
+    'BroadcastChannel.subscribe()': (onMessage, signal) => room().subscribe(onMessage, { signal }),
+    'BroadcastChannel.subscribeBinary()': (onMessage, signal) => room().subscribeBinary(onMessage, { signal }),
+  }
+
+  for (const [surface, subscribe] of Object.entries(LEAVING)) {
+    it(`${surface}: a listener that leaves as that message comes leaves nothing listening`, () => {
+      const transport = deliveringInsideListen()
+      const leaving = new AbortController()
+      subscribe(() => leaving.abort(), leaving.signal)
+      expect({ starts: transport.starts(), listening: transport.listening() }).toEqual({ starts: 1, listening: false })
+    })
+  }
+
+  /** The first listener of each surface adds a second of its kind from its callback, as that message comes. */
+  const NESTED: Record<
+    string,
+    (heard: { first: number[]; second: number[] }) => { stops: Unsubscribe[]; publish: () => unknown; end?: () => void }
+  > = {
+    'Broadcast.subscribe()': (heard) => {
+      const stops: Unsubscribe[] = []
+      const second = (n: number) => heard.second.push(n)
+      const first = (n: number) => {
+        heard.first.push(n)
+        if (heard.first.length === 1) stops.push(Broadcast.subscribe<number>(KEY, second))
+      }
+      stops.push(Broadcast.subscribe<number>(KEY, first))
+      return { stops, publish: () => Broadcast.publish(KEY, 2) }
+    },
+    'Broadcast.subscribeBinary()': (heard) => {
+      const stops: Unsubscribe[] = []
+      const second = (data: Uint8Array) => heard.second.push(...data)
+      const first = (data: Uint8Array) => {
+        heard.first.push(...data)
+        if (heard.first.length === 1) stops.push(Broadcast.subscribeBinary(KEY, second))
+      }
+      stops.push(Broadcast.subscribeBinary(KEY, first))
+      return { stops, publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)) }
+    },
+    'BroadcastChannel.subscribe()': (heard) => {
+      const broadcast = room()
+      const stops: Unsubscribe[] = []
+      const first = (n: number) => {
+        heard.first.push(n)
+        if (heard.first.length === 1) stops.push(broadcast.subscribe((n) => heard.second.push(n)))
+      }
+      stops.push(broadcast.subscribe(first))
+      return { stops, publish: () => Broadcast.publish(KEY, 2), end: () => broadcast.abort() }
+    },
+    'BroadcastChannel.subscribeBinary()': (heard) => {
+      const broadcast = room()
+      const stops: Unsubscribe[] = []
+      const first = (data: Uint8Array) => {
+        heard.first.push(...data)
+        if (heard.first.length === 1) stops.push(broadcast.subscribeBinary((data) => heard.second.push(...data)))
+      }
+      stops.push(broadcast.subscribeBinary(first))
+      return { stops, publish: () => Broadcast.publishBinary(KEY, Uint8Array.of(2)), end: () => broadcast.abort() }
+    },
+  }
+
+  for (const [surface, subscribe] of Object.entries(NESTED)) {
+    it(`${surface}: a listener its callback adds as that message comes shares the one start, and nothing listens after`, async () => {
+      const transport = deliveringInsideListen()
+      const heard = { first: [], second: [] }
+      const { stops, publish, end } = subscribe(heard)
+      await Promise.all(stops.map((stop) => stop.ready))
+      await publish()
+      for (const stop of stops) stop()
+      end?.()
+      // Whether the second hears the message it was added on is delivery's to decide, not this case's.
+      expect({
+        first: heard.first,
+        second: heard.second.filter((n) => n === 2),
+        starts: transport.starts(),
+        listening: transport.listening(),
+      }).toEqual({ first: [1, 2], second: [2], starts: 1, listening: false })
+    })
+  }
+})
+
+// A message its backend delivers before confirming the subscription waits for that confirmation, whether it came inside
+// listen() or after it: until then no listener hears it and `ready` stays pending.
+describe('a message its backend delivers before it confirmed the subscription', () => {
+  for (const binary of [false, true]) {
+    for (const inside of [true, false]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}, the message ${inside ? 'inside' : 'after'} listen(): the listener hears it once the backend confirms`, async () => {
+        let deliver = () => {}
+        const confirmed = Promise.withResolvers<void>()
+        const start = (deliverFirst: () => void) => {
+          deliver = deliverFirst
+          if (inside) deliver()
+          return { unsubscribe: () => {}, ready: confirmed.promise }
+        }
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        configureBroadcastTransport({
+          send: sent,
+          sendBinary: sent,
+          listen: (_key, onMessage) => start(() => onMessage('1', sent())),
+          listenBinary: (_key, onMessage) => start(() => onMessage(Uint8Array.of(1), sent())),
+        })
+        const room = new ServerBroadcast<string>({ key: 'room:before-confirmed' })
+        const order: string[] = []
+        const stop = binary
+          ? room.subscribeBinary(() => order.push('heard'))
+          : room.subscribe(() => order.push('heard'))
+        void stop.ready.then(() => order.push('ready'))
+        if (!inside) deliver()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(order).toEqual([])
+        confirmed.resolve()
+        await vi.waitFor(() => expect(order).toEqual(['heard', 'ready']))
+        room.abort()
+      })
+    }
+  }
+})
+
+// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the broadcast ended still
+// gets that end, whatever a close callback does after.
+describe('a broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber', () => {
+  for (const binary of [false, true]) {
+    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
+      const sent = () => ({ seq: 1, timestamp: 1 })
+      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+      const room = new ServerBroadcast<string>({ key: 'room:cleans-up-on-close' })
+      const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+      room.onClose(() => stop())
+      room.abort('terminal event')
+      const ready = await stop.ready.then(
+        () => 'resolved',
+        (err: unknown) => err,
+      )
+      expect(ready).toBe(await room.closed.catch((err: unknown) => err))
+    })
+  }
+})
+
+// Its close's outcome is decided after its callbacks start: here the cleanup one of them runs outlasts the close.
+describe("a broadcast whose graceful close times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
+  for (const binary of [false, true])
+    for (const removes of [false, true]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+        configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+        const room = new ServerBroadcast<string>({ key: 'room:close-times-out' })
+        const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+        room.onClose(() => {
+          if (removes) stop()
+          return new Promise<void>(() => {})
+        })
+        await room.close({ timeout: 10 })
+        const ended = await room.closed.catch((err: unknown) => err)
+        expect(ended).toMatchObject({ message: 'Channel close timed out' })
+        expect(
+          await stop.ready.then(
+            () => 'resolved',
+            (err: unknown) => err,
+          ),
+        ).toBe(ended)
+      })
+    }
+})
 
 describe('Broadcast disallows channel methods', () => {
   it.each([
@@ -558,7 +1278,7 @@ describe('lossy broadcast under memory pressure', () => {
         index: 7,
         replay: end._replayBuffer!,
       }),
-      { broadcast: { text: true, binary: false } },
+      { want: { version: 1, text: true, binary: false } },
     )
     await broadcast.publish('first', { lossy: true })
     await new Promise((resolve) => setTimeout(resolve, 5))

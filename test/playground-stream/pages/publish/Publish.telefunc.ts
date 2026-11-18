@@ -37,6 +37,10 @@ export {
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
   onJoinChat,
+  onBroadcastToSubscribe,
+  onPublishTo,
+  onBroadcastRedisRefuses,
+  onRedisAllowsEveryKey,
 }
 
 import { Buffer } from 'node:buffer'
@@ -45,6 +49,8 @@ import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
 import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
+import { redis } from '../../redis'
+import { refuseChannels } from './refuseChannels'
 
 type TextMsg = { text: string; from: string }
 
@@ -99,7 +105,7 @@ async function onBroadcastShieldClient() {
 }
 
 /** Client subscribes to binary broadcast, server publishes frames. Tests client-side subscribeBinary.
- *  The client sends a `{ start: true }` text publish on the same wire as its BROADCAST_SUB (binary),
+ *  The client sends a `{ start: true }` text publish on the same wire as its binary WANT,
  *  so by the time this `start` callback runs, the peer is wire-subscribed for binary. */
 async function onBinaryBroadcast() {
   const room = new BroadcastChannel<{ start: true }>({ key: `room:broadcast-test:${crypto.randomUUID()}` })
@@ -219,17 +225,13 @@ async function onBroadcastWhileEstablishing(count: number, bytes: number) {
 /** The store refuses this key's first subscribe (a test asks it to, see `failBackend()`). */
 async function onSubscribeRefused() {
   const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-refused:${crypto.randomUUID()}` })
-  const seen: string[] = []
-  const { promise: delivered, resolve } = Promise.withResolvers<void>()
-  channel.subscribe((msg) => {
-    seen.push(`first:${msg.n}`)
-    resolve()
-  })
-  // The refused subscription is replaced a few microtasks later.
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  await channel.publish({ n: 1 })
-  await delivered
-  return { seen }
+  const subscribed = channel.subscribe(() => {})
+  const outcome = (settled: Promise<unknown>) =>
+    settled.then(
+      () => 'resolved',
+      () => 'rejected',
+    )
+  return { ready: await outcome(subscribed.ready), closed: await outcome(channel.closed) }
 }
 
 /** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see
@@ -913,4 +915,26 @@ async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held')
   } catch (err) {
     return { received, error: (err as Error).name }
   }
+}
+
+/** A broadcast of a key of its own, which `onPublishTo()` and server action `publish_<key>` publish to from outside it. */
+async function onBroadcastToSubscribe() {
+  const key = `room:subscribe:${crypto.randomUUID()}`
+  onServerAction(`publish_${key}`, () => void Broadcast.publish(key, 'from a server action'))
+  return { room: new BroadcastChannel<string>({ key }), key }
+}
+
+async function onPublishTo(key: string, text: string) {
+  await Broadcast.publish(key, text)
+}
+
+/** A broadcast whose key Redis refuses to subscribe to (`refuseChannels()`), null where Redis doesn't refuse one. Only
+ *  where the playground runs on Redis. */
+async function onBroadcastRedisRefuses() {
+  if (!(await refuseChannels())) return null
+  return new BroadcastChannel<string>({ key: `!refused:${crypto.randomUUID()}` })
+}
+
+async function onRedisAllowsEveryKey() {
+  await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
 }

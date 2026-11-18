@@ -36,6 +36,7 @@ export {
   serverRuntime,
   setServerRuntime,
   canCutWire,
+  REDIS_TOOK_REFUSED_KEY,
 }
 
 import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
@@ -146,6 +147,10 @@ function canCutWire(): boolean {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Fails a card of a subscription Redis should refuse (`refuseChannels()`) where Redis took it instead. */
+const REDIS_TOOK_REFUSED_KEY =
+  "Redis took a subscription its channel permissions should refuse: check the ACL pattern in pages/publish/refuseChannels.ts against the channel names Telefunc's Redis transport subscribes to"
 
 async function resetCleanupState() {
   await fetch(`${getServerUrl()}/api/cleanup-state/reset`, { method: 'POST' })

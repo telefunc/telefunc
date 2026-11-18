@@ -56,6 +56,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
   testRoomStorage()
+  testServerFirst()
 }
 
 function testBroadcastPublishFromWorker() {
@@ -399,7 +400,9 @@ function testRefusedPresence() {
     })
     await page.click('#subscribe')
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+      const state = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      // The subscriber's `ready` keeps the refusal of its first presence.
+      expect({ published: state.published, ready: state.ready }).deep.equal({ published: true, ready: 'rejected' })
     })
     // Each try publishes again, until the replacing subscription's presence is recorded.
     await autoRetry(async () => {
@@ -755,4 +758,33 @@ function testPublishOrder() {
       { timeout: 30_000 },
     )
   })
+}
+
+function testServerFirst() {
+  test("Broadcast: a channel the server subscribed to after an `await` delivers every publish to its page's object", async () => {
+    // Pages on two objects, so that a subscription recorded under any one object but the page's misses on one of them.
+    for (const shard of [1, 2]) {
+      await page.goto(`${getServerUrl()}/server-first?session=${sessionTokenOfShard(shard)}`)
+      await autoRetry(async () => {
+        expect(await page.locator('#hydrated').count()).toBe(1)
+      })
+      await page.click('#server-first')
+      await autoRetry(
+        async () => {
+          expect(JSON.parse((await page.textContent('#server-first-result')) ?? 'null')).deep.equal(['p1', 'p2', 'p3'])
+        },
+        { timeout: 15_000 },
+      )
+    }
+  })
+}
+
+/** A session token the server routes to shard `shard` of the five `new Telefunc({ scale: 5 })` has. */
+function sessionTokenOfShard(shard: number): string {
+  for (;;) {
+    const token = crypto.randomUUID()
+    let hash = 0
+    for (let i = 0; i < token.length; i++) hash = (hash * 31 + token.charCodeAt(i)) >>> 0
+    if (hash % 5 === shard) return token
+  }
 }

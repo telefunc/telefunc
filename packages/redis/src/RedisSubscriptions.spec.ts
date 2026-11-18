@@ -7,8 +7,9 @@ import { RedisSubscriptions } from './RedisSubscriptions.js'
 
 const TEXT = 'text-channel'
 const BINARY = 'binary-channel'
-/** A key's two kinds share a seq, so a publish of either waits for both, as `broadcastWaitRule` has it. */
-const RULE = { queue: TEXT, channels: [TEXT, BINARY], budget: TEXT }
+/** A key's two kinds share a seq, so a text publish waits for both, and fails only on its own, as `broadcastWaitRule`
+ *  has it. */
+const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
 
 type ReadStarts = () => Promise<Map<string, { seq: number; timestamp: number }>>
 
@@ -63,14 +64,24 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     expect(binary.state()).toBe('ready')
   })
 
-  it('fails with the reason when Redis refuses a subscription it waits for', async () => {
+  it('fails with the reason when Redis refuses the subscription of its own kind it waits for', async () => {
     const refused = refusal()
     const { listen, sends } = setup(async (...channels) => {
-      if (channels.includes(BINARY)) throw refused
+      if (channels.includes(TEXT)) throw refused
     })
     listen(TEXT)
     listen(BINARY)
 
     await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toBe(refused)
+  })
+
+  it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
+    const { listen, sends } = setup(async (...channels) => {
+      if (channels.includes(BINARY)) throw refusal()
+    })
+    listen(TEXT)
+    listen(BINARY)
+
+    await expect(sends.waitTurn(RULE, 'hello')!.turn).resolves.toBe('hello')
   })
 })

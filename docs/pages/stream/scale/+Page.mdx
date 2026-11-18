@@ -78,10 +78,11 @@ Implement `BroadcastTransport` and assign it to `config.broadcast.transport`:
 ```ts ts-only
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
   sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
 }
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
 ```
 
 The rules a transport follows are in <Link href="/broadcast-config">`config.broadcast`</Link>.

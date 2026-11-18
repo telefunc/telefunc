@@ -505,9 +505,10 @@ class RedisRoomDriver implements RoomDriver {
  *  count against its member's. */
 function commitWaitRule({ lane, everyTrack, everyMember }: CommitChannels): WaitRule {
   if (everyTrack === null || everyMember === null) {
-    return { queue: lane, channels: [lane], budget: lane }
+    return { queue: lane, channels: [lane], failsOn: [lane], budget: lane }
   }
-  return { queue: lane, channels: [lane, everyTrack, everyMember], budget: everyTrack }
+  const channels = [lane, everyTrack, everyMember]
+  return { queue: lane, channels, failsOn: channels, budget: everyTrack }
 }
 
 /** The turn a Cluster's commits to one lane take. */

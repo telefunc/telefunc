@@ -65,9 +65,11 @@ class RedisBackend implements BroadcastDriver {
   }
 }
 
-/** A key's two kinds share its order, so a publish of either waits behind the key's waiting ones. */
+/** A key's two kinds share its order, so a publish of either waits behind the key's waiting ones; only Redis's refusal
+ *  of its own kind's subscription fails it, as only that one would miss it. */
 function broadcastWaitRule(prefix: string, { key, kind }: BroadcastRoute): WaitRule {
   const text = broadcastChannel(prefix, { key, kind: 'text' })
   const binary = broadcastChannel(prefix, { key, kind: 'binary' })
-  return { queue: text, channels: [text, binary], budget: kind === 'text' ? text : binary }
+  const own = kind === 'text' ? text : binary
+  return { queue: text, channels: [text, binary], failsOn: [own], budget: own }
 }

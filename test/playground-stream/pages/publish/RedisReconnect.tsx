@@ -8,6 +8,7 @@ import {
   onBroadcastStartReadFailed,
   onBroadcastSubscriberDropped,
   onBroadcastSubscriberSilent,
+  onPublishBesideRefusedSubscribe,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
 } from './RedisReconnect.telefunc'
@@ -15,6 +16,7 @@ import {
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
   const [channelDenied, setChannelDenied] = useState<unknown>(null)
+  const [beside, setBeside] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
   const [dropped, setDropped] = useState<unknown>(null)
   const [duringResume, setDuringResume] = useState<unknown>(null)
@@ -82,6 +84,14 @@ function RedisReconnect() {
       <pre id="redis-silent-result">{JSON.stringify(silent)}</pre>
       <button type="button" id="test-redis-silent" onClick={async () => setSilent(await onBroadcastSubscriberSilent())}>
         Stop Redis's replies reaching a subscriber connection
+      </button>
+      <pre id="redis-beside-refused-result">{JSON.stringify(beside)}</pre>
+      <button
+        type="button"
+        id="test-redis-beside-refused"
+        onClick={async () => setBeside(await onPublishBesideRefusedSubscribe())}
+      >
+        Publish on one key while Redis refuses another key's subscription
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

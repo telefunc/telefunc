@@ -45,8 +45,7 @@ function namesWireVersion(request: Pick<Request, 'url'>): boolean {
   return new URL(request.url, 'http://localhost').searchParams.get('wire') === String(WIRE_VERSION)
 }
 
-/** The token the page's client names its session by in every request (`getSessionUrl`), if the request has one: the
- *  client's, not the id the server gives a wire. */
-function getSessionToken(request: Pick<Request, 'url'>): string | null {
-  return new URL(request.url, 'http://localhost').searchParams.get('session')
+/** The session token the page's `getSessionUrl` names on its calls and its wire. */
+function getSessionToken(request: Pick<Request, 'url'>): string | undefined {
+  return new URL(request.url, 'http://localhost').searchParams.get('session') ?? undefined
 }
