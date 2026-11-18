@@ -68,7 +68,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.addSubscriber(this.broadcastBinaryListeners, 'binary', callback, options)
   }
 
-  /** Its `ready` settles once the server confirmed the want this subscriber needs, or the subscriber is removed. */
+  /** Its `ready` settles once the server confirmed the want this subscriber needs, or the subscriber is removed: with
+   *  the end as known then where the close callbacks were called. */
   private addSubscriber<L>(
     listeners: Listeners<L>,
     kind: 'text' | 'binary',

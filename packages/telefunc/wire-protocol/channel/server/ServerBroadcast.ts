@@ -159,7 +159,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   /** Its `ready` settles as a page's does: once the backend delivers to it what any server publishes to the key, or once
-   *  it is removed, and it rejects where the broadcast ends first. One added to an ended broadcast never takes effect. */
+   *  it is removed, with the end as known then where the close callbacks were called; one still registered rejects
+   *  where the broadcast ends first. One added to an ended broadcast never takes effect. */
   private addSubscriber<L>(
     listeners: Listeners<L>,
     binary: boolean,
@@ -596,7 +597,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
    *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
    *  broadcast ends: with the backend's error on the server, reported as a server error, and on its page as a
-   *  subscription that didn't take effect; every `ready` waiting rejects with that end. One removed meanwhile changes nothing. */
+   *  subscription that didn't take effect; every `ready` waiting rejects with that end. One removed meanwhile left `waiting` at its removal. */
   private async whenListening(listening: Listening, ready: Readiness, waiting: Set<Readiness>): Promise<void> {
     try {
       await ready.promise
