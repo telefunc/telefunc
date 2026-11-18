@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
@@ -9,6 +9,7 @@ import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { Channel } from '../channel/server/ServerChannel.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport, Listening } from './broadcastAdapter.js'
+import { onBug } from '../../node/server/runTelefunc/onBug.js'
 
 /** The adapter's subscription as the function that stops it. */
 const stopOf = (subscription: Listening) => subscription.unsubscribe
@@ -1382,6 +1383,75 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
+  })
+
+  it('a callback that throws is logged and reaches onBug(), publish() resolves, and the subscribers after it get the message', async () => {
+    const key = crypto.randomUUID()
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const thrown = new Error('a subscriber throws')
+    const received: string[] = []
+    const unsubscribes = [
+      Broadcast.subscribe<string>(key, () => {
+        throw thrown
+      }),
+      Broadcast.subscribe<string>(key, (msg) => received.push(msg)),
+    ]
+
+    expect(await Broadcast.publish(key, 'hi')).toMatchObject({ key })
+    expect(received).toEqual(['hi'])
+    expect(bugs).toEqual([thrown])
+    expect(logged.mock.calls).toEqual([[thrown.stack]])
+    logged.mockRestore()
+    for (const unsubscribe of unsubscribes) unsubscribe()
+  })
+
+  it("each subscribeBinary() callback, a BroadcastChannel's too, gets its own copy of the bytes", async () => {
+    const key = crypto.randomUUID()
+    const broadcast = new ServerBroadcast<string>({ key })
+    const seen: number[][] = []
+    const write = (data: Uint8Array) => {
+      seen.push([...data])
+      data[0] = 99
+    }
+    const unsubscribes = [
+      Broadcast.subscribeBinary(key, write),
+      broadcast.subscribeBinary(write),
+      Broadcast.subscribeBinary(key, write),
+    ]
+    const bytes = Uint8Array.of(1, 2, 3)
+
+    await Broadcast.publishBinary(key, bytes)
+    expect(seen).toEqual([
+      [1, 2, 3],
+      [1, 2, 3],
+      [1, 2, 3],
+    ])
+    expect([...bytes]).toEqual([1, 2, 3])
+    for (const unsubscribe of unsubscribes) unsubscribe()
+    broadcast.abort()
+  })
+
+  it('a publish made in a callback reaches every subscriber after the message that callback got', async () => {
+    const key = crypto.randomUUID()
+    const seen: [string, number][] = []
+    const unsubscribes = [
+      Broadcast.subscribe<number>(key, (n) => {
+        seen.push(['first', n])
+        if (n === 1) void Broadcast.publish(key, 2)
+      }),
+      Broadcast.subscribe<number>(key, (n) => seen.push(['second', n])),
+    ]
+
+    await Broadcast.publish(key, 1)
+    expect(seen).toEqual([
+      ['first', 1],
+      ['second', 1],
+      ['first', 2],
+      ['second', 2],
+    ])
+    for (const unsubscribe of unsubscribes) unsubscribe()
   })
 })
 
