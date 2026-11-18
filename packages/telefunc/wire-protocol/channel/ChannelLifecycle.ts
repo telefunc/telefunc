@@ -113,7 +113,11 @@ class ChannelLifecycle {
   }
 
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void {
-    if (!this.didFireOpen) return this.openListeners.add(callback, options)
+    if (!this.didFireOpen) {
+      // Ended unopened, it never opens: nothing would let go of the registration, or of its signal's listener.
+      if (this.ended) return () => {}
+      return this.openListeners.add(callback, options)
+    }
     if (!options?.signal?.aborted) this.invokeOpenCallback(callback)
     return () => {}
   }

@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHook } from 'node:async_hooks'
+import { getEventListeners } from 'node:events'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
@@ -64,6 +65,19 @@ describe('a listener added once its channel ended on the page', () => {
     const closedWith = await page.closed.catch((err: unknown) => err)
     await expect(page.listen(() => {}).ready).rejects.toBe(closedWith)
     await expect(page.listenBinary(() => {}).ready).rejects.toBe(closedWith)
+  })
+
+  it("an `onOpen()` callback added to a channel that ended unopened registers nothing on its signal and never runs", async () => {
+    const page = new ClientChannel(channelOptions())
+    page.abort('gone')
+    await page.closed.catch(() => {})
+    const signal = new AbortController().signal
+    const opened = vi.fn()
+    page.onOpen(opened, { signal })
+    expect({ listeners: getEventListeners(signal, 'abort').length, opened: opened.mock.calls.length }).toEqual({
+      listeners: 0,
+      opened: 0,
+    })
   })
 })
 
