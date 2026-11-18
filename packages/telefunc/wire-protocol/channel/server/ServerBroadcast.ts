@@ -558,13 +558,10 @@ class RouteSubscription<Kind extends BroadcastKind> {
     if (this.current === null && !this.starting) this.subscribe()
   }
 
+  /** What waits for it to take effect is let go: it would wait for good on a subscription no longer wanted. */
   close(): void {
-    this.opened = false
-    unfollowBroadcastPlane(this)
-    const current = this.current
-    this.current = null
-    this.currentInEffect = false
-    current?.unsubscribe()
+    this.establishing = null
+    this.stop()
   }
 
   /** Subscribes on the plane that replaced this subscription's. */
@@ -573,8 +570,18 @@ class RouteSubscription<Kind extends BroadcastKind> {
       this.replacedWhileStarting = true
       return
     }
-    this.close()
+    this.stop()
     this.open()
+  }
+
+  /** Stops its subscription; what waits for it to take effect waits on. */
+  private stop(): void {
+    this.opened = false
+    unfollowBroadcastPlane(this)
+    const current = this.current
+    this.current = null
+    this.currentInEffect = false
+    current?.unsubscribe()
   }
 
   /** Settles what waits for it to take effect: a wait that comes later gets its own. */
@@ -617,7 +624,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
         await subscription.ready
       } catch (err) {
         if (this.current !== subscription) return
-        this.close()
+        this.stop()
         const failure = err instanceof Error ? err : new Error(String(err))
         this.settleEstablishing(failure)
         this.onFailed(failure)

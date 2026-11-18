@@ -2,8 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
-import { setFlagsFromString } from 'node:v8'
-import { runInNewContext } from 'node:vm'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
 import { publishBody } from './PublishBody.js'
@@ -22,6 +20,8 @@ import type { BroadcastTransport, BroadcastUnsubscribe } from '../../backend/bro
 import { MemoryBackend } from '../../backend/memory/MemoryBackend.js'
 import { DriverAttempt, type BackendReceiver, type BroadcastRoute } from '../../backend/driver.js'
 import { onBug } from '../../../node/server/runTelefunc/onBug.js'
+import { collectGarbage } from '../../test/collectGarbage.js'
+import { MONITORING_FAILURES } from '../../test/monitoringFailures.js'
 import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
@@ -864,7 +864,7 @@ describe("a transport's listener whose broker refuses it", () => {
       it(`Broadcast.${surface}(): a transport's \`unsubscribe()\` that ${stop} is called once a round, its failure logged, and keeps no listener reachable`, async () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
-          const state = subscribeRounds(binary, (onMessage, counted) => () => {
+          const state = await subscribeRounds(binary, (onMessage, counted) => () => {
             // As a broker client's stop refers to the listener it stops.
             void onMessage
             counted.stops++
@@ -883,15 +883,29 @@ describe("a transport's listener whose broker refuses it", () => {
     }
     it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`ready\` pending keeps none of it reachable`, async () => {
       const pending = new Promise<void>(() => {})
-      const state = subscribeRounds(binary, (onMessage) => ({ unsubscribe: () => void onMessage, ready: pending }))
+      const state = await subscribeRounds(binary, (onMessage) => ({
+        unsubscribe: () => void onMessage,
+        ready: pending,
+      }))
+      await collectGarbage()
+      expect(state.reachable()).toBe(0)
+    })
+    it(`Broadcast.${surface}(): a transport's listener its broker confirmed, then stopped, keeps none of it reachable`, async () => {
+      const state = await subscribeRounds(
+        binary,
+        (onMessage) => ({ unsubscribe: () => void onMessage, ready: Promise.resolve() }),
+        'once ready',
+      )
       await collectGarbage()
       expect(state.reachable()).toBe(0)
     })
   }
-  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`. */
-  const subscribeRounds = (
+  /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`: each
+   *  subscriber removed at once, or once its `ready` resolved. */
+  const subscribeRounds = async (
     binary: boolean,
     listening: (onMessage: object, counted: { stops: number }) => BroadcastUnsubscribe,
+    removed: 'at once' | 'once ready' = 'at once',
   ) => {
     const listeners: WeakRef<object>[] = []
     const state = { stops: 0, reachable: () => listeners.filter((listener) => listener.deref() !== undefined).length }
@@ -905,6 +919,7 @@ describe("a transport's listener whose broker refuses it", () => {
       const remove = binary
         ? Broadcast.subscribeBinary('room:held', () => {})
         : Broadcast.subscribe('room:held', () => {})
+      if (removed === 'once ready') await remove.ready
       remove()
     }
     return state
@@ -1094,40 +1109,44 @@ describe("a transport's listener whose broker refuses it", () => {
     })
   }
 
-  // A monitoring client an app reports bugs to may fail on its own.
-  for (const fails of ['throws', 'returns a rejected promise'] as const) {
-    it(`a refusal reported to an \`onBug()\` listener that ${fails} still rejects the subscriber's \`ready\`, the listener's failure logged, not left unhandled`, async () => {
-      const monitoringFailed = new Error('monitoring client failed')
-      failingBugListener =
-        fails === 'throws'
-          ? () => {
-              throw monitoringFailed
-            }
-          : () => Promise.reject(monitoringFailed)
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const unhandled: unknown[] = []
-      const onUnhandled = (reason: unknown) => unhandled.push(reason)
-      process.on('unhandledRejection', onUnhandled)
-      try {
-        const { refuse } = refusingBroker()
-        const subscriber = Broadcast.subscribe('room:failing-monitoring', () => {})
-        refuse()
-        const cause = await subscriber.ready.then(
-          () => 'resolved',
-          (err: unknown) => err instanceof Error && err.cause instanceof Error && err.cause.message,
-        )
-        await new Promise((resolve) => setTimeout(resolve, 10))
-        expect({
-          cause,
-          unhandled,
-          logged: logged.mock.calls.some(([error]) => String(error).includes('monitoring client failed')),
-        }).toEqual({ cause: 'NOPERM', unhandled: [], logged: true })
-      } finally {
-        failingBugListener = undefined
-        process.off('unhandledRejection', onUnhandled)
-        logged.mockRestore()
-      }
-    })
+  // A monitoring client an app reports bugs to may fail on its own, also with the error of a stream it closed early.
+  for (const [given, failure] of Object.entries(MONITORING_FAILURES)) {
+    for (const fails of ['throws', 'rejects'] as const) {
+      it(`a refusal reported to an \`onBug()\` listener that ${fails} with ${given} still rejects the subscriber's \`ready\` and reaches the next listener, the listener's failure logged once`, async () => {
+        const monitoringFailed = failure()
+        failingBugListener =
+          fails === 'throws'
+            ? () => {
+                throw monitoringFailed
+              }
+            : () => Promise.reject(monitoringFailed)
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const unhandled: unknown[] = []
+        const onUnhandled = (reason: unknown) => unhandled.push(reason)
+        process.on('unhandledRejection', onUnhandled)
+        try {
+          const before = reported.length
+          const { refuse } = refusingBroker()
+          const subscriber = Broadcast.subscribe('room:failing-monitoring', () => {})
+          refuse()
+          const cause = await subscriber.ready.then(
+            () => 'resolved',
+            (err: unknown) => err instanceof Error && err.cause instanceof Error && err.cause.message,
+          )
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          expect({
+            cause,
+            unhandled,
+            nextListener: reported.slice(before),
+            logged: logged.mock.calls.filter(([error]) => String(error).includes(monitoringFailed.message)).length,
+          }).toEqual({ cause: 'NOPERM', unhandled: [], nextListener: ['NOPERM'], logged: 1 })
+        } finally {
+          failingBugListener = undefined
+          process.off('unhandledRejection', onUnhandled)
+          logged.mockRestore()
+        }
+      })
+    }
   }
 
   for (const refusesInListen of [false, true]) {
@@ -1146,12 +1165,12 @@ describe("a transport's listener whose broker refuses it", () => {
   }
 })
 
+/** What the first `onBug()` listener does with each bug, where a test sets it: throw, or return a promise that rejects. */
+let failingBugListener: (() => unknown) | undefined
+onBug(() => failingBugListener?.())
 /** The failures the server reported through `onBug()`, by the message of their cause. */
 const reported: string[] = []
 onBug((err) => reported.push(err instanceof Error && err.cause instanceof Error ? err.cause.message : String(err)))
-/** What an `onBug()` listener a test sets does with each bug: throw, or return a promise that rejects. */
-let failingBugListener: (() => unknown) | undefined
-onBug(() => failingBugListener?.())
 
 /** Ready at once, as a memory subscription is, until the test loses it or ends it, as a backend does that loses its
  *  connection or whose renewal is refused. */
@@ -2141,14 +2160,3 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(received).toEqual([])
   })
 })
-
-/** Collects what nothing reaches, without the `--expose-gc` flag on the test run. */
-async function collectGarbage(): Promise<void> {
-  setFlagsFromString('--expose-gc')
-  const gc: unknown = runInNewContext('gc')
-  if (typeof gc !== 'function') throw new Error('V8 exposes no gc()')
-  for (let turn = 0; turn < 4; turn++) {
-    await new Promise((resolve) => setImmediate(resolve))
-    gc()
-  }
-}

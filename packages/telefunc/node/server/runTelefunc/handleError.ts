@@ -1,4 +1,5 @@
 export { handleError }
+export { logError }
 export { describeValue }
 
 import type { ViteDevServer } from 'vite'
@@ -14,7 +15,11 @@ function handleError(err: unknown) {
   if (isNetworkError(err) && err.isChannel) return
   if (hasProp(err, 'code') && (err.code === 'ERR_STREAM_PREMATURE_CLOSE' || err.code === 'ERR_STREAM_UNABLE_TO_PIPE'))
     return
+  logError(err)
+}
 
+/** Logs `err` with its causes, where Vite didn't log it already. */
+function logError(err: unknown) {
   // We ensure we print a string; Cloudflare Workers doesn't seem to properly stringify `Error` objects.
   const errStr = describeError(err)
 
