@@ -6,6 +6,7 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 
 function createPeer(frames: Uint8Array[]) {
@@ -234,6 +235,22 @@ describe('self-initiated close', () => {
     expect(didFinishOnClose).toBe(true)
     expect(channel._phase).toBe('ended')
   })
+
+  const UNRETURNED = {
+    'a Channel': () => new ServerChannel<never, number>(),
+    'a BroadcastChannel used only on the server': () => new ServerBroadcast<number>({ key: crypto.randomUUID() }),
+  }
+  for (const [kind, create] of Object.entries(UNRETURNED)) {
+    test(`close() of ${kind} no telefunction has returned ends it without waiting for a page, and onClose() receives undefined`, async () => {
+      const channel = create()
+      const closes: unknown[] = []
+      channel.onClose((err) => void closes.push(err))
+
+      await expect(channel.close({ timeout: 1_000 })).resolves.toBe(1)
+      expect(closes).toEqual([undefined])
+      await expect(channel.closed).resolves.toBeUndefined()
+    })
+  }
 
   test('buffered send flushes before close request on attachPeer', async () => {
     const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })

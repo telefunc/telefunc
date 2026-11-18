@@ -302,7 +302,7 @@ A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the ser
 
 > Over SSE, the server can't pause a message on its way to the client. Encoding adds a third, so 8 MiB at 1 MiB/s takes about 11 s. A later `send()` of up to 16 KiB on another channel goes as soon as that 8 MiB message is out, ahead of what's queued behind it. Every other later message from the server waits behind what's queued before it. What the client sends still reaches the server.
 
-> A server's `close()` waits for the client's answer, up to its timeout of 5 s by default. When a message on its way takes longer, as the 8 MiB one above does, the `close()` times out: the channel ends on the server, and `onClose()` receives a `ChannelClosedError`. To avoid that, pass a longer timeout, such as `close({ timeout: 20_000 })`.
+> Once its telefunction has returned the channel, a server's `close()` waits for the client's answer, up to its timeout of 5 s by default. When a message on its way takes longer, as the 8 MiB one above does, the `close()` times out: the channel ends on the server, and `onClose()` receives a `ChannelClosedError`. To avoid that, pass a longer timeout, such as `close({ timeout: 20_000 })`. A channel no telefunction has returned yet, such as a `BroadcastChannel` used only on the server, ends at once on `close()`, and its `onClose()` receives `undefined`; a client that gets it afterwards reads what was sent, then the close.
 
 #### When held messages clear
 
