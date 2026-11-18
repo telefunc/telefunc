@@ -36,7 +36,12 @@ type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Pro
 
 /** A `BroadcastUnsubscribe` in one form: `ready` is undefined where the listener is in effect already, else the one
  *  outcome of its key's subscription, which every subscriber of the key shares. */
-type Listening = { unsubscribe: () => void; ready: Readiness | undefined }
+type Listening = {
+  unsubscribe: () => void
+  ready: Readiness | undefined
+  /** Aborts where the start the subscriber came for threw, which removed it: nothing of it is to be released any more. */
+  removed?: AbortSignal
+}
 
 type QueuedPublish = { size: number; depth: number; deliver: () => void }
 
@@ -132,7 +137,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
           this.deliver(this.subscriptions, key, payload, info)
         }),
       )
-    return { unsubscribe, ready: listening.ready }
+    return { unsubscribe, ready: listening.ready, removed: listening.removed }
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -166,7 +171,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
           this.deliver(this.binarySubscriptions, key, payload, info)
         }),
       )
-    return { unsubscribe, ready: listening.ready }
+    return { unsubscribe, ready: listening.ready, removed: listening.removed }
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -304,7 +309,8 @@ function startListening(
   listen: () => BroadcastUnsubscribe,
 ): Listening {
   const ready = new Readiness()
-  const listening: Listening = { unsubscribe: () => {}, ready }
+  const removed = new AbortController()
+  const listening: Listening = { unsubscribe: () => {}, ready, removed: removed.signal }
   listenings.set(key, listening)
   let started: BroadcastUnsubscribe
   try {
@@ -313,6 +319,7 @@ function startListening(
     listenings.delete(key)
     subscribers.get(key)?.clear()
     subscribers.delete(key)
+    removed.abort()
     ready.settle(err instanceof Error ? err : new Error(String(err)))
     throw err
   }

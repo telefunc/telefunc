@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHook } from 'node:async_hooks'
+import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
@@ -715,6 +716,35 @@ describe("a transport's listen() that delivers a message, then throws", () => {
         joinedHeard: [],
         listeningAfterRetry: 0,
       })
+    })
+  }
+
+  // An app that subscribes with one long-lived signal: each attempt that fails must leave nothing on it.
+  const WITH_SIGNAL: Record<string, (signal: AbortSignal) => (onMessage: () => void) => Unsubscribe> = {
+    'Broadcast.subscribe()': (signal) => (onMessage) => Broadcast.subscribe(KEY, onMessage, { signal }),
+    'Broadcast.subscribeBinary()': (signal) => (onMessage) => Broadcast.subscribeBinary(KEY, onMessage, { signal }),
+    'BroadcastChannel.subscribe()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribe(onMessage, { signal })
+    },
+    'BroadcastChannel.subscribeBinary()': (signal) => {
+      const broadcast = new ServerBroadcast({ key: KEY })
+      return (onMessage) => broadcast.subscribeBinary(onMessage, { signal })
+    },
+  }
+  for (const [surface, of] of Object.entries(WITH_SIGNAL)) {
+    it(`${surface}: a listener added on that message with a signal leaves no abort listener on it once it goes`, async () => {
+      deliveringThenThrowing()
+      const signal = new AbortController().signal
+      const subscribe = of(signal)
+      let joined: Unsubscribe | undefined
+      expect(() =>
+        subscribe(() => {
+          joined ??= subscribe(() => {})
+        }),
+      ).toThrow('broker connection closed')
+      await expect(joined?.ready).rejects.toThrow('broker connection closed')
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0)
     })
   }
 

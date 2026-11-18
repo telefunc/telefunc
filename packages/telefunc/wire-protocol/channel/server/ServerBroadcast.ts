@@ -813,7 +813,7 @@ function settleAll(waiting: Set<Readiness>, outcome: true | Error): void {
 
 /** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
  *  `ready` resolves once the subscription is in effect or removed, and rejects where its backend failed it first. */
-function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal | undefined): Unsubscribe {
+function removedOnAbort({ unsubscribe, ready, removed }: Listening, signal: AbortSignal | undefined): Unsubscribe {
   const readiness = ready && new Readiness(ready)
   let current: (() => void) | undefined = unsubscribe
   const remove = () => {
@@ -824,7 +824,8 @@ function removedOnAbort({ unsubscribe, ready }: Listening, signal: AbortSignal |
     readiness?.settle(ready?.failure ?? true)
     pending?.()
   }
-  signal?.addEventListener('abort', remove, { once: true })
+  // Off `signal` once the adapter removed the subscription itself, as when the app removes it.
+  signal?.addEventListener('abort', remove, { once: true, signal: removed })
   if (signal?.aborted) remove()
   return withReady(remove, readiness)
 }
