@@ -13,9 +13,6 @@ interface ChannelLifecycleOwner {
   _end(err?: Error): void
   /** A callback threw `Abort`. */
   _abortFromCallback(err: AbortError): void
-  /** Its close callbacks are about to run: what the end means for what waits on it is decided now, ahead of anything
-   *  they do. */
-  _closing(): void
 }
 
 type ChannelLifecycleOptions = {
@@ -93,6 +90,11 @@ class ChannelLifecycle {
   }
 
   /** What the channel ended with, where it didn't close gracefully. */
+  /** Its close callbacks have been called. */
+  get closeFired(): boolean {
+    return this.didFireClose
+  }
+
   get closeError(): Error | undefined {
     return this.endError
   }
@@ -225,7 +227,6 @@ class ChannelLifecycle {
   private fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
-    this.owner._closing()
     for (const { listener } of this.closeListeners.list()) {
       if (!listener) continue
       const pending = this.invokeCloseCallback(listener, err)

@@ -585,9 +585,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _abortFromCallback(err: AbortError): void {
     this.abort(err.abortValue, err.message)
   }
-
-  /** @internal Nothing of a plain channel waits on its end. */
-  _closing(): void {}
 }
 
 function reportChannelError(err: unknown): void {

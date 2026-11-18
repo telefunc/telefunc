@@ -980,6 +980,35 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
   }
 })
 
+// Its close's outcome is decided after its callbacks start: here the cleanup one of them runs outlasts the close.
+describe("a broadcast whose graceful close times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
+  for (const binary of [false, true])
+    for (const removes of [false, true]) {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+        const sent = () => ({ seq: 1, timestamp: 1 })
+        const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+        _resetBroadcastAdapterForTesting(
+          new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+        )
+        const room = new ServerBroadcast<string>({ key: 'room:close-times-out' })
+        const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
+        room.onClose(() => {
+          if (removes) stop()
+          return new Promise<void>(() => {})
+        })
+        await room.close({ timeout: 10 })
+        const ended = await room.closed.catch((err: unknown) => err)
+        expect(ended).toMatchObject({ message: 'Channel close timed out' })
+        expect(
+          await stop.ready.then(
+            () => 'resolved',
+            (err: unknown) => err,
+          ),
+        ).toBe(ended)
+      })
+    }
+})
+
 describe('Broadcast disallows channel methods', () => {
   it.each([
     ['listen', (b: ServerBroadcast) => b.listen()],

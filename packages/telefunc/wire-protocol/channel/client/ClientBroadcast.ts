@@ -82,7 +82,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
-        this._attach.stopWaiting(readiness)
+        // Once its close callbacks ran, one that waits gets the end, whatever they do.
+        if (!this.lifecycle.closeFired) this._attach.stopWaiting(readiness)
         if (listeners.size === 0) this.setSubscribed(kind, false)
       },
     })
@@ -101,14 +102,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
   }
 
-  /** @internal Ahead of its close callbacks, one of which may remove a subscriber that waits: that one gets the end. */
-  override _closing(): void {
-    this._attach.failWants(this.endError())
-  }
-
   override _end(err?: Error): void {
     super._end(err)
-    // One added while its close callbacks ran, ahead of clearing the subscribers, which settles their `ready` as removed.
+    // What waits gets the end: one its close callbacks removed too.
     this._attach.failWants(err ?? new ChannelClosedError())
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()

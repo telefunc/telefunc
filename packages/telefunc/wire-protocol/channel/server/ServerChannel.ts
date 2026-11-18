@@ -1017,9 +1017,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** @internal Nothing of a plain channel waits on its end. */
-  _closing(): void {}
-
   /** @internal A callback threw `Abort`: aborts the response carrying the channel if there is one, else the channel. */
   _abortFromCallback(err: AbortError): void {
     if (this.responseAbort) {
