@@ -792,7 +792,9 @@ describe('static subscribers that come and go with one signal on a key a healthy
       const signal = new AbortController().signal
       for (let i = 0; i < 100; i++) subscribe(signal)()
       const adapter = getBroadcastAdapter()
-      const { removed, unsubscribe } = binary ? adapter.subscribeBinary(key, () => {}) : adapter.subscribe(key, () => {})
+      const { removed, unsubscribe } = binary
+        ? adapter.subscribeBinary(key, () => {})
+        : adapter.subscribe(key, () => {})
       const registered = {
         signal: getEventListeners(signal, 'abort').length,
         start: removed ? getEventListeners(removed, 'abort').length : 0,
