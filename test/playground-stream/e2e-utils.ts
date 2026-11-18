@@ -250,14 +250,17 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
-/** The server logged `error`: on its stderr, or under Docker on compose's stdout, each line prefixed with the container's
- *  name. */
-function expectServerError(error: string, inDocker: boolean) {
+/** The server logged `error`, or an error whose text `error` matches: on its stderr, or under Docker on compose's
+ *  stdout, each line prefixed with the container's name. */
+function expectServerError(error: string | RegExp, inDocker: boolean) {
+  const fromServer = /^playground-[a-z]-\d+ +\| /
   expectLog(error, {
     filter: (log) =>
       inDocker
         ? log.logSource === 'stdout' &&
-          log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+          (typeof error === 'string'
+            ? log.logText.split('\n').some((line) => line.includes(error) && fromServer.test(line))
+            : fromServer.test(log.logText))
         : log.logSource === 'stderr',
   })
 }
