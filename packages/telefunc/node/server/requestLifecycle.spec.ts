@@ -422,3 +422,23 @@ describe("a telefunction's bug reported to an `onBug()` listener that fails", ()
     }
   }
 })
+
+test('a listener that an `onBug()` listener registers while a bug is reported gets the next bug, not that one', async () => {
+  const late: unknown[] = []
+  let registered = false
+  firstBugListener = () => {
+    if (registered) return
+    registered = true
+    onBug((err) => void late.push(err))
+  }
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    await (await call('onThrow')).getBody()
+    const duringItsBug = late.length
+    await (await call('onThrow')).getBody()
+    expect({ duringItsBug, next: late.length }).toEqual({ duringItsBug: 0, next: 1 })
+  } finally {
+    firstBugListener = undefined
+    logged.mockRestore()
+  }
+})

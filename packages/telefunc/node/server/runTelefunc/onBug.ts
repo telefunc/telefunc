@@ -13,10 +13,10 @@ function onBug(listener: (err: unknown) => void) {
   globalObject.bugListeners.push(listener)
 }
 
-/** What a listener throws, or what a promise it returns rejects with, is logged, whatever it is: the other listeners
- *  still get the bug, and whoever reported it goes on. */
+/** Calls the listeners registered when it is called. What one throws, or what a promise it returns rejects with, is
+ *  logged, whatever it is: the other listeners still get the bug, and whoever reported it goes on. */
 function callBugListeners(err: unknown) {
-  for (const listener of globalObject.bugListeners) {
+  for (const listener of [...globalObject.bugListeners]) {
     let listening: unknown
     try {
       listening = listener(err)
