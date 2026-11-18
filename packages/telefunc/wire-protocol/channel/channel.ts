@@ -68,11 +68,11 @@ type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => 
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 /** Removes the listener. `ready` resolves once the listener is in effect, at once where nothing has to reach the other
- *  side first, or once the listener is removed before its channel's `onClose()` callbacks are called; it rejects where
- *  it never will be in effect: its channel ended first, or before the listener was added, or, without a channel
- *  (`Broadcast.subscribe()`), the broadcast backend gave the subscription up. Still waiting when an `onClose()` callback,
- *  or anything after, removes the listener, it rejects at the removal with the error known then, not one the close
- *  ends with later. So on the page and on the server alike. */
+ *  side first, or once the listener is removed while it waits. Removed once its channel's `onClose()` callbacks are
+ *  being called, by one of them or by anything else, it rejects at the removal with the error known then, not one the
+ *  close ends with later. Still registered and waiting when its channel ends, or added after, it rejects with that
+ *  end. Without a channel (`Broadcast.subscribe()`), it rejects where the broadcast backend gave the subscription up:
+ *  removed before that, it resolves, and removed after, it keeps the rejection. So on the page and on the server alike. */
 type Unsubscribe = (() => void) & { readonly ready: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
