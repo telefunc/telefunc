@@ -1,7 +1,7 @@
 export { testSmallPending }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, reconnectAtFullDelay } from '../../e2e-utils'
 import { sendRefusedWarning } from '../../../utils'
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
@@ -152,6 +152,8 @@ function testSmallPending() {
   // own 20 again, while it reconnects.
   test('channel: a client that falls behind a lossy broadcast skips to the newest, with a jump in info.seq, and stays open, and so does its own uplink', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-behind')
     await autoRetry(
       async () => {
@@ -177,6 +179,8 @@ function testSmallPending() {
   // Each newer body replaces the one waiting before the server decides what it can hold, so neither closes.
   test("channel: a lossy broadcast whose client is away keeps its newest where it and the one before don't both fit the server's memory, for two subscribers sharing them", async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-away-shared')
     await autoRetry(
       async () => {
@@ -193,6 +197,8 @@ function testSmallPending() {
   // server's memory in the same turn: the gap is the fourth, so the page gets all three first.
   test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-behind-closes')
     await autoRetry(
       async () => {

@@ -14,6 +14,7 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  reconnectAtFullDelay,
   withPacedLink,
   expectServerError,
   getResult,
@@ -201,6 +202,14 @@ function expectServerError(error: string, inDocker: boolean) {
  *
  * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
+/** The page's reconnects wait the whole of each delay their random part is drawn from, 500 ms the first, until it
+ *  navigates: a card that publishes while the page is away keeps it away that long, whatever the draw. */
+async function reconnectAtFullDelay() {
+  await page.evaluate(() => {
+    Math.random = () => 1 - Number.EPSILON
+  })
+}
+
 async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
   for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === NAVIGATE_ATTEMPTS

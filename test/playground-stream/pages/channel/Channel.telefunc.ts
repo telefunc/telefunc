@@ -897,7 +897,7 @@ async function onChannelLinkShare() {
 /** A broadcast that publishes `count` bodies of `bytes`, closes or aborts, as a channel beside it asks, and answers its
  *  pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
- *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
+ *  publish's receipt, and 16 more while the page is away (the card has it wait its whole first delay, 500 ms). `'last'` answers the ordinal of the
  *  newest `<ordinal>:…` text its server subscription got. `'past memory'` publishes three bodies, then one of 3 MiB. */
 async function onChannelPublishesBehind(
   bytes = 4 * 1024 * 1024,
