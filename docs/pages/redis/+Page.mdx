@@ -15,7 +15,7 @@ Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across ser
 npm install @telefunc/redis ioredis
 ```
 
-Requires Redis 5 or later.
+Requires Redis 5 or later, and Redis 7 or later for a Redis user whose [ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/) doesn't allow every command: there, a `publish()` or a room change that Redis refuses leaves nothing behind.
 
 ```ts
 // Environment: server

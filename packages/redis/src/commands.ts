@@ -62,6 +62,15 @@ const PUBLISH_MAX_BYTES = 28 * 1024 * 1024
  *  framing, under the 8122 bytes past `PUBLISH_MAX_BYTES` that a Redis 7.4 at its defaults delivered at the least. */
 const ROOM_FRAMING_MAX_BYTES = 6 * 1024
 
+// A write script checks each call it may make past its first write before that write, as Redis 7 and later can without
+// making it: one the user's ACL refuses is made there, so Redis answers with its own refusal and nothing is written.
+// Redis 6 can't check, and its scripts can't undo a write, so the guide asks a restricted user for Redis 7.
+const ALLOWED_LUA = `
+local function tf_allowed(...)
+  if redis.acl_check_cmd and not redis.acl_check_cmd(...) then redis.call(...) end
+end
+`
+
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
 local function tf_now()
@@ -97,7 +106,7 @@ end
 // place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
 //   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary')
-const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
+const PUBLISH_LUA = `${ALLOWED_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
@@ -121,6 +130,7 @@ else
   binary = binary + 1
   place = binary
 end
+tf_allowed('PUBLISH', KEYS[2], '')
 redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
 local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
 redis.call('PUBLISH', KEYS[2], frame)
@@ -141,6 +151,16 @@ local function tf_write(key, value, version)
     redis.call('HDEL', KEYS[6], key)
     redis.call('ZREM', KEYS[4], key)
   end
+end
+-- The calls tf_write and tf_count make.
+local function tf_cell_writes_allowed()
+  tf_allowed('HSET', KEYS[5], '', '')
+  tf_allowed('HSET', KEYS[6], '', '')
+  tf_allowed('ZADD', KEYS[4], '0', '')
+  tf_allowed('HDEL', KEYS[5], '')
+  tf_allowed('HDEL', KEYS[6], '')
+  tf_allowed('ZREM', KEYS[4], '')
+  tf_allowed('HGET', KEYS[5], '')
 end
 local function tf_count(key, delta, create, version, now, reply)
   local raw = redis.call('HGET', KEYS[5], key)
@@ -163,7 +183,7 @@ end
 //         head's incarnation
 //   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
 //         cell its key, delta and create ('1' or '')
-const HEAD_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
+const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key = KEYS[1]
 local now = tf_now()
 local expected = cjson.decode(ARGV[1])
@@ -194,6 +214,12 @@ if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
 if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
+if stored.exp ~= nil then tf_allowed('PEXPIREAT', head_key, '0') end
+if #KEYS > 1 then
+  tf_allowed('INCR', KEYS[2])
+  tf_cell_writes_allowed()
+  tf_allowed('SADD', KEYS[3], '')
+end
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
 if #KEYS > 1 then
@@ -336,7 +362,8 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-const DROP_INCARNATION_LUA = `
+const DROP_INCARNATION_LUA = `${ALLOWED_LUA}
+tf_allowed('PUBLISH', KEYS[1], '')
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
@@ -347,7 +374,7 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
-const CELLS_EXCHANGE_LUA = `${HEAD_PRELUDE}${CELL_WRITES_LUA}
+const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
@@ -359,6 +386,8 @@ local first_counted = first_expected + 2 * expected
 for at = first_expected, first_counted - 1, 2 do
   if (redis.call('HGET', versions_key, ARGV[at]) or '') ~= ARGV[at + 1] then return {'conflict'} end
 end
+tf_cell_writes_allowed()
+tf_allowed('SADD', incarnation_keys_key, '')
 local version = redis.call('INCR', rev_key)
 for at = 5, first_expected - 1, 3 do
   tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
@@ -433,6 +462,47 @@ function luaRefs<Name extends string>(array: string, table: Record<Name, number>
 const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
 const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
 
+/** The checks of what COMMIT writes after its lane's order (`ALLOWED_LUA`). Run from OPERATION, past OPERATION's own
+ *  writes, its reads and its order's write are checked too. */
+function commitAllowedLua(
+  K: Record<keyof typeof COMMIT_KEYS, string>,
+  A: Record<keyof typeof COMMIT_ARGS, string>,
+  afterWrites: boolean,
+) {
+  const memberLane = `(${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary')`
+  return `${
+    afterWrites
+      ? `tf_allowed('HEXISTS', ${K.cellValues}, '')
+if ${memberLane} then
+  tf_allowed('HGET', ${K.order}, '')
+  tf_allowed('HSET', ${K.order}, '', '')
+else
+  tf_allowed('GET', ${K.order})
+  tf_allowed('SET', ${K.order}, '')
+end
+`
+      : ''
+  }tf_allowed('SADD', ${K.incarnationKeys}, '')
+tf_allowed('PUBLISH', ${K.channel}, '')
+if ${A.laneKind} == 'binary' then
+  tf_allowed('SADD', ${K.trackLanes}, '')
+  tf_allowed('PUBLISH', ${K.everyTrackChannel}, '')
+  tf_allowed('PUBLISH', ${K.everyMemberChannel}, '')
+end
+if ${A.retain} == '1' then
+  tf_allowed('EXISTS', ${K.retained})
+  tf_allowed('SET', ${K.retained}, '')
+  tf_allowed('SADD', ${K.retainedLanes}, '')
+  if ${A.laneKind} == 'binary' then
+    tf_allowed('SADD', ${K.memberRetained}, '')
+    tf_allowed('SADD', ${K.trackRetained}, '')
+  else
+    tf_allowed('HSET', ${K.retainedOwners}, '', '')
+    tf_allowed('HDEL', ${K.retainedOwners}, '')
+  end
+end`
+}
+
 /** COMMIT's body, reading its keys from `K` and its args from `A`, a table `args` names. */
 function commitLua(
   K: Record<keyof typeof COMMIT_KEYS, string>,
@@ -472,6 +542,7 @@ end
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
+${commitAllowedLua(K, A, false)}
 -- tostring keeps only 14 significant digits.
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
@@ -525,7 +596,7 @@ return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. 
 `
 }
 
-const COMMIT_LUA = `${HEAD_PRELUDE}
+const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 ${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV')}`
 
@@ -570,7 +641,7 @@ const OPERATION_KEYS = {
 } as const
 const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
 
-const OPERATION_LUA = `${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
+const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
 end
@@ -589,19 +660,55 @@ for _, member in ipairs(plan.members) do
     return '{"kind":"conflict"}'
   end
 end
+local CK, CA = {}, {}
+if plan.commit[1] then
+  for i = 1, ${Object.keys(COMMIT_KEYS).length} do CK[i] = KEYS[plan.commit[1] + i - 1] end
+  for i = plan.commit[2], #ARGV do CA[#CA + 1] = ARGV[i] end
+end
+tf_cell_writes_allowed()
+tf_allowed('INCR', rev_key)
+tf_allowed('SADD', incarnation_keys_key, '')
+tf_allowed('SREM', incarnation_keys_key, '')
+for _, member in ipairs(plan.members) do tf_allowed('UNLINK', KEYS[member[4]]) end
+if #plan.members > 0 or #plan.retained > 0 then
+  tf_allowed('HGET', owners_key, '')
+  tf_allowed('HDEL', owners_key, '')
+  tf_allowed('SREM', retained_lanes_key, '')
+  tf_allowed('DEL', semantic_key)
+end
+for _, lane in ipairs(plan.retained) do
+  tf_allowed('DEL', KEYS[lane[2]])
+  for at = lane[2] + 1, lane[2] + 2 do
+    tf_allowed('SREM', KEYS[at], '')
+    tf_allowed('SCARD', KEYS[at])
+  end
+end
+for _, lane in ipairs(plan.trackLanes) do
+  tf_allowed('SREM', KEYS[lane[2]], '')
+  tf_allowed('SCARD', KEYS[lane[2]])
+end
+for _, cell in ipairs(plan.expiring) do tf_allowed('SET', KEYS[cell[3]], '', 'PX', '1') end
+if plan.commit[1] then
+${commitAllowedLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), true)}
+end
 for _, prefix in ipairs(plan.prefixes) do
   for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
     tf_write(key, nil, nil)
   end
 end
-local version = redis.call('INCR', rev_key)
-for _, mutation in ipairs(plan.mutations) do
-  tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version)
-end
 local counters = {}
-for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
-redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, ${OPERATION_KEY.cellValues},
-  ${OPERATION_KEY.cellVersions})
+-- An operation that writes no cell, such as one that only checks what it read, takes no revision.
+if #plan.mutations > 0 or #plan.counts > 0 then
+  local version = redis.call('INCR', rev_key)
+  for _, mutation in ipairs(plan.mutations) do
+    tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version)
+  end
+  for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
+end
+if #plan.prefixes > 0 or #plan.mutations > 0 or #plan.counts > 0 then
+  redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, ${OPERATION_KEY.cellValues},
+    ${OPERATION_KEY.cellVersions})
+end
 for _, member in ipairs(plan.members) do
   redis.call('SREM', incarnation_keys_key, KEYS[member[4]])
   redis.call('UNLINK', KEYS[member[4]])
@@ -621,12 +728,7 @@ for _, lane in ipairs(plan.trackLanes) do
 end
 for _, cell in ipairs(plan.expiring) do redis.call('SET', KEYS[cell[3]], ARGV[cell[1]], 'PX', cell[2]) end
 local commit = 'null'
-if plan.commit[1] then
-  local CK, CA = {}, {}
-  for i = 1, ${Object.keys(COMMIT_KEYS).length} do CK[i] = KEYS[plan.commit[1] + i - 1] end
-  for i = plan.commit[2], #ARGV do CA[#CA + 1] = ARGV[i] end
-  commit = tf_commit(CK, CA)
-end
+if plan.commit[1] then commit = tf_commit(CK, CA) end
 return {commit, unpack(counters)}
 `
 
@@ -634,7 +736,9 @@ return {commit, unpack(counters)}
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
 //   KEYS: [1]=index [2]=tags [3]=checks
 //   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
-const DIRECTORY_PUT_LUA = `${NOW_LUA}
+const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${NOW_LUA}
+tf_allowed('HSET', KEYS[2], '', '')
+if ARGV[3] == '' then tf_allowed('ZREM', KEYS[3], '') else tf_allowed('ZADD', KEYS[3], '0', '') end
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 if ARGV[3] == '' then
@@ -646,8 +750,10 @@ end
 return 1
 `
 
-const DIRECTORY_DELETE_LUA = `
+const DIRECTORY_DELETE_LUA = `${ALLOWED_LUA}
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
+tf_allowed('ZREM', KEYS[1], '')
+tf_allowed('ZREM', KEYS[3], '')
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
