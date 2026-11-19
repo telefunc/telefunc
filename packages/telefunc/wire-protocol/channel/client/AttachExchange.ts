@@ -276,9 +276,8 @@ class AttachExchange {
     for (const ix of ixes) {
       const record = this.channels.get(ix)
       if (!record) continue
-      const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
       this.gate.release(record)
-      record.channel._onEnded(err)
+      record.channel._onConnectionLost(new NetworkError('Channel not acknowledged by server after reconnect', true))
     }
   }
 

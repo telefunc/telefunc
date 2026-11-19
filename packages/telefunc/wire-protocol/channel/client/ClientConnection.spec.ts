@@ -8,6 +8,7 @@ import {
   RECONCILE_TIMEOUT_MS,
 } from '../../constants.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
+import { ChannelClosedError } from '../channelErrors.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { encode } from '../../wire/frame.js'
 import { ClientConnection } from './ClientConnection.js'
@@ -73,7 +74,7 @@ describe('SSE reconcile watchdog', () => {
     vi.useFakeTimers()
     const { fetchImpl } = createStalledTransport()
     const ended: unknown[] = []
-    const channel = fakeMuxChannel({ _onEnded: (err) => ended.push(err) })
+    const channel = fakeMuxChannel({ _onConnectionLost: (err) => ended.push(err) })
 
     ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
       transports: [CHANNEL_TRANSPORT.SSE],
@@ -166,5 +167,37 @@ describe('WebSocket reconcile watchdog', () => {
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 2 * CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     clearInterval(trickle)
     expect(SilentWebSocket.opened).toHaveLength(3)
+  })
+})
+
+describe('a wire the server refused for a frame it could not read', () => {
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  test("its event stream's REJECTED event ends the channels with the refusal, and the page opens no other wire", async () => {
+    vi.useFakeTimers()
+    const { fetchImpl, downstreams } = createStalledTransport()
+    const ended: unknown[] = []
+    ClientConnection.getOrCreate(
+      'http://test.local/_telefunc',
+      fakeMuxChannel({ _onEnded: (err) => ended.push(err) }),
+      {
+        transports: [CHANNEL_TRANSPORT.SSE],
+        fetchImpl,
+        connectionKey: crypto.randomUUID(),
+      },
+    )
+    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_INITIAL_DELAY_MS)
+    expect(downstreams).toHaveLength(1)
+
+    downstreams.at(0)?.deliver(new TextEncoder().encode(`data: ${uint8ArrayToBase64url(encode.rejected())}\n\n`))
+    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS)
+
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toBeInstanceOf(ChannelClosedError)
+    expect(ended[0]).toHaveProperty('message', expect.stringContaining('the server refused a frame it could not read'))
+    expect(downstreams).toHaveLength(1)
   })
 })

@@ -8,6 +8,7 @@ import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
 import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
+import { WIRE_VERSION } from '../wire-protocol/constants.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 
 // The body of a binary call (a telefunction given a `Blob`) and of an SSE upload, read through Telefunc's body reader,
@@ -77,7 +78,7 @@ const sseStart = concat(
 )
 
 const kinds = { binary: 'bin', sse: 'sse' }
-const telefuncPath = '/_telefunc?wire=2'
+const telefuncPath = `/_telefunc?wire=${WIRE_VERSION}`
 
 let onRequest: ((req: IncomingMessage) => void) | undefined
 

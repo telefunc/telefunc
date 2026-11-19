@@ -1015,7 +1015,7 @@ describe('a broadcast its subscriber ends on the first message, its backend not 
           () => 'resolved',
           (err: unknown) => err,
         )
-        expect({ opened, listening }).toEqual({ opened: await room.closed.catch((err: unknown) => err), listening: 0 })
+        expect({ opened, listening }).toEqual({ opened: await room.closed, listening: 0 })
       })
     }
   }
@@ -1039,7 +1039,7 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
         () => 'resolved',
         (err: unknown) => err,
       )
-      expect(opened).toBe(await room.closed.catch((err: unknown) => err))
+      expect(opened).toBe(await room.closed)
     })
   }
 })
@@ -1061,7 +1061,7 @@ describe("a broadcast whose graceful close times out on an `onClose()` callback'
           return new Promise<void>(() => {})
         })
         await room.close({ timeout: 10 })
-        const ended = await room.closed.catch((err: unknown) => err)
+        const ended = await room.closed
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
         const opened = await stop.opened.then(
           () => 'resolved',
@@ -1116,6 +1116,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
             waitingPublishes: () => 0,
+            dropUngiven: () => 0,
             dropWaitingPublishes() {},
             dropWaitingFrom() {},
           },
@@ -1158,6 +1159,7 @@ describe('Broadcast shield validation', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
             waitingPublishes: () => 0,
+            dropUngiven: () => 0,
             dropWaitingPublishes() {},
             dropWaitingFrom() {},
           },
@@ -1188,6 +1190,7 @@ describe('lossy broadcast under memory pressure', () => {
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
           queue: {
             waitingPublishes: () => 0,
+            dropUngiven: () => 0,
             dropWaitingPublishes() {},
             dropWaitingFrom() {},
           },
@@ -1439,7 +1442,7 @@ describe('a subscriber a close callback removes while its backend starts', () =>
       })
       const closed = room.closed
       await room.close({ timeout: 50 })
-      await expect(closed).resolves.toBeUndefined()
+      await expect(closed).resolves.toBeNull()
     })
   }
   for (const method of ['subscribe', 'subscribeBinary'] as const) {

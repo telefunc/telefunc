@@ -83,7 +83,7 @@ async function lostWire({ handshakeMs = 0, then }: { handshakeMs?: number; then:
   const options = { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey }
   ClientConnection.getOrCreate(
     'http://test.local/_telefunc',
-    fakeMuxChannel({ _onEnded: (e) => ended.push(e) }),
+    fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) }),
     options,
   )
   await vi.advanceTimersByTimeAsync(handshakeMs + 10)

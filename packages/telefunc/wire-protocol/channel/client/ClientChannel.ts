@@ -15,7 +15,7 @@ import type {
 import {
   LOSSY_WITH_ACK_TEXT,
   neverOpened,
-  serializeAbortReason,
+  serializeBoundedAbortReason,
   stringifyValue,
   unsubscribeOf,
   type AbortReason,
@@ -46,6 +46,7 @@ import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { ChannelAttach } from './ChannelAttach.js'
 import type { CreditOwner } from '../../flowControl/credit.js'
@@ -94,7 +95,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   protected stopped = false
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportChannelError })
+  protected readonly lifecycle = new ChannelLifecycle({
+    owner: this,
+    side: 'page',
+    reconnectWindowMs: () => this.connection.reconnectWindow(),
+    reportError: reportChannelError,
+  })
   /** The ack requests sent and not yet answered, by seq. `resolve` takes `any`: text, binary and publish sends
    *  resolve with different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
@@ -150,7 +156,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.lifecycle.opened
   }
 
-  get closed(): Promise<void> {
+  get closed(): Promise<ChannelCloseResult> {
     return this.lifecycle.closed
   }
 
@@ -259,25 +265,40 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this.lifecycle.closing) return this.lifecycle.closing
-    if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
-    const timeout = normalizeCloseTimeout(opts?.timeout)
-    return this.lifecycle.localCloseRequested({
-      timeout,
-      peer: 'expected',
-      send: () => {
-        this.flushLossy()
-        this.stopped = true
-        this.connection.sendCloseRequest(this, timeout)
-      },
-    })
+    return this.lifecycle.close(normalizeCloseTimeout(opts?.timeout))
+  }
+
+  /** @internal */
+  _sendEnding(frame: EndingFrame): void {
+    switch (frame.kind) {
+      case 'close':
+        this.stopSending()
+        this.connection.sendCloseRequest(this, frame.timeoutMs)
+        return
+      case 'closeAck':
+        this.stopSending()
+        this.connection.sendCloseAck(this)
+        return
+      case 'closeDone':
+        this.connection.sendCloseDone(this)
+        return
+      case 'timedOut':
+        this.connection.sendCloseTimedOut(this)
+    }
+  }
+
+  /** It takes no more sends; the newest lossy send held for credit goes first, ahead of the stop. */
+  private stopSending(): void {
+    if (this.stopped) return
+    this.flushLossy()
+    this.stopped = true
   }
 
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this.stopped) return
-    const reason = serializeAbortReason(abortValue)
+    if (this.lifecycle.ended) return
+    const reason = serializeBoundedAbortReason(abortValue, this.connection.abortReasonLimit(this))
     this.abortWith(reason, message)
     if (reason.refusal) throw reason.refusal.error
   }
@@ -285,14 +306,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Ends the channel with `reason`, sent to the server, unless serializing it, which runs the app's getters and
    *  `toJSON`, ended it already. */
   private abortWith(reason: AbortReason, message?: string): void {
-    if (this.stopped) return
-    this.stopped = true
-    try {
+    this.lifecycle.endWith(createAbortError(reason.value, message), () => {
+      this.stopped = true
       // The newest lossy send, where it hasn't gone, is dropped.
       this.connection.sendAbort(this, reason.serialized, this.newestLossy?.seq)
-    } finally {
-      this._end(createAbortError(reason.value, message))
-    }
+    })
   }
 
   // ── Called by transport connection ──
@@ -407,10 +425,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
       case TAG.CLOSE:
-        this.onPeerCloseRequest(frame.timeoutMs)
+        this.lifecycle.peerClose(normalizeCloseTimeout(frame.timeoutMs))
         return
       case TAG.CLOSE_ACK:
-        this.onPeerCloseAck()
+        this.lifecycle.peerCloseAck()
+        return
+      case TAG.CLOSE_DONE:
+        this.lifecycle.peerCloseDone()
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
@@ -463,24 +484,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  protected onPeerCloseRequest(timeoutMs: number): void {
-    this.lifecycle.peerCloseReceived(normalizeCloseTimeout(timeoutMs), () => {
-      this.stopped = true
-      // Nothing goes after the acknowledgement, as on the server: the newest lossy send waiting for credit is dropped.
-      this.heldLossy = null
-      this.connection.sendCloseAck(this)
-    })
-  }
-
-  protected onPeerCloseAck(): void {
-    if (this.lifecycle.ended) return
-    this.lifecycle.closeAckReceived()
-  }
-
   _onEnded(err?: Error): void {
-    this.stopped = true
-    // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
-    this._end(this.lifecycle.closeAcked ? undefined : err)
+    this._end(err)
+  }
+
+  /** @internal Its connection is gone for good, with `err`. */
+  _onConnectionLost(err: Error): void {
+    this.lifecycle.connectionLost(err)
   }
 
   // ── Private ──
@@ -587,23 +597,26 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _end(err?: Error): void {
-    if (this.lifecycle.ended) return
-    this.lifecycle.forcedTermination(err, () => {
-      this.heldLossy = null
-      this.listeners.clear()
-      this.binaryListeners.clear()
-      this.sendCredit.shutdown(err)
-      this.receiveCredit.detach()
-      const ackErr = err ?? new ChannelClosedError()
-      for (const { reject } of this.pendingAcks.values()) reject(ackErr)
-      this.pendingAcks.clear()
-      this.connection.unregister(this)
-    })
+    this.lifecycle.endWith(err)
+  }
+
+  /** @internal */
+  _finalize(err: Error | undefined): void {
+    this.stopped = true
+    this.heldLossy = null
+    this.listeners.clear()
+    this.binaryListeners.clear()
+    this.sendCredit.shutdown(this.lifecycle.waitingSendOutcome)
+    this.receiveCredit.detach()
+    const ackErr = err ?? new ChannelClosedError()
+    for (const { reject } of this.pendingAcks.values()) reject(ackErr)
+    this.pendingAcks.clear()
+    this.connection.unregister(this)
   }
 
   /** @internal */
   _abortFromCallback(err: AbortError): void {
-    const reason = serializeAbortReason(err.abortValue)
+    const reason = serializeBoundedAbortReason(err.abortValue, this.connection.abortReasonLimit(this))
     this.abortWith(reason, err.message)
     if (reason.refusal) reportChannelError(reason.refusal.error)
   }

@@ -17,10 +17,13 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import type { Urgency } from '../../flowControl/credit.js'
-import { ACK_STATUS, encode } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
 import type { CallWant, ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
+import type { AbortReasonLimit } from '../channel.js'
+import { HEADER } from '../../wire/header.js'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
 import type { ChannelAttach } from './ChannelAttach.js'
@@ -50,6 +53,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
+  /** Its connection is gone for good. */
+  _onConnectionLost(err: Error): void
   /** Its credits as the connection drives them across wires. */
   readonly _attach: MuxChannelAttach
 }
@@ -80,8 +85,12 @@ interface MuxConnection {
   /** `inPlaceOf`: a lossy send's seq, which the ABORT takes the place of where that still waits and is the channel's
    *  last, so it never goes. */
   sendAbort(channel: MuxChannel, abortValue: string, inPlaceOf?: number): void
+  /** The most of an abort reason the server accepts from `channel`: it ends any wire a larger frame arrives on. */
+  abortReasonLimit(channel: MuxChannel): AbortReasonLimit
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
+  sendCloseDone(channel: MuxChannel): void
+  sendCloseTimedOut(channel: MuxChannel): void
   sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendBdpPing(channel: MuxChannel, probe: number): void
@@ -292,6 +301,14 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return Math.min(channel._maxFrameBytes, this.lifecycle.maxFrameBytes)
   }
 
+  abortReasonLimit(channel: MuxChannel): AbortReasonLimit {
+    return {
+      max: this.maxFrameBytesOf(channel),
+      bytesOf: (serialized) => HEADER + utf8ByteLength(serialized),
+      what: 'the server accepts in one frame',
+    }
+  }
+
   /** Sequenced like data, as CLOSE and CLOSE_ACK are, so a closing frame lost with a dead wire is replayed. */
   sendAbort(channel: MuxChannel, abortValue: string, inPlaceOf?: number): void {
     const record = this.channels.of(channel)
@@ -316,6 +333,20 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     if (record === undefined) return
     const seq = record.replay.nextSeq()
     this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
+  }
+
+  sendCloseDone(channel: MuxChannel): void {
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const seq = record.replay.nextSeq()
+    this.gate.send(record, seq, encode.closeDone(record.ix, seq), 'control')
+  }
+
+  sendCloseTimedOut(channel: MuxChannel): void {
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const seq = record.replay.nextSeq()
+    this.gate.send(record, seq, encode.error(record.ix, ERROR_REASON.CLOSE_TIMED_OUT, seq), 'control')
   }
 
   sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {

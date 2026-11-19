@@ -47,7 +47,7 @@ class FakeChannel<T> implements WireChannel<T> {
   end(): void {
     this.ended = true
     this.acknowledge?.()
-    for (const callback of this.closeCallbacks) callback()
+    for (const callback of this.closeCallbacks) callback(null)
   }
 }
 

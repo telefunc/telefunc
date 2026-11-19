@@ -432,7 +432,7 @@ function ChannelDemo() {
     })
     channel.onClose((err) => {
       addLog('system', `onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === undefined }))
+      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === null }))
     })
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
@@ -549,7 +549,7 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, hookChannelId: channelId }))
     channel.onClose((err) => {
       addLog('system', `hook-channel onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === null }))
       hookChannelRef.current = null
     })
     channel.listen((msg) => {
@@ -873,7 +873,7 @@ function ChannelDemo() {
     channel.listen((msg) => `ack:${msg}`)
     channel.onClose((err) => {
       serverPendingAckCloseReconnectChannelRef.current = null
-      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === null }))
       addLog('system', `server-pending-ack-close reconnect channel closed — err=${err ? err.message : 'none'}`)
     })
     serverPendingAckCloseReconnectChannelRef.current = channel
@@ -1247,8 +1247,9 @@ function ChannelDemo() {
 
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
-    const err = await channel.closed.catch((error) => error)
-    document.querySelector('#channel-late-abort-result')!.textContent = err.abortValue
+    const outcome = await channel.closed
+    document.querySelector('#channel-late-abort-result')!.textContent =
+      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome)
   }, [])
 
   const testBudgets = useCallback(async () => {
@@ -1296,7 +1297,7 @@ function ChannelDemo() {
     const results = await Promise.allSettled(sends)
     document.querySelector('#channel-credit-result')!.textContent = JSON.stringify({
       id: channel.id,
-      rejected: results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
+      resolved: results.every((r) => r.status === 'fulfilled'),
     })
   }, [])
 

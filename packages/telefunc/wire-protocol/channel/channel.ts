@@ -2,6 +2,7 @@ export {
   makePublishInfo,
   stringifyValue,
   serializeAbortReason,
+  serializeBoundedAbortReason,
   unsubscribeOf,
   neverOpened,
   Outcome,
@@ -9,6 +10,7 @@ export {
 }
 export type {
   AbortReason,
+  AbortReasonLimit,
   ChannelBase,
   ChannelShield,
   ClientChannel,
@@ -31,6 +33,7 @@ export type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
+import { ChannelOverflowError } from './channelErrors.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
@@ -100,6 +103,20 @@ function serializeAbortReason(reason: unknown): AbortReason {
 }
 type AbortReason = { value: unknown; serialized: string; refusal: { error: unknown } | null }
 
+/** The most an end takes of an abort reason: `max` of what `bytesOf` counts for it, and what that limit is. */
+type AbortReasonLimit = { max: number; bytesOf: (serialized: string) => number; what: string }
+
+/** As `serializeAbortReason`, and a reason over `limit` goes without its value too: the abort ends the channel on both
+ *  ends without it, and its refusal is a `ChannelOverflowError`. */
+function serializeBoundedAbortReason(value: unknown, limit: AbortReasonLimit): AbortReason {
+  const reason = serializeAbortReason(value)
+  if (reason.refusal || limit.bytesOf(reason.serialized) <= limit.max) return reason
+  const error = new ChannelOverflowError(
+    `abort(): the value is more than ${limit.what} (${limit.max} bytes), so the channel ended without it`,
+  )
+  return { value: undefined, serialized: serializeAbortReason(undefined).serialized, refusal: { error } }
+}
+
 const toTag = Object.prototype.toString
 /** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm, by its tag. A plain object or an array
  *  of this realm is none, which one prototype read tells. */
@@ -152,9 +169,14 @@ type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
-/** `0`: this end received the close acknowledgement; `1`: it did not. `closed` gives the final outcome. */
-type ChannelCloseResult = 0 | 1
-type ChannelCloseCallback = (err?: Error) => void | Promise<void>
+/** How the channel ended, the same on every reader of it (`close()`, `closed`, `onClose`): `null` where it closed
+ *  gracefully on both ends, else the error it ended with.
+ *
+ *  https://telefunc.com/channel#how-a-channel-ends */
+type ChannelCloseResult = Error | null
+/** `err` is `null` where the channel is closing gracefully: the cleanup may start before the close's outcome is known,
+ *  which `closed` gives. */
+type ChannelCloseCallback = (err: Error | null) => void | Promise<void>
 
 /** The channel surface both ends share: `TOut` is what this end sends, `TIn` what it receives, each a message type or a
  *  `(message) => answer` signature. */
@@ -162,7 +184,9 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   readonly id: string
   readonly isClosed: boolean
   readonly opened: Promise<void>
-  readonly closed: Promise<void>
+  /** Resolves once the channel has ended, never rejects: with `null` where it closed gracefully on both ends, else the
+   *  error it ended with. */
+  readonly closed: Promise<ChannelCloseResult>
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
     { type: 'text'; data: ChannelData<TIn> } | { type: 'binary'; data: Uint8Array }
   >
@@ -191,10 +215,13 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
    *  rejects with the channel's end. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): Unsubscribe
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
-  /** Called when the channel closes. Returns a function that removes the callback. */
+  /** Called once as the channel closes, with `null` for a graceful close (its outcome is `closed`'s) and else the error
+   *  it ends with; a graceful close waits, within its timeout, for the promise it returns. Returns a function that
+   *  removes the callback. */
   onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
   /** Called when the channel opens. Returns a function that removes the callback. */
   onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
+  /** Closes gracefully, within `timeout` (5 s by default), and resolves with how the channel ended, as `closed` does. */
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

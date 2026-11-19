@@ -4,7 +4,8 @@ export type { TransportOwner, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, rejectedFrameError } from '../channelErrors.js'
+import { closeTimedOutError } from '../ChannelEnding.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -41,8 +42,11 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 interface TransportOwner {
   onTransportOpen(transport: ClientChannelTransport): void
   /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
-   *  another `WIRE_VERSION`. */
-  onTransportClosed(transport: ClientChannelTransport, options?: { refusal?: string; otherWireVersion?: boolean }): void
+   *  another `WIRE_VERSION`; `rejectedFrame`: it refused the wire for a frame it couldn't read. */
+  onTransportClosed(
+    transport: ClientChannelTransport,
+    options?: { refusal?: string; otherWireVersion?: boolean; rejectedFrame?: boolean },
+  ): void
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
@@ -356,13 +360,21 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { refusal, otherWireVersion = false }: { refusal?: string; otherWireVersion?: boolean } = {},
+    {
+      refusal,
+      otherWireVersion = false,
+      rejectedFrame = false,
+    }: { refusal?: string; otherWireVersion?: boolean; rejectedFrame?: boolean } = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
     // No reconnect reaches a server that speaks this page's wire.
     if (otherWireVersion) {
-      this.closeAll(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      return
+    }
+    if (rejectedFrame) {
+      this.closeAll(rejectedFrameError())
       return
     }
     if (transport !== this.transport) {
@@ -524,10 +536,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
 
     const attempt = this.recovery?.attempt ?? 0
-    if (rejected && attempt === 0) {
-      this.closeAll(err)
-      return
-    }
+    if (rejected && attempt === 0) return this.loseConnection(err)
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
       if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
@@ -559,7 +568,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private onRecoveryDeadline(): void {
     const recovery = this.recovery
     if (this.closed || !recovery) return
-    this.closeAll(recovery.lost)
+    this.loseConnection(recovery.lost)
   }
 
   private endRecovery(): void {
@@ -628,6 +637,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     record.channel._onEnded(err)
   }
 
+  /** No wire can reach the server again: its channels' connection is lost for good. */
+  private loseConnection(err: Error): void {
+    for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
+    this.dispose()
+  }
+
   private closeAll(err: Error): void {
     for (const { channel } of this.channels.values()) {
       channel._onEnded(err)
@@ -662,6 +677,7 @@ function channelErrorFor(reason: number): Error {
       `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
     )
   }
+  if (reason === ERROR_REASON.CLOSE_TIMED_OUT) return closeTimedOutError()
   if (reason === ERROR_REASON.NOT_IN_EFFECT) {
     return new ChannelClosedError(
       'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',

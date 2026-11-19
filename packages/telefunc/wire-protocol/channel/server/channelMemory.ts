@@ -11,6 +11,7 @@ export {
   heldPublishBytes,
   heldSendBytes,
   hold,
+  holdsAtMost,
   holdsEnough,
   letGo,
   maxPendingBytesOf,
@@ -59,12 +60,10 @@ const memory = getGlobalObject('channelMemory.ts', {
  *  equal share is refused, so one still under it has room. A subscriber cut to make room ends after this returns. */
 function admit(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
-  const holderMax = Math.min(maxPendingBytesOf(), maxMemory)
-  // Nothing let go makes room for more than one holder may ever hold.
-  if (bytes > holderMax) return false
+  // Nothing let go makes room for more than one holder may ever hold, so nothing goes for it.
+  if (holder.heldBytes + bytes > holdsAtMost()) return false
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) reclaim(bytes, target)
-  if (holder.heldBytes + bytes > holderMax) return false
   if (memory.total + bytes <= target) return true
   return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
 }
@@ -72,10 +71,7 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
 /** Whether `bytes` for `holder` may be held with nothing let go to make room for them: `admit` then admits them as well. */
 function fits(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
-  return (
-    holder.heldBytes + bytes <= Math.min(maxPendingBytesOf(), maxMemory) &&
-    memory.total + bytes <= shedTarget(maxMemory)
-  )
+  return holder.heldBytes + bytes <= holdsAtMost() && memory.total + bytes <= shedTarget(maxMemory)
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse. Near the budget, each page whose waiting
@@ -240,6 +236,11 @@ function maxMemoryOf(): number {
 /** The most one channel holds, as `maxMemoryOf`. */
 function maxPendingBytesOf(): number {
   return (memory.maxPendingBytes ||= getChannelConfig().maxPendingBytes)
+}
+
+/** The most one holder may ever hold: a channel's limit, within `maxMemory`. */
+function holdsAtMost(): number {
+  return Math.min(maxPendingBytesOf(), maxMemoryOf())
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */

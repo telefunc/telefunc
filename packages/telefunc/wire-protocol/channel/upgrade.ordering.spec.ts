@@ -23,6 +23,7 @@ function createHarness() {
       bufferedAmount: () => 0,
       queueOf: () => ({
         waitingPublishes: () => 0,
+        dropUngiven: () => 0,
         dropWaitingPublishes() {},
         dropWaitingFrom() {},
       }),

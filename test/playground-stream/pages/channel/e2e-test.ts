@@ -266,7 +266,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── close() — isClosed property + client onClose fires clean ─────────
 
-  test('channel: close() — isClosed is true immediately; client onClose fires with err=undefined', async () => {
+  test('channel: close() — isClosed is true immediately; client onClose fires with err=null', async () => {
     // Reconnect so we have an open channel to test close() on
     await page.click('#channel-connect')
     await autoRetry(async () => {
@@ -281,7 +281,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       // channel.isClosed was true immediately after channel.close() was called
       expect(state.isClosedAfterClose).toBe(true)
       expect(state.connected).toBe(false)
-      // Client's onClose callback fired with err===undefined (clean close)
+      // Client's onClose callback fired with err===null (clean close)
       expect(state.mainChannelOnCloseFiredClean).toBe(true)
     })
 
@@ -293,7 +293,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── Full hook instrumentation (onOpen + onClose, client + server) ─────
 
-  test('channel: hooks — server onOpen and onClose both fire; client onClose fires with err=undefined', async () => {
+  test('channel: hooks — server onOpen and onClose both fire; client onClose fires with err=null', async () => {
     await page.click('#channel-test-hooks')
 
     // Wait for:
@@ -610,7 +610,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(state.serverPendingAckCloseReconnectClientOnCloseClean).toBe(true)
         const ss = await getCleanupState()
         expect(ss[`serverClose_${channelId}_ackResult`]).toBe('ack:offline-close')
-        expect(ss[`serverClose_${channelId}_closeResult`]).toBe('0')
+        expect(ss[`serverClose_${channelId}_closeResult`]).toBe('clean')
         expect(ss[`serverClose_${channelId}_serverOnCloseErr`]).toBe('none')
       })
     })
@@ -1550,7 +1550,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
     const bugsBefore = await bugs()
     const answer = await page.evaluate(async () => {
-      const resp = await fetch('/_telefunc?_telefunc=sse&wire=2', {
+      const resp = await fetch('/_telefunc?_telefunc=sse&wire=3', {
         method: 'POST',
         headers: { 'x-telefunc-request': 'sse' },
       })
@@ -1622,13 +1622,13 @@ function testChannelApi() {
     })
   })
 
-  test('channel: failed capacity waits reject on both ends', async () => {
+  test('channel: sends waiting for capacity at abort() resolve on both ends: their messages go ahead of the abort', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-credit')
     let id = ''
     await autoRetry(async () => {
       const result = JSON.parse((await page.textContent('#channel-credit-result'))!)
-      expect(result.rejected).toBe(true)
+      expect(result.resolved).toBe(true)
       id = result.id
     })
     await autoRetry(async () => {

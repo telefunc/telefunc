@@ -13,6 +13,7 @@ import {
   SSE_POST_MIN_BYTES_PER_S,
   SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
+  STATUS_CODE_REJECTED,
   STATUS_CODE_WIRE_VERSION,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
@@ -414,10 +415,15 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
     const pair = pairPublishes()
+    let rejectedFrame = false
     try {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
+        if (raw[0] === TAG.REJECTED) {
+          rejectedFrame = true
+          break
+        }
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
           onOpenAck()
           continue
@@ -448,7 +454,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, { rejectedFrame })
     }
   }
 
@@ -507,6 +513,7 @@ class SseTransport implements UpgradeSource {
     this.folded = null
     this.lastPostStartedAt = now
     const wire = this.transportAbort
+    let rejectedFrame = false
     try {
       const body = encodeSseRequest(
         { connId: this.connId },
@@ -515,6 +522,7 @@ class SseTransport implements UpgradeSource {
       )
       this.postOutBytes = body.size
       const response = await this.postWithDeadline(body, wire.signal)
+      rejectedFrame = response.status === STATUS_CODE_REJECTED
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
       this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
@@ -526,7 +534,7 @@ class SseTransport implements UpgradeSource {
       }
       this.requeue(queued)
       this.abandonActiveTransport()
-      this.owner.onTransportClosed(this)
+      this.owner.onTransportClosed(this, { rejectedFrame })
     } finally {
       this.flushing = false
       this.postOutBytes = 0

@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { WireEntry, ReconcileOutcome, ServerTransport, Wire }
+export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WireClose }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -25,6 +25,7 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
+import { ChannelPageLeftError, rejectedFrameError } from '../channelErrors.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   BarrierPayload,
@@ -100,7 +101,9 @@ type MuxServerOptions = {
   transports: ChannelTransports
 }
 
-type DetachReason = 'transient' | 'permanent' | 'recoveryFailed'
+/** How a wire closed: lost (its page may reconnect), its page left for good, or refused by the server. */
+type WireClose = 'transient' | 'pageLeft' | 'rejected'
+type DetachReason = WireClose | 'recoveryFailed'
 
 type WireState = {
   pingTimer: ReturnType<typeof setTimeout> | null
@@ -110,10 +113,12 @@ type WireState = {
   deliveries: Deliveries
   /** When the last PONG went out. */
   pongedAt: number
-  terminatePermanently: boolean
+  /** `terminateWire` refused it: its page sent what the server can't read. */
+  rejected: boolean
   recvChain: Promise<unknown> | null
-  /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind. */
-  closed: { isPermanent: boolean } | null
+  /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind, which its session's channels
+   *  detach with. */
+  closed: { reason: WireClose } | null
   retiredByBarrier: boolean
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
@@ -229,7 +234,7 @@ class ChannelMux implements UpgradeStagesOwner {
         lastReceivedAt: 0,
         deliveries,
         pongedAt: performance.now(),
-        terminatePermanently: false,
+        rejected: false,
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
@@ -283,10 +288,10 @@ class ChannelMux implements UpgradeStagesOwner {
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
 
-  onWireClosed(wire: Wire, { permanent }: { permanent: boolean }): void {
+  onWireClosed(wire: Wire, reason: WireClose): void {
     const entry = this.wires.get(wire)
     if (!entry) return
-    entry.state.closed = { isPermanent: permanent }
+    entry.state.closed = { reason }
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     entry.sender.close()
@@ -302,19 +307,18 @@ class ChannelMux implements UpgradeStagesOwner {
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
     const stagedProbe = this.stages.probeFor(sessionId)
     if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
-    // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
-    // permanent tears them down.
-    this.detachSession(sessionId, permanent ? 'permanent' : 'transient')
+    // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace); the others end them.
+    this.detachSession(sessionId, reason)
     if (this.sessionWires.get(sessionId) === wire) this.sessionWires.delete(sessionId)
   }
 
-  /** The page of a session whose wire closed transiently left: ends its channels as a permanent close would. */
+  /** The page of a session whose wire closed transiently left: ends its channels as its wire's close would have. */
   endSession(sessionId: string): void {
-    this.detachSession(sessionId, 'permanent')
+    this.detachSession(sessionId, 'pageLeft')
   }
 
-  readPermanentTermination(wire: Wire): boolean {
-    return this.wires.get(wire)?.state.terminatePermanently ?? false
+  readRejection(wire: Wire): boolean {
+    return this.wires.get(wire)?.state.rejected ?? false
   }
 
   /** SSE data POST: resolve the stream wire by its stable connId. Undefined when the
@@ -475,7 +479,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const entry = this.wires.get(wire)
     if (!entry) return
     if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
-    entry.state.terminatePermanently = true
+    entry.state.rejected = true
     entry.transport.terminateWire(wire)
   }
 
@@ -666,9 +670,8 @@ class ChannelMux implements UpgradeStagesOwner {
     // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reconnect grace.
     if (state.closed) {
       state.attaching.clear()
-      const reason = state.closed.isPermanent ? 'permanent' : 'transient'
       const session = this.sessions.removeSession(newSessionId)
-      if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
+      if (session) for (const handle of session.values()) this.detachHandle(handle, state.closed.reason)
       state.awaited.stop()
       throw new ProtocolViolationError('wire closed mid-reconcile')
     }
@@ -848,10 +851,10 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** Transient: leave registry entries so the next reconcile's prev-comparison can fire
-   *  `recovery-failed` on abandoned channels. Permanent: remove outright — no resume. */
+   *  `recovery-failed` on abandoned channels. The page left or the wire was refused: remove outright — no resume. */
   private detachSession(sessionId: string, reason: DetachReason): void {
-    const session =
-      reason === 'permanent' ? this.sessions.removeSession(sessionId) : this.sessions.peekSession(sessionId)
+    const forGood = reason === 'pageLeft' || reason === 'rejected'
+    const session = forGood ? this.sessions.removeSession(sessionId) : this.sessions.peekSession(sessionId)
     if (!session) return
     for (const handle of session.values()) this.detachHandle(handle, reason)
   }
@@ -860,13 +863,17 @@ class ChannelMux implements UpgradeStagesOwner {
     // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
     // wire's RECONCILE, or leaving for good.
     if (this.ended.has(h.channel)) {
+      h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
       if (reason === 'transient') this.ended.keep(h.channel, this.options.reconnectTimeout)
       else this.ended.release(h.channel)
       return
     }
     switch (reason) {
-      case 'permanent':
-        h.channel._onPeerGone()
+      case 'pageLeft':
+        h.channel._onPeerGone(new ChannelPageLeftError())
+        return
+      case 'rejected':
+        h.channel._onPeerGone(rejectedFrameError())
         return
       case 'transient':
         h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)

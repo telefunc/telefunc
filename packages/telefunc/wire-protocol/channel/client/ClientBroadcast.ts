@@ -103,8 +103,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
   }
 
-  override _end(err?: Error): void {
-    super._end(err)
+  override _finalize(err: Error | undefined): void {
+    super._finalize(err)
     // What waits gets the end: one its close callbacks removed too.
     this._attach.failWants(err ?? new ChannelClosedError())
     this.broadcastListeners.clear()

@@ -954,7 +954,7 @@ describe('cloudflare broadcast routing', () => {
             broadcast.subscribe(() => {})
             return broadcast
           })
-          await expect(room.closed).rejects.toThrow('URI malformed')
+          await expect(room.closed).resolves.toHaveProperty('message', expect.stringContaining('URI malformed'))
         } finally {
           warn.mockRestore()
           _resetBroadcastAdapterForTesting(previousTransport)
@@ -1006,7 +1006,7 @@ describe('cloudflare broadcast routing', () => {
         broadcast.subscribe(() => {})
         return broadcast
       })
-      await expect(room.closed).rejects.toThrow('429')
+      await expect(room.closed).resolves.toHaveProperty('message', expect.stringContaining('429'))
       _resetBroadcastAdapterForTesting(previousTransport)
     })
   })

@@ -120,9 +120,16 @@ export const WS_CLOSE_PAGE_LEFT = 4000
 /** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
  *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
  *  reload: those two never change. */
-export const WIRE_VERSION = 2
+export const WIRE_VERSION = 3
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
+
+/** A wire the server refused for a frame it couldn't read: a WebSocket's close code, the status of the SSE request that
+ *  carried the frame (its stream ends with a `REJECTED` event), and the reason both give, within the 123 bytes a close
+ *  frame's reason may hold. The page ends its channels and doesn't reconnect. */
+export const WS_CLOSE_REJECTED = 4002
+export const STATUS_CODE_REJECTED = 422
+export const WIRE_REJECTED_REASON = 'Invalid channel frame. Reload the page.'
 
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */

@@ -124,14 +124,6 @@ function openingOf(channel: ClientChannel) {
   )
 }
 
-/** What the channel's end came to: its error, or `'closed'`. */
-function closingOf(channel: ClientChannel) {
-  return channel.closed.then(
-    () => 'closed' as const,
-    (err: unknown) => err,
-  )
-}
-
 // A page that goes away sends the rest of no request it started: the fixture then has no request to answer.
 test('a request whose page leaves in the middle of its body is left unanswered, with no error', async () => {
   const unhandled: unknown[] = []
@@ -260,9 +252,9 @@ test.each([
     const channel = openChannel()
     expect(await openingOf(channel)).toBe('opened')
     wires.shift()?.end()
-    const closing = await closingOf(channel)
+    const closed = await channel.closed
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
-    expect(closing).toBeInstanceOf(Error)
-    expect((closing as Error).message).toBe(message)
+    expect(closed).toBeInstanceOf(Error)
+    expect(closed?.message).toBe(message)
   },
 )

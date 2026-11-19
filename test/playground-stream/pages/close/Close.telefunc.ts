@@ -103,7 +103,7 @@ async function onCloseChannel() {
   return ch.client
 }
 
-/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's message, or 'none'. */
+/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's name, or 'none'. */
 async function onKeptChannel() {
   const ch = new Channel<never, never>()
   cleanupState.keptChannel = 'pending'
@@ -111,7 +111,7 @@ async function onKeptChannel() {
     cleanupState.keptChannel = 'open'
   })
   ch.onClose((err) => {
-    cleanupState.keptChannel = err ? err.message : 'none'
+    cleanupState.keptChannel = err ? err.name : 'none'
   })
   return ch.client
 }

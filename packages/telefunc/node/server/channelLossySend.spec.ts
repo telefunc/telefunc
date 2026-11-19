@@ -5,7 +5,11 @@ import { Channel, ServerChannel } from '../../wire-protocol/channel/server/Serve
 import { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
-import { countWaitingPublishes, droppingPublishes } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
+import {
+  countWaitingPublishes,
+  droppingLossy,
+  droppingPublishes,
+} from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 import { pairPublishes } from '../../wire-protocol/channel/client/pairPublishes.js'
 import { decode, encode, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
@@ -70,6 +74,11 @@ function wire(
         waiting = waiting.filter((frame) => !dropping(frame))
       },
       dropWaitingFrom() {},
+      dropUngiven(ix) {
+        const cut = droppingLossy(ix)
+        waiting = waiting.filter((frame) => !cut.drops(frame))
+        return cut.count()
+      },
     },
   }
   return {

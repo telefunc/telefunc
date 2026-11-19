@@ -609,7 +609,7 @@ async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held')
     for await (const _ of room.messages()) {
       received++
       if (kind === 'slow') await new Promise((resolve) => setTimeout(resolve, 20))
-      else if (received === 1) await room.closed.catch(() => {})
+      else if (received === 1) await room.closed
     }
     return { received, error: null }
   } catch (err) {

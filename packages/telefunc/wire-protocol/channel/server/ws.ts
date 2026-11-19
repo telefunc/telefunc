@@ -5,7 +5,13 @@ import { enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { assert } from '../../../utils/assert.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
-import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  WIRE_REJECTED_REASON,
+  WS_CLOSE_PAGE_LEFT,
+  WS_CLOSE_REJECTED,
+  WS_CLOSE_WIRE_VERSION,
+} from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
@@ -50,11 +56,13 @@ function getTelefuncChannelOptions({
     wholeMessages: true,
     copiesOnSend,
     bufferedAmount,
-    // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
+    // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers. A page
+    // the server refused is told why, and doesn't reconnect.
     terminateWire: (peer) => {
-      const permanent = mux.readPermanentTermination(peer)
-      terminate(peer)
-      mux.onWireClosed(peer, { permanent })
+      const rejected = mux.readRejection(peer)
+      if (rejected) peer.close(WS_CLOSE_REJECTED, WIRE_REJECTED_REASON)
+      else terminate(peer)
+      mux.onWireClosed(peer, rejected ? 'rejected' : 'transient')
     },
   }
   /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
@@ -101,10 +109,10 @@ function getTelefuncChannelOptions({
       mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     ),
     close: guard((peer, details: Parameters<Hooks['close']>[1]) => {
-      const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT
-      mux.onWireClosed(peer, { permanent: isPermanent })
+      if (mux.readRejection(peer)) mux.onWireClosed(peer, 'rejected')
+      else mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient')
     }, false),
-    error: guard((peer) => mux.onWireClosed(peer, { permanent: false }), false),
+    error: guard((peer) => mux.onWireClosed(peer, 'transient'), false),
   })
   return {
     hooks,

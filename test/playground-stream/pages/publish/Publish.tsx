@@ -167,10 +167,7 @@ function Publish() {
             })
             const opened = await settledWithin(stop.opened, 5_000)
             const closed = await Promise.race([
-              room.closed.then(
-                () => 'clean',
-                () => 'with an error',
-              ),
+              room.closed.then((outcome) => (outcome === null ? 'clean' : 'with an error')),
               new Promise((resolve) => setTimeout(() => resolve('open'), 1_000)),
             ])
             setResult(JSON.stringify({ opened, closed, received }))
@@ -251,10 +248,7 @@ function Publish() {
             const remote = await onBroadcastBacklog('held')
             const { room } = remote
             await room.opened
-            const closed = room.closed.then(
-              () => 'clean',
-              (err) => (err as Error).name,
-            )
+            const closed = room.closed.then((outcome) => outcome?.name ?? 'clean')
             let received = 0
             const loop = (async () => {
               try {
@@ -359,7 +353,7 @@ function Publish() {
               room.abort('stop')
               if (caught) outcomes.push(await pending.catch((err) => err.abortValue))
               else outcomes.push('ignored')
-              await room.closed.catch(() => {})
+              await room.closed
               close(remote)
             }
           }

@@ -7,6 +7,7 @@ import {
   LOSSY_CONFIRM_SLACK_MS,
   WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
+  WS_CLOSE_REJECTED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
@@ -228,7 +229,10 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner.onTransportClosed(this, { otherWireVersion: code === WS_CLOSE_WIRE_VERSION })
+      this.owner.onTransportClosed(this, {
+        otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
+        rejectedFrame: code === WS_CLOSE_REJECTED,
+      })
     }
     ws.onerror = () => {}
   }

@@ -22,6 +22,7 @@ import { isSequencedTag } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
   droppingFrom,
+  droppingLossy,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -88,6 +89,12 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
 
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
     this.sender.dropWaiting(droppingFrom(ix, from))
+  }
+
+  dropUngiven(ix: number): number {
+    const cut = droppingLossy(ix)
+    this.sender.dropUngiven(cut.drops)
+    return cut.count()
   }
 
   /** The rate sends go by, which a probe gives before any data does. */

@@ -145,7 +145,7 @@ function testWire(isDev: boolean) {
         expect(state.end!.received).deep.equal(received('onClose:none'))
         const ss = await getCleanupState()
         expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
-        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('0')
+        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('clean')
       })
     })
 
@@ -169,7 +169,7 @@ function testWire(isDev: boolean) {
       await page.click('#wire-end-close-timeout')
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
-        expect(end!.close).toBe('1')
+        expect(end!.close).toBe('ChannelClosedError')
       })
       await cutWire()
       await page.context().setOffline(false)
@@ -193,7 +193,7 @@ function testWire(isDev: boolean) {
     const maxChannels = 4_096
     const connect = async () => {
       // The wire's version, as the page's `getWireUrl` names it.
-      const url = new URL('/_telefunc?wire=2', getServerUrl())
+      const url = new URL('/_telefunc?wire=3', getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
@@ -397,7 +397,7 @@ function testWire(isDev: boolean) {
       let channelId = ''
       await autoRetry(async () => {
         const { release } = await getResult<WireState>('#wire-state')
-        expect(release!.close).toBe('0')
+        expect(release!.close).toBe('clean')
         channelId = release!.channelId
       })
       // Well within reconnectTimeout (60 s), which the server waits for a page that is away.
@@ -577,7 +577,7 @@ function testWireSlowPing() {
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
         expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
-        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('0')
+        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('clean')
       })
     } finally {
       await proxy.close()

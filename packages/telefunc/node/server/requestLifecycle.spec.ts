@@ -141,7 +141,7 @@ function pageThatStopsReading(channel: ServerChannel, index: number) {
       behindAfter: () => Number.POSITIVE_INFINITY,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+      queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     },
     index,
     replay: channel._replayBuffer!,

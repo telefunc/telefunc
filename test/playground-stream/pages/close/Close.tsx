@@ -97,7 +97,7 @@ function Close() {
           let channelCloseClean: boolean | null = null
           const channelClosed = new Promise<void>((resolve) => {
             channel.onClose((err) => {
-              channelCloseClean = err === undefined
+              channelCloseClean = err === null
               resolve()
             })
           })
@@ -303,7 +303,7 @@ function Close() {
           let channelCloseClean: boolean | null = null
           const channelClosed = new Promise<void>((resolve) => {
             channel.onClose((err) => {
-              channelCloseClean = err === undefined
+              channelCloseClean = err === null
               resolve()
             })
           })

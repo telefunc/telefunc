@@ -24,7 +24,7 @@ const stalledSender: PeerSender = {
   behindAfter: () => Number.POSITIVE_INFINITY,
   deliveredBefore: () => 0,
   sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-  queue: { waitingPublishes: () => 2, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+  queue: { waitingPublishes: () => 2, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
 }
 
 /** A broadcast of `key` whose page subscribed to its text and reads nothing. */
@@ -69,7 +69,7 @@ for (const lossy of [false, true]) {
   test(`a ${lossy ? 'lossy' : 'reliable'} broadcast whose publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
     const key = crypto.randomUUID()
     const broadcast = subscribedPage(key, lossy)
-    let closedWith: Error | undefined
+    let closedWith: Error | null | undefined
     broadcast.onClose((err) => {
       closedWith = err
     })

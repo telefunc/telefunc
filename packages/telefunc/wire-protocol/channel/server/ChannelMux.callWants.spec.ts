@@ -42,7 +42,7 @@ function returnedBroadcast(session: string, lossy = false) {
     behindAfter: () => Number.POSITIVE_INFINITY,
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+    queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
   }
   const count = (tag: number) => frames.filter((frame) => frame[0] === tag).length
   return {
@@ -167,13 +167,13 @@ test('before the first attach of a page that has not subscribed, nothing publish
 })
 
 // As a plain channel sends what it held across a close that ran out before its page attached.
-test("a close that runs out before the page's first attach keeps what the page subscribed to by a call, ahead of the CLOSE", async () => {
+test("a close that runs out before the page's first attach keeps what the page subscribed to by a call, ahead of the CLOSE and its timeout", async () => {
   const page = returnedBroadcast('session-a')
   await page.call(on(1))
   await Broadcast.publish(page.key, 'after-subscribe')
   await page.broadcast.close({ timeout: 1 })
   page.attach(on(1))
-  expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE])
+  expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE, TAG.ERROR])
   page.broadcast._release()
 })
 
@@ -227,7 +227,10 @@ for (const kind of KINDS) {
         const want = { version: 1, text: kind === 'text', binary: kind === 'binary' }
         if (arrival === 'call') await page.call(want)
         else page.wire(want)
-        await expect(page.broadcast.closed).rejects.toThrow('broker connection closed')
+        await expect(page.broadcast.closed).resolves.toHaveProperty(
+          'message',
+          expect.stringContaining('broker connection closed'),
+        )
         expect(page.tags()).toContain(TAG.ERROR)
       } finally {
         _resetBroadcastAdapterForTesting(previous)
@@ -278,7 +281,7 @@ test(
     const wants = [refused, healthy].map((page) => ({ channel: page.broadcast.id, ...on(1) }))
     const call = getChannelMux().applyCallWants(callOf('session-a'), wants)
     listening(refused.key).reject(new Error('NOPERM'))
-    await expect(refused.broadcast.closed).rejects.toThrow('NOPERM')
+    await expect(refused.broadcast.closed).resolves.toHaveProperty('message', expect.stringContaining('NOPERM'))
     expect(await settled(call)).toBe(false)
     listening(healthy.key).resolve()
     expect(await settled(call)).toBe(true)
@@ -297,7 +300,10 @@ test(
     request.abort()
     await call
     expect(page.broadcast.isClosed).toBe(true)
-    await expect(page.broadcast.closed).rejects.toThrow('before the subscription took effect')
+    await expect(page.broadcast.closed).resolves.toHaveProperty(
+      'message',
+      expect.stringContaining('before the subscription took effect'),
+    )
     expect(page.tags()).toContain(TAG.ERROR)
     expect(page.wanted()).toEqual([])
   }),
@@ -320,7 +326,10 @@ test(
       expect(done).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
       expect(done).toBe(true)
-      await expect(silent.broadcast.closed).rejects.toThrow('did not take effect within')
+      await expect(silent.broadcast.closed).resolves.toHaveProperty(
+        'message',
+        expect.stringContaining('did not take effect within'),
+      )
       expect(silent.tags()).toContain(TAG.ERROR)
       expect({ closed: healthy.broadcast.isClosed, wanted: healthy.wanted() }).toEqual({
         closed: false,
