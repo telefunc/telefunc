@@ -146,7 +146,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
   }
 
   async register(): Promise<void> {
-    const registering = this.callAuthority((authority) => authority.registerRoute(this.route))
+    const registering = this.sendRegistration()
     if (this.readyWhenSent) this.transition('ready')
     let registration: RegisterWire
     try {
@@ -217,6 +217,12 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.retry = null
     this.owner.stopRenewing(this)
     this.stopDeliveries()
+  }
+
+  /** Sent in this turn, behind what this session sent the room before; a stub that can't be opened rejects it, once the
+   *  caller has the attempt. */
+  private async sendRegistration(): Promise<RegisterWire> {
+    return await this.callAuthority((authority) => authority.registerRoute(this.route))
   }
 
   private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
