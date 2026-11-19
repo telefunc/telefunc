@@ -250,19 +250,30 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
-/** The server logged a line with `error`, by now or soon: on its stderr, or under Docker on compose's stdout, each line
- *  prefixed with the container's name. Its output may reach the test after the page saw the outcome, and one error's lines
- *  in several chunks. */
-async function expectServerError(error: string, inDocker: boolean): Promise<void> {
-  await autoRetry(() =>
-    expectLog(error, {
-      filter: (log) =>
-        inDocker
-          ? log.logSource === 'stdout' &&
-            log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
-          : log.logSource === 'stderr',
-    }),
-  )
+/** The server logged `error` (text it contains, or a pattern over lines in a row), by now or soon. Its output may reach
+ *  the test after the page saw the outcome. Outside Docker it is searched in each write to the server's stderr, one per
+ *  logged error. Under Docker the test gets compose's stdout in chunks that may cut a line or an error, so it is
+ *  searched in each playground container's output as Docker keeps it. */
+async function expectServerError(error: string | RegExp, inDocker: boolean): Promise<void> {
+  if (!inDocker) return autoRetry(() => expectLog(error, { filter: (log) => log.logSource === 'stderr' }))
+  const logged = (output: string) => (typeof error === 'string' ? output.includes(error) : error.test(output))
+  // Not `autoRetry()`: it counts its timeout in tries of 100 ms, and each look here runs `docker compose`.
+  const giveUp = Date.now() + 30_000
+  while (!playgroundOutputs().some(logged)) {
+    if (Date.now() > giveUp) throw new Error(`No playground container logged ${String(error)}`)
+    await sleep(500)
+  }
+}
+
+/** Each playground container's output, stdout and stderr, its lines whole and each stream's in order. */
+function playgroundOutputs(): string[] {
+  // A whole run's output may pass `execSync`'s 1 MiB default.
+  const docker = (args: string) =>
+    execSync(`docker compose ${args}`, { cwd: playgroundDir, encoding: 'utf8', maxBuffer: 64 << 20 })
+  return docker('config --services')
+    .split('\n')
+    .filter((service) => service.startsWith('playground-'))
+    .map((service) => docker(`logs --no-color --no-log-prefix ${service}`))
 }
 
 /**
