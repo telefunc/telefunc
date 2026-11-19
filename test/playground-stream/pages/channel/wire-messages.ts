@@ -16,21 +16,27 @@ function binaryMessage(n: number): Uint8Array {
 
 type TallyState = { text: number; binary: number; inOrder: boolean }
 
-/** Counts the numbered messages that arrive, and whether each is the one after the last. */
+/** Counts the numbered messages that arrive, and whether each is the one after the last. `alternating`: the sender
+ *  sends text n, then binary n, so each also comes right after the other kind's last. */
 class Tally {
   readonly state: TallyState = { text: 0, binary: 0, inOrder: true }
+  private readonly alternating: boolean
+
+  constructor({ alternating = false } = {}) {
+    this.alternating = alternating
+  }
 
   /** Returns the message's number. */
   text(message: string): number {
     const n = Number.parseInt(message)
-    if (n !== this.state.text) this.state.inOrder = false
+    if (n !== this.state.text || (this.alternating && this.state.binary !== n)) this.state.inOrder = false
     this.state.text++
     return n
   }
 
   binary(message: Uint8Array): number {
     const n = new DataView(message.buffer, message.byteOffset).getUint32(0)
-    if (n !== this.state.binary) this.state.inOrder = false
+    if (n !== this.state.binary || (this.alternating && this.state.text !== n + 1)) this.state.inOrder = false
     this.state.binary++
     return n
   }

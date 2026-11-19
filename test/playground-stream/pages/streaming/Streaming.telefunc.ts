@@ -474,6 +474,7 @@ const onReturnFailingStream = async (chunksBeforeFailure: number) => {
   })
 }
 
+/** cleanupState: generatorFinallyThrowsRan = 'true' once its `finally` ran, as the page's cancel returns it. */
 async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
   try {
     while (true) {
@@ -481,6 +482,7 @@ async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
       await sleep(50)
     }
   } finally {
+    cleanupState.generatorFinallyThrowsRan = 'true'
     throw Abort({ reason: 'generator-finally-failure' })
   }
 }

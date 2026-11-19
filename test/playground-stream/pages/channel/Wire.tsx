@@ -61,7 +61,7 @@ function WireDemo() {
   const resume = useCallback(async () => {
     const { channel, channelId } = await onWireResume(RESUME_COUNT)
     resumeChannel.current = channel
-    const tally = new Tally()
+    const tally = new Tally({ alternating: true })
     const show = () => setState((s) => ({ ...s, resume: { channelId, received: { ...tally.state } } }))
     show()
     channel.listen((message) => {
@@ -127,17 +127,19 @@ function WireDemo() {
   // One channel stays open throughout, so the page keeps its connection.
   const many = useCallback(async () => {
     const kept = await onWireOpen()
+    let closed = 0
     for (let opened = 0; opened < MANY_CHANNELS; opened += 100) {
-      await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
+      const closes = await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
+      for (const close of closes) if (close === 0) closed++
     }
     const next = await onWireOpen()
     const opens = new Promise<string>((resolve) => {
       next.onOpen(() => resolve('open'))
       next.onClose((err) => resolve(err?.name ?? 'closed'))
     })
-    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: '' } }))
+    setState((s) => ({ ...s, many: { closed, next: '' } }))
     const outcome = await opens
-    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: outcome } }))
+    setState((s) => ({ ...s, many: { closed, next: outcome } }))
     next.close()
     kept.close()
   }, [])

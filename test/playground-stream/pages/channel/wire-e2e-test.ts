@@ -10,6 +10,7 @@ import {
   runServerAction,
   cutWire,
   canCutWire,
+  countConnections,
   dropNextWebSocket,
   forceServerGc,
   holdNextSsePost,
@@ -411,13 +412,19 @@ function testWire(isDev: boolean) {
     })
   }
 
-  test('channel: a page that opened and closed 4,200 channels on one connection opens the next', async () => {
+  test('channel: a page that opened and closed 4,200 channels on one connection, each close acknowledged, opens the next', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    const connections = countConnections()
     await page.click('#wire-many')
     await autoRetry(async () => {
       const { many } = await getResult<WireState>('#wire-state')
       expect(many).deep.equal({ closed: 4_200, next: 'open' })
     })
+    // At most the one it opened for them: a page that upgrades opens its WebSocket beside its first SSE stream.
+    const opened = connections.stop()
+    if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).length === 1) {
+      expect(opened).lessThanOrEqual(1)
+    }
   })
 
   test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, every close is acknowledged on both ends, and what the page sends on a kept one as each opens arrives', async () => {

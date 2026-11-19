@@ -1,7 +1,7 @@
 export { testStreamToServer }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, canCutWire } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 function testStreamToServer(isDev: boolean, inDocker = false) {
@@ -151,8 +151,9 @@ function testStreamToServer(isDev: boolean, inDocker = false) {
     })
   }
 
-  // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
-  if (!isDev && !inDocker && process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
+  // Preview on Node only: dev serves `/_telefunc` from Vite's middleware, and on Bun and Deno, where the server can't
+  // drop the page's connections.
+  if (!isDev && !inDocker && canCutWire() && process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
     test('stream-to-server: an upload of small chunks whose connection drops halfway, its window grown, resumes and arrives whole', async () => {
       await navigate(`${getServerUrl()}/stream-to-server`)
       await page.click('#test-ingest-many-small')
@@ -160,6 +161,8 @@ function testStreamToServer(isDev: boolean, inDocker = false) {
       await autoRetry(async () => {
         expect((await getCleanupState())[`ingest_${key}`]).toBe(`completed:${20_000 * 1024}`)
       })
+      // The drop happened: the server cut at least one of the page's connections.
+      expect(Number((await getCleanupState())[`ingest_${key}_cut`])).greaterThan(0)
     })
   }
 

@@ -473,12 +473,17 @@ function testStreaming() {
 
   test('streaming: cancelling a returned stream that failed, or a generator whose finally throws, leaves the server answering', async () => {
     await navigate(`${getServerUrl()}/streaming`)
+    await resetCleanupState()
     await page.click('#test-cancel-failed-streams')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')
       expect(result.errors).to.have.length(2)
       expect(result.errors).not.to.include('none')
       expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
+    })
+    // The page's cancel returned the generator: its `finally` ran.
+    await autoRetry(async () => {
+      expect((await getCleanupState()).generatorFinallyThrowsRan).toBe('true')
     })
   })
 }

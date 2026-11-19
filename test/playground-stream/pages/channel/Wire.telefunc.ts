@@ -14,7 +14,7 @@ import { Tally, textMessage, binaryMessage } from './wire-messages'
  */
 async function onWireResume(count: number) {
   const ch = new Channel<(message: string) => void, (message: string) => void>()
-  const tally = new Tally()
+  const tally = new Tally({ alternating: true })
   const report = () => {
     cleanupState[`wireResume_${ch.id}`] = JSON.stringify(tally.state)
   }
