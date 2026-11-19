@@ -367,8 +367,9 @@ class RedisSubscriptions {
       if (!attempt.establishing) await socket.subscribe(...attempt.channels)
     } catch (error) {
       if (!this.isCurrent(id)) return
-      // A refusal stands until an operator changes Redis's ACL. Any other failure (a command-connection error) is tried
-      // again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber connection stays.
+      // A refusal stands until an operator changes Redis's ACL or role. Any other failure (a command-connection error,
+      // `LOADING`) is tried again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber
+      // connection stays.
       if (isRefusal(error)) return attempt.fail(error)
       return this.retryRead(attempt, error)
     }

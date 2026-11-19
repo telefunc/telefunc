@@ -66,9 +66,16 @@ function isUnreachable(error: unknown): boolean {
   )
 }
 
-/** Redis denied the command, which stands until an operator changes its ACL; `BUSY`, `LOADING` and the like pass. */
+/** Redis's refusal of a command its user's ACL denies or a replica won't run, at top level or inside a script: Redis 7
+ *  and later word a script's ACL refusal as `ERR`, and Redis 5 and 6 and Dragonfly wrap a script's refusal in the
+ *  script's error. */
+const REFUSAL =
+  /^(?:NOPERM |READONLY |ERR ACL failure in script: |ERR The user executing the script |ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?(?:The user executing the script |-READONLY |-NOPERM ))/
+
+/** Redis refused the command, which stands until an operator changes its ACL or role; `BUSY`, `LOADING` and the like
+ *  pass. */
 function isRefusal(error: unknown): error is Error {
-  return error instanceof Error && error.name === 'ReplyError' && error.message.startsWith('NOPERM')
+  return error instanceof Error && error.name === 'ReplyError' && REFUSAL.test(error.message)
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters

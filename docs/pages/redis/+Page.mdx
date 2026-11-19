@@ -55,7 +55,7 @@ Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `pu
 
 While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 
-A subscription fails when Redis refuses it with `NOPERM` (from its ACL): when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows the key again, so subscribe again once you have restored the key's access.
+A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, or the server is a replica (`READONLY`). That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access.
 
 > A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error's `cause` is Redis's error. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `ready` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
 
