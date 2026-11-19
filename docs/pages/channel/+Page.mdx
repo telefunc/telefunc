@@ -372,7 +372,7 @@ const err = await channel.closed
 if (err) console.error('The channel ended with', err)
 ```
 
-A graceful `close()` waits for both ends, up to its timeout (5 s by default): for the answers to acknowledged sends, and for the `onClose()` callbacks on each end. One end decides the outcome and sends it to the other, so both ends read the same one. An `onClose()` callback that runs past the timeout ends the channel with the timeout on both ends, and one that throws `Abort` aborts it. Another error it throws goes to <Link href="/onBug">`onBug()`</Link> and leaves the outcome as it is. A callback that rejects with its own channel's outcome, as an awaited `send()` does when the channel ends, reports nothing: `closed` gives it already.
+A graceful `close()` waits for both ends, up to its timeout (5 s by default): for the answers to acknowledged sends, and for the `onClose()` callbacks on each end. One end decides the outcome and sends it to the other, so both ends read the same one. An `onClose()` callback that runs past the timeout ends the channel with the timeout on both ends, and one that throws `Abort` aborts it. Another error it throws goes to <Link href="/onBug">`onBug()`</Link> and leaves the outcome as it is. A callback that rejects with its own channel's outcome, as an awaited `send()` does when the channel ends, reports nothing: `closed` gives it already. Neither does a `listen()` or `onOpen()` callback whose `send()` throws because the channel ended while it worked, such as a reply after a database read while the user closed the tab: that `send()` throws a `ChannelClosedError` whose `cause` is the outcome. An `onClose()` callback's `send()` on its own channel can never go, so what it throws is reported.
 
 A `send()` still waiting for capacity when the channel ends resolves where its message goes ahead of an ending the other end reads: a graceful close, or this end's `abort()`. Otherwise it rejects with the channel's outcome.
 
@@ -387,6 +387,8 @@ A `send()` still waiting for capacity when the channel ends resolves where its m
 | The channel overflowed | `ChannelOverflowError` | `null` where its cleanup had started, else the `ChannelOverflowError` |
 
 An `onClose()` callback runs once both ends stopped sending, before the outcome is known, so its `null` means "closing gracefully". To act on the outcome, await `closed`.
+
+> The end that decides already has the other end's result once that end is done: if its connection is lost after that, it still closes with `null`, or with the timeout where its own cleanup runs past it.
 
 > An `onClose()` callback may await its own channel's `closed` or `close()`. The close then doesn't wait for that callback. Read `closed` or call `close()` before the callback's first `await`, as in `channel.onClose(async () => log(await channel.closed))`: a callback that reads it only after an earlier `await` holds the close until its timeout.
 
@@ -663,7 +665,35 @@ Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publ
 
 A call that can't start throws instead of rejecting: `send()` or `sendBinary()` on a closed channel, `publish()` or `publishBinary()` on a page's closed broadcast, or a client's message over the size limit in <Link href="#binary-data" />. On the server, a closed broadcast's `publish()` still reaches its key. `.catch()` doesn't see that throw, so put a `try` around the call.
 
-A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A page the user reloads, closes or navigates away from ends its channels on the server at once, with `ChannelPageLeftError`. A slow client doesn't close a `Channel`, and neither does a refused `send()`. Two things do: a client that sends more than the server holds while your `listen()` callbacks work on what it sent, and a client with so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server can't hold even their refusals. The channel then closes with `ChannelOverflowError`. A `BroadcastChannel` also closes, with `ChannelOverflowError`, where its client would miss a message, and a <Link href="#lossy-broadcast">lossy</Link> one where the server can't hold even the newest message for its client.
+To tell a send that failed because its channel closed from one that failed for another reason, check `isClosed`. It is `true` however the channel ended, while a refused `send()` on an open channel, such as one that throws `ChannelOverflowError`, leaves it `false`:
+
+```ts
+try {
+  await channel.send(reply)
+} catch (err) {
+  // The channel closed: `closed` tells how
+  if (channel.isClosed) return
+  throw err
+}
+```
+
+A callback that sends to other channels handles each send's failure the same way. Otherwise the first of them whose page left stops it, and its error goes to <Link href="/onBug">`onBug()`</Link>:
+
+```ts
+channel.listen(async (message) => {
+  await Promise.all(
+    members.map(async (member) => {
+      try {
+        await member.send(message)
+      } catch (err) {
+        if (!member.isClosed) throw err
+      }
+    }),
+  )
+})
+```
+
+A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A page the user reloads, closes or navigates away from tells the server, which ends its channels with `ChannelPageLeftError`. Where that doesn't reach the server, its channels end once the page has been gone longer than `reconnectTimeout`, with `NetworkError`. A slow client doesn't close a `Channel`, and neither does a refused `send()`. Two things do: a client that sends more than the server holds while your `listen()` callbacks work on what it sent, and a client with so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server can't hold even their refusals. The channel then closes with `ChannelOverflowError`. A `BroadcastChannel` also closes, with `ChannelOverflowError`, where its client would miss a message, and a <Link href="#lossy-broadcast">lossy</Link> one where the server can't hold even the newest message for its client.
 
 Channels and broadcasts signal failure through these errors:
 
