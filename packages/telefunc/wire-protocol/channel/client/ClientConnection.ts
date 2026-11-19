@@ -228,7 +228,10 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const frame = this.fitting(channel, encodeFrame(record.ix, data, replay.seq + 1))
     const seq = replay.nextSeq()
     onQueued?.(seq)
-    this.gate.send(record, seq, frame, kind)
+    // A data frame after which its channel is out of the server's credit goes at once: nothing the channel sends next
+    // can join its batch POST before the server has it and grants more.
+    const goesNow = kind === 'data' && !channel._attach.sendCredit.leavesCredit(frame.byteLength)
+    this.gate.send(record, seq, frame, goesNow ? 'control' : kind)
     return frame.byteLength
   }
 

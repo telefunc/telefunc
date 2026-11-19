@@ -16,7 +16,7 @@ type ChannelAttachOptions = {
  *  the replay buffers' caps, and a wire turning to batch POSTs or joining an upgrade. */
 class ChannelAttach {
   private readonly channel: { readonly isClosed: boolean }
-  private readonly sendCredit: SendCredit
+  readonly sendCredit: SendCredit
   readonly receiveCredit: ReceiveCredit
   /** A broadcast's want, which its entry declares beside its probe; replaced, never changed, so an entry keeps the want
    *  it was built with. */

@@ -47,6 +47,8 @@ function createChannel(dispatched: DecodedFrame[]) {
     },
     _onEnded() {},
     _attach: {
+      // Never at the edge of its credit: its data frames wait for the batch timer.
+      sendCredit: { leavesCredit: () => true },
       state: () => ({}),
       receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
       capWindows() {},
