@@ -20,6 +20,7 @@ import {
   releaseHeldSsePosts,
 } from '../../e2e-utils'
 import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -186,7 +187,7 @@ function testWire(isDev: boolean) {
     })
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') {
     // MAX_CHANNELS_PER_CONNECTION
     const maxChannels = 4_096
     const connect = async () => {
@@ -351,7 +352,7 @@ function testWire(isDev: boolean) {
     })
   }
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {
     test('channel: a 1 MB message the server sends at 1 Mbit/s as the page upgrades from SSE to WebSocket arrives, and the page moves to the WebSocket without opening another SSE stream', async () => {
       await navigate(`${getServerUrl()}/channel`)
       let sseStreams = 0
@@ -434,7 +435,7 @@ function testWire(isDev: boolean) {
     )
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
     test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
       await navigate(`${getServerUrl()}/channel`)
       await holdNextSseWire()

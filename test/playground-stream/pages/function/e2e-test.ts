@@ -4,6 +4,7 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import * as http from 'node:http'
 import * as os from 'node:os'
 import { navigate, getResult, forceServerGc, serverRuntime } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 function testFunction(isDev: boolean, inDocker = false) {
   test('function: simple greeter returns correct string', async () => {
@@ -118,7 +119,7 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   })
 
-  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('ws')) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).includes('ws')) {
     test("function: a call's channel.idleTimeout of 0 closes its connection once the callback it passed is let go", async () => {
       await navigate(`${getServerUrl()}/function`)
       const webSocket = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })

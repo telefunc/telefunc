@@ -2,6 +2,7 @@ export { testStreaming }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
@@ -480,16 +481,4 @@ function testStreaming() {
       expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
     })
   })
-}
-
-function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
-  const parsed: unknown = JSON.parse(value ?? '["sse"]')
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
-  ) {
-    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
-  }
-  return parsed
 }

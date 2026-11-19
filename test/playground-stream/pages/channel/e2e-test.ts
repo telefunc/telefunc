@@ -13,6 +13,7 @@ import {
   countConnections,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type ChannelState = {
   heldBytes: number | null
@@ -1562,18 +1563,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(await bugs()).deep.equal(bugsBefore)
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
   })
-}
-
-function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
-  const parsed: unknown = JSON.parse(value ?? '["sse"]')
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
-  ) {
-    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
-  }
-  return parsed
 }
 
 async function expectHoldsNothingOnceLeft() {

@@ -4,6 +4,7 @@ import { Worker } from 'node:worker_threads'
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, withPacedLink, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
 import { withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
@@ -24,7 +25,7 @@ type SlowLinkState = {
 // Preview only: the page loads through a proxy in the test process, which Vite's HMR socket would share.
 function testSlowLink(isDev: boolean) {
   if (isDev) return
-  const upgrades = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).length > 1
+  const upgrades = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).length > 1
 
   test(upgrades
     ? "channel: on a 1 MB/s link, once the page moved from SSE to a WebSocket, a channel's acknowledged sends beside another channel's download answer as on a WebSocket from the start"
@@ -57,7 +58,7 @@ function testSlowLink(isDev: boolean) {
   // slow link there.
   if (upgrades) return
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === '["sse"]')
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse')
     test('channel: SSE wires the page gave up on hold nothing of the 32 MiB waiting for it, and all of it arrives', async () => {
       await navigate(`${getServerUrl()}/channel`)
       const before = await serverArrayBuffers()
@@ -114,7 +115,9 @@ function testSlowLink(isDev: boolean) {
           { timeout: 55_000 },
         )
         // An event goes whole: 4 MiB in base64 takes about 5.6 s here.
-        const upToMs = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('sse') ? 14_000 : 4000
+        const upToMs = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).includes('sse')
+          ? 14_000
+          : 4000
         expect(behind!.pingMs).lessThan(upToMs)
         expect(behind!.publishesAhead).toBe(1)
         expect(behind).deep.equal({ ...behind!, closed: '0', received: 5, closeErr: 'none' })

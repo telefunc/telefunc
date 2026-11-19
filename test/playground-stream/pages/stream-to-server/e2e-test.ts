@@ -2,6 +2,7 @@ export { testStreamToServer }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 function testStreamToServer(isDev: boolean, inDocker = false) {
   test('stream-to-server: echo', async () => {
@@ -131,7 +132,7 @@ function testStreamToServer(isDev: boolean, inDocker = false) {
     })
   })
 
-  const channelTransports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+  const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel' && channelTransports.at(-1) === 'ws') {
     test('stream-to-server: an upload whose page closes mid-upload errors on the server instead of completing short', async () => {
       const otherContext = await page.context().browser()!.newContext()

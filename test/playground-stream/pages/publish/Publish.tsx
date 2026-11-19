@@ -34,6 +34,7 @@ import {
   onRedisAllowsEveryKey,
   onPublishTo,
 } from './Publish.telefunc'
+import { parseChannelTransports } from '../../channelTransports'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -810,8 +811,10 @@ function Publish() {
 /** Whether the page's wire is SSE alone, over HTTP/1.1, where it sends its frames in batch POSTs the server can hold:
  *  over HTTPS the browser can stream them in one upload. */
 function holdsPosts(): boolean {
-  const transports = JSON.stringify(JSON.parse(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]'))
-  return transports === '["sse"]' && location.protocol === 'http:'
+  return (
+    parseChannelTransports(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse' &&
+    location.protocol === 'http:'
+  )
 }
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`. */

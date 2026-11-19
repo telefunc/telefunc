@@ -11,6 +11,7 @@ export { testUpgrade }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type FrameCounts = { received: number }
 
@@ -187,11 +188,6 @@ async function holdFlip(target: Page, heldPast: number) {
       return held.length
     },
   }
-}
-
-function parseChannelTransports(raw: string | undefined): string[] {
-  if (!raw) return ['sse']
-  return JSON.parse(raw) as string[]
 }
 
 type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }

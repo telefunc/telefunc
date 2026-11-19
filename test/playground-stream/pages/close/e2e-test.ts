@@ -11,6 +11,7 @@ import {
   sleep,
   expectServerError,
 } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 function testClose(inDocker = false) {
   for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
@@ -133,7 +134,7 @@ function testClose(inDocker = false) {
     )
   })
 
-  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '[]').join() === 'sse,ws') {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {
     test('close: a page that reloads while its connection moves to a WebSocket ends its open channel on the server at once', async () => {
       await navigate(`${getServerUrl()}/close`)
       await resetCleanupState()
