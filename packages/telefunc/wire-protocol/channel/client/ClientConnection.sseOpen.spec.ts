@@ -2,7 +2,7 @@
 // `fetch` against a scripted HTTP server: each open the server gets is answered by the next answer a test lists, and
 // once those run out, with a wire.
 
-import { afterEach, beforeEach, expect, test } from 'vitest'
+import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { ClientChannel } from './ClientChannel.js'
 import { decode, encode } from '../../wire/frame.js'
@@ -20,6 +20,8 @@ let answers: Answer[]
 let opens: number
 let wires: ServerResponse[]
 let channels: ClientChannel[]
+/** The upload POST is held, neither acknowledged nor answered, as by a proxy that buffers a request's body. */
+let holdUploads: boolean
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -67,11 +69,12 @@ beforeEach(async () => {
   opens = 0
   wires = []
   channels = []
+  holdUploads = false
   server = createServer((req, res) => {
     // A page a redirect sent here.
     if (req.method === 'GET') return html(200)(res)
     // The upload POST that would stream: ended at once, its frames go in batch POSTs.
-    if (req.headers['transfer-encoding'] === 'chunked') return void res.end()
+    if (req.headers['transfer-encoding'] === 'chunked') return holdUploads ? undefined : void res.end()
     void framesOf(req).then((frames) => {
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
       if (!metadata.streamResponse) return void res.end()
@@ -151,6 +154,50 @@ test('during a recovery, an open answered with a page of HTML is tried again', {
   while (opens < 4) await delay(50)
   expect({ opens, closed: channel.isClosed }).toEqual({ opens: 4, closed: false })
 })
+
+// The page waits up to 3 s for its upload's acknowledgement.
+test(
+  'a wire that ends while its upload waits for an acknowledgement is followed by another',
+  { timeout: 15_000 },
+  async () => {
+    holdUploads = true
+    const channel = openChannel()
+    expect(await openingOf(channel)).toBe('opened')
+    wires.shift()?.end()
+    while (opens < 2) await delay(50)
+    expect(channel.isClosed).toBe(false)
+  },
+)
+
+// The old open's upload settles late, by its 3 s wait, where a successor holds the transport by then. Its fetch ignores
+// the abort its wire's end sends, so that it is still pending when the successor opens.
+test(
+  'the upload of a wire that ended settles late without ending the wire after it, or opening another',
+  { timeout: 20_000 },
+  async () => {
+    holdUploads = true
+    const realFetch = globalThis.fetch
+    let held = false
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      if (held || !(init?.body instanceof ReadableStream)) return realFetch(input, init)
+      held = true
+      return new Promise<Response>(() => {})
+    })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
+    const channel = openChannel()
+    expect(await openingOf(channel)).toBe('opened')
+    wires.shift()?.end()
+    while (opens < 2 || wires.length === 0) await delay(50)
+    let ended = false
+    wires[0]?.on('close', () => {
+      ended = true
+    })
+    await delay(4000)
+    expect({ opens, ended, closed: channel.isClosed }).toEqual({ opens: 2, ended: false, closed: false })
+  },
+)
 
 // Its window is the ping deadline, two and a half intervals over SSE, and then `reconnectTimeout`: 12.5 s, room for
 // attempts after a first handshake that took seconds, as the page starts none that couldn't reconcile in time.
