@@ -8,7 +8,7 @@ You can use Telefunc with NestJS using `defineTelefunctions()` on the server, a 
 
 Define your API functions on the server using `defineTelefunctions()`:
 
-```ts
+```ts ts-only
 // src/api.ts
 // Environment: server
 import { defineTelefunctions, shield, Channel } from 'telefunc'
@@ -37,7 +37,7 @@ export type Api = typeof api
 
 Create a middleware that forwards HTTP requests to Telefunc's `serve()`:
 
-```ts
+```ts ts-only
 // src/telefunc.middleware.ts
 // Environment: server
 import { Injectable, NestMiddleware } from '@nestjs/common'
@@ -68,7 +68,7 @@ export class TelefuncMiddleware implements NestMiddleware {
 
 Mount the middleware in your `AppModule`:
 
-```ts
+```ts ts-only
 // src/app.module.ts
 // Environment: server
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common'
@@ -87,7 +87,7 @@ export class AppModule implements NestModule {
 
 Call your telefunctions from the client using `createClient()`:
 
-```ts
+```ts ts-only
 // client.ts
 // Environment: client
 import { createClient } from 'telefunc/client'
