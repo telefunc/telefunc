@@ -40,11 +40,9 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
   onTransportOpen(transport: ClientChannelTransport): void
-  /** `rejectedByServer`: it refused the wire's opening; `otherWireVersion`: it runs another `WIRE_VERSION`. */
-  onTransportClosed(
-    transport: ClientChannelTransport,
-    options?: { rejectedByServer?: boolean; otherWireVersion?: boolean },
-  ): void
+  /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
+   *  another `WIRE_VERSION`. */
+  onTransportClosed(transport: ClientChannelTransport, options?: { refusal?: string; otherWireVersion?: boolean }): void
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
@@ -358,7 +356,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { rejectedByServer = false, otherWireVersion = false } = {},
+    { refusal, otherWireVersion = false }: { refusal?: string; otherWireVersion?: boolean } = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -374,8 +372,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     this.upgrade.abortAttempt()
-    const err = new NetworkError(rejectedByServer ? 'Server rejected SSE connection' : 'Connection dropped', true)
-    this.handleTransportLoss(err, rejectedByServer)
+    const err = new NetworkError(refusal ?? 'Connection dropped', true)
+    this.handleTransportLoss(err, refusal !== undefined)
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {

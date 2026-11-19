@@ -303,7 +303,7 @@ class SseTransport implements UpgradeSource {
     } catch {
       // Its wire was dropped already: what the open carried goes as that wire's outbox does (see `flushOutbox`).
       if (this.transportAbort !== abortController) this.requeue(stage.movedOutbox)
-      else this.failOpen(stage, abortController, null)
+      else this.failOpen(stage, abortController, {})
       return null
     } finally {
       if (this.transportAbort === abortController) this.openPending = false
@@ -313,8 +313,20 @@ class SseTransport implements UpgradeSource {
       abortController.abort()
       return null
     }
-    if (!response.ok || !response.body) {
-      this.failOpen(stage, abortController, { otherWireVersion: response.status === STATUS_CODE_WIRE_VERSION })
+    if (response.status === STATUS_CODE_WIRE_VERSION) {
+      this.failOpen(stage, abortController, { otherWireVersion: true })
+      return null
+    }
+    if (!response.ok) {
+      this.failOpen(stage, abortController, { refusal: 'Server rejected SSE connection' })
+      return null
+    }
+    // As a browser's EventSource requires (HTML, "the EventSource interface"): a 200 event stream. A login page or an
+    // app's HTML fallback, also behind a followed redirect, is not one.
+    if (response.status !== 200 || mediaTypeOf(response) !== 'text/event-stream' || !response.body) {
+      this.failOpen(stage, abortController, {
+        refusal: `The server answered the SSE connection with ${describeAnswer(response)}, not an event stream`,
+      })
       return null
     }
     return response.body
@@ -382,18 +394,19 @@ class SseTransport implements UpgradeSource {
     this.owner.onTransportBatched(this)
   }
 
-  /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. */
+  /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. `answer`: what the
+   *  server answered with, where it answered. */
   private failOpen(
     stage: SseInitialBatchStage,
     abortController: AbortController,
-    refused: { otherWireVersion: boolean } | null,
+    answer: { refusal?: string; otherWireVersion?: boolean },
   ): void {
     this.rollbackInitialBatch(stage)
     this.closeStreamRequest()
     abortController.abort()
     this.transportAbort = null
     this.connecting = false
-    this.owner.onTransportClosed(this, { rejectedByServer: refused !== null, ...refused })
+    this.owner.onTransportClosed(this, answer)
   }
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
@@ -782,4 +795,18 @@ function createSseEventStreamReader(
   }
 
   return { cancel, readNextEntry }
+}
+
+/** The media type a response says it carries, without its parameters (`text/event-stream; charset=utf-8` is
+ *  `text/event-stream`), as the Fetch standard extracts it; null without a `Content-Type`. */
+function mediaTypeOf(response: Response): string | null {
+  const contentType = response.headers.get('content-type')
+  return contentType === null ? null : (contentType.split(';', 1)[0] ?? '').trim().toLowerCase()
+}
+
+/** A response's status and `Content-Type`, as an error message names them. */
+function describeAnswer(response: Response): string {
+  const contentType = response.headers.get('content-type')
+  const type = contentType === null ? ' and no Content-Type' : ` ${contentType}`
+  return `${response.status}${type}${response.body ? '' : ' and no body'}`
 }
