@@ -469,7 +469,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
         // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
         // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
-        restartProxy()
+        await restartProxy()
       } else {
         // dev/preview: single-instance, no proxy to restart — setOffline still works
         // because batch-only SSE without streamRequest gets blocked by Chromium's offline
@@ -520,7 +520,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
 
       // Go offline
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
@@ -531,7 +531,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
       // Arm reconnect watcher, then come back online.
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -629,14 +629,14 @@ function testChannel(isDev: boolean, inDocker = false) {
         channelId = state.clientPendingAckCloseReconnectChannelId
       })
 
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
       await page.click('#channel-test-client-pending-ack-close-reconnect')
 
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -1129,12 +1129,12 @@ function testChannel(isDev: boolean, inDocker = false) {
       await page.click('#channel-test-lossy-from-page-open')
       await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([]))
 
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
       await page.click('#channel-test-lossy-from-page-send')
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -1182,10 +1182,10 @@ function testChannel(isDev: boolean, inDocker = false) {
       await navigate(`${getServerUrl()}/channel`)
       await page.click('#channel-test-lossy-before-plain')
       await autoRetry(async () => expect(await lossyBeforePlain()).toBe('listening'))
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await autoRetry(
         async () => expect(await lossyBeforePlain()).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] }),
