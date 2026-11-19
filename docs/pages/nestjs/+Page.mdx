@@ -1,0 +1,104 @@
+import { Link } from '@brillout/docpress'
+
+Using Telefunc with [NestJS](https://nestjs.com).
+
+You can use Telefunc with NestJS using `defineTelefunctions()` on the server, a NestJS middleware calling `serve()`, and `createClient()` on the client.
+
+## 1. Define telefunctions
+
+Define your API functions on the server using `defineTelefunctions()`:
+
+```ts
+// src/api.ts
+// Environment: server
+import { defineTelefunctions, shield, Channel } from 'telefunc'
+
+export const api = defineTelefunctions({
+  watchOrders: async () => {
+    const channel = new Channel<never, (event: { id: string; status: string }) => void>()
+    // Set up subscription or event stream
+    return channel.client
+  },
+  createOrder: shield(
+    [shield.type.string, shield.type.number],
+    async (sku: string, qty: number) => {
+      // Create order logic
+      return { id: 'order_123', sku, qty }
+    },
+  ),
+})
+
+export type Api = typeof api
+```
+
+> Standalone telefunctions defined without `shield()` accept zero arguments by default. To accept arguments, use `shield()`.
+
+## 2. NestJS middleware
+
+Create a middleware that forwards HTTP requests to Telefunc's `serve()`:
+
+```ts
+// src/telefunc.middleware.ts
+// Environment: server
+import { Injectable, NestMiddleware } from '@nestjs/common'
+import { serve } from 'telefunc'
+import type { Request, Response } from 'express'
+
+@Injectable()
+export class TelefuncMiddleware implements NestMiddleware {
+  async use(req: Request, res: Response) {
+    const httpResponse = await serve({
+      url: req.originalUrl,
+      method: req.method,
+      readable: req,
+      headers: req.headers,
+      context: { req },
+    })
+
+    res.status(httpResponse.statusCode)
+    for (const [name, value] of httpResponse.headers) {
+      res.setHeader(name, value)
+    }
+    await httpResponse.pipe(res)
+  }
+}
+```
+
+## 3. Mount in AppModule
+
+Mount the middleware in your `AppModule`:
+
+```ts
+// src/app.module.ts
+// Environment: server
+import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common'
+import { TelefuncMiddleware } from './telefunc.middleware'
+
+@Module({})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(TelefuncMiddleware).forRoutes('_telefunc')
+  }
+}
+```
+
+## 4. Client
+
+Call your telefunctions from the client using `createClient()`:
+
+```ts
+// client.ts
+// Environment: client
+import { createClient } from 'telefunc/client'
+import type { Api } from './api'
+
+const server = createClient<Api>({ url: 'http://localhost:3000/_telefunc' })
+
+const order = await server.createOrder('product-xyz', 3)
+console.log(order)
+
+const orders = await server.watchOrders()
+orders.listen((event) => {
+  console.log('Order event:', event)
+})
+```

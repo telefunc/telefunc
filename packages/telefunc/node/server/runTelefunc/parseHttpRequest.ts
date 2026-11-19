@@ -237,7 +237,12 @@ function transformEnvelope(raw: object, reviver: Reviver, runContext: RunContext
 }
 
 function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
-  if (!hasProp(parsed, 'file', 'string') || !hasProp(parsed, 'name', 'string') || !hasProp(parsed, 'args', 'array')) {
+  if (
+    !hasProp(parsed, 'file', 'string') ||
+    !hasProp(parsed, 'name', 'string') ||
+    !hasProp(parsed, 'args', 'array') ||
+    parsed.name.includes(':')
+  ) {
     logParseError('Telefunc request body has unexpected content', runContext)
     return { isMalformedRequest: true }
   }

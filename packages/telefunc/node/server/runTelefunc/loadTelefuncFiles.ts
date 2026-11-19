@@ -14,6 +14,19 @@ async function loadTelefuncFiles(runContext: {
   telefuncFilesManuallyProvidedByUser: string[] | null
   telefuncFilePath: string
 }): Promise<{ telefuncFilesLoaded: TelefuncFiles; telefuncFilesAll: string[] }> {
+  // - defineTelefunctions()
+  // - Next.js
+  // - Nuxt 2
+  // - Vite in production if @brillout/vite-plugin-server-entry fails (see comment below)
+  {
+    const telefuncFilesLoaded = loadTelefuncFilesUsingRegistration()
+    if (telefuncFilesLoaded) {
+      const telefuncFilesAll = Object.keys(telefuncFilesLoaded)
+      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('registration'))
+      return { telefuncFilesLoaded, telefuncFilesAll }
+    }
+  }
+
   // - The user can manually provide the list of `.telefunc.js` files using `config.telefuncFiles`
   {
     if (runContext.telefuncFilesManuallyProvidedByUser) {
@@ -40,19 +53,7 @@ async function loadTelefuncFiles(runContext: {
     }
   }
 
-  // - Next.js
-  // - Nuxt 2
-  // - Vite in production if @brillout/vite-plugin-server-entry fails (see comment above)
-  {
-    const telefuncFilesLoaded = loadTelefuncFilesUsingRegistration()
-    if (telefuncFilesLoaded) {
-      const telefuncFilesAll = Object.keys(telefuncFilesLoaded)
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('automatic registration'))
-      return { telefuncFilesLoaded, telefuncFilesAll }
-    }
-  }
-
-  if (isVikeApp() || !isWebpack()) {
+  if (isVikeApp()) {
     // Show [manual import error](https://github.com/brillout/vite-plugin-server-entry#manual-import):
     // ```
     // [@brillout/vite-plugin-server-entry][Wrong Usage] The server production entry is missing.
@@ -65,7 +66,12 @@ async function loadTelefuncFiles(runContext: {
     assert(false) // loadTelefuncFilesUsingVite() should have thrown the assertUsage() error above
   } else {
     // Generic message
-    assertUsage(false, `Couldn't find method for retrieving ${pc.cyan('.telefunc.js')} files. Is your stack supported?`)
+    assertUsage(
+      false,
+      `No telefunction registered. Did you define telefunctions with ${pc.cyan(
+        'defineTelefunctions()',
+      )} or create ${pc.cyan('.telefunc.{js|ts|...}')} files?`,
+    )
   }
 }
 
