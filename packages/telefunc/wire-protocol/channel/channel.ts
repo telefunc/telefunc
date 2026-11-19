@@ -69,7 +69,7 @@ const REFUSED: Record<ValueBy, (which: string) => string> = {
 
 /** `value` as JSON, for what an app sends as text, on either end. Bytes are refused at any depth: JSON turns them into
  *  an object. The serializer's own pass over `value` checks each value, so one without bytes costs one call per value
- *  and a tag read per object. */
+ *  and a prototype read per object. */
 function stringifyValue(value: unknown, by: ValueBy): string {
   return stringify(value, {
     replacer(key, slot) {
@@ -111,10 +111,13 @@ const readByteLength = {
       : Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength')?.get,
 }
 
-/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm. Its tag names a candidate, one call per
- *  object, and the buffer's getter confirms it: an object that only claims the tag isn't one. Confirming every object
- *  that way would cost a throw each. */
+/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm. A plain object or an array of this realm
+ *  is none, which one prototype read tells; for the rest, the tag names a candidate and the buffer's getter confirms
+ *  it, so an object that only claims the tag isn't one. Confirming every object that way would cost a throw each. */
 function isBuffer(value: object): value is ArrayBufferLike {
+  const proto = Object.getPrototypeOf(value)
+  if (proto === Object.prototype || proto === Array.prototype) return false
+  if (value instanceof ArrayBuffer) return true
   const tag = toTag.call(value)
   const read = tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]' ? readByteLength[tag] : undefined
   if (!read) return false
