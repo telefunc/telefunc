@@ -10,7 +10,6 @@ export type {
 }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
@@ -118,15 +117,47 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   subscribe(key: string, onMessage: BroadcastOnMessage): Listening {
-    const subs = this.subscriptions.get(key) ?? new Set<BroadcastOnMessage>()
-    this.subscriptions.set(key, subs)
+    return this.register(this.subscriptions, this.transportUnsubs, key, onMessage, (transport, deliver) =>
+      transport.listen(key, deliver),
+    )
+  }
+
+  publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+    if (this.transport) return this.transport.send(key, serialized)
+    return this.publishInMemory(this.subscriptions, key, serialized)
+  }
+
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): Listening {
+    return this.register(this.binarySubscriptions, this.transportBinaryUnsubs, key, onMessage, (transport, deliver) =>
+      transport.listenBinary(key, deliver),
+    )
+  }
+
+  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+    if (this.transport) return this.transport.sendBinary(key, data)
+    return this.publishInMemory(this.binarySubscriptions, key, data)
+  }
+
+  /** Adds `onMessage` to `key`'s subscribers of one kind, and has the transport listen on `key` for the first. */
+  private register<T>(
+    subscriptions: Map<string, Set<OnMessage<T>>>,
+    listenings: Map<string, Listening>,
+    key: string,
+    onMessage: OnMessage<T>,
+    listen: (
+      transport: BroadcastTransport,
+      deliver: (payload: T, info: WirePublishInfo) => void,
+    ) => BroadcastUnsubscribe,
+  ): Listening {
+    const subs = subscriptions.get(key) ?? new Set<OnMessage<T>>()
+    subscriptions.set(key, subs)
     subs.add(onMessage)
 
     // On the set it joined: one a failed start discarded is left empty, so this does nothing to the key's next one.
     const unsubscribe = () => {
       if (!subs.delete(onMessage) || subs.size > 0) return
-      this.subscriptions.delete(key)
-      this.releaseUnsub(this.transportUnsubs, key)
+      subscriptions.delete(key)
+      this.releaseUnsub(listenings, key)
       this.releaseSeq(key)
     }
 
@@ -135,56 +166,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const transport = this.transport
     if (!transport) return { unsubscribe, ready: undefined }
     const listening =
-      this.transportUnsubs.get(key) ??
-      startListening(this.transportUnsubs, this.subscriptions, key, () =>
-        transport.listen(key, (payload, info) => {
-          this.deliver(this.subscriptions, key, payload, info)
+      listenings.get(key) ??
+      startListening(listenings, subscriptions, key, () =>
+        listen(transport, (payload, info) => {
+          this.deliver(subscriptions, key, payload, info)
         }),
       )
     return { unsubscribe, ready: listening.ready, removed: listening.removed }
-  }
-
-  publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    if (this.transport) {
-      const result = this.transport.send(key, serialized)
-      if (isPromise(result)) return result
-      return result
-    }
-    return this.publishInMemory(this.subscriptions, key, serialized)
-  }
-
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): Listening {
-    const subs = this.binarySubscriptions.get(key) ?? new Set<BroadcastBinaryOnMessage>()
-    this.binarySubscriptions.set(key, subs)
-    subs.add(onMessage)
-
-    const unsubscribe = () => {
-      if (!subs.delete(onMessage) || subs.size > 0) return
-      this.binarySubscriptions.delete(key)
-      this.releaseUnsub(this.transportBinaryUnsubs, key)
-      this.releaseSeq(key)
-    }
-
-    // As in `subscribe()`.
-    const transport = this.transport
-    if (!transport) return { unsubscribe, ready: undefined }
-    const listening =
-      this.transportBinaryUnsubs.get(key) ??
-      startListening(this.transportBinaryUnsubs, this.binarySubscriptions, key, () =>
-        transport.listenBinary(key, (payload, info) => {
-          this.deliver(this.binarySubscriptions, key, payload, info)
-        }),
-      )
-    return { unsubscribe, ready: listening.ready, removed: listening.removed }
-  }
-
-  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    if (this.transport) {
-      const result = this.transport.sendBinary(key, data)
-      if (isPromise(result)) return result
-      return result
-    }
-    return this.publishInMemory(this.binarySubscriptions, key, data)
   }
 
   // ── In-memory ──
