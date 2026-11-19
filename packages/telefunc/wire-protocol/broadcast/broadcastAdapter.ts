@@ -85,8 +85,7 @@ type BroadcastTransport = {
   ): BroadcastUnsubscribe
 }
 
-/** How deep in-memory publishes in answer to answers may go: 10,000, past the about 1,300 that Node.js's call stack holds
- *  for a recursive delivery. A chain that deep is taken for a listener that answers its own messages without end. */
+/** How deep in-memory publishes in answer to answers may go. */
 const MAX_ANSWER_DEPTH = 10_000
 
 // ---------------------------------------------------------------------------
@@ -336,7 +335,7 @@ function* stillSubscribed<T, D>(publishedTo: { target: T; deliver: D }[], subs: 
 
 function endlessAnswersError(): ChannelOverflowError {
   return new ChannelOverflowError(
-    `Publish rejected: listeners published in answer to each other's answers ${MAX_ANSWER_DEPTH} deep, far past the about 1,300 a call stack holds, which is taken for a listener that answers its own messages without end; make it skip the messages it published itself`,
+    `Publish rejected: listeners published in answer to each other's answers ${MAX_ANSWER_DEPTH} deep, past Telefunc's limit on nested publishes. A listener that publishes on the key it listens to should skip the messages it published itself.`,
   )
 }
 
