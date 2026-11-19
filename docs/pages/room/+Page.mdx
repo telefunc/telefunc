@@ -387,6 +387,8 @@ export async function onStartMatch() {
 
 A hidden participant can do everything a participant does, but players don't see it among the room's participants.
 
+On the server, `getContext()` throws inside a room's callbacks (`listen()`, `subscribe()`, `onJoin()`, `onClose()`, …), since they run for what other users do: read the context before you add them.
+
 To let players send it commands, return it with the room:
 
 ```js

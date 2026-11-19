@@ -432,6 +432,8 @@ Awaiting `publish()` doesn't wait for any subscriber's client to keep up: a clie
 A `subscribe()` callback's `async` work isn't awaited, on the page or on the server: the next message arrives whether or not your callback is done. Telefunc doesn't limit how many calls of your callback are unfinished, so if it can fall behind, limit them in your code.
 For example, a callback that does an `await fetch()` for each message should queue them, and drop or merge what it can't keep up with.
 
+On the server, `getContext()` throws inside a `subscribe()` or `subscribeBinary()` callback, since what it receives comes from other users' requests or from none: read the context before you subscribe.
+
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
 > For <Link href="/stream/scale">scaling horizontally</Link>, you must configure `Broadcast` to publish across all server instances — see <Link href="/stream/scale#broadcast" />
