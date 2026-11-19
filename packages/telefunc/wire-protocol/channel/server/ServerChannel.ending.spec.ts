@@ -21,7 +21,7 @@ import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceive
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
 import { pairPublishes } from '../client/pairPublishes.js'
-import { SseEvents } from '../client/SseEvents.js'
+import { SseEvents } from '../../wire/SseEvents.js'
 import { ChannelStreamSource } from '../../values/ChannelStreamSource.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { getChannelMux } from './ChannelMux.js'

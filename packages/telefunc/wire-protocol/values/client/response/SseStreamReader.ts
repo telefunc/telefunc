@@ -1,7 +1,7 @@
 export { SseStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { SseEvents } from '../../../channel/client/SseEvents.js'
+import { SseEvents } from '../../../wire/SseEvents.js'
 import { splitOwned } from '../../../wire/envelope.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
