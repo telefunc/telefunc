@@ -321,8 +321,9 @@ for (const [ending, end] of Object.entries(ENDS)) {
         sseOpens: h.opens(),
         reconnectReconciles: h.reconciles.slice(reconcilesBefore),
         handedTheWebSocketAfter: h.probe.sent.slice(handedBefore).map((frame) => frame.tag),
-        // The flow-control probe the held data started goes once the page is back, on the new SSE wire.
-        flowControlProbesAfter: h.upstream.slice(upstreamBefore).filter((tag) => tag === TAG.BDP_PING).length,
+        // The flow-control probe the held data started goes once the page is back, on the new SSE wire; on a slow run
+        // the next message may start another, once the probe interval passed.
+        flowControlProbeAfter: h.upstream.slice(upstreamBefore).some((tag) => tag === TAG.BDP_PING),
         closedSocketSends: h.probe.closedSocketSends,
       }).toEqual({
         uncaught: [],
@@ -333,7 +334,7 @@ for (const [ending, end] of Object.entries(ENDS)) {
         sseOpens: 2,
         reconnectReconciles: [[{ ix: h.ix, lastSeq: 1 }]],
         handedTheWebSocketAfter: [],
-        flowControlProbesAfter: 1,
+        flowControlProbeAfter: true,
         closedSocketSends: 0,
       })
     } finally {
