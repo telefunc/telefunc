@@ -24,6 +24,7 @@ If a telefunction reads <Link href="/getContext">`getContext()`</Link> (e.g. to 
 // Team.telefunc.test.ts
 // Environment: server
 
+import 'telefunc/async_hooks'
 import { provideTelefuncContext } from 'telefunc'
 import { onJoinTeam } from './Team.telefunc'
 
@@ -32,6 +33,8 @@ test('rejects a non-member of the team', async () => {
   await expect(onJoinTeam('acme')).rejects.toThrow() // throws Abort()
 })
 ```
+
+> `provideTelefuncContext()` requires `import 'telefunc/async_hooks'`, which also makes `getContext()` work after an `await`. If your server doesn't import it, call `getContext()` before any `await`, see <Link href="/getContext#access" />.
 
 This is also how you test <Link href="/permissions">permissions</Link> — set up a context that should (or shouldn't) pass, then assert the telefunction returns or throws `Abort()` accordingly.
 

@@ -7,6 +7,7 @@ import { Link } from '@brillout/docpress'
 ```ts
 // Environment: server
 
+import 'telefunc/async_hooks'
 import { provideTelefuncContext } from 'telefunc'
 
 provideTelefuncContext({ user })
@@ -14,6 +15,8 @@ provideTelefuncContext({ user })
 ```
 
 Call it before the telefunction runs (e.g. in your test setup or your SSR request handler).
+
+> `provideTelefuncContext()` requires `import 'telefunc/async_hooks'`: without it, Telefunc can't keep the context of one request apart from another's.
 
 > With <Link href="/serve">`serve()`</Link> / <Link href="/Telefunc">`new Telefunc()`</Link>, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 
