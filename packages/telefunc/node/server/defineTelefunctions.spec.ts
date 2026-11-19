@@ -3,6 +3,7 @@ import { defineTelefunctions } from './defineTelefunctions.js'
 import { serve } from './telefunc.js'
 import { shield } from './shield.js'
 import { clearRegistration } from './runTelefunc/loadTelefuncFilesUsingRegistration.js'
+import { applyShield } from './runTelefunc/applyShield.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { createClient } from '../../client/createClient.js'
 import { withContext } from '../../client/withContext.js'
@@ -229,6 +230,28 @@ describe('defineTelefunctions', () => {
       })
       expect(resPing.statusCode).toBe(200)
       expect(await resPing.getBody()).toContain('pong')
+    })
+
+    it('serializes callback/function arguments safely without throwing in applyShield', () => {
+      const standaloneFn = Object.assign(async () => 'ok', { _isStandalone: true })
+      const resUnshielded = applyShield({
+        telefunction: standaloneFn,
+        telefunctionName: 'testCallbackFn',
+        telefuncFilePath: '',
+        telefunctionArgs: [() => {}],
+        serverConfig: { log: { shieldErrors: { dev: true, prod: true } } },
+      })
+      expect(resUnshielded.isValidRequest).toBe(false)
+
+      const shieldedFn = shield([shield.type.number], async (n: any) => n)
+      const resShielded = applyShield({
+        telefunction: shieldedFn as any,
+        telefunctionName: 'testShieldFn',
+        telefuncFilePath: '',
+        telefunctionArgs: [() => {}],
+        serverConfig: { log: { shieldErrors: { dev: true, prod: true } } },
+      })
+      expect(resShielded.isValidRequest).toBe(false)
     })
   })
 })

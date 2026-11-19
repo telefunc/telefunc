@@ -28,7 +28,7 @@ function applyShield(runContext: {
             telefuncFilePath,
             subject: 'the arguments passed',
             wrongType: `Expected 0 arguments because standalone telefunction has no shield(), but received ${telefunctionArgs.length}`,
-            extra: `Arguments: \`${stringify(telefunctionArgs)}\`.`,
+            extra: `Arguments: \`${serializeArguments(telefunctionArgs)}\`.`,
           },
           runContext.serverConfig.log.shieldErrors,
         )
@@ -60,10 +60,20 @@ function applyShield(runContext: {
       telefuncFilePath,
       subject: 'the arguments passed',
       wrongType: applyResult,
-      extra: `Arguments: \`${stringify(telefunctionArgs)}\`.`,
+      extra: `Arguments: \`${serializeArguments(telefunctionArgs)}\`.`,
     },
     runContext.serverConfig.log.shieldErrors,
   )
 
   return { isValidRequest: false }
+}
+
+function serializeArguments(args: unknown[]): string {
+  try {
+    return stringify(args, {
+      replacer: (_key, value) => (typeof value === 'function' ? { replacement: '[Function]' } : undefined),
+    })
+  } catch {
+    return '[unserializable arguments]'
+  }
 }

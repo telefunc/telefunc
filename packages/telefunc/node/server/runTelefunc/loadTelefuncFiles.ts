@@ -22,12 +22,6 @@ async function loadTelefuncFiles(runContext: {
     return { telefuncFilesLoaded: registered, telefuncFilesAll }
   }
 
-  // Next.js / Nuxt 2 / Vite production fallback registration
-  if (registered && runContext.telefuncFilePath && registered[runContext.telefuncFilePath]) {
-    const telefuncFilesAll = Object.keys(registered)
-    return { telefuncFilesLoaded: registered, telefuncFilesAll }
-  }
-
   // - The user can manually provide the list of `.telefunc.js` files using `config.telefuncFiles`
   {
     if (runContext.telefuncFilesManuallyProvidedByUser) {
