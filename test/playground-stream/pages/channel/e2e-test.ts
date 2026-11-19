@@ -91,6 +91,7 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  textBurstProgress: { received: number; reconnects: number } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -98,6 +99,13 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
+}
+
+/** The page's text burst once it ended; until then, a failure that says where the page got to. */
+async function endedTextBurst() {
+  const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+  if (textBurst === null) throw new Error(`The page's text burst hasn't ended: ${JSON.stringify(textBurstProgress)}`)
+  return textBurst
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -1340,7 +1348,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-unawaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
@@ -1354,7 +1362,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-awaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
@@ -1368,7 +1376,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-acks-18000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.closeErr).toBe(null)
         expect(burst.received).greaterThan(3000)
         expect(burst.received).lessThan(18000)

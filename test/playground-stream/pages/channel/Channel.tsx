@@ -184,6 +184,8 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  /** Where the page's text burst got to: what it received and how often its channel reconnected. */
+  textBurstProgress: { received: number; reconnects: number } | null
   awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
@@ -272,6 +274,7 @@ const initialState: ChannelState = {
   binaryBurst: null,
   paced: null,
   textBurst: null,
+  textBurstProgress: null,
   awaitedFromOffline: null,
   openBurstReceived: null,
   freshBinaryEchoed: null,
@@ -1179,13 +1182,21 @@ function ChannelDemo() {
   }, [])
 
   const testTextBurst = useCallback(async (mode: 'unawaited' | 'awaited' | 'acks', count: number) => {
-    setChannelState((s) => ({ ...s, textBurst: null }))
+    setChannelState((s) => ({ ...s, textBurst: null, textBurstProgress: null }))
     const { channel, channelId } = await openChannel(onChannelTextBurst)
     const received: number[] = []
+    let reconnects = 0
+    const progressed = () =>
+      setChannelState((s) => ({ ...s, textBurstProgress: { received: received.length, reconnects } }))
+    channel.onReconnect(() => {
+      reconnects++
+      progressed()
+    })
     const ended = new Promise<string | null>((resolve) => {
       channel.listen((message) => {
         if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
+        if (received.length % 500 === 0) progressed()
         if (received.length === count) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
