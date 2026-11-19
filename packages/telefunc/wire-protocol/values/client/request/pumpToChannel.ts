@@ -12,16 +12,10 @@ import { sendChunks } from '../../sendChunks.js'
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 
 /**
- * Pump a single producer's chunks to the server through a dedicated ClientChannel.
+ * Pumps a single producer's chunks to the server through a channel of its own, and returns the channel's id as the
+ * metadata the request carries, with `close()` and `abort()` for the request's lifetime.
  *
- * Creates the channel, starts the pump, and returns the channel so the caller
- * can register it for abort handling.
- *
- * The pump races `cancelledPromise` against `producer.chunks.next()` so that
- * channel close / abort breaks the loop immediately.
- *
- * On abort: the abort error propagates through the race (reject, not resolve),
- * so the catch block sees it. On clean close: resolves with null.
+ * The channel's end, a close or an abort, wakes the pump at once, and its error, if any, goes to `producer.cancel()`.
  */
 function pumpClientProducerToChannel(createProducer: () => StreamingProducer, connection: ConnectionOptions) {
   const channel = new ClientChannel({ channelId: randomUuid(), connection })
