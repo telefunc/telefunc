@@ -1395,7 +1395,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // A page whose channels start on SSE sends the message over SSE.
   if (channelTransports[0] === 'ws') {
-    test("channel: the page's first 32 KiB sendBinary on a fresh WebSocket goes as one WebSocket message", async () => {
+    test("channel: the page's first 32 KiB sendBinary on a fresh WebSocket goes unsplit, in one WebSocket message at least its size", async () => {
       const sizes: number[] = []
       const onWebSocket = (ws: WebSocket) => {
         if (!ws.url().includes('/_telefunc')) return
