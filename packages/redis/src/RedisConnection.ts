@@ -4,6 +4,7 @@ import { assert } from './assert.js'
 import {
   addressOf,
   callDefinedCommand,
+  connectsAlike,
   createCommandClient,
   isUnreachable,
   createSubscriberSocket,
@@ -26,13 +27,17 @@ class RedisConnection {
   /** Broadcast's and Room's: their queues and budgets are channel names, which never collide. */
   readonly sends: NewSubscriptionWait
   private commands: RedisClient
-  /** The app clients installed with this backend: its command client ends once the last one does. */
-  private readonly holders = new Set<RedisClient>()
+  /** The app client `commands` was made from. */
+  private source: RedisClient
+  /** The app clients installed with this backend, with their `end` listeners: its command client ends once the last one
+   *  does. */
+  private readonly holders = new Map<RedisClient, () => void>()
   /** The last holder ended, so `commands` was disconnected; its socket may still be closing. */
   private commandsEnded = false
 
   constructor({ redis, prefix }: RedisConnectionOptions) {
     assertKeyPrefix(prefix)
+    this.source = redis
     this.commands = commandClientOf(redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
@@ -62,20 +67,37 @@ class RedisConnection {
   }
 
   /** The backend's command client lives while `redis`, or another app client installed with it, does; a client
-   *  installed after the last one ended gets a new one, as the old one's close may still be pending. */
+   *  installed after the last one ended gets a new one, as the old one's close may still be pending. A client that
+   *  connects otherwise, with other credentials or TLS, replaces the ones installed before it. */
   holdFor(redis: RedisClient): void {
     if (this.holders.has(redis)) return
-    this.holders.add(redis)
-    if (this.commandsEnded) {
+    if (!connectsAlike(this.source, redis)) this.connectWith(redis)
+    else if (this.commandsEnded) {
       this.commands = commandClientOf(redis)
       this.commandsEnded = false
     }
-    redis.once('end', () => {
+    const ended = () => {
       this.holders.delete(redis)
       if (this.holders.size > 0) return
       this.commands.disconnect()
       this.commandsEnded = true
-    })
+    }
+    this.holders.set(redis, ended)
+    redis.once('end', ended)
+  }
+
+  /** Moves the backend's connections to ones made from `redis`. */
+  private connectWith(redis: RedisClient): void {
+    for (const [holder, ended] of this.holders) holder.off('end', ended)
+    this.holders.clear()
+    const previous = this.commands
+    this.source = redis
+    this.commands = commandClientOf(redis)
+    // QUIT lets the commands already sent get their replies; a client that never connected has none.
+    if (previous.status === 'wait') previous.disconnect()
+    else if (!this.commandsEnded) previous.quit().catch(() => {})
+    this.commandsEnded = false
+    this.subscriptions.reconnect()
   }
 
   async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {

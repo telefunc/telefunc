@@ -6,6 +6,7 @@ export {
   callDefinedCommand,
   isCluster,
   deploymentOf,
+  connectsAlike,
   addressOf,
   isUnreachable,
   isRefusal,
@@ -13,6 +14,7 @@ export {
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { Cluster, type Redis } from 'ioredis'
 import { assert } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
@@ -41,6 +43,37 @@ function deploymentOf(redis: RedisClient): string {
   if (isCluster(redis)) return JSON.stringify((redis as unknown as { startupNodes: unknown }).startupNodes)
   const { path, host, port, db, sentinels, name } = redis.options
   return JSON.stringify({ path, host, port, db, sentinels, name })
+}
+
+/** A client's options past its deployment that decide how it connects: its credentials, its TLS, and which server of a
+ *  Sentinel group it takes. */
+const CONNECTION_OPTIONS = [
+  'username',
+  'password',
+  'tls',
+  'role',
+  'preferredSlaves',
+  'natMap',
+  'sentinelUsername',
+  'sentinelPassword',
+  'sentinelTLS',
+  'enableTLSForSentinelMode',
+] as const
+/** A Cluster's own options that decide how it reaches its nodes; its nodes' connections take its `redisOptions`. */
+const CLUSTER_CONNECTION_OPTIONS = ['natMap', 'dnsLookup', 'useSRVRecords'] as const
+
+/** Whether two clients of one deployment connect alike, compared where they are, so no secret is copied or shown. */
+function connectsAlike(a: RedisClient, b: RedisClient): boolean {
+  if (isCluster(a) || isCluster(b)) {
+    if (!isCluster(a) || !isCluster(b)) return false
+    return (
+      CLUSTER_CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name])) &&
+      CONNECTION_OPTIONS.every((name) =>
+        isDeepStrictEqual(a.options.redisOptions?.[name], b.options.redisOptions?.[name]),
+      )
+    )
+  }
+  return CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name]))
 }
 
 /** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port. */

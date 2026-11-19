@@ -43,7 +43,7 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc.
+Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc. To rotate credentials, call `installRedis()` again with a client of the same Redis that has the new ones: Telefunc moves its connections to it.
 
 To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
 

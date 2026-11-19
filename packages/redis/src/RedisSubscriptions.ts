@@ -245,13 +245,25 @@ class RedisSubscriptions {
     connection.awaitingPong = false
   }
 
-  private lost(id: number, error: unknown): void {
-    if (!this.isCurrent(id)) return
+  /** Moves the subscriptions to a connection of the connection's current client, as a resume after a loss. */
+  reconnect(): void {
+    if (this.socket.phase === 'idle') return
+    this.loseAll(new Error("Telefunc's Redis backend moved to a client installed with other connection options"))
+    this.reconnectDelay = RECONNECT_DELAY_MIN_MS
+    void this.connect()
+  }
+
+  private loseAll(error: unknown): void {
     this.disconnect()
     for (const attempt of this.attempts()) {
       attempt.lose(error)
       this.unconfirmed.add(attempt)
     }
+  }
+
+  private lost(id: number, error: unknown): void {
+    if (!this.isCurrent(id)) return
+    this.loseAll(error)
     // A listener may have released the last attempt, or opened one that is already connecting.
     if (this.byChannel.size === 0 || this.socket.phase !== 'idle') return
     if (!this.outageReported) {
