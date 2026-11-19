@@ -25,12 +25,15 @@ async function onRedisSubscribeFailure() {
   const { RedisTransport } = await import('@telefunc/redis')
   const user = `subscribe-test-${crypto.randomUUID()}`
   await redis!.acl('SETUSER', user, 'on', '>test', '~*', '&*', '+@all', '-subscribe')
-  const publisher = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
-  const transport = new RedisTransport({ redis: publisher })
-  await publisher.ping()
-  const received: string[] = []
-  let stop = transport.listen(user, (value) => received.push(value)).unsubscribe
+  // From here on, a failure still removes the user and its connections.
+  let publisher: ReturnType<NonNullable<typeof redis>['duplicate']> | undefined
+  let stop = () => {}
   try {
+    publisher = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
+    const transport = new RedisTransport({ redis: publisher })
+    await publisher.ping()
+    const received: string[] = []
+    stop = transport.listen(user, (value) => received.push(value)).unsubscribe
     const [text, binary] = await Promise.allSettled([
       transport.send(user, 'text'),
       transport.sendBinary(user, new Uint8Array(1)),
@@ -64,7 +67,7 @@ async function onRedisSubscribeFailure() {
     }
   } finally {
     stop()
-    publisher.disconnect()
+    publisher?.disconnect()
     // Also closes the transport's subscriber connection, which runs as `user` too.
     await redis!.acl('DELUSER', user)
   }
