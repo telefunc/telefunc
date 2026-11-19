@@ -7,7 +7,7 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { Readiness, makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { Readiness, makePublishInfo, neverInEffect, stringifyValue, withReady, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -37,7 +37,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.stopped) throw new ChannelClosedError()
-    const ret = this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'))
+    const ret = this.sendPublish(encode.publishAckReq, stringifyValue(data, 'publish'))
     ret.catch(() => {})
     return ret
   }

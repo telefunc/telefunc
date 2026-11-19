@@ -15,7 +15,7 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyMessage, withReady } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyValue, withReady } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -244,7 +244,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase !== 'open') throw new ChannelClosedError()
     if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
-    const serialized = stringifyMessage(data, 'send')
+    const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) return this.sendLossy(TAG.TEXT, serialized, utf8ByteLength(serialized))
     const refusal = this.textRefusal(serialized)
     if (refusal) return Promise.reject<void>(refusal)

@@ -12,7 +12,7 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyMessage, withReady } from '../channel.js'
+import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyValue, withReady } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -184,7 +184,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
     if (this.stopped) throw new ChannelClosedError()
-    const serialized = stringifyMessage(data, 'send')
+    const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
       return this.sendNewest(encode.text, serialized)

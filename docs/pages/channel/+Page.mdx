@@ -265,7 +265,7 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-> `send()` and `publish()` serialize their data as JSON, so they throw at the call when given a `Uint8Array`, another typed array or an `ArrayBuffer`, also inside an object or an array: bytes go through `sendBinary()` and `publishBinary()`.
+> `send()`, `publish()` and a listener's answer are serialized as JSON by Telefunc's serializer, which also carries values such as a `Date`, a `Map` or a `BigInt`. Bytes in them, a `Uint8Array`, another typed array, an `ArrayBuffer` or a `SharedArrayBuffer`, also inside an object or an array, are refused: bytes go through `sendBinary()` and `publishBinary()`. `send()` and `publish()` throw at the call. A listener's answer fails as a listener that throws: its error is logged where it runs, and the acknowledged send rejects.
 
 A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open.
 

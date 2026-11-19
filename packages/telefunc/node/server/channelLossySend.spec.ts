@@ -1,4 +1,5 @@
 import { afterEach, assert, describe, expect, expectTypeOf, onTestFinished, test, vi } from 'vitest'
+import { runInNewContext } from 'node:vm'
 
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
@@ -338,6 +339,50 @@ describe('bytes given to `send()` and `publish()`', () => {
     const page = newPage()
     wire(server, page).attach()
     expect(page.read).toEqual(['R'])
+  })
+
+  test("of another realm, and shared ones, are a usage error too, and an object that only claims a buffer's tag goes", () => {
+    const channel = new Channel()
+    const other = runInNewContext(
+      '({ buffer: new ArrayBuffer(2), shared: new SharedArrayBuffer(2), view: new Uint8Array(2) })',
+    )
+    expect(() => channel.send(other.buffer)).toThrow('turns this `ArrayBuffer` into a plain object')
+    expect(() => channel.send({ a: other.buffer }, { lossy: true })).toThrow('the `ArrayBuffer` at `a`')
+    expect(() => channel.send(new SharedArrayBuffer(2))).toThrow('turns this `SharedArrayBuffer` into a plain object')
+    expect(() => channel.send([other.shared], { ack: true })).toThrow('the `SharedArrayBuffer` at `[0]`')
+    expect(() => channel.send({ v: other.view })).toThrow('the `Uint8Array` at `v`')
+    expect(() => channel.send({ [Symbol.toStringTag]: 'ArrayBuffer', n: 1 })).not.toThrow()
+  })
+
+  test('are found without running a getter, and refused where finding them fails', () => {
+    const channel = new Channel()
+    let reads = 0
+    const value = {
+      a: { bytes: new Uint8Array(1) },
+      get z() {
+        reads++
+        throw new Error('a getter the search ran')
+      },
+    }
+    expect(() => channel.send(value)).toThrow('the `Uint8Array` at `a.bytes`')
+    expect(reads).toBe(0)
+    const behindAGetter = {
+      get a() {
+        return { bytes: new Uint8Array(1) }
+      },
+    }
+    expect(() => channel.send(behindAGetter)).toThrow('turns a `Uint8Array` in it into a plain object')
+    let ownKeys = 0
+    const listsOnce = new Proxy(
+      { a: { bytes: new Uint8Array(1) } },
+      {
+        ownKeys(target) {
+          if (++ownKeys > 1) throw new Error('listed twice')
+          return Reflect.ownKeys(target)
+        },
+      },
+    )
+    expect(() => channel.send({ listsOnce })).toThrow('turns a `Uint8Array` in it into a plain object')
   })
 
   test('nested at any depth, are a usage error naming `publishBinary()` and where they are, and nothing is published', async () => {

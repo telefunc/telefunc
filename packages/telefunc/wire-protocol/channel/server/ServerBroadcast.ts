@@ -11,7 +11,7 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { Readiness, makePublishInfo, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { Readiness, makePublishInfo, neverInEffect, stringifyValue, withReady, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -133,7 +133,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    const serialized = stringifyMessage(data, 'publish')
+    const serialized = stringifyValue(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
@@ -772,7 +772,7 @@ const Broadcast = {
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
-    const serialized = stringifyMessage(data, 'publish')
+    const serialized = stringifyValue(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
   /** Receive `(data, info)` for each publish to `key`, in effect once it gets what any server publishes to `key`. */

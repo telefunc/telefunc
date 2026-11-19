@@ -1,4 +1,4 @@
-export { makePublishInfo, stringifyMessage, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
+export { makePublishInfo, stringifyValue, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
 export type {
   ChannelBase,
   ChannelShield,
@@ -45,39 +45,86 @@ function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPu
 const LOSSY_WITH_ACK_TEXT =
   "`lossy` can't be combined with `ack: true`: a newer send may take this one's place, so it gets no answer. Send it without `lossy` to get its answer."
 
-/** `data` as JSON, for `send()` and `publish()` on either end. Bytes are refused, at any depth: JSON turns them into an
- *  object. The serializer's own pass over `data` checks each value, so a message without bytes costs one call per value. */
-function stringifyMessage(data: unknown, method: 'send' | 'publish'): string {
-  return stringify(data, {
-    replacer(key, value) {
-      if (!ArrayBuffer.isView(value) && !(value instanceof ArrayBuffer)) return undefined
-      const name = `\`${value.constructor.name}\``
-      const at = key === '' ? null : pathOf(data, this, key)
-      const which = key === '' ? `this ${name}` : at === null ? `a ${name} in it` : `the ${name} at \`${at}\``
-      assertUsage(
-        false,
-        `\`${method}()\` serializes its data as JSON, which turns ${which} into a plain object. Bytes go through \`${method}Binary()\`, which takes a \`Uint8Array\`.`,
-      )
+/** What `stringifyValue()` serializes: `send()` and `publish()`'s data, a listener's answer, an abort reason. */
+type ValueBy = 'send' | 'publish' | 'answer' | 'abort'
+const REFUSED: Record<ValueBy, (which: string) => string> = {
+  send: (which) =>
+    `\`send()\` serializes its data as JSON, which turns ${which} into a plain object. Bytes go through \`sendBinary()\`, which takes a \`Uint8Array\`.`,
+  publish: (which) =>
+    `\`publish()\` serializes its data as JSON, which turns ${which} into a plain object. Bytes go through \`publishBinary()\`, which takes a \`Uint8Array\`.`,
+  answer: (which) =>
+    `A listener's answer is serialized as JSON, which turns ${which} into a plain object. Answer with a value JSON holds, or send the bytes with \`sendBinary()\` and answer with a reference to them.`,
+  abort: (which) =>
+    `An abort reason is serialized as JSON, which turns ${which} into a plain object. Abort with a plain value, such as a string or a code.`,
+}
+
+/** `value` as JSON, for what an app sends as text, on either end. Bytes are refused at any depth: JSON turns them into
+ *  an object. The serializer's own pass over `value` checks each value, so one without bytes costs one call per value
+ *  and a tag read per object. */
+function stringifyValue(value: unknown, by: ValueBy): string {
+  return stringify(value, {
+    replacer(key, slot) {
+      if (typeof slot !== 'object' || slot === null) return undefined
+      if (!ArrayBuffer.isView(slot) && !isBuffer(slot)) return undefined
+      let name = toTag.call(slot).slice('[object '.length, -1)
+      let at: string | null = null
+      // The refusal is what matters: naming the bytes, or where they are, may fail on an app's object.
+      try {
+        name = slot.constructor.name
+        if (key !== '') at = pathOf(value, this, key)
+      } catch {}
+      const which =
+        key === '' ? `this \`${name}\`` : at === null ? `a \`${name}\` in it` : `the \`${name}\` at \`${at}\``
+      assertUsage(false, REFUSED[by](which))
     },
   })
 }
 
-/** Where `holder[key]` is in `data`, as `a.b[0]`; searched only for a message refused. Null where `holder` isn't one of
- *  its objects, as inside a `Map` or a `Set`, which the serializer copies. */
-function pathOf(data: unknown, holder: object, key: string): string | null {
+const toTag = Object.prototype.toString
+/** A buffer's own `byteLength` getter, which throws for anything without the buffer's internal slot. A page that isn't
+ *  cross-origin isolated has no `SharedArrayBuffer`, and no realm of it makes one. */
+const readByteLength = {
+  '[object ArrayBuffer]': Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')?.get,
+  '[object SharedArrayBuffer]':
+    typeof SharedArrayBuffer === 'undefined'
+      ? undefined
+      : Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength')?.get,
+}
+
+/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm. Its tag names a candidate, one call per
+ *  object, and the buffer's getter confirms it: an object that only claims the tag isn't one. Confirming every object
+ *  that way would cost a throw each. */
+function isBuffer(value: object): value is ArrayBufferLike {
+  const tag = toTag.call(value)
+  const read = tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]' ? readByteLength[tag] : undefined
+  if (!read) return false
+  try {
+    read.call(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Where `holder[key]` is in `value`, as `a.b[0]`; searched only for a value refused. It reads data properties only, so
+ *  no getter or `toJSON` runs, and is null where that doesn't reach `holder`: behind a getter, or inside a `Map` or a
+ *  `Set`, which the serializer copies. */
+function pathOf(value: unknown, holder: object, key: string): string | null {
   const seen = new Set<object>()
-  const search = (value: unknown, at: (string | number)[]): (string | number)[] | null => {
-    if (typeof value !== 'object' || value === null || seen.has(value)) return null
-    seen.add(value)
-    const step = Array.isArray(value) ? Number(key) : key
-    if (value === holder) return [...at, step]
-    for (const [k, v] of Object.entries(value)) {
-      const found = search(v, [...at, Array.isArray(value) ? Number(k) : k])
+  const search = (at: unknown, path: (string | number)[]): (string | number)[] | null => {
+    if (typeof at !== 'object' || at === null || seen.has(at)) return null
+    seen.add(at)
+    const isArray = Array.isArray(at)
+    if (at === holder) return [...path, isArray ? Number(key) : key]
+    for (const k of Object.keys(at)) {
+      const field = Object.getOwnPropertyDescriptor(at, k)
+      if (!field || !('value' in field)) continue
+      const found = search(field.value, [...path, isArray ? Number(k) : k])
       if (found) return found
     }
     return null
   }
-  const path = search(data, [])
+  const path = search(value, [])
   if (!path) return null
   return path.map((step, i) => (typeof step === 'number' ? `[${step}]` : i === 0 ? step : `.${step}`)).join('')
 }
