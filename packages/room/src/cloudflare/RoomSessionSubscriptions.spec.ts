@@ -23,12 +23,27 @@ function setup(answers: { register: Array<RegisterWire | Error>; renew: Array<Re
   const receiver = { deliver() {} }
   const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } }, receiver)
   const states: string[] = []
-  attempt.onStateChange((state) => states.push(state))
-  return { attempt, calls, states }
+  const reasons: unknown[] = []
+  attempt.onStateChange((state, reason) => {
+    states.push(state)
+    if (reason !== undefined) reasons.push([state, reason instanceof Error ? reason.message : reason])
+  })
+  return { attempt, calls, states, reasons }
 }
 
-beforeEach(() => vi.useFakeTimers())
-afterEach(() => vi.useRealTimers())
+/** Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. */
+const transient = (overloaded: boolean) => Object.assign(new Error('reset'), { retryable: true, overloaded })
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  // The longest waits Cloudflare's backoff draws.
+  vi.spyOn(Math, 'random').mockReturnValue(1)
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
 describe('a Cloudflare Room lane', () => {
   it('whose route lapsed is lost, registers its route again, and is ready again: a lapse is no end', async () => {
@@ -41,16 +56,37 @@ describe('a Cloudflare Room lane', () => {
     expect(states).toEqual(['ready', 'lost', 'ready'])
   })
 
-  it('whose route registration failed registers it again, and is ready once it is registered', async () => {
-    const { attempt, calls, states } = setup({
-      register: [new Error('the authority is overloaded'), 'registered'],
-      renew: [],
-    })
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    await vi.advanceTimersByTimeAsync(5_000)
+  it('whose first route registration failed as retryable registers it again within a second, and is ready once it is registered', async () => {
+    const { attempt, calls, states } = setup({ register: [transient(false), 'registered'], renew: [] })
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(calls.register).toBe(2)
     expect(attempt.state()).toBe('ready')
     expect(states).toEqual(['ready'])
+  })
+
+  it('whose first route registration fails as retryable 3 times closes with that error, and is not registered again', async () => {
+    const { calls, reasons } = setup({ register: [transient(false), transient(false), transient(false)], renew: [] })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ registered: calls.register, reasons }).toEqual({ registered: 3, reasons: [['closed', 'reset']] })
+  })
+
+  for (const [fails, error] of [
+    ['as overloaded', transient(true)],
+    ['otherwise', new Error('reset')],
+  ] as const) {
+    it(`whose first route registration fails ${fails} closes with that error at once`, async () => {
+      const { calls, reasons } = setup({ register: [error], renew: [] })
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect({ registered: calls.register, reasons }).toEqual({ registered: 1, reasons: [['closed', 'reset']] })
+    })
+  }
+
+  it('unsubscribed while its first route registration waits to be made again, registers it no more', async () => {
+    const { attempt, calls } = setup({ register: [transient(false), 'registered'], renew: [] })
+    await vi.advanceTimersByTimeAsync(0)
+    await attempt.unsubscribe()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(calls.register).toBe(1)
   })
 
   it('whose incarnation was dropped ends on purpose, with no reason', async () => {

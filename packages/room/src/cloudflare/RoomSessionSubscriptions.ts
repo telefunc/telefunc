@@ -8,6 +8,7 @@ import {
   currentCloudflareMember,
   getOrCreate,
   hostLocal,
+  transientRetryDelay,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
@@ -120,7 +121,9 @@ type CloudflareRoomAttemptOptions = {
 }
 
 /** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
- *  went out. A failed call to the authority, or a lapsed route, holds it back until its route is registered again. */
+ *  went out. Its first registration that fails is made again only as Cloudflare says to (`transientRetryDelay()`), and
+ *  otherwise closes it with the error. Once registered, a failed call to the authority, or a lapsed route, holds it
+ *  back until its route is registered again. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
@@ -128,6 +131,9 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private readonly readyWhenSent: boolean
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
+  /** Whether its route was ever registered; until then, how many times its registration failed. */
+  private registered = false
+  private firstFailures = 0
 
   constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
     super()
@@ -144,11 +150,12 @@ class CloudflareRoomAttempt extends DriverAttempt {
     try {
       registration = await registering
     } catch (error) {
-      return this.lose(error)
+      return this.registered ? this.lose(error) : this.failFirst(error)
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
+    this.registered = true
     this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
     this.owner.renewWithRoom(this)
@@ -180,6 +187,21 @@ class CloudflareRoomAttempt extends DriverAttempt {
       void this.register()
     }, this.retryDelay)
     this.retryDelay = Math.min(this.retryDelay * 2, REGISTER_RETRY_MAX_MS)
+  }
+
+  /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, which
+   *  core reports. */
+  private failFirst(error: unknown): void {
+    if (this.state() === 'closed') return
+    const delay = transientRetryDelay(error, ++this.firstFailures)
+    if (delay === null) {
+      this.stop()
+      return this.transition('closed', error)
+    }
+    this.retry = setTimeout(() => {
+      this.retry = null
+      void this.register()
+    }, delay)
   }
 
   /** Its incarnation is no longer open: closed on purpose, with no reason. */
