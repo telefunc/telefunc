@@ -20,6 +20,7 @@ import {
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
   WIRE_SEND_AHEAD_MIN_BYTES,
+  CHANNEL_TRANSPORT,
 } from '../constants.js'
 import type { PieceRate } from './PieceRate.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, lengthBytes, type PiecesAck } from '../wire/frame.js'
@@ -556,7 +557,8 @@ class PieceSender {
     // or more at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,
-      Math.max(WIRE_PROBE_FIRST_BYTES, this.pieceRate.floor * pingDeadline(this.pingInterval)),
+      // Pieces go only on a WebSocket.
+      Math.max(WIRE_PROBE_FIRST_BYTES, this.pieceRate.floor * pingDeadline(this.pingInterval, CHANNEL_TRANSPORT.WS)),
     )
     this.gatherUpTo = Math.min(WIRE_GATHER_BYTES, this.pieceRate.fastest > 0 ? this.wholeUpTo : this.unannouncedUpTo)
   }

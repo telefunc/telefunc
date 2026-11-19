@@ -7,7 +7,7 @@ import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { handleSseChannelRequest } from './sse.js'
 
-// A ping deadline of 2 s.
+// A ping deadline of 2.5 s: two intervals, after the half interval the page may hold its PING for a POST.
 config.channel = { pingInterval: 1000 }
 
 function post(body: BodyInit) {
@@ -77,6 +77,18 @@ test('a page whose upload POST is read only after server code held the event loo
   )
 
   expect((await upload).statusCode).toBe(200)
+})
+
+test('a page that held its PING for a POST, then stalled for most of an interval, keeps its wire', async () => {
+  const connId = crypto.randomUUID()
+  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  expect(opened.statusCode).toBe(200)
+  // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
+  expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
+
+  // Its PING goes an interval on, held half an interval for a POST, and the page stalls 0.8 interval more.
+  await new Promise((resolve) => setTimeout(resolve, 2_300))
+  expect((await post(encodeSseRequest({ connId }, [encode.ping([])]))).statusCode).toBe(200)
 })
 
 test('a page that stays silent past the ping deadline loses its wire', async () => {

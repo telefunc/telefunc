@@ -53,8 +53,9 @@ import {
   type ChannelTransports,
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
+  CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
+import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
@@ -96,7 +97,8 @@ type ChannelConfigUser = {
   idleTimeout?: number
   /**
    * How often, in milliseconds, the client sends a ping for channel health
-   * checks. The server considers the client dead after 2x this interval.
+   * checks. The server considers the client dead after 2x this interval, or 2.5x
+   * over SSE, where the client may hold its ping for a POST.
    */
   pingInterval?: number
   /**
@@ -413,10 +415,11 @@ function fillUnset(current: unknown, val: unknown): unknown {
   return filled
 }
 
-/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`.
+ *  The longest, a page's over SSE: the client's transport isn't known where this is read. */
 function reconnectWindow(): number {
   const c = getChannelConfig()
-  return reconnectWindowOf(c.pingInterval, c.reconnectTimeout)
+  return reconnectWindowOf(c.pingInterval, c.reconnectTimeout, CHANNEL_TRANSPORT.SSE)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
@@ -545,8 +548,8 @@ function applyChannelConfig(val: unknown): void {
         assertDuration(
           value,
           configPath,
-          Math.floor(TIMER_DELAY_MAX_MS / 2),
-          'as its deadline, twice it, is at most the longest a timer waits',
+          PING_INTERVAL_MAX_MS,
+          'as its deadline, up to two and a half times it, is at most the longest a timer waits',
         )
         assertUsage(
           value >= CHANNEL_PING_INTERVAL_MIN_MS,

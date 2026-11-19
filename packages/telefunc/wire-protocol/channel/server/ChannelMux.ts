@@ -17,6 +17,7 @@ import {
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
+  type ChannelTransport,
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
@@ -55,6 +56,8 @@ type ServerTransport<TWire> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(wire: TWire): string | null
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
+  /** Which transport the wire is, whose ping deadline allows for the PING its page may hold. */
+  type: ChannelTransport
   /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
   /** True if the runtime keeps a copy of each message it's handed, as Bun, Deno and workerd do: Node keeps the bytes. */
@@ -90,7 +93,6 @@ type MuxServerOptions = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
-  pingDeadline: number
   creditWindow: number
   connectTtl: number
   sseFlushThrottle: number
@@ -897,11 +899,15 @@ class ChannelMux implements UpgradeStagesOwner {
     state.pingTimer = null
   }
 
+  private pingDeadlineOf(entry: WireEntry): number {
+    return pingDeadline(this.options.pingInterval, entry.transport.type)
+  }
+
   /** A wire that closed keeps no timer. */
   private resetPingTimer(entry: WireEntry): void {
     if (entry.state.closed !== null) return
     entry.state.lastReceivedAt = performance.now()
-    this.armPingDeadline(entry, this.options.pingDeadline)
+    this.armPingDeadline(entry, this.pingDeadlineOf(entry))
   }
 
   /** `recheck`: the deadline had passed when the timer last ran, and is judged again once the server read its sockets. */
@@ -914,9 +920,10 @@ class ChannelMux implements UpgradeStagesOwner {
         state.pingTimer = null
         // A PING waits behind what the page queued, so the wire is dead only a deadline after its last bytes and after
         // the data it announced.
+        const deadline = this.pingDeadlineOf(entry)
         const deadAt = Math.max(
-          state.lastReceivedAt + this.options.pingDeadline,
-          entry.sender.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,
+          state.lastReceivedAt + deadline,
+          entry.sender.pieces?.receiver.expectedBy(deadline) ?? 0,
         )
         const now = performance.now()
         if (now < deadAt) return this.armPingDeadline(entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
@@ -939,7 +946,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     reconnectTimeout: c.reconnectTimeout,
     idleTimeout: c.idleTimeout,
     pingInterval: c.pingInterval,
-    pingDeadline: pingDeadline(c.pingInterval),
     creditWindow: creditWindowOf(c.maxMemory, c.maxPendingBytes),
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,

@@ -26,7 +26,10 @@ vi.mock('../../constants.js', async (importOriginal) => ({
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS: 60_000,
   RECONCILE_TIMEOUT_MS: 60_000,
 }))
-vi.mock('../../wire/pingDeadline.js', () => ({ pingDeadline: () => 60_000 }))
+vi.mock('../../wire/pingDeadline.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../wire/pingDeadline.js')>()),
+  pingDeadline: () => 60_000,
+}))
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */

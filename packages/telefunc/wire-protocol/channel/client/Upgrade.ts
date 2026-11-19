@@ -22,6 +22,7 @@ import {
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
+  CHANNEL_TRANSPORT,
 } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -476,7 +477,8 @@ class Upgrade implements ProbeOwner {
   private keepProbeAlive(probe: ProbeWire, attempt: AbortController, intervalMs: number): Heartbeat {
     const heartbeat = new Heartbeat({
       intervalMs,
-      pongTimeoutMs: pingDeadline(intervalMs),
+      // The probe is a WebSocket.
+      pongTimeoutMs: pingDeadline(intervalMs, CHANNEL_TRANSPORT.WS),
       send: () => probe.ping(),
       onDead: () => attempt.abort(),
     })

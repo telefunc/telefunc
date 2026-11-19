@@ -242,6 +242,7 @@ class SseServerTransport {
     },
     getConnId: (wire) => wire.connId,
     sendNow: (wire, frame) => this.sendNow(wire, frame),
+    type: CHANNEL_TRANSPORT.SSE,
     wholeMessages: false,
     // Events carry frames in base64 plus framing, so three quarters of what waits is at least the frames it carries.
     bufferedAmount: (wire) => Math.floor((wire.events.heldBytes * 3) / 4),

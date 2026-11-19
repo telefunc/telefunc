@@ -17,6 +17,7 @@ import {
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
+import { heartbeatHold } from '../../wire/pingDeadline.js'
 import { encodeU32, encodeLengthPrefixedBlob, encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
@@ -110,7 +111,7 @@ class SseTransport implements UpgradeSource {
   private outboxBytes = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
-  private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
+  private heartbeatFlushDelayMs = heartbeatHold(CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT.SSE)
   private drainCallbacks: Array<() => void> = []
   /** A barrier waiting for the POST out: it goes next, with the outbox. */
   private barrierTurn: (() => void) | null = null
@@ -682,10 +683,10 @@ class SseTransport implements UpgradeSource {
     this.sendFrame({ kind: 'heartbeat', frame })
   }
 
-  /** Its PINGs wait for a POST half the heartbeat's interval at most. */
+  /** Its PINGs wait for a POST as long as the ping deadline allows the page to hold them. */
   attachHeartbeat(heartbeat: Heartbeat): void {
     this.heartbeat = heartbeat
-    this.heartbeatFlushDelayMs = Math.floor(heartbeat.intervalMs / 2)
+    this.heartbeatFlushDelayMs = heartbeatHold(heartbeat.intervalMs, CHANNEL_TRANSPORT.SSE)
   }
 
   detachHeartbeat(): void {

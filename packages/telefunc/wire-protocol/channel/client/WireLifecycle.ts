@@ -223,7 +223,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** How long the page waits for a server that went away: until the pong deadline, then `reconnectTimeout` more. */
   reconnectWindow(): number {
-    return reconnectWindowOf(this.liveness.pingInterval, this.reconnectTimeoutMs)
+    return reconnectWindowOf(this.liveness.pingInterval, this.reconnectTimeoutMs, this.transport.type)
   }
 
   /** Called once the channel sends nothing more. */

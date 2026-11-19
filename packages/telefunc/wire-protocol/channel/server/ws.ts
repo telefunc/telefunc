@@ -2,7 +2,7 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Hooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
-import { WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
@@ -40,6 +40,7 @@ function getTelefuncChannelHooks({
      *  connId-based reverse lookup. */
     getConnId: () => null,
     sendNow: send,
+    type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     copiesOnSend,
     bufferedAmount,

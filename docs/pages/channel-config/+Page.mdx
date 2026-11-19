@@ -12,7 +12,7 @@ import { config } from 'telefunc'
 
 config.channel = {
   reconnectTimeout: 60_000,  // How long a client may be gone and get its channels back (ms)
-  pingInterval: 5_000,       // How often a client pings; it counts as gone after twice this (ms)
+  pingInterval: 5_000,       // How often a client pings; it counts as gone after twice this, 2.5× over SSE (ms)
   maxMemory: '4g',           // The most this server's channels hold for clients, all together (bytes, or a size)
   connectTtl: 15_000,        // How long a new channel waits for its client, and a call for a subscription it carries (ms)
 }
