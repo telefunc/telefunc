@@ -309,12 +309,13 @@ class CloudflareBroadcastMember {
   /** Written again after a failure Cloudflare calls transient, a few times (`transientRetryDelay()`), unless nobody
    *  wants the route by then; after any other failure, or the last, its attempt closes with the error. */
   private async recordFirstPresence(routeKey: string, memberRoute: MemberRoute): Promise<void> {
+    const startedAt = Date.now()
     for (let failures = 1; ; failures++) {
       try {
         await this.recordPresence(memberRoute.route)
         break
       } catch (error) {
-        const delay = transientRetryDelay(error, failures)
+        const delay = transientRetryDelay(error, failures, Date.now() - startedAt)
         if (delay === null) {
           this.routes.delete(routeKey)
           memberRoute.attempt?.presence('closed', error)

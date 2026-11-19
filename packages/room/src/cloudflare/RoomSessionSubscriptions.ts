@@ -131,8 +131,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private readonly readyWhenSent: boolean
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
-  /** Whether its route was ever registered; until then, how many times its registration failed. */
+  /** Whether its route was ever registered; until then, when its first registration started and how many times it
+   *  failed. */
   private registered = false
+  private readonly firstRegistrationAt = Date.now()
   private firstFailures = 0
 
   constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
@@ -193,7 +195,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
    *  core reports. */
   private failFirst(error: unknown): void {
     if (this.state() === 'closed') return
-    const delay = transientRetryDelay(error, ++this.firstFailures)
+    const delay = transientRetryDelay(error, ++this.firstFailures, Date.now() - this.firstRegistrationAt)
     if (delay === null) {
       this.stop()
       return this.transition('closed', error)

@@ -1,15 +1,19 @@
 export { transientRetryDelay }
 
 /** As Cloudflare's error-handling page shows: 3 attempts, the waits between them drawn as `100 ms × random × 2^n`. Each
- *  attempt also carries the runtime's own retries of a call that never reached the Durable Object. */
+ *  attempt also carries the runtime's own retries, which start none more than 10 s after the call did; ours start none
+ *  past the same 10 s from the first, so no attempt of either starts later. */
 const TRANSIENT_ATTEMPTS = 3
 const TRANSIENT_BACKOFF_BASE_MS = 100
+const TRANSIENT_WINDOW_MS = 10_000
 
-/** How long to wait before making a Durable Object call again after its `failures`-th failure, with `error`; `null`
- *  where it isn't made again: a failure Cloudflare marks `.overloaded`, or doesn't mark `.retryable`, or the last. */
-function transientRetryDelay(error: unknown, failures: number): number | null {
+/** How long to wait before making a Durable Object call again after its `failures`-th failure, with `error`, `elapsed`
+ *  ms after its first attempt started; `null` where it isn't made again: a failure Cloudflare marks `.overloaded`, or
+ *  doesn't mark `.retryable`, the last attempt, or one whose next would start past the window. */
+function transientRetryDelay(error: unknown, failures: number, elapsed: number): number | null {
   if (!isRetryable(error) || failures >= TRANSIENT_ATTEMPTS) return null
-  return TRANSIENT_BACKOFF_BASE_MS * Math.random() * 2 ** (failures - 1)
+  const delay = TRANSIENT_BACKOFF_BASE_MS * Math.random() * 2 ** (failures - 1)
+  return elapsed + delay < TRANSIENT_WINDOW_MS ? delay : null
 }
 
 /** A failure Cloudflare marks as transient: `.retryable`, unless `.overloaded`, which it says not to retry. */

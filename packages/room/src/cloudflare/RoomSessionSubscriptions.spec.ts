@@ -6,10 +6,11 @@ import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import type { RegisterWire, RenewWire } from './RoomAuthority.js'
 
 /** A session's Room subscriptions against an authority that answers each call from `answers`, in order. */
-function setup(answers: { register: Array<RegisterWire | Error>; renew: Array<RenewWire | Error> }) {
+function setup(answers: { register: Array<RegisterWire | Error | Promise<never>>; renew: Array<RenewWire | Error> }) {
   const calls = { register: 0, renew: 0 }
-  const answer = <T>(queue: Array<T | Error>): Promise<T> => {
+  const answer = <T>(queue: Array<T | Error | Promise<never>>): Promise<T> => {
     const next = queue.shift()!
+    if (next instanceof Promise) return next
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
   }
   const authority = {
@@ -80,6 +81,14 @@ describe('a Cloudflare Room lane', () => {
       expect({ registered: calls.register, reasons }).toEqual({ registered: 1, reasons: [['closed', 'reset']] })
     })
   }
+
+  // The runtime retries a call itself for up to 10 s; a failure that reaches the code that late isn't made again.
+  it('whose first route registration fails as retryable 10 seconds in closes with that error, and is not registered again', async () => {
+    const late = new Promise<never>((_, reject) => setTimeout(() => reject(transient(false)), 10_000))
+    const { calls, reasons } = setup({ register: [late, 'registered'], renew: [] })
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect({ registered: calls.register, reasons }).toEqual({ registered: 1, reasons: [['closed', 'reset']] })
+  })
 
   it('unsubscribed while its first route registration waits to be made again, registers it no more', async () => {
     const { attempt, calls } = setup({ register: [transient(false), 'registered'], renew: [] })

@@ -575,6 +575,25 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         })
       })
 
+      // The runtime retries a call itself for up to 10 s; a failure that reaches the code that late isn't made again.
+      it("a first presence write that fails as retryable 10 seconds in rejects the subscriber's `ready`, and is not written again", async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { state, presences, inObject } = worker()
+        state.held = new Promise((resolve) => setTimeout(resolve, 10_000))
+        state.fail = transient(false)
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        let ready = 'pending'
+        void outcome(subscriber.ready).then((settled) => (ready = settled))
+        state.held = undefined
+        await vi.advanceTimersByTimeAsync(12_000)
+        expect({ ready, written: presences.length }).toEqual({
+          ready: 'Durable Object is overloaded or reset',
+          written: 1,
+        })
+        subscriber()
+      })
+
       it('a subscriber removed while its retryable first presence write waits to be written again leaves no other write', async () => {
         vi.useFakeTimers()
         const { state, presences, inObject } = worker()
