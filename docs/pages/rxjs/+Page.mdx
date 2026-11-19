@@ -195,6 +195,8 @@ export class DashboardComponent {
 
 Unsubscribing stops data flow immediately. The underlying <Link href="/channel">channel</Link> is cleaned up <Link href="/close#when-to-close">automatically via GC</Link>, or immediately if you use <Link href="/close">`close()`</Link>.
 
+Once you call `close()`, no further value from the other end reaches your subscribers, and an Observable's subscribers complete when the channel has closed.
+
 
 ## See also
 
