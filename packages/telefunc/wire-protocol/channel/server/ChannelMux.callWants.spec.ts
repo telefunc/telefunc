@@ -241,9 +241,9 @@ function confirmingLater(run: (listening: (key: string) => Deferred<void>) => Pr
   return async () => {
     const waits = new Map<string, Deferred<void>>()
     const listen = (key: string) => {
-      const ready = createDeferred()
-      waits.set(key, ready)
-      return { unsubscribe() {}, ready: ready.promise }
+      const opened = createDeferred()
+      waits.set(key, opened)
+      return { unsubscribe() {}, opened: opened.promise }
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     const previous = getBroadcastAdapter()
@@ -252,9 +252,9 @@ function confirmingLater(run: (listening: (key: string) => Deferred<void>) => Pr
     )
     try {
       await run((key) => {
-        const ready = waits.get(key)
-        if (ready === undefined) throw new Error(`Nothing listens to ${key}`)
-        return ready
+        const opened = waits.get(key)
+        if (opened === undefined) throw new Error(`Nothing listens to ${key}`)
+        return opened
       })
     } finally {
       _resetBroadcastAdapterForTesting(previous)
@@ -336,10 +336,10 @@ test(
 // Each way a call's wait ends leaves no timer of its own behind, so none ends the broadcast later.
 const WAIT_ENDS: Record<
   string,
-  (end: { ready: Deferred<void>; request: AbortController; page: ReturnType<typeof attachedBroadcast> }) => void
+  (end: { opened: Deferred<void>; request: AbortController; page: ReturnType<typeof attachedBroadcast> }) => void
 > = {
-  'the subscription takes effect': ({ ready }) => ready.resolve(),
-  'its backend refuses it': ({ ready }) => ready.reject(new Error('NOPERM')),
+  'the subscription takes effect': ({ opened }) => opened.resolve(),
+  'its backend refuses it': ({ opened }) => opened.reject(new Error('NOPERM')),
   "the call's request goes": ({ request }) => request.abort(),
   'the broadcast is closed': ({ page }) => page.broadcast.abort(),
 }
@@ -353,7 +353,7 @@ for (const [end, endWait] of Object.entries(WAIT_ENDS)) {
         const before = vi.getTimerCount()
         const request = new AbortController()
         const call = page.call(on(1), 'session-a', request.signal)
-        endWait({ ready: listening(page.key), request, page })
+        endWait({ opened: listening(page.key), request, page })
         await call
         await vi.advanceTimersByTimeAsync(0)
         const left = vi.getTimerCount() - before

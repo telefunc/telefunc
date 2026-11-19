@@ -85,29 +85,29 @@ class RedisTransport implements BroadcastTransport {
   }
 
   /** In effect once Redis acknowledged its SUBSCRIBE. */
-  listen(key: string, onMessage: TextOnMessage): { unsubscribe: () => void; ready: Promise<void> } {
+  listen(key: string, onMessage: TextOnMessage): { unsubscribe: () => void; opened: Promise<void> } {
     const channel = this.channelKey(key, 't')
     assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
     this.textCallbacks.set(channel, onMessage)
-    const ready = this.subscribe(channel)
+    const opened = this.subscribe(channel)
     const unsubscribe = () => {
       this.textCallbacks.delete(channel)
       this.unsubscribe(channel)
     }
-    return { unsubscribe, ready }
+    return { unsubscribe, opened }
   }
 
   /** In effect once Redis acknowledged its SUBSCRIBE. */
-  listenBinary(key: string, onMessage: BinaryOnMessage): { unsubscribe: () => void; ready: Promise<void> } {
+  listenBinary(key: string, onMessage: BinaryOnMessage): { unsubscribe: () => void; opened: Promise<void> } {
     const channel = this.channelKey(key, 'b')
     assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
     this.binaryCallbacks.set(channel, onMessage)
-    const ready = this.subscribe(channel)
+    const opened = this.subscribe(channel)
     const unsubscribe = () => {
       this.binaryCallbacks.delete(channel)
       this.unsubscribe(channel)
     }
-    return { unsubscribe, ready }
+    return { unsubscribe, opened }
   }
 
   /** Sends the SUBSCRIBE, and returns its acknowledgement, which rejects with its failure; a failure nobody reads raises
@@ -116,9 +116,9 @@ class RedisTransport implements BroadcastTransport {
     const ack = this.subscriber.subscribe(channel)
     this.subscribing.set(channel, { ack, order: ++this.subscribesSent })
     void this.settleSubscribe(channel, ack)
-    const ready = ack.then(() => {})
-    ready.catch(() => {})
-    return ready
+    const confirmed = ack.then(() => {})
+    confirmed.catch(() => {})
+    return confirmed
   }
 
   private async settleSubscribe(channel: string, ack: Promise<unknown>): Promise<void> {

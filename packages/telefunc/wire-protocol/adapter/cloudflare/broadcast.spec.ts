@@ -671,7 +671,7 @@ describe('cloudflare broadcast routing', () => {
   })
 
   // Its publishes reach this Durable Object only where another one's publish finds its presence in KV.
-  it("a subscriber's `ready` resolves once KV wrote its Durable Object's presence", async () => {
+  it("a subscriber's `opened` resolves once KV wrote its Durable Object's presence", async () => {
     const transport = createTransport(1)
     const previousTransport = getBroadcastAdapter()
     let wrote = () => {}
@@ -687,13 +687,13 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(transport)
 
     const remove = transport.runInObject('telefunc-shard-weur-0', () => Broadcast.subscribe('room:test', () => {}))
-    let ready = false
-    void remove.ready.then(() => (ready = true))
+    let opened = false
+    void remove.opened.then(() => (opened = true))
     await flushCoordinatorTurn()
-    expect(ready).toBe(false)
+    expect(opened).toBe(false)
     wrote()
     await flushCoordinatorTurn()
-    expect(ready).toBe(true)
+    expect(opened).toBe(true)
 
     remove()
     _resetBroadcastAdapterForTesting(previousTransport)
@@ -728,35 +728,35 @@ describe('cloudflare broadcast routing', () => {
       return { state, kv, inObject, inOtherObject }
     }
 
-    it("a subscriber's `ready` rejects with KV's error, and so does a later one of the same Durable Object, until it has none", async () => {
+    it("a subscriber's `opened` rejects with KV's error, and so does a later one of the same Durable Object, until it has none", async () => {
       const previousTransport = getBroadcastAdapter()
       const { state, inObject } = refusing()
       const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
-      await expect(first.ready).rejects.toThrow('429')
+      await expect(first.opened).rejects.toThrow('429')
       const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
-      await expect(second.ready).rejects.toThrow('429')
+      await expect(second.opened).rejects.toThrow('429')
       first()
       second()
       state.refuse = false
       const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
-      await expect(third.ready).resolves.toBe(undefined)
+      await expect(third.opened).resolves.toBe(undefined)
       third()
       _resetBroadcastAdapterForTesting(previousTransport)
     })
 
-    it("once the refresh writes the presence, a later subscriber's `ready` resolves, and the refused one's stays rejected", async () => {
+    it("once the refresh writes the presence, a later subscriber's `opened` resolves, and the refused one's stays rejected", async () => {
       vi.useFakeTimers()
       const previousTransport = getBroadcastAdapter()
       try {
         const { state, inObject } = refusing()
         const refused = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await expect(refused.ready).rejects.toThrow('429')
+        await expect(refused.opened).rejects.toThrow('429')
         state.refuse = false
         // Telefunc's next try at the presence, every 30 s.
         await vi.advanceTimersByTimeAsync(30_000)
         const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await expect(later.ready).resolves.toBe(undefined)
-        await expect(refused.ready).rejects.toThrow('429')
+        await expect(later.opened).resolves.toBe(undefined)
+        await expect(refused.opened).rejects.toThrow('429')
         refused()
         later()
       } finally {
@@ -774,7 +774,7 @@ describe('cloudflare broadcast routing', () => {
         const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
         // Another Durable Object's subscriber keeps the key's refresh going.
         const other = inOtherObject(() => Broadcast.subscribe('room:test', () => {}))
-        await Promise.all([left.ready, other.ready])
+        await Promise.all([left.opened, other.opened])
         let acknowledge = () => {}
         state.held = new Promise((resolve) => {
           acknowledge = resolve
@@ -785,9 +785,9 @@ describe('cloudflare broadcast routing', () => {
         state.refuse = true
         const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
         acknowledge()
-        await expect(back.ready).rejects.toThrow('429')
+        await expect(back.opened).rejects.toThrow('429')
         const later = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await expect(later.ready).rejects.toThrow('429')
+        await expect(later.opened).rejects.toThrow('429')
         back()
         later()
         other()
@@ -797,14 +797,14 @@ describe('cloudflare broadcast routing', () => {
       }
     })
 
-    it('a presence write that throws at once fails as a refused one: `ready` rejects with its error, and a publish goes on', async () => {
+    it('a presence write that throws at once fails as a refused one: `opened` rejects with its error, and a publish goes on', async () => {
       const previousTransport = getBroadcastAdapter()
       const { kv, inObject } = refusing()
       kv.put = () => {
         throw new Error('KV binding invocation failed')
       }
       const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-      await expect(subscriber.ready).rejects.toThrow('KV binding invocation failed')
+      await expect(subscriber.opened).rejects.toThrow('KV binding invocation failed')
       // A publish from here waits for the presence writes in flight here.
       const published = await Promise.race([
         Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).then(() => 'published'),
@@ -825,7 +825,7 @@ describe('cloudflare broadcast routing', () => {
           throw new Error('KV binding invocation failed')
         }
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await subscriber.ready
+        await subscriber.opened
         subscriber()
         await flushMicrotasks()
         expect(warn.mock.calls.map(([warning]) => String(warning).includes('KV binding invocation failed'))).toEqual([
@@ -847,7 +847,7 @@ describe('cloudflare broadcast routing', () => {
           state.refuse = false
           const presences = async () => (await kv.list({ prefix: 'tfps:' })).keys.map(({ name }) => name)
           const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
-          await left.ready
+          await left.opened
           const written = await presences()
           let acknowledge = () => {}
           state.held = new Promise((resolve) => {
@@ -859,7 +859,7 @@ describe('cloudflare broadcast routing', () => {
           const back = comesBack ? inObject(() => Broadcast.subscribe('room:test', () => {})) : undefined
           acknowledge()
           await vi.advanceTimersByTimeAsync(0)
-          await back?.ready
+          await back?.opened
           expect(await presences()).toEqual(comesBack ? written : [])
           back?.()
         } finally {
@@ -872,7 +872,7 @@ describe('cloudflare broadcast routing', () => {
     // A Durable Object subscribes again while KV still holds the delete of its presence: that of its release, or the one
     // after a refresh KV acknowledged once it had left.
     for (const deleting of ['its release', 'a late refresh'] as const) {
-      it(`a Durable Object that subscribes again while the delete after ${deleting} is under way keeps its presence, and its \`ready\` waits for that delete`, async () => {
+      it(`a Durable Object that subscribes again while the delete after ${deleting} is under way keeps its presence, and its \`opened\` waits for that delete`, async () => {
         vi.useFakeTimers()
         const previousTransport = getBroadcastAdapter()
         try {
@@ -887,7 +887,7 @@ describe('cloudflare broadcast routing', () => {
             return acknowledge
           }
           const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
-          await left.ready
+          await left.opened
           const written = await presences()
           let acknowledgeDelete: () => void
           if (deleting === 'its release') {
@@ -906,11 +906,11 @@ describe('cloudflare broadcast routing', () => {
           state.held = undefined
           const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
           let backReady = false
-          void back.ready?.then(() => (backReady = true))
+          void back.opened?.then(() => (backReady = true))
           await vi.advanceTimersByTimeAsync(0)
           expect(backReady).toBe(false)
           acknowledgeDelete()
-          await back.ready
+          await back.opened
           expect(await presences()).toEqual(written)
           back()
         } finally {
@@ -927,14 +927,14 @@ describe('cloudflare broadcast routing', () => {
       const warned = (warn: { mock: { calls: unknown[][] } }) =>
         warn.mock.calls.filter(([warning]) => String(warning).includes('URI malformed')).length
 
-      it("a subscriber's `ready` rejects with its error, which is warned of", async () => {
+      it("a subscriber's `opened` rejects with its error, which is warned of", async () => {
         const previousTransport = getBroadcastAdapter()
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
         try {
           const { state, inObject } = refusing()
           state.refuse = false
           const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
-          await expect(subscriber.ready).rejects.toThrow('URI malformed')
+          await expect(subscriber.opened).rejects.toThrow('URI malformed')
           expect(warned(warn)).toBe(1)
           subscriber()
         } finally {
@@ -968,7 +968,7 @@ describe('cloudflare broadcast routing', () => {
           const { state, inObject } = refusing()
           state.refuse = false
           const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
-          await subscriber.ready?.catch(() => {})
+          await subscriber.opened?.catch(() => {})
           subscriber()
           await flushMicrotasks()
           expect(warned(warn)).toBe(2)
@@ -986,7 +986,7 @@ describe('cloudflare broadcast routing', () => {
           const { state, inObject } = refusing()
           state.refuse = false
           const subscriber = inObject(() => Broadcast.subscribe(KEY, () => {}))
-          await subscriber.ready?.catch(() => {})
+          await subscriber.opened?.catch(() => {})
           await vi.advanceTimersByTimeAsync(30_000)
           expect(warned(warn)).toBe(2)
           subscriber()

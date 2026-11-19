@@ -8,7 +8,7 @@ import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { OrderedStubs } from './OrderedStubs.js'
-import { Readiness } from '../../channel/channel.js'
+import { Outcome } from '../../channel/channel.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
@@ -172,7 +172,7 @@ class MemberBucketState {
   readonly owners = new Map<string, number>()
   /** Each owner's presence KV hasn't written, by owner: being written, its subscribers are in effect once it is; refused,
    *  they never are, nor any it gets until a refresh writes it or it has none left. */
-  readonly unwritten = new Map<string, Readiness>()
+  readonly unwritten = new Map<string, Outcome>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
   /** A stub can only be used by the Durable Object that got it, and this state is the isolate's, so it holds none. */
   private readonly authority: () => TelefuncBroadcastStub
@@ -379,7 +379,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   /** Runs `operation` on `owner`'s presence once every write and delete asked of it before has settled, so they go to
    *  KV in the order asked: the delete of an owner that left after a write still under way, and the write of one that
-   *  came back after a delete still under way, which its subscribers' `ready` so waits for. An operation that throws at
+   *  came back after a delete still under way, which its subscribers' `opened` so waits for. An operation that throws at
    *  once fails as one KV refuses does. */
   private inPresenceOrder(
     key: string,
@@ -504,7 +504,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       if (current.size === 0) subsByKey.delete(key)
       this.releasePresence(key, entryOwner)
     }
-    return { unsubscribe, ready: this.memberStates.get(key)?.unwritten.get(owner) }
+    return { unsubscribe, opened: this.memberStates.get(key)?.unwritten.get(owner) }
   }
 
   // --- BroadcastAdapter interface ---
@@ -670,7 +670,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
     memberState.setupsInFlight++
     const written = this.writePresence(key, owner)
-    const unwritten = Readiness.following(written)
+    const unwritten = new Outcome()
+    void unwritten.follow(written)
     memberState.unwritten.set(owner, unwritten)
     const wrote = await this.warnRefusedPresence(key, written)
     memberState.setupsInFlight--

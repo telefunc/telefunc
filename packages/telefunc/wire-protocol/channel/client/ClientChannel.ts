@@ -14,10 +14,10 @@ import type {
 } from '../channel.js'
 import {
   LOSSY_WITH_ACK_TEXT,
-  neverInEffect,
+  neverOpened,
   serializeAbortReason,
   stringifyValue,
-  withReady,
+  unsubscribeOf,
   type AbortReason,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
@@ -236,13 +236,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** In effect at once: the server sends whether the page listens or not. One added once the channel ended never is. */
   listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): Unsubscribe {
-    if (this.lifecycle.ended) return neverInEffect(this.endError())
-    return withReady(this.listeners.add(callback, options))
+    if (this.lifecycle.ended) return neverOpened(this.endError())
+    return unsubscribeOf(this.listeners.add(callback, options))
   }
 
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
-    if (this.lifecycle.ended) return neverInEffect(this.endError())
-    return withReady(this.binaryListeners.add(callback, options))
+    if (this.lifecycle.ended) return neverOpened(this.endError())
+    return unsubscribeOf(this.binaryListeners.add(callback, options))
   }
 
   /** What it ended with, as its `closed` rejects. */

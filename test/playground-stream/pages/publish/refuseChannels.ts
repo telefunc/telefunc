@@ -24,12 +24,12 @@ async function allowEveryChannel(): Promise<void> {
   await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
 }
 
-/** Whether Redis refuses a subscription to `key`: its `ready` rejects, or Redis itself doesn't hold it. A `ready` that
+/** Whether Redis refuses a subscription to `key`: its `opened` rejects, or Redis itself doesn't hold it. An `opened` that
  *  resolved for a subscription Redis doesn't hold is the bug the cards look for, so they run on and show it. */
 async function refuses(redis: Redis, key: string): Promise<boolean> {
   const probe = Broadcast.subscribe(key, () => {})
   try {
-    const refused = await probe.ready.then(
+    const refused = await probe.opened.then(
       () => false,
       () => true,
     )

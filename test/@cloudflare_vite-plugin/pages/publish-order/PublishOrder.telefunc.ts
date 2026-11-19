@@ -14,7 +14,7 @@ async function onPublishLoop() {
     seqs.push(seq)
   })
   // The subscription is in effect: what follows checks ordering, not a publish racing the presence write.
-  await off.ready
+  await off.opened
   const padding = 'x'.repeat(64 * 1024)
   const receipts = await Promise.all(
     Array.from({ length: 200 }, (_, i) => Broadcast.publish(key, { i, padding: i % 2 ? padding : '' })),

@@ -522,7 +522,7 @@ function testSubscribeOrder(inDocker = false) {
 
   // On Redis: the Docker suite and a lane with REDIS_URL.
   if (inDocker || process.env.REDIS_URL) {
-    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `ready` rejects", async () => {
+    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `opened` rejects", async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-refused')
       let refuses = true
@@ -530,7 +530,7 @@ function testSubscribeOrder(inDocker = false) {
         async () => {
           const result = await getResult('#publish-result')
           refuses = result.refusesChannels !== false
-          if (refuses) expect(result).deep.equal({ ready: 'rejected', closed: 'with an error', received: [] })
+          if (refuses) expect(result).deep.equal({ opened: 'rejected', closed: 'with an error', received: [] })
         },
         { timeout: 20_000 },
       )
@@ -563,16 +563,16 @@ function testSubscribeOrder(inDocker = false) {
     }
   })
 
-  test("broadcast: a subscriber's `ready` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `ready` rejects with the error its broadcast ends with first", async () => {
+  test("broadcast: a subscriber's `opened` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `opened` rejects with the error its broadcast ends with first", async () => {
     await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-ready')
+    await page.click('#test-broadcast-opened')
     await autoRetry(
       async () => {
         expect(await getResult('#publish-result')).deep.equal({
-          readyWhileHeld: holdsPosts() ? 'pending' : null,
+          openedWhileHeld: holdsPosts() ? 'pending' : null,
           held: holdsPosts() ? 1 : null,
           received: ['from a server action'],
-          abortedReady: 'Abort',
+          abortedOpened: 'Abort',
         })
       },
       { timeout: 20_000 },

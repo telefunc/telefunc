@@ -352,10 +352,10 @@ function testRefusedPresence() {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
     await page.click('#subscribe')
-    // KV refused the presence: the subscription's `ready` rejected, and the publish made meanwhile settled.
+    // KV refused the presence: the subscription's `opened` rejected, and the publish made meanwhile settled.
     await autoRetry(async () => {
-      const { readyRejected, published } = JSON.parse((await page.textContent('#refused-presence-state'))!)
-      expect({ readyRejected, published }).deep.equal({ readyRejected: true, published: true })
+      const { openedRejected, published } = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      expect({ openedRejected, published }).deep.equal({ openedRejected: true, published: true })
     })
     // Each try publishes again: the presence is written at its next refresh, within 30 s.
     await autoRetry(

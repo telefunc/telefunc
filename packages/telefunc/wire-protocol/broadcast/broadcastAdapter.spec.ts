@@ -367,12 +367,12 @@ describe('a subscription the adapter refused', () => {
   })
 })
 
-// The same rule as a page's `ready`: it resolves once the listener is in effect or removed, and rejects where the
+// The same rule as a page's `opened`: it resolves once the listener is in effect or removed, and rejects where the
 // broadcast ends first. The backend here confirms no subscription until each test is over.
-describe("a server subscriber's `ready` while its backend hasn't confirmed the subscription", () => {
+describe("a server subscriber's `opened` while its backend hasn't confirmed the subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  const listen = () => ({ unsubscribe: () => {}, opened: pending })
   const unconfirmed = () =>
     _resetBroadcastAdapterForTesting(
       new DefaultBroadcastAdapter({
@@ -382,16 +382,16 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
         listenBinary: listen,
       }),
     )
-  const settled = async (ready: Promise<void>) => {
+  const settled = async (opened: Promise<void>) => {
     let state = 'pending'
-    ready.then(
+    opened.then(
       () => (state = 'resolved'),
       () => (state = 'rejected'),
     )
     await new Promise((resolve) => setTimeout(resolve, 0))
     return state
   }
-  type Subscribe = (signal: AbortSignal) => { remove: () => void; ready: Promise<void>; end?: () => void }
+  type Subscribe = (signal: AbortSignal) => { remove: () => void; opened: Promise<void>; end?: () => void }
   const instance =
     (binary: boolean): Subscribe =>
     (signal) => {
@@ -399,7 +399,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const remove = binary
         ? broadcast.subscribeBinary(() => {}, { signal })
         : broadcast.subscribe(() => {}, { signal })
-      return { remove, ready: remove.ready, end: () => broadcast.abort() }
+      return { remove, opened: remove.opened, end: () => broadcast.abort() }
     }
   const statically =
     (binary: boolean): Subscribe =>
@@ -408,7 +408,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const remove = binary
         ? Broadcast.subscribeBinary(key, () => {}, { signal })
         : Broadcast.subscribe(key, () => {}, { signal })
-      return { remove, ready: remove.ready }
+      return { remove, opened: remove.opened }
     }
   const SUBSCRIBERS: Record<string, Subscribe> = {
     'subscribe()': instance(false),
@@ -421,7 +421,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       unconfirmed()
       const subscriber = subscribe(new AbortController().signal)
       subscriber.remove()
-      expect(await settled(subscriber.ready)).toBe('resolved')
+      expect(await settled(subscriber.opened)).toBe('resolved')
       subscriber.end?.()
     })
     it(`${name}: resolves once removed by its signal`, async () => {
@@ -429,7 +429,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const controller = new AbortController()
       const subscriber = subscribe(controller.signal)
       controller.abort()
-      expect(await settled(subscriber.ready)).toBe('resolved')
+      expect(await settled(subscriber.opened)).toBe('resolved')
       subscriber.end?.()
     })
   }
@@ -439,18 +439,18 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       unconfirmed()
       const subscriber = subscribe(new AbortController().signal)
       subscriber.end?.()
-      expect(await settled(subscriber.ready)).toBe('rejected')
+      expect(await settled(subscriber.opened)).toBe('rejected')
     })
   }
 })
 
 // A backend that refused a key's subscription keeps that outcome: removing a subscriber afterwards doesn't turn its
-// `ready` into a success, whether the app read `ready` before the removal or not.
-describe("a static subscriber's `ready` once its backend refused the key's subscription", () => {
+// `opened` into a success, whether the app read `opened` before the removal or not.
+describe("a static subscriber's `opened` once its backend refused the key's subscription", () => {
   const sent = () => ({ seq: 1, timestamp: 1 })
   const refusing = () => {
-    const ready = Promise.reject(new Error('NOPERM'))
-    const listen = () => ({ unsubscribe: () => {}, ready })
+    const opened = Promise.reject(new Error('NOPERM'))
+    const listen = () => ({ unsubscribe: () => {}, opened })
     _resetBroadcastAdapterForTesting(
       new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
     )
@@ -465,11 +465,11 @@ describe("a static subscriber's `ready` once its backend refused the key's subsc
         refusing()
         const remove = subscribe()
         await new Promise((resolve) => setTimeout(resolve, 0))
-        let ready: Promise<void> | undefined
-        if (removed === 'after') ready = remove.ready
+        let opened: Promise<void> | undefined
+        if (removed === 'after') opened = remove.opened
         remove()
-        ready ??= remove.ready
-        await expect(ready).rejects.toThrow('NOPERM')
+        opened ??= remove.opened
+        await expect(opened).rejects.toThrow('NOPERM')
       })
     }
     it(`${name}: a refusal nobody reads makes no unhandled rejection`, async () => {
@@ -490,11 +490,11 @@ describe("a static subscriber's `ready` once its backend refused the key's subsc
   }
 })
 
-// A `ready` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
+// An `opened` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
 describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  const listen = () => ({ unsubscribe: () => {}, opened: pending })
   /** How many promises `run` made. */
   const promisesMadeBy = (run: () => void) => {
     let made = 0
@@ -525,12 +525,12 @@ describe("subscribers that come and go while their backend hasn't confirmed the 
   const CHURN: Record<string, (key: string) => Unsubscribe> = {
     'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
     'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
-    // In effect at once: its `ready`, read, is one promise every such listener shares.
+    // In effect at once: its `opened`, read, is one promise every such listener shares.
     'Broadcast.subscribe()': (key) => Broadcast.subscribe(key, () => {}),
     'Broadcast.subscribeBinary()': (key) => Broadcast.subscribeBinary(key, () => {}),
-    "a channel's listen(), its `ready` read": (key) => {
+    "a channel's listen(), its `opened` read": (key) => {
       const remove = channelOf(key).listen(() => {})
-      void remove.ready
+      void remove.opened
       return remove
     },
   }
@@ -598,7 +598,7 @@ describe("a transport's listen() that throws", () => {
       'broker connection closed',
     )
     const stop = Broadcast.subscribe<string>('room:throws', (text) => heard.push(`retry ${text}`))
-    await stop.ready
+    await stop.opened
     transport.text('"hello"', { seq: 1, timestamp: 1 })
     stop()
     expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
@@ -614,7 +614,7 @@ describe("a transport's listen() that throws", () => {
     const heard: string[] = []
     expect(() => room.subscribe((text) => heard.push(`failed ${text}`))).toThrow('broker connection closed')
     const stop = room.subscribe((text) => heard.push(`retry ${text}`))
-    await stop.ready
+    await stop.opened
     transport.text('"hello"', { seq: 1, timestamp: 1 })
     room.abort()
     expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
@@ -630,7 +630,7 @@ describe("a transport's listen() that throws", () => {
     const heard: string[] = []
     expect(() => room.subscribeBinary((data) => heard.push(`failed ${data}`))).toThrow('broker connection closed')
     const stop = room.subscribeBinary((data) => heard.push(`retry ${data}`))
-    await stop.ready
+    await stop.opened
     transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
     room.abort()
     expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
@@ -647,7 +647,7 @@ describe("a transport's listen() that throws", () => {
       'broker connection closed',
     )
     const stop = Broadcast.subscribeBinary('room:throws', (data) => heard.push(`retry ${data}`))
-    await stop.ready
+    await stop.opened
     transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
     stop()
     expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
@@ -745,9 +745,9 @@ describe("a transport's listen() that delivers a message, then throws", () => {
           joined ??= subscribe((n) => joinedHeard.push(n))
         }),
       ).toThrow('broker connection closed')
-      await expect(joined?.ready).rejects.toThrow('broker connection closed')
+      await expect(joined?.opened).rejects.toThrow('broker connection closed')
       const retry = subscribe(() => {})
-      await retry.ready
+      await retry.opened
       await publish()
       retry()
       const listeningAfterRetry = transport.listening()
@@ -783,7 +783,7 @@ describe("a transport's listen() that delivers a message, then throws", () => {
           joined ??= subscribe(() => {})
         }),
       ).toThrow('broker connection closed')
-      await expect(joined?.ready).rejects.toThrow('broker connection closed')
+      await expect(joined?.opened).rejects.toThrow('broker connection closed')
       expect(getEventListeners(signal, 'abort')).toHaveLength(0)
     })
   }
@@ -930,7 +930,7 @@ describe('a message the transport delivers inside listen()', () => {
       const transport = deliveringInsideListen()
       const heard: number[] = []
       const { stop, publish, end } = subscribe(heard)
-      await stop.ready
+      await stop.opened
       await publish()
       stop()
       end?.()
@@ -1005,7 +1005,7 @@ describe('a message the transport delivers inside listen()', () => {
       const transport = deliveringInsideListen()
       const heard = { first: [], second: [] }
       const { stops, publish, end } = subscribe(heard)
-      await Promise.all(stops.map((stop) => stop.ready))
+      await Promise.all(stops.map((stop) => stop.opened))
       await publish()
       for (const stop of stops) stop()
       end?.()
@@ -1021,18 +1021,18 @@ describe('a message the transport delivers inside listen()', () => {
 })
 
 // A subscriber may end its broadcast on a message that ends what it waited for, before its backend confirmed the
-// subscription: its `ready` rejects with that end, whether the message came inside listen() or after it.
+// subscription: its `opened` rejects with that end, whether the message came inside listen() or after it.
 describe('a broadcast its subscriber ends on the first message, its backend not confirmed yet', () => {
   for (const binary of [false, true]) {
     for (const inside of [true, false]) {
-      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}, the message ${inside ? 'inside' : 'after'} listen(): \`ready\` rejects with the end`, async () => {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}, the message ${inside ? 'inside' : 'after'} listen(): \`opened\` rejects with the end`, async () => {
         let listening = 0
         let deliver = () => {}
         const start = (deliverFirst: () => void) => {
           listening++
           deliver = deliverFirst
           if (inside) deliver()
-          return { unsubscribe: () => listening--, ready: new Promise<void>(() => {}) }
+          return { unsubscribe: () => listening--, opened: new Promise<void>(() => {}) }
         }
         const sent = () => ({ seq: 1, timestamp: 1 })
         _resetBroadcastAdapterForTesting(
@@ -1047,23 +1047,23 @@ describe('a broadcast its subscriber ends on the first message, its backend not 
         const end = () => room.abort('terminal event')
         const stop = binary ? room.subscribeBinary(end) : room.subscribe(end)
         if (!inside) deliver()
-        const ready = await stop.ready.then(
+        const opened = await stop.opened.then(
           () => 'resolved',
           (err: unknown) => err,
         )
-        expect({ ready, listening }).toEqual({ ready: await room.closed.catch((err: unknown) => err), listening: 0 })
+        expect({ opened, listening }).toEqual({ opened: await room.closed.catch((err: unknown) => err), listening: 0 })
       })
     }
   }
 })
 
-// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the broadcast ended still
+// An app may clean its listeners up in `onClose()`: a listener whose `opened` was pending when the broadcast ended still
 // gets that end, whatever a close callback does after.
 describe('a broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber', () => {
   for (const binary of [false, true]) {
-    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
+    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`opened\` rejects with the end`, async () => {
       const sent = () => ({ seq: 1, timestamp: 1 })
-      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+      const listen = () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) })
       _resetBroadcastAdapterForTesting(
         new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
       )
@@ -1071,11 +1071,11 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
       const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
       room.onClose(() => stop())
       room.abort('terminal event')
-      const ready = await stop.ready.then(
+      const opened = await stop.opened.then(
         () => 'resolved',
         (err: unknown) => err,
       )
-      expect(ready).toBe(await room.closed.catch((err: unknown) => err))
+      expect(opened).toBe(await room.closed.catch((err: unknown) => err))
     })
   }
 })
@@ -1084,9 +1084,9 @@ describe('a broadcast that ends while a subscriber waits, its `onClose()` removi
 describe("a broadcast whose graceful close times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
   for (const binary of [false, true])
     for (const removes of [false, true]) {
-      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: ${removes ? 'removed by the callback, its `ready` rejects at the removal with the close, not the end it times out with' : 'still subscribed, its `ready` rejects with the end the close times out with'}`, async () => {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: ${removes ? 'removed by the callback, its `opened` rejects at the removal with the close, not the end it times out with' : 'still subscribed, its `opened` rejects with the end the close times out with'}`, async () => {
         const sent = () => ({ seq: 1, timestamp: 1 })
-        const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+        const listen = () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) })
         _resetBroadcastAdapterForTesting(
           new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
         )
@@ -1099,14 +1099,14 @@ describe("a broadcast whose graceful close times out on an `onClose()` callback'
         await room.close({ timeout: 10 })
         const ended = await room.closed.catch((err: unknown) => err)
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
-        const ready = await stop.ready.then(
+        const opened = await stop.opened.then(
           () => 'resolved',
           (err: unknown) => err,
         )
         if (removes) {
-          expect(ready).toBeInstanceOf(ChannelClosedError)
-          expect(ready).not.toBe(ended)
-        } else expect(ready).toBe(ended)
+          expect(opened).toBeInstanceOf(ChannelClosedError)
+          expect(opened).not.toBe(ended)
+        } else expect(opened).toBe(ended)
       })
     }
 })
@@ -1457,8 +1457,8 @@ describe('Broadcast static bus (publish/subscribe)', () => {
 
 describe('a subscriber a close callback removes while its backend starts', () => {
   for (const method of ['subscribe', 'subscribeBinary'] as const) {
-    it(`${method}(): a callback that awaits its \`ready\` lets the close end gracefully`, async () => {
-      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+    it(`${method}(): a callback that awaits its \`opened\` lets the close end gracefully`, async () => {
+      const listen = () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) })
       _resetBroadcastAdapterForTesting(
         new DefaultBroadcastAdapter({
           send: () => ({ seq: 1, timestamp: 1 }),
@@ -1471,7 +1471,7 @@ describe('a subscriber a close callback removes while its backend starts', () =>
       const remove = room[method](() => {})
       room.onClose(async () => {
         remove()
-        await remove.ready.catch(() => {})
+        await remove.opened.catch(() => {})
       })
       const closed = room.closed
       await room.close({ timeout: 50 })
@@ -1479,11 +1479,11 @@ describe('a subscriber a close callback removes while its backend starts', () =>
     })
   }
   for (const method of ['subscribe', 'subscribeBinary'] as const) {
-    it(`${method}(): a confirmation during the cleanup leaves its \`ready\` rejected with the close`, async () => {
+    it(`${method}(): a confirmation during the cleanup leaves its \`opened\` rejected with the close`, async () => {
       const backend = Promise.withResolvers<void>()
       const cleanup = Promise.withResolvers<void>()
       const entered = Promise.withResolvers<void>()
-      const listen = () => ({ unsubscribe() {}, ready: backend.promise })
+      const listen = () => ({ unsubscribe() {}, opened: backend.promise })
       _resetBroadcastAdapterForTesting(
         new DefaultBroadcastAdapter({
           send: () => ({ seq: 1, timestamp: 1 }),
@@ -1495,7 +1495,7 @@ describe('a subscriber a close callback removes while its backend starts', () =>
       const room = new ServerBroadcast({ key: method })
       const remove = room[method](() => {})
       const sibling = room[method](() => {})
-      const outcome = remove.ready.then(
+      const outcome = remove.opened.then(
         () => 'resolved',
         (err: Error) => err.message,
       )
@@ -1508,7 +1508,7 @@ describe('a subscriber a close callback removes while its backend starts', () =>
       try {
         await entered.promise
         backend.resolve()
-        await sibling.ready.catch(() => {})
+        await sibling.opened.catch(() => {})
       } finally {
         cleanup.resolve()
         await close
@@ -1518,18 +1518,18 @@ describe('a subscriber a close callback removes while its backend starts', () =>
   }
 })
 
-// When a waiting `ready` settles around its broadcast's close: at the moment its subscription can no longer take effect,
+// When a waiting `opened` settles around its broadcast's close: at the moment its subscription can no longer take effect,
 // with what is known of the end then.
-describe("a server subscriber's `ready` around its broadcast's graceful close", () => {
+describe("a server subscriber's `opened` around its broadcast's graceful close", () => {
   /** A backend whose first start waits for `confirm()`, and whose later ones wait for it too, or are confirmed or refused
    *  at once, as `next` says. */
   const backend = (next: 'pending' | 'confirms' | 'refuses' = 'pending') => {
     const confirmation = Promise.withResolvers<void>()
     let starts = 0
     const listen = () => {
-      if (starts++ === 0 || next === 'pending') return { unsubscribe() {}, ready: confirmation.promise }
+      if (starts++ === 0 || next === 'pending') return { unsubscribe() {}, opened: confirmation.promise }
       if (next === 'confirms') return () => {}
-      return { unsubscribe() {}, ready: Promise.reject(new Error('NOPERM')) }
+      return { unsubscribe() {}, opened: Promise.reject(new Error('NOPERM')) }
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     _resetBroadcastAdapterForTesting(
@@ -1537,8 +1537,8 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
     )
     return { confirm: () => confirmation.resolve() }
   }
-  const outcome = (ready: Promise<void> | undefined) =>
-    Promise.resolve(ready).then(
+  const outcome = (opened: Promise<void> | undefined) =>
+    Promise.resolve(opened).then(
       () => 'resolved',
       (err: Error) => err.message,
     )
@@ -1553,9 +1553,9 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
         removed()
         added = room[kind](() => {})
       })
-      const removedOutcome = outcome(removed.ready)
+      const removedOutcome = outcome(removed.opened)
       await room.close({ timeout: 50 })
-      expect({ removed: await removedOutcome, added: await outcome(added?.ready) }).toEqual({
+      expect({ removed: await removedOutcome, added: await outcome(added?.opened) }).toEqual({
         removed: 'Channel is closed',
         added: 'resolved',
       })
@@ -1570,10 +1570,10 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
         removed()
         added = room[kind](() => {})
       })
-      const removedOutcome = outcome(removed.ready)
+      const removedOutcome = outcome(removed.opened)
       await room.close({ timeout: 50 }).catch(() => {})
       expect(await removedOutcome).toBe('Channel is closed')
-      expect(await outcome(added?.ready)).not.toBe('resolved')
+      expect(await outcome(added?.opened)).not.toBe('resolved')
     })
 
     it(`${kind}(): one its callback removes and replaces, while the close then times out: the removed one has the close, the new one the timeout`, async () => {
@@ -1586,9 +1586,9 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
         added = room[kind](() => {})
         return new Promise<void>(() => {})
       })
-      const removedOutcome = outcome(removed.ready)
+      const removedOutcome = outcome(removed.opened)
       await room.close({ timeout: 10 })
-      expect({ removed: await removedOutcome, added: await outcome(added?.ready) }).toEqual({
+      expect({ removed: await removedOutcome, added: await outcome(added?.opened) }).toEqual({
         removed: 'Channel is closed',
         added: 'Channel close timed out',
       })
@@ -1607,7 +1607,7 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
       const close = room.close({ timeout: 500 })
       await entered.promise
       confirm()
-      const subscribed = await outcome(subscriber.ready)
+      const subscribed = await outcome(subscriber.opened)
       cleanup.resolve()
       await close
       expect(subscribed).toBe('resolved')
@@ -1619,10 +1619,10 @@ describe("a server subscriber's `ready` around its broadcast's graceful close", 
       // Its first start waits: one that comes and goes ends it, so the next one starts again and is confirmed.
       room[kind](() => {})()
       const subscriber = room[kind](() => {})
-      await subscriber.ready
+      await subscriber.opened
       room.onClose(() => subscriber())
       await room.close({ timeout: 50 })
-      expect(await outcome(subscriber.ready)).toBe('resolved')
+      expect(await outcome(subscriber.opened)).toBe('resolved')
     })
 
     it(`${kind}(): one nobody reads, removed by its callback, makes no unhandled rejection`, async () => {

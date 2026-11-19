@@ -5,8 +5,8 @@ import { onPublish, onSubscribe } from './RefusedPresence.telefunc'
 
 function Page() {
   const [key] = useState(() => `refused-presence:${Math.random()}`)
-  const [state, setState] = useState<{ readyRejected: boolean; published: boolean; received: string[] | null }>({
-    readyRejected: false,
+  const [state, setState] = useState<{ openedRejected: boolean; published: boolean; received: string[] | null }>({
+    openedRejected: false,
     published: false,
     received: null,
   })
@@ -14,8 +14,8 @@ function Page() {
   useEffect(() => setHydrated(true), [])
 
   const subscribe = async () => {
-    const { readyRejected, published } = await onSubscribe(key)
-    setState((s) => ({ ...s, readyRejected, published }))
+    const { openedRejected, published } = await onSubscribe(key)
+    setState((s) => ({ ...s, openedRejected, published }))
   }
 
   const publish = async () => {

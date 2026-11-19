@@ -2,9 +2,9 @@ export {
   makePublishInfo,
   stringifyValue,
   serializeAbortReason,
-  withReady,
-  neverInEffect,
-  Readiness,
+  unsubscribeOf,
+  neverOpened,
+  Outcome,
   LOSSY_WITH_ACK_TEXT,
 }
 export type {
@@ -160,12 +160,12 @@ type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
 type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
-/** Removes the listener, as aborting its `signal` does. `ready` resolves once the listener is in effect, at once for
+/** Removes the listener, as aborting its `signal` does. `opened` resolves once the listener is in effect, at once for
  *  `listen()`, and rejects if its channel closes first or, for a server-side `Broadcast.subscribe()`, if its
- *  subscription fails. What removing the listener while `ready` waits does, and each case's error, is on the page.
+ *  subscription fails. What removing the listener while `opened` waits does, and each case's error, is on the page.
  *
- *  https://telefunc.com/channel#when-ready-settles */
-type Unsubscribe = (() => void) & { readonly ready: Promise<void> }
+ *  https://telefunc.com/channel#when-opened-settles */
+type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -205,8 +205,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
    *
    *  https://telefunc.com/channel#skip-to-the-newest */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
-  /** Receive messages. Return a value to ack the sender. Returns an unlisten function, whose `ready` resolves at once:
-   *  the listener is in effect once `listen()` returns. On a channel that ended, it registers nothing, and `ready`
+  /** Receive messages. Return a value to ack the sender. Returns an unlisten function, whose `opened` resolves at once:
+   *  the listener is in effect once `listen()` returns. On a channel that ended, it registers nothing, and `opened`
    *  rejects with the channel's end. */
   listen(callback: ChannelListener<TIn>, options?: { signal?: AbortSignal }): Unsubscribe
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
@@ -239,22 +239,22 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
   ChannelShield<ClientToServer, ServerToClient>
 
 /** A listener's way to being in effect, settled at its first outcome: `true` once it is in effect or removed, or the
- *  error it never will be with. Its promise is made only where its `ready` is read. */
-class Readiness {
+ *  error it never will be with. Its promise is made only where its `opened` is read. */
+class Outcome {
   private outcome: true | Error | undefined = undefined
   private waiting: Deferred<void> | undefined = undefined
-  /** Settles as `until` does: followed only once `ready` is read. */
-  private readonly until: Readiness | undefined
+  /** Settles as `until` does: followed only once `opened` is read. */
+  private readonly until: Outcome | undefined
 
-  constructor(until?: Readiness) {
+  constructor(until?: Outcome) {
     this.until = until
   }
 
-  /** One that settles as `promise` does, followed now: a backend's `ready`, observed once for every subscriber. */
-  static following(promise: Promise<void>): Readiness {
-    const readiness = new Readiness()
-    void readiness.follow(promise)
-    return readiness
+  /** One that failed with `err`. */
+  static failed(err: Error): Outcome {
+    const outcome = new Outcome()
+    outcome.settle(err)
+    return outcome
   }
 
   /** The error it settled with, where it did. */
@@ -270,7 +270,7 @@ class Readiness {
   }
 
   get promise(): Promise<void> {
-    if (this.outcome === true) return IN_EFFECT
+    if (this.outcome === true) return OPENED
     if (this.waiting === undefined) {
       this.waiting = createDeferred()
       // A failure nobody reads raises no unhandled rejection.
@@ -281,7 +281,7 @@ class Readiness {
     return this.waiting.promise
   }
 
-  /** Settles as `promise` does: where a backend's `ready` is observed once, or a listener's once it is read. */
+  /** Settles as `promise` does: where a backend's `opened` is observed once, or a listener's once it is read. */
   async follow(promise: Promise<void>): Promise<void> {
     try {
       await promise
@@ -292,19 +292,16 @@ class Readiness {
   }
 }
 
-/** What the `ready` of every listener in effect at once is. */
-const IN_EFFECT = Promise.resolve()
+/** What the `opened` of every listener in effect at once is. */
+const OPENED = Promise.resolve()
 
-/** `remove` with `ready`: in effect at once without `readiness`. */
-function withReady(remove: () => void, readiness?: Readiness): Unsubscribe {
-  const unsubscribe = Object.assign(remove, { ready: IN_EFFECT })
-  if (readiness) Object.defineProperty(unsubscribe, 'ready', { get: () => readiness.promise })
-  return unsubscribe
+/** `remove` with `opened`, read through a getter: in effect at once without `outcome`. */
+function unsubscribeOf(remove: () => void, outcome?: Outcome): Unsubscribe {
+  const opened = outcome ? () => outcome.promise : () => OPENED
+  return Object.defineProperty(Object.assign(remove, { opened: OPENED }), 'opened', { get: opened })
 }
 
-/** The remover of a listener added once its channel ended, which registered nothing: its `ready` rejects with `err`. */
-function neverInEffect(err: Error): Unsubscribe {
-  const readiness = new Readiness()
-  readiness.settle(err)
-  return withReady(() => {}, readiness)
+/** The remover of a listener added once its channel ended, which registered nothing: its `opened` rejects with `err`. */
+function neverOpened(err: Error): Unsubscribe {
+  return unsubscribeOf(() => {}, Outcome.failed(err))
 }

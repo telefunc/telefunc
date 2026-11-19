@@ -14,7 +14,7 @@ import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { Readiness } from '../channel/channel.js'
+import { Outcome } from '../channel/channel.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
@@ -33,15 +33,15 @@ type OnMessage<T> = ((data: T, info: WirePublishInfo) => void) & {
 }
 
 /** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
- *  is returned; else that function as `unsubscribe`, with `ready`, which resolves once the backend delivers to the
+ *  is returned; else that function as `unsubscribe`, with `opened`, which resolves once the backend delivers to the
  *  listener what any server publishes to its key, and rejects where the backend gives the subscription up. */
-type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; ready: Promise<void> }
+type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 
-/** A `BroadcastUnsubscribe` in one form: `ready` is undefined where the listener is in effect already, else the one
+/** A `BroadcastUnsubscribe` in one form: `opened` is undefined where the listener is in effect already, else the one
  *  outcome of its key's subscription of that kind, which every subscriber of the kind to the key shares here. */
 type Listening = {
   unsubscribe: () => void
-  ready: Readiness | undefined
+  opened: Outcome | undefined
   /** Aborts where the start the subscriber came for threw, which removed it: nothing of it is to be released any more. */
   removed?: AbortSignal
 }
@@ -68,7 +68,7 @@ type BroadcastTransport = {
   /** Send a text message. Must return the assigned seq and timestamp. */
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function, or, where the
-   *  listener misses publishes until your broker confirms it, `{ unsubscribe, ready }`. */
+   *  listener misses publishes until your broker confirms it, `{ unsubscribe, opened }`. */
   listen(
     key: string,
     onMessage: (payload: string, info: { seq: number; timestamp: number }) => void,
@@ -164,7 +164,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     // Registered before the transport listens, so a message it delivers inside listen() reaches this subscriber; where
     // listen() throws, it is removed again with the key's other subscribers, leaving nothing registered.
     const transport = this.transport
-    if (!transport) return { unsubscribe, ready: undefined }
+    if (!transport) return { unsubscribe, opened: undefined }
     const listening =
       listenings.get(key) ??
       startListening(listenings, subscriptions, key, () =>
@@ -172,7 +172,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
           this.deliver(subscriptions, key, payload, info)
         }),
       )
-    return { unsubscribe, ready: listening.ready, removed: listening.removed }
+    return { unsubscribe, opened: listening.opened, removed: listening.removed }
   }
 
   // ── In-memory ──
@@ -289,7 +289,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 }
 
-/** The transport's one listener of `key`, in the one form of either `BroadcastUnsubscribe`: its `ready` is observed here
+/** The transport's one listener of `key`, in the one form of either `BroadcastUnsubscribe`: its `opened` is observed here
  *  once, for every subscriber of the key, so its first outcome is known to each, read or not. It holds the key's place in
  *  `listenings` while `listen()` runs, as a message delivered inside it may subscribe to the key, which joins this
  *  listener. Where `listen()` throws, the place is given back, and every subscriber of the key in `subscribers` came for
@@ -300,9 +300,9 @@ function startListening(
   key: string,
   listen: () => BroadcastUnsubscribe,
 ): Listening {
-  const ready = new Readiness()
+  const opened = new Outcome()
   const removed = new AbortController()
-  const listening: Listening = { unsubscribe: () => {}, ready, removed: removed.signal }
+  const listening: Listening = { unsubscribe: () => {}, opened, removed: removed.signal }
   listenings.set(key, listening)
   let started: BroadcastUnsubscribe
   try {
@@ -312,18 +312,18 @@ function startListening(
     subscribers.get(key)?.clear()
     subscribers.delete(key)
     removed.abort()
-    ready.settle(err instanceof Error ? err : new Error(String(err)))
+    opened.settle(err instanceof Error ? err : new Error(String(err)))
     throw err
   }
   // Nothing can roll the start back now: a subscriber that comes from here on gets no signal to hold.
   listening.removed = undefined
   if (typeof started === 'function') {
     listening.unsubscribe = started
-    listening.ready = undefined
-    ready.settle(true)
+    listening.opened = undefined
+    opened.settle(true)
   } else {
     listening.unsubscribe = started.unsubscribe
-    void ready.follow(started.ready)
+    void opened.follow(started.opened)
   }
   return listening
 }

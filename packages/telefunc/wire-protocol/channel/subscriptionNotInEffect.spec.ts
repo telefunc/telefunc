@@ -30,27 +30,27 @@ afterEach(() => {
 
 const ENDINGS: Record<string, { listen: () => BroadcastUnsubscribe; pastLimit: boolean }> = {
   'its backend refuses it': {
-    listen: () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: no permission for this channel')) }),
+    listen: () => ({ unsubscribe() {}, opened: Promise.reject(new Error('NOPERM: no permission for this channel')) }),
     pastLimit: false,
   },
   'its backend neither confirms nor refuses it within `connectTtl` of a call that carries it': {
-    listen: () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) }),
+    listen: () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) }),
     pastLimit: true,
   },
 }
 
 for (const [ending, { listen, pastLimit }] of Object.entries(ENDINGS)) {
-  test(`where ${ending}, the page's \`ready\` and \`onClose()\` get a ChannelClosedError, not the server's error`, async () => {
+  test(`where ${ending}, the page's \`opened\` and \`onClose()\` get a ChannelClosedError, not the server's error`, async () => {
     const page = await subscribedPage()
     page.receive(await errorSentToPage(page.index, listen, pastLimit))
     const given = await page.given()
-    expect(given.ready).toBeInstanceOf(ChannelClosedError)
+    expect(given.opened).toBeInstanceOf(ChannelClosedError)
     expect(given.onClose).toBeInstanceOf(ChannelClosedError)
   })
 }
 
 /** A page's broadcast, subscribed, on an SSE wire this test serves once it reconciled: `receive()` hands it a frame the
- *  server sent, and `given()` is what its `ready` rejects with and its `onClose()` callback gets. */
+ *  server sent, and `given()` is what its `opened` rejects with and its `onClose()` callback gets. */
 async function subscribedPage() {
   const reconciled = createDeferred<{ index: number; push: (frame: Uint8Array<ArrayBuffer>) => void }>()
   vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
@@ -87,7 +87,7 @@ async function subscribedPage() {
   return {
     index,
     receive: push,
-    given: async () => ({ ready: await subscription.ready.catch((err: unknown) => err), onClose: await onClose }),
+    given: async () => ({ opened: await subscription.opened.catch((err: unknown) => err), onClose: await onClose }),
   }
 }
 

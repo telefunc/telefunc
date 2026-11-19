@@ -12,7 +12,7 @@ function testRedisReconnect() {
       async () => {
         const result = await getResult('#redis-beside-refused-result')
         refuses = result.refusesChannels !== false
-        if (refuses) expect(result).deep.equal({ refusedReady: 'rejected', published: 'sent', received: ['beside'] })
+        if (refuses) expect(result).deep.equal({ refusedOpened: 'rejected', published: 'sent', received: ['beside'] })
       },
       { timeout: 20_000 },
     )

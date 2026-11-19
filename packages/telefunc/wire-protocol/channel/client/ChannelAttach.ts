@@ -1,7 +1,7 @@
 export { ChannelAttach }
 
 import type { AttachState, Want } from '../../wire/payloads.js'
-import type { Readiness } from '../channel.js'
+import type { Outcome } from '../channel.js'
 import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { SendCredit } from '../../flowControl/SendCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
@@ -24,7 +24,7 @@ class ChannelAttach {
   /** The newest version of the want the server confirmed is in effect. */
   private confirmed = 0
   /** The listeners waiting for a version the server hasn't confirmed yet, each with that version. */
-  private readonly confirming = new Map<Readiness, number>()
+  private readonly confirming = new Map<Outcome, number>()
 
   constructor({ channel, sendCredit, receiveCredit }: ChannelAttachOptions) {
     this.channel = channel
@@ -61,30 +61,30 @@ class ChannelAttach {
   }
 
   /** A listener is in effect once the server confirmed the want at `version`, or a newer one. */
-  waitFor(readiness: Readiness, version: number): void {
-    if (version <= this.confirmed) readiness.settle(true)
-    else this.confirming.set(readiness, version)
+  waitFor(opened: Outcome, version: number): void {
+    if (version <= this.confirmed) opened.settle(true)
+    else this.confirming.set(opened, version)
   }
 
   /** The listener was removed: it waits no more, and settles with `outcome`. */
-  stopWaiting(readiness: Readiness, outcome: true | Error): void {
-    this.confirming.delete(readiness)
-    readiness.settle(outcome)
+  stopWaiting(opened: Outcome, outcome: true | Error): void {
+    this.confirming.delete(opened)
+    opened.settle(outcome)
   }
 
   confirmWant(version: number): void {
     if (version <= this.confirmed) return
     this.confirmed = version
-    for (const [readiness, waitsFor] of this.confirming) {
+    for (const [opened, waitsFor] of this.confirming) {
       if (waitsFor > version) continue
-      this.confirming.delete(readiness)
-      readiness.settle(true)
+      this.confirming.delete(opened)
+      opened.settle(true)
     }
   }
 
   /** The channel ended: no want of it will take effect. */
   failWants(err: Error): void {
-    for (const readiness of this.confirming.keys()) readiness.settle(err)
+    for (const opened of this.confirming.keys()) opened.settle(err)
     this.confirming.clear()
   }
 

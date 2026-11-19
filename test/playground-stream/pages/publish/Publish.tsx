@@ -94,7 +94,7 @@ function Publish() {
       </button>
 
       <button
-        id="test-broadcast-ready"
+        id="test-broadcast-opened"
         onClick={async () => {
           try {
             const { room, key } = await onBroadcastToSubscribe()
@@ -105,28 +105,28 @@ function Publish() {
               received.push(text)
             })
             // The server takes the subscription only once the POST that carries it reaches it.
-            const readyWhileHeld = holdsPosts() ? await settledWithin(stop.ready, 1_000) : null
+            const openedWhileHeld = holdsPosts() ? await settledWithin(stop.opened, 1_000) : null
             const held = holdsPosts() ? await releaseHeldSsePosts() : null
-            await stop.ready
+            await stop.opened
             // Not by a telefunction: a call would carry the subscription and wait for it.
             await fetch(`/api/server-action?key=publish_${key}`, { method: 'POST' })
             const aborted = (await onBroadcastToSubscribe()).room
             const stopAborted = aborted.subscribe(() => {})
             aborted.abort()
-            const abortedReady = await stopAborted.ready.then(
+            const abortedOpened = await stopAborted.opened.then(
               () => 'resolved',
               (err: Error) => err.name,
             )
             // The publish reaches the page over its wire, after the server action that made it answered.
             await new Promise((resolve) => setTimeout(resolve, 1_000))
             await room.close()
-            setResult(JSON.stringify({ readyWhileHeld, held, received, abortedReady }))
+            setResult(JSON.stringify({ openedWhileHeld, held, received, abortedOpened }))
           } catch (err) {
             setResult(String(err))
           }
         }}
       >
-        A subscriber's ready
+        A subscriber's opened
       </button>
 
       <button
@@ -165,7 +165,7 @@ function Publish() {
             const stop = room.subscribe((text) => {
               received.push(text)
             })
-            const ready = await settledWithin(stop.ready, 5_000)
+            const opened = await settledWithin(stop.opened, 5_000)
             const closed = await Promise.race([
               room.closed.then(
                 () => 'clean',
@@ -173,7 +173,7 @@ function Publish() {
               ),
               new Promise((resolve) => setTimeout(() => resolve('open'), 1_000)),
             ])
-            setResult(JSON.stringify({ ready, closed, received }))
+            setResult(JSON.stringify({ opened, closed, received }))
           } catch (err) {
             setResult(String(err))
           } finally {

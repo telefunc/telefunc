@@ -7,7 +7,7 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { Readiness, makePublishInfo, neverInEffect, stringifyValue, withReady, type Unsubscribe } from '../channel.js'
+import { Outcome, makePublishInfo, neverOpened, stringifyValue, unsubscribeOf, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { encode, type ChannelCtrlFrame, type ChannelDataFrame, type SequencedEncoder } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -68,7 +68,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this.addSubscriber(this.broadcastBinaryListeners, 'binary', callback, options)
   }
 
-  /** Its `ready` settles once the server confirmed the want this subscriber needs, or the subscriber is removed: with
+  /** Its `opened` settles once the server confirmed the want this subscriber needs, or the subscriber is removed: with
    *  the end as known then where the close callbacks were called. */
   private addSubscriber<L>(
     listeners: Listeners<L>,
@@ -76,21 +76,21 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     callback: L,
     options: { signal?: AbortSignal },
   ): Unsubscribe {
-    if (options.signal?.aborted) return withReady(() => {})
+    if (options.signal?.aborted) return unsubscribeOf(() => {})
     // A closing one sends no want any more.
-    if (this.stopped) return neverInEffect(this.endError())
-    const readiness = new Readiness()
+    if (this.stopped) return neverOpened(this.endError())
+    const opened = new Outcome()
     const remove = listeners.add(callback, {
       ...options,
       onRemove: () => {
         // Removed, it can no longer take effect: once its close callbacks were called, that is the end as known now.
-        this._attach.stopWaiting(readiness, this.lifecycle.closeFired ? this.endError() : true)
+        this._attach.stopWaiting(opened, this.lifecycle.closeFired ? this.endError() : true)
         if (listeners.size === 0) this.setSubscribed(kind, false)
       },
     })
     if (listeners.size === 1) this.setSubscribed(kind, true)
-    this._attach.waitFor(readiness, this._attach.wants?.version ?? 0)
-    return withReady(remove, readiness)
+    this._attach.waitFor(opened, this._attach.wants?.version ?? 0)
+    return unsubscribeOf(remove, opened)
   }
 
   protected override dispatchCtrl(frame: ChannelCtrlFrame): void {

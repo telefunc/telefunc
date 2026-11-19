@@ -86,7 +86,7 @@ async function onPublishAcrossSeqBoundary() {
     received.push({ text, seq })
   })
   try {
-    await unsubscribe.ready
+    await unsubscribe.opened
     const published: number[] = []
     for (const text of ['a', 'b', 'c']) published.push((await Broadcast.publish(key, text)).seq)
     for (let i = 0; i < 25 && received.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 100))
@@ -110,17 +110,17 @@ async function onPublishBesideRefusedSubscribe() {
     const received: string[] = []
     const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
     unsubscribe.push(subscribed)
-    const refusedReady = await refused.ready.then(
+    const refusedOpened = await refused.opened.then(
       () => 'resolved',
       () => 'rejected',
     )
-    await subscribed.ready
+    await subscribed.opened
     const published = await Promise.resolve(Broadcast.publish(key, 'beside')).then(
       () => 'sent',
       (err: unknown) => String(err),
     )
     for (let i = 0; i < 25 && received.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100))
-    return { refusedReady, published, received }
+    return { refusedOpened, published, received }
   } finally {
     for (const stop of unsubscribe) stop()
     await allowEveryChannel()
