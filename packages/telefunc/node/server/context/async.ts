@@ -5,7 +5,7 @@ import { assert, assertWarning, assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
-import { PROVIDED_CONTEXT } from './getContext.js'
+import { PROVIDED_CONTEXT, WITHHELD_CONTEXT } from './getContext.js'
 import { REQUEST_CONTEXT } from './requestContext.js'
 import type { Context } from './context.js'
 import type { Telefunc } from './TelefuncNamespace.js'
@@ -56,5 +56,5 @@ function withoutContext_async<T>(fn: () => T): T {
   if (store === undefined) return fn()
   // An adapter's scope stays: on Cloudflare, the session a publish or subscribe from `fn` goes through.
   const { [PROVIDED_CONTEXT]: _provided, [REQUEST_CONTEXT]: _request, ...adapterScope } = store
-  return globalObject.asyncStore.run(adapterScope, fn)
+  return globalObject.asyncStore.run({ ...adapterScope, [WITHHELD_CONTEXT]: true }, fn)
 }
