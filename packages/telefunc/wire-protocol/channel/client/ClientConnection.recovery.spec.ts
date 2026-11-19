@@ -137,3 +137,57 @@ describe("a page's reconnects", () => {
     expect(madeSince(lostAt).slice(0, 2)).toEqual([250, 750])
   })
 })
+
+describe("a page's recovery", () => {
+  const realWebSocket = globalThis.WebSocket
+  beforeEach(() => {
+    vi.useFakeTimers()
+    globalThis.WebSocket = ScriptedWebSocket as unknown as typeof WebSocket
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+  })
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    globalThis.WebSocket = realWebSocket
+    ScriptedWebSocket.made = []
+    ScriptedWebSocket.scripts = []
+  })
+
+  test('ends its channels at the deadline the server holds them to, not before', async () => {
+    const { ended } = await lostWire({ then: [] })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
+    expect(ended).toEqual([])
+    await vi.advanceTimersByTimeAsync(2)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ message: 'Connection dropped' })
+  })
+
+  test('ends an attempt that never opens at that deadline', async () => {
+    const { ended } = await lostWire({ then: ['hangs'] })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1)
+    expect(ended).toHaveLength(1)
+    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([false, true])
+  })
+
+  test("starts no attempt that couldn't reconcile before the deadline, as long as the last handshake took", async () => {
+    const handshakeMs = 3_000
+    const { lostAt, ended } = await lostWire({ handshakeMs, then: [] })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
+    expect(ended).toEqual([])
+    // 0.9 of 500, 1,000, 2,000, 4,000, then of the 5,000 cap, each after the last refusal: the next, at 29,250,
+    // couldn't reconcile 3 s later before the deadline at 30,000.
+    expect(madeSince(lostAt)).toEqual([450, 1350, 3150, 6750, 11250, 15750, 20250, 24750])
+    await vi.advanceTimersByTimeAsync(2)
+    expect(ended).toHaveLength(1)
+  })
+
+  test('a channel registered while a reconnect waits starts no attempt sooner', async () => {
+    const { lostAt, register } = await lostWire({ then: [] })
+    await vi.advanceTimersByTimeAsync(100)
+    register()
+    expect(ScriptedWebSocket.made).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(madeSince(lostAt)).toEqual([450])
+  })
+})

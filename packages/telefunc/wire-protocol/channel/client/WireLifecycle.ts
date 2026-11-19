@@ -60,8 +60,11 @@ interface TransportOwner {
 type ConnectionState =
   | { tag: 'fresh' }
   | { tag: 'open' }
-  | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> }
+  /** `timer` starts the next attempt; null where none could reconcile before the recovery's deadline. */
+  | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> | null }
   | { tag: 'closed' }
+
+type Recovery = { attempt: number; deadline: number; lost: Error; timer: ReturnType<typeof setTimeout> }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
 interface WireLifecycleOwner {
@@ -83,8 +86,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
-  /** The wires lost since the last RECONCILED, and when the first was: a wire that opens and never reconciles counts. */
-  private reconnects: { attempt: number; startedAt: number } | null = null
+  /** From the first wire lost since the last RECONCILED: the attempts made (a wire that opens and never reconciles
+   *  counts), why the last wire went, and the deadline whose timer ends the channels if no wire reconciled by then. */
+  private recovery: Recovery | null = null
+  /** When the wire being opened started, until its RECONCILED. */
+  private attemptStartedAt: number | null = null
+  /** How long the last wire took from its start to its RECONCILED: the room an attempt needs before the deadline. */
+  private handshakeMs = 0
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -128,12 +136,21 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.state = { tag: 'open' }
   }
 
-  /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
-  private enterReconnecting(delay: number): void {
-    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
-    const timer = setTimeout(() => this.transport.start(), delay)
+  /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. A null `delay`: no attempt. */
+  private enterReconnecting(delay: number | null): void {
+    this.clearReconnectTimer()
+    const timer = delay === null ? null : setTimeout(() => this.startWire(), delay)
     this.state = { tag: 'reconnecting', timer }
     this.upgrade.forget()
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.state.tag === 'reconnecting' && this.state.timer) clearTimeout(this.state.timer)
+  }
+
+  private startWire(): void {
+    this.attemptStartedAt = performance.now()
+    this.transport.start()
   }
 
   private enterClosed(): void {
@@ -190,7 +207,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
-      this.transport.start()
+      // While a reconnect waits, its attempt's RECONCILE lists this channel: it starts none sooner, nor one past the
+      // recovery's deadline.
+      if (!this.reconnecting) this.startWire()
       return
     }
     this.exchange.scheduleRegisterReconcile()
@@ -361,7 +380,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.reconnects = null
+    this.endRecovery()
+    if (this.attemptStartedAt !== null) {
+      this.handshakeMs = performance.now() - this.attemptStartedAt
+      this.attemptStartedAt = null
+    }
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
@@ -502,7 +525,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.ttl = null
     }
 
-    const { attempt, startedAt } = this.reconnects ?? { attempt: 0, startedAt: performance.now() }
+    const attempt = this.recovery?.attempt ?? 0
     if (rejected && attempt === 0) {
       this.closeAll(err)
       return
@@ -515,12 +538,36 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
-    if (performance.now() - startedAt > this.reconnectTimeoutMs) {
-      this.closeAll(err)
-      return
-    }
-    this.reconnects = { attempt: attempt + 1, startedAt }
-    this.enterReconnecting(reconnectDelay(attempt))
+    const recovery = this.recoveryFrom(err)
+    recovery.lost = err
+    recovery.attempt = attempt + 1
+    // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
+    // deadline ends the channels.
+    const delay = reconnectDelay(attempt)
+    this.enterReconnecting(performance.now() + delay + this.handshakeMs < recovery.deadline ? delay : null)
+  }
+
+  /** The recovery under way, or one from now: the server holds the page's channels until its ping deadline noticed
+   *  the loss, then `reconnectTimeout`, so the page tries until then and not past it. */
+  private recoveryFrom(err: Error): Recovery {
+    if (this.recovery) return this.recovery
+    const windowMs = this.reconnectWindow()
+    const timer = setTimeout(() => this.onRecoveryDeadline(), windowMs)
+    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, lost: err, timer }
+    return this.recovery
+  }
+
+  /** No wire reconciled in time: the channels end with the last loss, and the attempt under way closes with them. */
+  private onRecoveryDeadline(): void {
+    const recovery = this.recovery
+    if (this.closed || !recovery) return
+    this.closeAll(recovery.lost)
+  }
+
+  private endRecovery(): void {
+    if (!this.recovery) return
+    clearTimeout(this.recovery.timer)
+    this.recovery = null
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
@@ -545,7 +592,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
-    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
+    this.clearReconnectTimer()
+    this.endRecovery()
     this.upgrade.abandon()
     this.enterClosed()
     this.transport.detachHeartbeat()
