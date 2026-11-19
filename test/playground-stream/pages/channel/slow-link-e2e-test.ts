@@ -1,10 +1,23 @@
 export { testSlowLink }
 
-import { Worker } from 'node:worker_threads'
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, withPacedLink, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
-import { withNetworkConditions } from '../../../utils'
+import { newCDPSession, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { StallClock, STALL_TICK_MS, byMachine, formatStalls, type Stall } from '../../stalls'
+
+declare global {
+  interface Window {
+    /** The page's clock of its stalls, while a card runs (`clockPageStalls`). */
+    stallClock?: { stalls: { endedAt: number; ms: number }[]; stop: () => void }
+  }
+}
+
+/** The playground's `pingInterval` (+server.ts): a wire whose page or server stops for about that long may be taken for
+ *  dead. */
+const PING_INTERVAL_MS = 1000
+/** The shortest stall the clocks keep. */
+const STALL_MIN_MS = 50
 
 type SlowLinkState = {
   linkShare: { pingMs: number[]; downloaded: number } | null
@@ -80,23 +93,33 @@ function testSlowLink(isDev: boolean) {
       )
     })
 
-  // 32 s to cross, past the 10 s a page waits for an answer to its ping.
+  // 32 s to cross, past the deadline a page waits for an answer to its ping. A process on the path that the machine
+  // stops for a ping interval may cost the wire, so such a run is void (`onlyTelefuncFails`).
   test('channel: on a 1 Mbit/s link, a 4 MB message from the server arrives on the connection it started on', async () => {
-    // In 40 ms bursts, as a cell link delivers: a wire's first two pieces reach the page together.
-    await withPacedLink(
-      { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024, burstMs: 40 },
-      async () => {
-        const connections = countConnections()
-        await page.click('#wire-large-slow-link')
-        await autoRetry(
-          async () => {
-            const { large } = await getResult<{ large: number | null }>('#wire-state')
-            expect(large).toBe(4_000_000)
-          },
-          { timeout: 55_000 },
-        )
-        expect(connections.stop()).toBe(1)
-      },
+    await onlyTelefuncFails(
+      PING_INTERVAL_MS,
+      () =>
+        // In 40 ms bursts, as a cell link delivers: a wire's first two pieces reach the page together.
+        withPacedLink(
+          { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024, burstMs: 40 },
+          () =>
+            whileClockingStalls(async () => {
+              const connections = countConnections()
+              await page.click('#wire-large-slow-link')
+              const seen: { large: number | null } = { large: null }
+              await settles(() =>
+                autoRetry(
+                  async () => {
+                    seen.large = (await getResult<{ large: number | null }>('#wire-state')).large
+                    expect(seen.large).toBe(4_000_000)
+                  },
+                  { timeout: 55_000 },
+                ),
+              )
+              return { large: seen.large, connections: connections.stop() }
+            }),
+        ),
+      (got) => expect(got).deep.equal({ large: 4_000_000, connections: 1 }),
     )
   })
 
@@ -166,40 +189,51 @@ function testSlowLink(isDev: boolean) {
     )
   })
 
-  // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms. A pause of the
-  // whole machine about as long as `LOSSY_CONFIRM_SLACK_MS` (300 ms) delays them past what the server allows a page that
-  // keeps up, and that run may lose messages. A run that lost some while a worker thread of the test's own overslept
-  // 100 ms or more runs again, up to three times in all; any other run's count is the card's.
+  // 60/s of 100 B for 5 s over 450 ms each way: a link that keeps up, whose confirmations take 900 ms. A stop of a
+  // process on the path about as long as `LOSSY_CONFIRM_SLACK_MS` (300 ms) delays them past what the server allows a
+  // page that keeps up, and that run may lose messages, so a run with one of 100 ms or more is void (`onlyTelefuncFails`).
   test('channel: on a 900 ms round trip that keeps up, a lossy broadcast delivers every message', async () => {
     await withPacedLink(
       { downBytesPerSecond: 12_500_000, upBytesPerSecond: 12_500_000, queueBytes: 256 * 1024, delayMs: 450 },
-      async () => {
-        let run = await whileTimingStalls(runSmallTicker)
-        for (let runs = 1; runs < 3 && run.result.received < 300 && run.stalledMs >= 100; runs++)
-          run = await whileTimingStalls(runSmallTicker)
-        expect(run.result).deep.equal({ ...run.result, received: 300, last: 299 })
-      },
+      () =>
+        onlyTelefuncFails(
+          100,
+          () => whileClockingStalls(runSmallTicker),
+          (ticker) => expect(ticker).deep.equal({ ...ticker, received: 300, last: 299 }),
+        ),
     )
   })
 
+  // The server ticks every 100 ms while the page uploads for about 17 s: a gap in the ticks is a stall of a process on
+  // the path, never the download waiting for the upload.
   test('channel: on a 125 kB/s uplink, a 2 MiB upload arrives and keeps the download coming on the connection it started on, and a channel opened meanwhile opens on it', async () => {
-    await withPacedLink(
-      { downBytesPerSecond: 10_000_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 },
-      async () => {
-        const connections = countConnections()
-        await page.click('#channel-test-slow-uplink')
-        let slowUplink: SlowLinkState['slowUplink'] = null
-        await autoRetry(
-          async () => {
-            slowUplink = (await getResult<SlowLinkState>('#channel-state')).slowUplink
-            expect(slowUplink).not.toBe(null)
-          },
-          { timeout: 55_000 },
-        )
-        expect(slowUplink!.uploaded).toBe(2 * 1024 * 1024)
-        expect(slowUplink!.opened).toBe('answer')
-        expect(slowUplink!.longestTickGapMs).lessThan(2000)
-        expect(connections.stop()).toBe(1)
+    await onlyTelefuncFails(
+      PING_INTERVAL_MS,
+      () =>
+        withPacedLink({ downBytesPerSecond: 10_000_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 }, () =>
+          whileClockingStalls(async () => {
+            const connections = countConnections()
+            await page.click('#channel-test-slow-uplink')
+            const seen: { slowUplink: SlowLinkState['slowUplink'] } = { slowUplink: null }
+            await settles(() =>
+              autoRetry(
+                async () => {
+                  seen.slowUplink = (await getResult<SlowLinkState>('#channel-state')).slowUplink
+                  expect(seen.slowUplink).not.toBe(null)
+                },
+                { timeout: 55_000 },
+              ),
+            )
+            return { ...seen, connections: connections.stop() }
+          }),
+        ),
+      ({ slowUplink, connections }, stalls) => {
+        expect({ slowUplink, connections }).deep.equal({
+          slowUplink: slowUplink && { ...slowUplink, uploaded: 2 * 1024 * 1024, opened: 'answer' },
+          connections: 1,
+        })
+        const longestStallMs = Math.max(0, ...stalls.map((stall) => stall.ms))
+        expect((slowUplink?.longestTickGapMs ?? Infinity) - longestStallMs).lessThan(PING_INTERVAL_MS)
       },
     )
   })
@@ -220,29 +254,112 @@ async function runSmallTicker() {
   )
 }
 
-/** Runs `run` while a worker thread of the test's own, apart from the channel and the paced link, wakes every 10 ms, and
- *  returns its result with the longest that thread overslept meanwhile. */
-async function whileTimingStalls<T>(run: () => Promise<T>): Promise<{ result: T; stalledMs: number }> {
-  const timer = new Worker(
-    `const { parentPort } = require('node:worker_threads')
-    let last = performance.now()
-    let stalledMs = 0
-    setInterval(() => {
-      const now = performance.now()
-      stalledMs = Math.max(stalledMs, now - last - 10)
-      last = now
-    }, 10)
-    parentPort.on('message', () => parentPort.postMessage(stalledMs))`,
-    { eval: true },
-  )
+/** Runs `check` on what `run` got. A run whose check fails is void where a process on the path stalled `slackMs` or more
+ *  and every such stall was the machine's, the process stopped, not computing (`byMachine`): it runs again, twice at
+ *  most, and a third void run fails the card with its stalls, as a machine that can't run it. A check that fails with no
+ *  such stall, or with one a process spent computing, fails the card, with the stalls and what the page got. */
+async function onlyTelefuncFails<T>(
+  slackMs: number,
+  run: () => Promise<{ result: T; stalls: Stall[] }>,
+  check: (result: T, stalls: Stall[]) => void,
+): Promise<void> {
+  const voided: string[] = []
+  for (let runs = 1; ; runs++) {
+    const { result, stalls } = await run()
+    try {
+      check(result, stalls)
+      return
+    } catch (err) {
+      const past = stalls.filter((stall) => stall.ms >= slackMs)
+      const got = `The page got ${JSON.stringify(result)}; the stalls of ${STALL_MIN_MS} ms or more: ${formatStalls(stalls)}`
+      if (past.length === 0 || !past.every(byMachine)) throw new Error(`${String(err)}\n${got}`, { cause: err })
+      voided.push(`run ${runs}: ${formatStalls(past)}`)
+      console.log(`[slow-link] void ${voided.at(-1)}; ${got}`)
+      if (runs === 3)
+        throw new Error(
+          `Three runs were void, each with a process on the path stopped by the machine for ${slackMs} ms or more: ${voided.join('; ')}`,
+          { cause: err },
+        )
+    }
+  }
+}
+
+/** Waits for `wait`, which a card's poll for its result is, and carries on where it times out: the check then says what
+ *  the page got. */
+async function settles(wait: () => Promise<unknown>): Promise<void> {
+  try {
+    await wait()
+  } catch {}
+}
+
+/** Runs `run` while the page, the server and this test process clock their stalls of `STALL_MIN_MS` or more, and returns
+ *  its result with them. */
+async function whileClockingStalls<T>(run: () => Promise<T>): Promise<{ result: T; stalls: Stall[] }> {
+  const testClock = new StallClock('test', STALL_MIN_MS)
+  testClock.start()
+  await fetch(`${getServerUrl()}/api/stalls/start?minMs=${STALL_MIN_MS}`, { method: 'POST' })
+  const pageClock = await clockPageStalls()
   try {
     const result = await run()
-    const stalledMs = await new Promise<number>((resolve) => {
-      timer.once('message', resolve)
-      timer.postMessage(null)
-    })
-    return { result, stalledMs }
+    return { result, stalls: [...(await pageClock.stop()), ...(await serverStalls()), ...testClock.stop()] }
   } finally {
-    await timer.terminate()
+    testClock.stop()
+  }
+}
+
+async function serverStalls(): Promise<Stall[]> {
+  const resp = await fetch(`${getServerUrl()}/api/stalls/stop`, { method: 'POST' })
+  return (await resp.json()) as Stall[]
+}
+
+/** The page clocks its stalls on its main thread; the CPU time that thread spent across each is read from Chrome
+ *  (`Performance.getMetrics`'s `ThreadTime`) about every 50 ms meanwhile, a read before the stall to one after it. */
+async function clockPageStalls() {
+  const cdp = await newCDPSession()
+  await cdp.send('Performance.enable')
+  const samples: { at: number; cpuMs: number }[] = []
+  const sample = async () => {
+    const { metrics } = await cdp.send('Performance.getMetrics')
+    const thread = metrics.find((metric) => metric.name === 'ThreadTime')
+    if (thread) samples.push({ at: Date.now(), cpuMs: thread.value * 1000 })
+  }
+  await sample()
+  await page.evaluate(
+    ({ minMs, tickMs }) => {
+      const stalls: { endedAt: number; ms: number }[] = []
+      let last = performance.now()
+      const timer = setInterval(() => {
+        const now = performance.now()
+        if (now - last - tickMs >= minMs) stalls.push({ endedAt: Date.now(), ms: Math.round(now - last) })
+        last = now
+      }, tickMs)
+      window.stallClock = { stalls, stop: () => clearInterval(timer) }
+    },
+    { minMs: STALL_MIN_MS, tickMs: STALL_TICK_MS },
+  )
+  let sampling = true
+  const sampler = (async () => {
+    while (sampling) {
+      await sample()
+      await sleep(50)
+    }
+  })()
+  return {
+    async stop(): Promise<Stall[]> {
+      const clocked = await page.evaluate(() => {
+        window.stallClock?.stop()
+        return window.stallClock?.stalls ?? []
+      })
+      sampling = false
+      await sampler
+      await sample()
+      await cdp.detach()
+      return clocked.map(({ endedAt, ms }) => {
+        const before = samples.findLast((s) => s.at <= endedAt - ms) ?? samples[0]
+        const after = samples.find((s) => s.at >= endedAt) ?? samples[samples.length - 1]
+        const cpuMs = before && after ? Math.round(after.cpuMs - before.cpuMs) : ms
+        return { who: 'page', endedAt, ms, cpuMs }
+      })
+    },
   }
 }

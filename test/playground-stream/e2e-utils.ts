@@ -237,12 +237,12 @@ const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
 
 /** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
-async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+async function withPacedLink<T>(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<T>): Promise<T> {
   const proxy = await startBlackHoleProxy(getServerUrl())
   try {
     await navigate(`${proxy.url}/channel`)
     proxy.pace(link)
-    await run()
+    return await run()
   } finally {
     // The page leaves before the proxy closes, which would cut its connections.
     try {

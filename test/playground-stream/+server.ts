@@ -12,6 +12,7 @@ import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './clea
 import { trackWireSocket, untrackWireSocket, cutWireSockets } from './wire-sockets'
 import { runServerAction } from './server-actions'
 import { redis } from './redis'
+import { StallClock } from './stalls'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -81,6 +82,20 @@ app.post('/api/gc', async (c) => {
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
   return c.json({ ok: true })
+})
+
+// The slow-link cards' clock of this process's stalls (stalls.ts), one at a time.
+let stallClock: StallClock | null = null
+app.post('/api/stalls/start', (c) => {
+  stallClock?.stop()
+  stallClock = new StallClock('server', Number(c.req.query('minMs')))
+  stallClock.start()
+  return c.json({ ok: true })
+})
+app.post('/api/stalls/stop', (c) => {
+  const stalls = stallClock?.stop() ?? []
+  stallClock = null
+  return c.json(stalls)
 })
 
 app.get('/api/heap-used', (c) => c.json({ heapUsed: process.memoryUsage().heapUsed }))
