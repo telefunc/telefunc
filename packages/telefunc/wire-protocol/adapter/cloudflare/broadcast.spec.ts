@@ -530,87 +530,52 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       const transient = (overloaded: boolean) =>
         Object.assign(new Error('Durable Object is overloaded or reset'), { retryable: true, overloaded })
 
-      it("a first presence write that fails as retryable keeps the subscriber's `ready` pending, and is written again at the next refresh", async () => {
+      /** The subscriber's `ready` and how many presence writes reached the authority, `ms` after it subscribed. */
+      async function firstRegistration(fail: (written: number) => Error | undefined, ms: number) {
         vi.useFakeTimers()
-        const { state, presences, present, inObject } = worker()
-        state.fail = transient(false)
+        // The longest waits Cloudflare's backoff draws, so each write comes in its own step below.
+        vi.spyOn(Math, 'random').mockReturnValue(1)
+        const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { state, presences, inObject } = worker()
+        state.fail = fail(0)
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         let ready = 'pending'
         void outcome(subscriber.ready).then((settled) => (ready = settled))
-        await vi.advanceTimersByTimeAsync(0)
-        expect({ ready, written: presences.length }).toEqual({ ready: 'pending', written: 1 })
-        state.fail = undefined
-        await vi.advanceTimersByTimeAsync(29_999)
-        expect({ ready, written: presences.length }).toEqual({ ready: 'pending', written: 1 })
-        await vi.advanceTimersByTimeAsync(1)
-        expect({ ready, written: presences.length, present: present('room:test').map(({ member }) => member) }).toEqual(
-          {
-            ready: 'resolved',
-            written: 2,
-            present: ['telefunc-shard-weur-0'],
-          },
-        )
-        subscriber()
-      })
-
-      it("a first presence write that keeps failing as retryable is written again every 30 seconds, the subscriber's `ready` pending, until one is stored", async () => {
-        vi.useFakeTimers()
-        const { state, presences, present, inObject } = worker()
-        state.fail = transient(false)
-        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        let ready = 'pending'
-        void outcome(subscriber.ready).then((settled) => (ready = settled))
-        const seen: unknown[] = []
-        // Just before and at each 30 seconds.
-        for (const elapsed of [0, 29_999, 1, 29_999, 1]) {
-          await vi.advanceTimersByTimeAsync(elapsed)
-          seen.push({ ready, written: presences.length })
+        let written = 0
+        for (let elapsed = 0; elapsed < ms; elapsed += 10) {
+          await vi.advanceTimersByTimeAsync(10)
+          if (presences.length > written) state.fail = fail((written = presences.length))
         }
-        state.fail = undefined
-        await vi.advanceTimersByTimeAsync(30_000)
-        seen.push({ ready, written: presences.length, present: present('room:test').length })
-        expect(seen).toEqual([
-          { ready: 'pending', written: 1 },
-          { ready: 'pending', written: 1 },
-          { ready: 'pending', written: 2 },
-          { ready: 'pending', written: 2 },
-          { ready: 'pending', written: 3 },
-          { ready: 'resolved', written: 4, present: 1 },
-        ])
+        const result = { ready, written: presences.length, reported: reported.mock.calls.length > 0 }
         subscriber()
+        return result
+      }
+
+      it("a first presence write that fails as retryable is written again within a second, and the subscriber's `ready` resolves once it is stored", async () => {
+        expect(await firstRegistration((written) => (written < 2 ? transient(false) : undefined), 2_000)).toEqual({
+          ready: 'resolved',
+          written: 3,
+          reported: false,
+        })
       })
 
-      it("a first presence write retried after a retryable failure that then fails otherwise rejects the subscriber's `ready`, and is not written again", async () => {
-        vi.useFakeTimers()
-        const { state, presences, inObject } = worker()
-        state.fail = transient(false)
-        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        let ready = 'pending'
-        void outcome(subscriber.ready).then((settled) => (ready = settled))
-        await vi.advanceTimersByTimeAsync(30_000)
-        state.fail = undefined
-        state.refuse = true
-        await vi.advanceTimersByTimeAsync(90_000)
-        expect({ ready, written: presences.length }).toEqual({ ready: REFUSAL, written: 3 })
-        subscriber()
+      it("a first presence write that fails as retryable 3 times rejects the subscriber's `ready` with that error, is reported, and is not written again", async () => {
+        expect(await firstRegistration(() => transient(false), 2_000)).toEqual({
+          ready: 'Durable Object is overloaded or reset',
+          written: 3,
+          reported: true,
+        })
       })
 
-      it("a first presence write that fails as overloaded rejects the subscriber's `ready`, and is not written again", async () => {
-        vi.useFakeTimers()
-        const { state, presences, inObject } = worker()
-        state.fail = transient(true)
-        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        let ready = 'pending'
-        void outcome(subscriber.ready).then((settled) => (ready = settled))
-        await vi.advanceTimersByTimeAsync(30_000)
-        expect({ ready, written: presences.length }).toEqual({
+      it("a first presence write that fails as overloaded rejects the subscriber's `ready` with that error, and is not written again", async () => {
+        expect(await firstRegistration(() => transient(true), 2_000)).toEqual({
           ready: 'Durable Object is overloaded or reset',
           written: 1,
+          reported: true,
         })
-        subscriber()
       })
 
-      it('a subscriber removed while its retryable first presence write waits for the next refresh leaves no write', async () => {
+      it('a subscriber removed while its retryable first presence write waits to be written again leaves no other write', async () => {
         vi.useFakeTimers()
         const { state, presences, inObject } = worker()
         state.fail = transient(false)

@@ -11,6 +11,7 @@ export type {
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import type { OrderedStubs } from './OrderedStubs.js'
+import { transientRetryDelay } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
 import {
   DriverAttempt,
@@ -93,11 +94,6 @@ class MemberRoute {
     this.state = 'lost'
     console.error(new Error(`Cloudflare Broadcast presence for '${this.route.key}' lost`, { cause: error }))
     this.attempt?.presence('lost')
-  }
-
-  /** Runs `retry` once the refresh interval passed. */
-  retryLater(retry: () => void): void {
-    this.refreshTimer = setTimeout(retry, PRESENCE_REFRESH_INTERVAL_MS)
   }
 
   startRefresh(refresh: () => Promise<boolean>): void {
@@ -310,26 +306,27 @@ class CloudflareBroadcastMember {
     if (memberRoute.state !== 'establishing') await this.release(broadcastRouteKey(memberRoute.route), memberRoute)
   }
 
+  /** Written again after a failure Cloudflare calls transient, a few times (`transientRetryDelay()`), unless nobody
+   *  wants the route by then; after any other failure, or the last, its attempt closes with the error. */
   private async recordFirstPresence(routeKey: string, memberRoute: MemberRoute): Promise<void> {
-    try {
-      await this.recordPresence(memberRoute.route)
-    } catch (error) {
-      if (isRetryable(error)) return this.retryFirstPresence(routeKey, memberRoute)
-      this.routes.delete(routeKey)
-      memberRoute.attempt?.presence('closed', error)
-      return
+    for (let failures = 1; ; failures++) {
+      try {
+        await this.recordPresence(memberRoute.route)
+        break
+      } catch (error) {
+        const delay = transientRetryDelay(error, failures)
+        if (delay === null) {
+          this.routes.delete(routeKey)
+          memberRoute.attempt?.presence('closed', error)
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        if (memberRoute.attempt === null) return void this.routes.delete(routeKey)
+      }
     }
     memberRoute.presenceRecorded()
     if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
     memberRoute.startRefresh(() => this.recordPresence(memberRoute.route))
-  }
-
-  /** Its attempt stays establishing meanwhile; a route nobody wants by then is dropped. */
-  private retryFirstPresence(routeKey: string, memberRoute: MemberRoute): void {
-    memberRoute.retryLater(() => {
-      if (memberRoute.attempt === null) return void this.routes.delete(routeKey)
-      void this.recordFirstPresence(routeKey, memberRoute).catch(() => {})
-    })
   }
 
   private async release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
@@ -504,11 +501,4 @@ function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<u
     console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
   }
   return failed.length
-}
-
-/** A failure Cloudflare marks as transient: `.retryable`, unless `.overloaded`, which it says not to retry. Writing a
- *  presence again is idempotent. */
-function isRetryable(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false
-  return 'retryable' in error && error.retryable === true && !('overloaded' in error && error.overloaded === true)
 }
