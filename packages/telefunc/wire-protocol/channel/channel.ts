@@ -152,7 +152,7 @@ function pathOf(value: unknown, holder: object, key: string): string | null {
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
   : T extends (data: any) => infer R
-    ? Awaited<R> | Promise<Awaited<R>> | void | Promise<void>
+    ? Awaited<R> | void | Promise<Awaited<R> | void>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
