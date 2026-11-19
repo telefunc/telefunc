@@ -83,7 +83,7 @@ export type {
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
-export { transientRetryDelay } from '../../wire-protocol/adapter/cloudflare/transientRetry.js'
+export { TransientRetry } from '../../wire-protocol/adapter/cloudflare/transientRetry.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/ClientBroadcast.js'

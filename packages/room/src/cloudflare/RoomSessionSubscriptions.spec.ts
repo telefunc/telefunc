@@ -10,14 +10,14 @@ import type { LaneId } from '../backend/contract.js'
  *  to it throws the next of `answers.open`, while one is left. */
 function setup(
   answers: {
-    register: Array<RegisterWire | Error | Promise<never>>
+    register: Array<RegisterWire | Error | Promise<RegisterWire>>
     renew: Array<RenewWire | Error>
     open?: Array<Error | undefined>
   },
   lane: LaneId = { kind: 'semantic' },
 ) {
   const calls = { register: 0, renew: 0 }
-  const answer = <T>(queue: Array<T | Error | Promise<never>>): Promise<T> => {
+  const answer = <T>(queue: Array<T | Error | Promise<T>>): Promise<T> => {
     const next = queue.shift()!
     if (next instanceof Promise) return next
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
@@ -44,7 +44,9 @@ function setup(
     states.push(state)
     if (reason !== undefined) reasons.push([state, reason instanceof Error ? reason.message : reason])
   })
-  return { attempt, calls, states, reasons }
+  /** Another lane of the room, on the same ordered stub. */
+  const subscribe = (other: LaneId) => subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: other }, receiver)
+  return { attempt, calls, states, reasons, subscribe }
 }
 
 /** Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. */
@@ -116,6 +118,21 @@ describe('a Cloudflare Room lane', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     // Ready when `subscribe()` returned.
     expect(states).toEqual(['lost', 'ready'])
+  })
+
+  // A retry made on a fresh stub waits until the failed stub's calls settled, which can be past the 10 s.
+  it('whose first route registration would be made again past 10 seconds closes with its last error, and is not made again', async () => {
+    const failed = transient(false)
+    const late = new Promise<never>((_, reject) => setTimeout(() => reject(failed), 9_800))
+    const held = new Promise<RegisterWire>((resolve) => setTimeout(() => resolve('registered'), 10_300))
+    const { attempt, calls, subscribe } = setup({ register: [late, held, 'registered'], renew: [] })
+    const reasons: unknown[] = []
+    attempt.onStateChange((state, reason) => reasons.push([state, reason]))
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(calls.register).toBe(2)
+    expect(reasons).toEqual([['closed', failed]])
+    expect(reasons[0]).toContain(failed)
   })
 
   it('unsubscribed while its first route registration waits to be made again, registers it no more', async () => {

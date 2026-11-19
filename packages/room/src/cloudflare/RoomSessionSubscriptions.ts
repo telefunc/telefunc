@@ -8,7 +8,7 @@ import {
   currentCloudflareMember,
   getOrCreate,
   hostLocal,
-  transientRetryDelay,
+  TransientRetry,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
@@ -121,7 +121,7 @@ type CloudflareRoomAttemptOptions = {
 }
 
 /** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
- *  went out. Its first registration that fails is made again only as Cloudflare says to (`transientRetryDelay()`), and
+ *  went out. Its first registration that fails is made again only as Cloudflare says to (`TransientRetry`), and
  *  otherwise closes it with the error. Once registered, a failed call to the authority, or a lapsed route, holds it
  *  back until its route is registered again. */
 class CloudflareRoomAttempt extends DriverAttempt {
@@ -131,11 +131,8 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private readonly readyWhenSent: boolean
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
-  /** Whether its route was ever registered; until then, when its first registration started and how many times it
-   *  failed. */
-  private registered = false
-  private readonly firstRegistrationAt = Date.now()
-  private firstFailures = 0
+  /** How its first registration is made again, until its route was registered. */
+  private firstRegistration: TransientRetry | null = new TransientRetry()
 
   constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
     super()
@@ -152,12 +149,12 @@ class CloudflareRoomAttempt extends DriverAttempt {
     try {
       registration = await registering
     } catch (error) {
-      return this.registered ? this.lose(error) : this.failFirst(error)
+      return this.firstRegistration === null ? this.lose(error) : this.failFirst(this.firstRegistration, error)
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
-    this.registered = true
+    this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
     this.owner.renewWithRoom(this)
@@ -193,9 +190,9 @@ class CloudflareRoomAttempt extends DriverAttempt {
 
   /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, which
    *  core reports. An inbox ready once it went out is lost meanwhile: what is sent to its member may miss it. */
-  private failFirst(error: unknown): void {
+  private failFirst(retry: TransientRetry, error: unknown): void {
     if (this.state() === 'closed') return
-    const delay = transientRetryDelay(error, ++this.firstFailures, Date.now() - this.firstRegistrationAt)
+    const delay = retry.delayAfter(error)
     if (delay === null) {
       this.stop()
       return this.transition('closed', error)
@@ -223,7 +220,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
   /** Sent in this turn, behind what this session sent the room before; a stub that can't be opened rejects it, once the
    *  caller has the attempt. */
   private async sendRegistration(): Promise<RegisterWire> {
-    return await this.callAuthority((authority) => authority.registerRoute(this.route))
+    const first = this.firstRegistration
+    return await this.callAuthority((authority) =>
+      first === null ? authority.registerRoute(this.route) : first.attempt(() => authority.registerRoute(this.route)),
+    )
   }
 
   private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {

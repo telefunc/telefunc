@@ -11,7 +11,7 @@ export type {
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import type { OrderedStubs } from './OrderedStubs.js'
-import { transientRetryDelay } from './transientRetry.js'
+import { TransientRetry } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
 import {
   DriverAttempt,
@@ -306,16 +306,16 @@ class CloudflareBroadcastMember {
     if (memberRoute.state !== 'establishing') await this.release(broadcastRouteKey(memberRoute.route), memberRoute)
   }
 
-  /** Written again after a failure Cloudflare calls transient, a few times (`transientRetryDelay()`), unless nobody
-   *  wants the route by then; after any other failure, or the last, its attempt closes with the error. */
+  /** Written again after a failure Cloudflare calls transient, a few times (`TransientRetry`), unless nobody wants the
+   *  route by then; after any other failure, or the last, its attempt closes with the error. */
   private async recordFirstPresence(routeKey: string, memberRoute: MemberRoute): Promise<void> {
-    const startedAt = Date.now()
-    for (let failures = 1; ; failures++) {
+    const retry = new TransientRetry()
+    for (;;) {
       try {
-        await this.recordPresence(memberRoute.route)
+        await this.recordPresence(memberRoute.route, retry)
         break
       } catch (error) {
-        const delay = transientRetryDelay(error, failures, Date.now() - startedAt)
+        const delay = retry.delayAfter(error)
         if (delay === null) {
           this.routes.delete(routeKey)
           memberRoute.attempt?.presence('closed', error)
@@ -336,11 +336,12 @@ class CloudflareBroadcastMember {
     await this.withdrawPresence(memberRoute.route)
   }
 
-  /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made. */
-  private recordPresence(route: BroadcastRoute): Promise<boolean> {
+  /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made; a first
+   *  one's attempt is made through `retry`. */
+  private recordPresence(route: BroadcastRoute, retry?: TransientRetry): Promise<boolean> {
     assert(this.locatedBucket, 'A Broadcast member registers from a session that knows its bucket')
     const request = { key: route.key, kind: route.kind, member: this.id, bucket: this.locatedBucket }
-    return this.broadcast.sendPresence(this.calls, request)
+    return this.broadcast.sendPresence(this.calls, request, retry)
   }
 
   private withdrawPresence(route: BroadcastRoute): Promise<boolean> {
@@ -391,9 +392,11 @@ class CloudflareBroadcast {
     return this.callByName(member.calls, name, member.bucket, send)
   }
 
-  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<boolean> {
+  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest, retry?: TransientRetry): Promise<boolean> {
     return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
-      authority.telefuncBroadcastPresence(request),
+      retry === undefined
+        ? authority.telefuncBroadcastPresence(request)
+        : retry.attempt(() => authority.telefuncBroadcastPresence(request)),
     )
   }
 
