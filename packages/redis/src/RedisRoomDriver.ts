@@ -384,8 +384,9 @@ class RedisRoomDriver implements RoomDriver {
       client.getBuffer(retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane))),
     )
     if (frame === null) return null
-    const { payload, info } = decodeOrderingFrame(frame)
-    return { payload: Uint8Array.from(payload), seq: info.seq, timestamp: info.timestamp }
+    const decoded = decodeOrderingFrame(frame)
+    assert(decoded !== null, 'A retained frame is not an ordering frame')
+    return { payload: Uint8Array.from(decoded.payload), seq: decoded.info.seq, timestamp: decoded.info.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {

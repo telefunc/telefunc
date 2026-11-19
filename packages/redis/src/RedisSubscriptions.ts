@@ -436,6 +436,8 @@ class RedisAttempt extends DriverAttempt {
   private orders = new Map<string, LaneOrder>()
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private early: Buffer[] = []
+  /** A frame in another form was dropped and reported. */
+  private foreignReported = false
   private readonly firstReadiness = createDeferred()
   /** Settles on its first ready or its end. Rejects if it fails before either, for the sends waiting on it. */
   readonly firstReady: Promise<void> = this.firstReadiness.promise
@@ -501,7 +503,11 @@ class RedisAttempt extends DriverAttempt {
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
-    const early = this.early.map((message) => this.decodeLaneFrame(message))
+    const early: LaneFrame[] = []
+    for (const message of this.early) {
+      const frame = this.decodeLaneFrame(message)
+      if (frame !== null) early.push(frame)
+    }
     this.early = []
     const missed = resuming ? this.missedBefore(starts) : 0
     const arrived = resuming && missed !== null ? this.arrivedOfMissed(early, starts) : []
@@ -563,7 +569,11 @@ class RedisAttempt extends DriverAttempt {
 
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
-    if (this.state() === 'ready') return this.order(this.decodeLaneFrame(message))
+    if (this.state() === 'ready') {
+      const frame = this.decodeLaneFrame(message)
+      if (frame !== null) this.order(frame)
+      return
+    }
     if (this.awaitsConfirmation()) this.early.push(message)
   }
 
@@ -583,20 +593,42 @@ class RedisAttempt extends DriverAttempt {
 
   /** A frame on the wire: its commit's fence token, if armed; its lane key and its place, if its shape has them; then
    *  the ordering frame. */
-  private decodeLaneFrame(message: Buffer): LaneFrame {
+  private decodeLaneFrame(message: Buffer): LaneFrame | null {
     const fenced = message[0] === REDIS_DELIVERY_FENCE_BYTE
-    const token = fenced ? message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : null
-    let frame = fenced ? message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH) : message
+    let at = fenced ? 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH : 0
+    const token = fenced ? message.toString('latin1', 1, at) : null
     let lane = ''
     const { fanIn, placed } = this.frames
     if (fanIn) {
-      const end = 2 + frame.readUInt16BE(0)
-      lane = frame.toString('latin1', 2, end)
-      frame = frame.subarray(end)
+      const end = message.byteLength >= at + 2 ? at + 2 + message.readUInt16BE(at) : Number.POSITIVE_INFINITY
+      if (end > message.byteLength) return this.dropForeign()
+      lane = message.toString('latin1', at + 2, end)
+      at = end
     }
-    const { payload, info } = decodeOrderingFrame(placed ? frame.subarray(8) : frame)
-    const place = placed ? Number(frame.readBigUInt64BE(0)) : info.seq
-    return { lane, place, payload, info, token }
+    let place = 0
+    if (placed) {
+      if (message.byteLength < at + 8) return this.dropForeign()
+      place = Number(message.readBigUInt64BE(at))
+      at += 8
+    }
+    const decoded = decodeOrderingFrame(message.subarray(at))
+    if (decoded === null) return this.dropForeign()
+    if (!placed) place = decoded.info.seq
+    if (!Number.isSafeInteger(place) || place < 1) return this.dropForeign()
+    return { lane, place, payload: decoded.payload, info: decoded.info, token }
+  }
+
+  /** A frame in a form Telefunc's scripts don't write, from another client publishing to the channel: reported once. */
+  private dropForeign(): null {
+    if (this.foreignReported) return null
+    this.foreignReported = true
+    console.error(
+      new Error(
+        `Telefunc's Redis backend dropped a message on ${this.channel} that isn't in the form Telefunc publishes: a ` +
+          'client other than Telefunc published to its channel',
+      ),
+    )
+    return null
   }
 
   /** Delivers each lane in order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for it,

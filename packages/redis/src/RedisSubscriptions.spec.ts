@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import type { SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
@@ -48,26 +48,60 @@ const PASSING = [
 ]
 
 function setup(subscribe: SubscriberSocket['subscribe'] = async () => {}) {
+  /** What Redis sends the subscriber socket: a frame on a channel. */
+  let publish = (_channel: string, _frame: Buffer) => {}
   const socket: SubscriberSocket = {
     connect: async () => {},
     subscribe,
     unsubscribe: async () => {},
     ping: async () => {},
     disconnect() {},
-    on: () => socket,
+    on(event: string, listener: (channel: Buffer, frame: Buffer) => void) {
+      if (event === 'messageBuffer') publish = (channel, frame) => listener(Buffer.from(channel), frame)
+      return socket
+    },
   }
   const connection = { openSubscriberSocket: async () => socket } as unknown as RedisConnection
   const subscriptions = new RedisSubscriptions({ connection })
-  const listen = (channel: string, readStarts: ReadStarts = async () => new Map()): DriverAttempt =>
+  const delivered: string[] = []
+  const listen = (
+    channel: string,
+    readStarts: ReadStarts = async () => new Map(),
+    frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
+  ): DriverAttempt =>
     subscriptions.subscribe({
       channel,
       invalidationChannel: null,
-      frames: { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
+      frames,
       readStarts,
-      receiver: { deliver() {} },
+      receiver: {
+        deliver(payload) {
+          delivered.push(String(payload))
+        },
+      },
       reportMissed() {},
     })
-  return { subscriptions, listen, sends: new NewSubscriptionWait({ subscriptions }) }
+  return {
+    subscriptions,
+    listen,
+    delivered,
+    publish: (channel: string, frame: Buffer) => publish(channel, frame),
+    sends: new NewSubscriptionWait({ subscriptions }),
+  }
+}
+
+/** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
+ *  `[seq_hi][seq_lo][ts_hi][ts_lo][payload]`, u32 big-endian. */
+function frameOf(place: number, text: string, { lane, seq = place }: { lane?: string; seq?: number } = {}): Buffer {
+  const header = Buffer.alloc(24)
+  header.writeBigUInt64BE(BigInt(place), 0)
+  header.writeUInt32BE(Math.floor(seq / 0x1_0000_0000), 8)
+  header.writeUInt32BE(seq % 0x1_0000_0000, 12)
+  header.writeUInt32BE(0, 16)
+  header.writeUInt32BE(1_700_000_000, 20)
+  const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
+  if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
+  return Buffer.concat([laneKey, header, Buffer.from(text)])
 }
 
 describe('a start read Redis answers with an error', () => {
@@ -144,5 +178,70 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(BINARY)
 
     await expect(sends.waitTurn(RULE, 'hello')!.turn).resolves.toBe('hello')
+  })
+})
+
+describe("a frame on a subscribed channel that isn't in the form Telefunc's scripts publish", () => {
+  const reports: unknown[][] = []
+  afterEach(() => {
+    vi.restoreAllMocks()
+    reports.length = 0
+  })
+  const spyReports = () => vi.spyOn(console, 'error').mockImplementation((...args) => void reports.push(args))
+  const FOREIGN: [string, Buffer][] = [
+    ['3 bytes', Buffer.from([1, 2, 3])],
+    ['a place and no ordering header', frameOf(1, '').subarray(0, 12)],
+    ['a seq of 0', frameOf(1, 'x', { seq: 0 })],
+    ['a place of 0', frameOf(0, 'x', { seq: 1 })],
+  ]
+
+  for (const [name, frame] of FOREIGN) {
+    it(`is dropped, reported once without calling itself a bug, and the subscription goes on: ${name}`, async () => {
+      spyReports()
+      const { subscriptions, listen, publish, delivered } = setup()
+      listen(TEXT)
+      await Promise.all(subscriptions.establishingOn([TEXT]))
+
+      publish(TEXT, frame)
+      publish(TEXT, frame)
+      publish(TEXT, frameOf(1, 'after'))
+
+      expect(delivered).toEqual(['after'])
+      expect(reports).toHaveLength(1)
+      expect(String(reports[0])).toContain(`Telefunc's Redis backend dropped a message on ${TEXT}`)
+      expect(String(reports[0])).not.toMatch(/bug/i)
+    })
+  }
+
+  it('is dropped where its lane key runs past its end, on a channel of many lanes', async () => {
+    spyReports()
+    const { subscriptions, listen, publish, delivered } = setup()
+    listen(TEXT, async () => new Map(), { fanIn: true, placed: true, text: true, lanesEndWithMembers: false })
+    await Promise.all(subscriptions.establishingOn([TEXT]))
+    const overlong = frameOf(1, 'x', { lane: 'lane' })
+    overlong.writeUInt16BE(500, 0)
+
+    publish(TEXT, overlong)
+    publish(TEXT, frameOf(1, 'after', { lane: 'lane' }))
+
+    expect(delivered).toEqual(['after'])
+    expect(reports).toHaveLength(1)
+  })
+
+  it('is dropped where it arrives while the subscription is confirmed, which then goes live', async () => {
+    spyReports()
+    const starts = createDeferred<Map<string, { seq: number; timestamp: number }>>()
+    const { listen, publish, delivered } = setup()
+    const attempt = listen(TEXT, () => starts.promise)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    publish(TEXT, Buffer.from([1, 2, 3]))
+    publish(TEXT, frameOf(1, 'early'))
+    starts.resolve(new Map())
+
+    await expect.poll(() => attempt.state()).toBe('ready')
+    expect(delivered).toEqual(['early'])
+    expect(reports).toHaveLength(1)
+    expect(String(reports[0])).not.toMatch(/bug/i)
   })
 })
