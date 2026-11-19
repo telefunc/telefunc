@@ -2,6 +2,7 @@ export {
   isRoomRequest,
   decodeRoomRequest,
   decodeRoomDeclaration,
+  decodeRoomWantParts,
   decodeRoomPublish,
   decodeStubBinaryFrame,
   pageFrameMessage,
@@ -38,9 +39,7 @@ type RoomRequest = Extract<
   { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-update-meta' | 'req-dm' | 'req-private' }
 >
 
-type RoomDeclaration =
-  | Exclude<RoomStubRequest, RoomRequest | { __r: 'sub-binary' }>
-  | ({ __r: 'sub-binary' } & BinaryWantChange)
+type RoomDeclaration = Exclude<RoomStubRequest, RoomRequest>
 
 /** A member's meta, attributes and DM requests, by the API call each serves. */
 const MEMBER_MUTATIONS = {
@@ -119,21 +118,26 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   switch (decl.__r) {
     case 'dm-reply':
       return decodeDmReplyDeclaration(decl)
-    case 'sub-binary': {
-      const { member, track, on } = decl
-      if (member !== null && !isMemberId(member)) malformed('binary wants')
-      if (track !== null && !isRoomTrack(track)) malformed('binary wants')
-      return {
-        __r: 'sub-binary',
-        member: member ?? EVERY_MEMBER,
-        track: track ?? EVERY_TRACK,
-        on: flag(on, 'binary wants'),
-      }
-    }
-    case 'sub-text':
-      return { __r: 'sub-text', members: decodeTextWants(decl.members) }
   }
   return malformed('declaration')
+}
+
+/** A page's `RoomWantParts`, none before its first member or track want: the members, and the pairs as wants to turn
+ *  on. */
+function decodeRoomWantParts(value: unknown): { members: Set<string>; tracks: BinaryWantChange[] } {
+  if (value === undefined) return { members: new Set(), tracks: [] }
+  const parts = record(value, 'want parts')
+  if (!Array.isArray(parts.members) || !Array.isArray(parts.tracks)) malformed('want parts')
+  const members = new Set<string>()
+  for (const id of parts.members) members.add(memberId(id, 'want parts'))
+  const tracks = parts.tracks.map((pair: unknown): BinaryWantChange => {
+    if (!Array.isArray(pair) || pair.length !== 2) malformed('want parts')
+    const [member, track] = pair
+    if (member !== null && !isMemberId(member)) malformed('want parts')
+    if (track !== null && !isRoomTrack(track)) malformed('want parts')
+    return { member: member ?? EVERY_MEMBER, track: track ?? EVERY_TRACK, on: true }
+  })
+  return { members, tracks }
 }
 
 function decodeParticipantDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
@@ -157,16 +161,6 @@ function decodeDmReply(value: unknown): RoomResult {
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */
-function decodeTextWants(value: unknown): Record<string, boolean> {
-  const changes = record(value, 'text wants')
-  const members: Record<string, boolean> = Object.create(null)
-  for (const [memberId, wanted] of Object.entries(changes)) {
-    if (!isMemberId(memberId)) malformed('text wants')
-    members[memberId] = flag(wanted, 'text wants')
-  }
-  return members
-}
-
 function decodeRoomPublish(value: unknown): RoomDataPublish {
   const publish = record(value, 'publish')
   if (publish.__r !== 'data') malformed('publish')

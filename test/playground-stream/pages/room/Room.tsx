@@ -5,6 +5,8 @@ import { abort, close, withContext } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
+  onJoinSpeaker,
+  onSpeakerPublishes,
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
@@ -2123,6 +2125,31 @@ function Room() {
           // `theirs` arriving proves the publish propagated, so `mine` staying empty is meaningful.
           return { result: { mine, theirs, selfDelivery: me.selfDelivery }, done: theirs.includes('hi') }
         })
+      })}
+
+      {scenario('sub-then-call', null, 'Subscribe, then call a telefunction that publishes', async () => {
+        // Per form, whether the first message published by the call right after the subscribe reached it.
+        const firsts: Record<string, string> = {}
+        for (const form of ['member', 'track', 'member binary', 'track binary']) {
+          const binary = form.endsWith('binary')
+          const track = form.startsWith('track')
+          const [roomId, room] = await createRoom('subthencall')
+          const releaseRoom = keepReachable(room)
+          const speaker = await getParticipantWhenJoined(room, await onJoinSpeaker(roomId))
+          const received: string[] = []
+          const push = (data: unknown) =>
+            received.push(data instanceof Uint8Array ? new TextDecoder().decode(data) : String(data))
+          if (track && binary) room.subscribeBinary(push, { track: 't' })
+          else if (track) room.subscribe(push, { track: 't' })
+          else if (binary) speaker.subscribeBinary(push)
+          else speaker.subscribe(push)
+          await onSpeakerPublishes(roomId, 'first', { binary, track })
+          await onSpeakerPublishes(roomId, 'end', { binary, track })
+          await pollUntil(() => ({ done: received.includes('end') }))
+          firsts[form] = received[0] ?? 'none'
+          releaseRoom()
+        }
+        setResult(JSON.stringify({ firsts }))
       })}
 
       {scenario(

@@ -53,10 +53,10 @@ class ChannelAttach {
     return this.want !== null && this.want.version > this.confirmed ? this.want : null
   }
 
-  /** Turns the want of `kind` on or off at the next version, and returns the new want. */
-  changeWant(kind: 'text' | 'binary', on: boolean): Readonly<Want> {
-    const { version, text, binary } = this.want ?? { version: 0, text: false, binary: false }
-    this.want = { version: version + 1, text, binary, [kind]: on }
+  /** Changes the want as `change` says at the next version, and returns the new want. */
+  changeWant(change: Partial<Omit<Want, 'version'>>): Readonly<Want> {
+    const { version, ...want } = this.want ?? { version: 0, text: false, binary: false }
+    this.want = { ...want, ...change, version: version + 1 }
     return this.want
   }
 

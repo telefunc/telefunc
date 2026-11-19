@@ -19,6 +19,7 @@ import type { RosterStream } from './lifecycle/RosterStream.js'
 import { reportRoomError } from './reportRoomError.js'
 import {
   decodeRoomDeclaration,
+  decodeRoomWantParts,
   decodeRoomPublish,
   decodeRoomRequest,
   type RoomRequest,
@@ -32,6 +33,7 @@ import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHo
 import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import {
   applyBinaryWantChange,
+  binaryWantChangesTo,
   binaryWantsCovers,
   emptyBinaryWants,
   forgetMemberWants,
@@ -125,7 +127,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     })
   }
 
-  /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
+  /** Control always flows; text follows the room-wide want and the members' (`_onPageWantParts`), binary the pairs'. */
   _onPageSubscription(kind: BroadcastKind, on: boolean): void {
     if (kind === 'binary' || on === this.wantsText) return
     const before = on ? { all: this.wantsText, members: new Map<string, boolean>() } : null
@@ -134,6 +136,17 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this.flushTail()
     this.room.onHolderTextChanged(this, before)
+  }
+
+  /** The members and pairs the page wants, as its want declares them whole, with the room-wide text before them: applied
+   *  where they differ from what it holds. */
+  _onPageWantParts(parts: unknown): void {
+    const { members, tracks } = decodeRoomWantParts(parts)
+    const texts = new Map<string, boolean>()
+    for (const id of this.textMemberWants) if (!members.has(id)) texts.set(id, false)
+    for (const id of members) if (!this.textMemberWants.has(id)) texts.set(id, true)
+    if (texts.size > 0) this.declareTextWants(texts)
+    for (const change of binaryWantChangesTo(this.binary, tracks)) this.declareBinaryWant(change)
   }
 
   _onPageAttach(): void {
@@ -158,14 +171,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   private applyDeclaration(declaration: RoomDeclaration): void {
-    switch (declaration.__r) {
-      case 'sub-binary':
-        return this.declareBinaryWant(declaration)
-      case 'sub-text':
-        return this.declareTextWants(declaration.members)
-      case 'dm-reply':
-        return this.dmReplies.settle(declaration.ackId, declaration.reply)
-    }
+    this.dmReplies.settle(declaration.ackId, declaration.reply)
   }
 
   /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
@@ -186,9 +192,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.room.onHolderBinaryChanged(this, change)
   }
 
-  private declareTextWants(changes: Record<string, boolean>): void {
+  private declareTextWants(changes: Map<string, boolean>): void {
     const members = new Map<string, boolean>()
-    for (const [id, wanted] of Object.entries(changes)) {
+    for (const [id, wanted] of changes) {
       if (wanted === this.textMemberWants.has(id) || (wanted && !this.room.model.hasMember(id))) continue
       members.set(id, !wanted)
       toggle(this.textMemberWants, id, wanted)

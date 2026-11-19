@@ -839,6 +839,18 @@ function testRoom() {
       expect(r.received).deep.equal(['live', 'end'])
     },
   )
+  testRoomScenario<{ firsts: Record<string, string> }>(
+    'sub-then-call',
+    'room: a page that subscribes to a member or a track, of messages or bytes, gets what the telefunction it calls next publishes there',
+    (r) => {
+      expect(r.firsts).deep.equal({
+        member: 'first',
+        track: 'first',
+        'member binary': 'first',
+        'track binary': 'first',
+      })
+    },
+  )
   testRoomScenario<{ held: string[] }>(
     'dm-hold',
     'room: a DM sent before listen() is held and flushed on attach',

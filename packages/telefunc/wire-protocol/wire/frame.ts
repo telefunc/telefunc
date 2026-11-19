@@ -369,11 +369,14 @@ const encode = {
     writeU32(frame, HEADER + 1, lastSeq ?? 0)
     return frame
   },
-  want(index: number, { version, text, binary }: Want): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 5)
+  /** `parts`, where it has some, follows as JSON. */
+  want(index: number, { version, text, binary, parts }: Want): Uint8Array<ArrayBuffer> {
+    const json = parts === undefined ? null : textEncoder.encode(JSON.stringify(parts))
+    const frame = new Uint8Array(HEADER + 5 + (json?.byteLength ?? 0))
     writeHeader(frame, TAG.WANT, index, 0)
     writeU32(frame, HEADER, version)
     frame[HEADER + 4] = (text ? 1 : 0) | (binary ? 2 : 0)
+    if (json !== null) frame.set(json, HEADER + 5)
     return frame
   },
   wanted(index: number, version: number): Uint8Array<ArrayBuffer> {
@@ -416,7 +419,6 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.CLOSE_ACK]: encode.closeAck(0, 0).byteLength,
   [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST, 0).byteLength,
   [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
-  [TAG.WANT]: encode.want(0, { version: 0, text: false, binary: false }).byteLength,
   [TAG.WANTED]: encode.wanted(0, 0).byteLength,
   [TAG.BDP_PING]: encode.bdpPing(0, 0).byteLength,
   [TAG.BDP_PING_ACK]: encode.bdpPingAck(0, 0, 0, 0).byteLength,
@@ -598,11 +600,9 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.WANT: {
       assertProtocol(payload.length >= 5, 'WANT payload too short')
       const kinds = payload[4] ?? 0
-      return {
-        tag: TAG.WANT,
-        index,
-        want: { version: readU32(payload, 0), text: (kinds & 1) !== 0, binary: (kinds & 2) !== 0 },
-      }
+      const want: Want = { version: readU32(payload, 0), text: (kinds & 1) !== 0, binary: (kinds & 2) !== 0 }
+      if (payload.length > 5) want.parts = parseJsonPayload(payload.subarray(5))
+      return { tag: TAG.WANT, index, want }
     }
     case TAG.WANTED:
       assertProtocol(payload.length >= 4, 'WANTED payload too short')

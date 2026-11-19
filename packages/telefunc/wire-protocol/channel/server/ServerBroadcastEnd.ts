@@ -36,6 +36,8 @@ type BroadcastEndOwner = {
    *  server hasn't confirmed them. The page learns it is in effect, and such a call goes on, once what it returns
    *  settles; where that rejects, the broadcast ends with the page told its subscription didn't take effect. */
   _onPageSubscription?(kind: BroadcastKind, on: boolean): Promise<void> | void
+  /** What the page wants beyond the two kinds (`Want`'s `parts`), declared and confirmed as they are. */
+  _onPageWantParts?(parts: unknown): Promise<void> | void
   /** Each attach of the page while the channel is open, after the page's subscriptions applied. */
   _onPageAttach?(): void
   /** Whether its page reads the publishes of `stream`; without one, whether it reads any. Left out, it reads them all. */
@@ -365,6 +367,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     const pending = inRequestScope(this._callRequest, () => [
       owner._onPageSubscription?.('text', want.text),
       owner._onPageSubscription?.('binary', want.binary),
+      owner._onPageWantParts?.(want.parts),
     ])
     // A page that reads none of its publishes any more would only drop those still waiting for its wire.
     if (!want.text && !want.binary && owner._pageReads?.() === false) this.dropUnhanded()

@@ -113,6 +113,7 @@ type ClientBroadcast = Pick<
   | '_publishUnreported'
   | '_publishBinaryUnreported'
   | '_setSubscribed'
+  | '_setWantParts'
   | '_sendReply'
   | '_subscribeLocal'
   | '_confirmSoon'

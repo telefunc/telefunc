@@ -19,7 +19,7 @@ import {
   type RoomJoinedEvent,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
-  type RoomStubRequest,
+  type RoomWantParts,
 } from '../shared/protocol.js'
 import { departureCause } from '../shared/RoomModel.js'
 import { RoomState, type RoomStateOwner, type WantChange } from '../shared/RoomState.js'
@@ -36,6 +36,7 @@ import {
   type PageLink,
 } from './ClientParticipant.js'
 import { addRoom } from './page.js'
+import { toggle } from '../utils/sets.js'
 import type { JoinOptions, LeaveCause, Sender } from '../types.js'
 
 /** What a room's stub relays to its client on the text lane. */
@@ -58,6 +59,10 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   private readonly joins = new PendingJoins()
   /** The wants turned off in this task, by `wantKey`. */
   private readonly offsDue = new Map<string, WantChange>()
+  /** The members whose messages it wants, and the member and track pairs whose bytes it wants, by `wantKey`: its
+   *  want's parts. */
+  private readonly memberTexts = new Set<string>()
+  private readonly tracks = new Map<string, [member: string | null, track: string | null]>()
 
   constructor({ end, snapshot }: ClientRoomHandleOptions) {
     this.end = end
@@ -70,7 +75,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     this.remotes = new RoomRemotes({ state: this.state, adder: 'app' })
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
-    // text while subscribed, binary per `sub-binary`.
+    // text while subscribed room-wide or to its member, binary per its pairs.
     end._subscribeLocal('text', (envelope, info) => this.onEnvelope(envelope, info))
     end._subscribeLocal('binary', (framed, info) => this.onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
@@ -201,9 +206,9 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     this.offsDue.clear()
   }
 
-  /** Room-wide text wants ride the Broadcast subscription, which attaches again before the channel's `onOpen`.
-   *  Declarations are replayed channel messages, so the server keeps them across reconnects: each carries only what
-   *  changed: a member's text want, or the binary want. */
+  /** Every want rides the broadcast's: the room-wide text as its text, the members' and the pairs' as its parts. The
+   *  page declares it at each attach, and each call it makes before the server confirmed it carries it, so the server
+   *  applies it before that call runs. */
   private declare(change: WantChange): void {
     if (this.mirror.model.closed) {
       this.end._setSubscribed('text', false) // a closed room takes no declaration
@@ -214,11 +219,20 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
         return
       case 'text':
         if (change.member === null) return this.end._setSubscribed('text', change.on)
-        // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
-        return this.notify({ __r: 'sub-text', members: { [change.member]: change.on } })
-      case 'track':
-        return this.notify({ __r: 'sub-binary', ...trackWantOnWire(change.change) })
+        toggle(this.memberTexts, change.member, change.on)
+        return this.declareParts()
+      case 'track': {
+        const { member, track, on } = trackWantOnWire(change.change)
+        if (on) this.tracks.set(wantKey(change), [member, track])
+        else this.tracks.delete(wantKey(change))
+        return this.declareParts()
+      }
     }
+  }
+
+  private declareParts(): void {
+    const parts: RoomWantParts = { members: [...this.memberTexts], tracks: [...this.tracks.values()] }
+    this.end._setWantParts(parts)
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
@@ -289,11 +303,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     // Local participants end after onClose, as on the server.
     for (const local of this.localParticipants.values()) local._onLeft(departureCause(cause))
     this.localParticipants.clear()
-  }
-
-  /** A closed channel's server side is gone with its wants. */
-  private notify(notice: RoomStubRequest): void {
-    if (!this.end.isClosed) void this.end.send(notice, { ack: false }).catch(() => {})
   }
 }
 

@@ -1,7 +1,14 @@
-export { emptyBinaryWants, binaryWantsCovers, applyBinaryWantChange, forgetMemberWants }
+export { emptyBinaryWants, binaryWantsCovers, applyBinaryWantChange, binaryWantChangesTo, forgetMemberWants }
 export type { TrackWants, BinaryWants }
 
-import { EVERY_MEMBER, EVERY_TRACK, type BinaryWantChange, type TrackKey } from '../../shared/binary.js'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  type BinaryWantChange,
+  type EveryMember,
+  type EveryTrack,
+  type TrackKey,
+} from '../../shared/binary.js'
 import { toggle } from '../../utils/sets.js'
 
 /** Which of a publisher's tracks a holder wants: every track while `all`, and each of `tracks` either way
@@ -49,4 +56,23 @@ function forgetMemberWants(wants: BinaryWants, member: string): boolean {
   if (wanted === undefined) return false
   wants.named -= wanted.tracks.size
   return wants.members.delete(member)
+}
+
+/** The changes that make `wants` want exactly `pairs`, the ones turning a want off first. */
+function binaryWantChangesTo(wants: BinaryWants, pairs: readonly BinaryWantChange[]): BinaryWantChange[] {
+  const wanted = new Map<string | EveryMember, Set<TrackKey | EveryTrack>>()
+  for (const { member, track } of pairs) {
+    const tracks = wanted.get(member) ?? new Set()
+    wanted.set(member, tracks.add(track))
+  }
+  const offs: BinaryWantChange[] = []
+  const turnOffUnwanted = (member: string | EveryMember, { all, tracks }: TrackWants) => {
+    const held: Array<TrackKey | EveryTrack> = all ? [EVERY_TRACK, ...tracks] : [...tracks]
+    for (const track of held) if (!wanted.get(member)?.delete(track)) offs.push({ member, track, on: false })
+  }
+  turnOffUnwanted(EVERY_MEMBER, wants.everyMember)
+  for (const [member, memberWants] of wants.members) turnOffUnwanted(member, memberWants)
+  const ons: BinaryWantChange[] = []
+  for (const [member, tracks] of wanted) for (const track of tracks) ons.push({ member, track, on: true })
+  return [...offs, ...ons]
 }

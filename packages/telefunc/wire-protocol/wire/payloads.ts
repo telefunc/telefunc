@@ -21,8 +21,9 @@ import { hasProp } from '../../utils/hasProp.js'
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 
 /** What a page wants to hear on a broadcast: `version` counts the changes the page made to it, so the server applies a
- *  want only over an older one, whichever way each came. */
-type Want = { version: number; text: boolean; binary: boolean }
+ *  want only over an older one, whichever way each came. `parts` is what an add-on built on the broadcast lets the page
+ *  want beyond its two kinds, such as Room's members and tracks, as JSON the add-on reads. */
+type Want = { version: number; text: boolean; binary: boolean; parts?: unknown }
 
 /** A want a telefunction call carries, for the broadcast `channel` names. */
 type CallWant = Want & { channel: string }

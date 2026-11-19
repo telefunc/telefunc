@@ -23,6 +23,7 @@ function pageRoom(members: Record<string, number> = {}) {
     },
     _subscribeLocal: () => () => {},
     _setSubscribed: () => {},
+    _setWantParts: () => {},
     onClose: (callback: () => void) => {
       closes.push(callback)
       return () => {}

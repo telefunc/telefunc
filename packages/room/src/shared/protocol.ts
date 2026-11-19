@@ -24,6 +24,7 @@ export type {
   RoomFailure,
   RoomResult,
   RoomStubRequest,
+  RoomWantParts,
   ParticipantStubRequest,
   MemberMutationRequest,
   MemberRequest,
@@ -175,16 +176,16 @@ type MemberMutationRequest =
 /** What a member asks of its room: the requests both stubs take, and what a server participant does itself. */
 type MemberRequest = MemberMutationRequest | { __r: 'req-leave' }
 
-/** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
- *  subscription, which attaches again before `onOpen`. */
+/** Client→server requests on a room stub; `id` is the acting member. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | (MemberRequest & { id: string })
   | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
-  /** A `BinaryWantChange`, with `null` for `EVERY_MEMBER` and `EVERY_TRACK`. */
-  | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
-  /** Changes only: each member whose own want changed. */
-  | { __r: 'sub-text'; members: Record<string, boolean> }
+
+/** What a page wants of its room besides the room-wide messages: the members whose messages it wants, and the member and
+ *  track pairs whose bytes it wants, `null` naming every member or every track. The parts of its broadcast's want, which
+ *  carries the room-wide one as its text. */
+type RoomWantParts = { members: string[]; tracks: Array<[member: string | null, track: string | null]> }
 
 /** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
 type ParticipantStubRequest = { __r: 'req-publish'; data: unknown; retain?: boolean } | MemberRequest

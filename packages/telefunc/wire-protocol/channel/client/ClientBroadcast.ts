@@ -70,7 +70,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
    *  entry and each call made while the server hasn't confirmed it carry it. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
     if (on === (this._attach.wants?.[kind] ?? false) || this.stopped) return
-    this.connection.sendWant(this, this._attach.changeWant(kind, on))
+    this.connection.sendWant(this, this._attach.changeWant({ [kind]: on }))
+  }
+
+  /** @internal Changes what an add-on built on it wants beyond its two kinds (`Want`'s `parts`), as `_setSubscribed`
+   *  does. */
+  _setWantParts(parts: unknown): void {
+    if (this.stopped) return
+    this.connection.sendWant(this, this._attach.changeWant({ parts }))
   }
 
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {

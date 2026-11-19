@@ -1,5 +1,7 @@
 export {
   onCreateRoom,
+  onJoinSpeaker,
+  onSpeakerPublishes,
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
@@ -806,6 +808,28 @@ async function onSeedChurn(roomId: string) {
   const members = seeded.get(roomId)!
   members.push(await (await Room.get(roomId)).join({ meta: { name: 'late' } }))
   await members[0]!.leave()
+}
+
+/** Each room's speaker, joined on the server: the member whose publishes a page subscribes to. */
+const speakers = new Map<string, LocalParticipant>()
+
+async function onJoinSpeaker(roomId: string) {
+  const speaker = await Room.join(roomId, { meta: { name: 'S' } })
+  speakers.set(roomId, speaker)
+  return speaker.id
+}
+
+/** The speaker publishes `text` as a message or as bytes, on the track `t` or on none. */
+async function onSpeakerPublishes(
+  roomId: string,
+  text: string,
+  { binary, track }: { binary: boolean; track: boolean },
+) {
+  const speaker = speakers.get(roomId)
+  if (!speaker) throw new Error(`No speaker joined room ${roomId}`)
+  const options = track ? { track: 't' } : {}
+  if (binary) await speaker.publishBinary(new TextEncoder().encode(text), options)
+  else await speaker.publish(text, options)
 }
 
 async function onPing() {
