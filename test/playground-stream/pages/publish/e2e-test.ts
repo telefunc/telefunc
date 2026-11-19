@@ -17,6 +17,7 @@ import {
   REDIS_TOOK_REFUSED_KEY,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -42,7 +43,7 @@ type ServerBroadcastResult = {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
-  const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
+  const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const transport = transports.at(-1)
 
   testSubscribeOrder(inDocker)
@@ -502,7 +503,7 @@ function testPublish(isDev: boolean, inDocker = false) {
 /** When a page's subscription takes effect. */
 function testSubscribeOrder(inDocker = false) {
   // On SSE alone, over HTTP/1.1, the page holds the POST that carries its subscription (Publish.tsx `holdsPosts()`).
-  const sseOnly = JSON.stringify(JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+  const sseOnly = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse'
   const holdsPosts = () => sseOnly && getServerUrl().startsWith('http:')
 
   test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
