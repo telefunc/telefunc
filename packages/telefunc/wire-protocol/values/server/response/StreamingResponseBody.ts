@@ -14,7 +14,7 @@ import {
 } from '../../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../../node/server/context/requestContext.js'
 import type { TelefuncId } from '../../../../node/server/runTelefunc/serializeTelefunctionResult.js'
-import { restoreContext, isAsyncMode } from '../../../../node/server/context/context.js'
+import { restoreContext, restoreContextInSyncMode } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
@@ -125,8 +125,7 @@ function buildInlineResponseBody(runContext: {
     pending: Promise<{ type: 'chunk'; entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
   }
   const advance = (entry: RaceEntry) => {
-    // Without AsyncLocalStorage the context ends with the synchronous call, so each pull restores it.
-    const next = isAsyncMode() ? entry.iter.next() : restoreContext(context, () => entry.iter.next())
+    const next = restoreContextInSyncMode(context, () => entry.iter.next())
     entry.pending = next.then((result) => ({ type: 'chunk', entry, result }))
     // While paused nothing races it, so its failure waits for the resume without counting as unhandled.
     if (flow) entry.pending.catch(() => {})

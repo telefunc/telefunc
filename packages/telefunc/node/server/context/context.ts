@@ -1,5 +1,6 @@
 export { getRawContext }
 export { restoreContext }
+export { restoreContextInSyncMode }
 export { provideContext }
 export { installAsyncMode }
 export { isAsyncMode }
@@ -44,6 +45,11 @@ function getRawContext(): Context | null {
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
   return globalObject.restoreContext(context, fn)
+}
+
+/** Without AsyncLocalStorage the context ends with the synchronous call, so a call made after an `await` restores it. */
+function restoreContextInSyncMode<T>(context: Context, fn: () => T): T {
+  return globalObject.isAsyncMode ? fn() : restoreContext(context, fn)
 }
 
 function provideContext(context: Telefunc.Context): void {
