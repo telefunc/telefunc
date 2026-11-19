@@ -101,24 +101,26 @@ function isUnreachable(error: unknown): boolean {
   )
 }
 
-/** Redis's refusal of a command its user's ACL denies or a replica won't run, at top level or inside a script: Redis 7
- *  and later word a script's ACL refusal as `ERR`, and Redis 5 and 6 and Dragonfly wrap a script's refusal in the
- *  script's error. */
-const REFUSAL =
-  /^(?:NOPERM |READONLY |ERR ACL failure in script: |ERR The user executing the script |ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?(?:The user executing the script |-READONLY |-NOPERM ))/
+/** How Redis 5 and 6 and Dragonfly wrap the refusal of a call a script makes. */
+const IN_SCRIPT = String.raw`ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?`
+
+/** Redis's refusal of a command its user's ACL denies, at top level or inside a script: Redis 7 and later word a
+ *  script's ACL refusal as `ERR`. */
+const ACL_REFUSAL = new RegExp(
+  String.raw`^(?:NOPERM |ERR ACL failure in script: |ERR The user executing the script |${IN_SCRIPT}(?:The user executing the script |-NOPERM ))`,
+)
 
 /** A replica's refusal of a write, at top level or inside a script. */
-const READ_ONLY =
-  /^(?:READONLY |ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?-READONLY )/
+const READ_ONLY = new RegExp(String.raw`^(?:READONLY |${IN_SCRIPT}-READONLY )`)
 
 /** A write a replica refused, as the backend reports it: it was given, or now reaches, a replica. */
 class ReplicaRefusal extends Error {}
 
-/** Redis refused the command, which stands until an operator changes its ACL or role; `BUSY`, `LOADING` and the like
- *  pass. */
+/** Redis refused the command, by its user's ACL or as a replica, which stands until an operator changes the ACL or the
+ *  role; `BUSY`, `LOADING` and the like pass. */
 function isRefusal(error: unknown): error is Error {
-  if (error instanceof ReplicaRefusal) return true
-  return error instanceof Error && error.name === 'ReplyError' && REFUSAL.test(error.message)
+  if (error instanceof ReplicaRefusal || isReadOnly(error)) return true
+  return error instanceof Error && error.name === 'ReplyError' && ACL_REFUSAL.test(error.message)
 }
 
 function isReadOnly(error: unknown): error is Error {
