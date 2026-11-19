@@ -160,10 +160,12 @@ function testChannelOversized() {
     await autoRetry(async () => {
       expect(await page.textContent('#log')).toContain('{"type":"welcome"}')
     })
+    // `sendBinary()` throws at the call: the page logs the refusal, and not the send.
     await page.click('#send-oversized-btn')
     await autoRetry(async () => {
-      expect(await page.textContent('#log')).toContain('Channel message too large')
+      expect(await page.textContent('#log')).toContain('Refused: ')
     })
+    expect(await page.textContent('#log')).not.toContain('binary: 32 MiB')
     const echoText = `echo-${Math.random()}`
     await page.fill('#echo-input', echoText)
     await page.click('#send-echo-btn')
@@ -350,8 +352,10 @@ function testRefusedPresence() {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
     await page.click('#subscribe')
+    // KV refused the presence: the subscription's `ready` rejected, and the publish made meanwhile settled.
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+      const { readyRejected, published } = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      expect({ readyRejected, published }).deep.equal({ readyRejected: true, published: true })
     })
     // Each try publishes again: the presence is written at its next refresh, within 30 s.
     await autoRetry(
@@ -375,7 +379,7 @@ async function fullPageReload() {
 }
 
 function testColdPublish() {
-  test("Broadcast: publishes past the buffer's budget while the key's first presence is written all arrive", async () => {
+  test("Broadcast: a publish a listener makes in answer to a key's first publish, as its first presence is written, arrives", async () => {
     await page.goto(getServerUrl() + '/cold-publish')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
