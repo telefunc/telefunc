@@ -31,6 +31,11 @@ function createPeer(frames: Uint8Array[]) {
 function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8Array[]) {
   let seq = 0
   const dispatch = (frame: Uint8Array<ArrayBuffer>) => channel._dispatchFrame(decode(frame) as ChannelFrame)
+  const askAck = (text: string) => {
+    const ackedSeq = ++seq
+    dispatch(encode.textAckReq(7, text, ackedSeq))
+    return ackedSeq
+  }
   return {
     text(text: string) {
       dispatch(encode.text(7, text, ++seq))
@@ -44,10 +49,13 @@ function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8A
     closeAck() {
       dispatch(encode.closeAck(7, ++seq))
     },
+    /** Asks for an acknowledgement, without waiting for the answer. */
+    askAck(text: string): void {
+      askAck(text)
+    },
     /** Resolves once the channel sent its answer. */
     async ackReq(text: string): Promise<void> {
-      const ackedSeq = ++seq
-      dispatch(encode.textAckReq(7, text, ackedSeq))
+      const ackedSeq = askAck(text)
       const isAnswer = (frame: Uint8Array) => {
         const decoded = decode(frame)
         return decoded.tag === TAG.ACK_RES && decoded.ackedSeq === ackedSeq
@@ -386,7 +394,8 @@ describe('peer-initiated close', () => {
         }),
     )
 
-    page.ackReq('"work"')
+    // The ended channel drops its answer: nothing waits for one.
+    page.askAck('"work"')
     page.closeRequest(10)
 
     expect(channel.isClosed).toBe(true)
