@@ -520,7 +520,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     this.reconnects = { attempt: attempt + 1, startedAt }
-    this.enterReconnecting(Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS))
+    this.enterReconnecting(reconnectDelay(attempt))
   }
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
@@ -588,6 +588,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.dispose()
   }
+}
+
+/** How long the page waits before reconnect `attempt` (0 after a loss): a random part of a delay that doubles from
+ *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, so pages that lost their wires together,
+ *  to a proxy or a server that restarted, don't come back together, on the first attempt or at the cap. */
+function reconnectDelay(attempt: number): number {
+  return Math.random() * Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
 }
 
 // ── Transport registry ──

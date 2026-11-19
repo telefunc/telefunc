@@ -565,7 +565,7 @@ function applyChannelConfig(val: unknown): void {
         assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
         assertUsage(
           value >= CHANNEL_RECONNECT_TIMEOUT_MIN_MS,
-          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: a client that lost its connection retries after ${CHANNEL_RECONNECT_INITIAL_DELAY_MS} ms, so in less its channels close before it is back`,
+          `\`${configPath}\` should be at least ${CHANNEL_RECONNECT_TIMEOUT_MIN_MS}: a client that lost its connection retries within ${CHANNEL_RECONNECT_INITIAL_DELAY_MS} ms, so in less its channels may close before it is back`,
         )
         next[key] = value
         break
