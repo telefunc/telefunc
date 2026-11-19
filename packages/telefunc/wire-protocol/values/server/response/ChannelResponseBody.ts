@@ -10,6 +10,7 @@ import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
 import { isAbort } from '../../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
+import { serializeAbortReason } from '../../../channel/channel.js'
 import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
@@ -76,7 +77,8 @@ function pumpProducerToChannel(
       await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
     } catch (err) {
       if (err instanceof ChannelClosedError) return
-      if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
+      // A reason JSON can't hold goes to none of the response's values: the error frame reports it.
+      if (isAbort(err)) runContext.requestContext.responseAbort.abort(serializeAbortReason(err.abortValue).value)
       if (channel.isClosed) return
       try {
         await Promise.race([channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))), stop])

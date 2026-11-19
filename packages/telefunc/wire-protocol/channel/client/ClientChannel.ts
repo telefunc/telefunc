@@ -12,10 +12,16 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyValue, withReady } from '../channel.js'
+import {
+  LOSSY_WITH_ACK_TEXT,
+  neverInEffect,
+  serializeAbortReason,
+  stringifyValue,
+  withReady,
+  type AbortReason,
+} from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../../client/clientConfig.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import {
@@ -271,11 +277,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
     if (this.stopped) return
+    const reason = serializeAbortReason(abortValue)
+    this.abortWith(reason, message)
+    if (reason.refusal) throw reason.refusal.error
+  }
+
+  /** Ends the channel with `reason`, sent to the server, unless serializing it, which runs the app's getters and
+   *  `toJSON`, ended it already. */
+  private abortWith(reason: AbortReason, message?: string): void {
+    if (this.stopped) return
     this.stopped = true
-    const abortError = createAbortError(abortValue, message)
-    // The newest lossy send, where it hasn't gone, is dropped.
-    this.connection.sendAbort(this, stringify(abortValue), this.newestLossy?.seq)
-    this._end(abortError)
+    try {
+      // The newest lossy send, where it hasn't gone, is dropped.
+      this.connection.sendAbort(this, reason.serialized, this.newestLossy?.seq)
+    } finally {
+      this._end(createAbortError(reason.value, message))
+    }
   }
 
   // ── Called by transport connection ──
@@ -586,7 +603,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _abortFromCallback(err: AbortError): void {
-    this.abort(err.abortValue, err.message)
+    const reason = serializeAbortReason(err.abortValue)
+    this.abortWith(reason, err.message)
+    if (reason.refusal) reportChannelError(reason.refusal.error)
   }
 }
 

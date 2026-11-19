@@ -1,5 +1,14 @@
-export { makePublishInfo, stringifyValue, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
+export {
+  makePublishInfo,
+  stringifyValue,
+  serializeAbortReason,
+  withReady,
+  neverInEffect,
+  Readiness,
+  LOSSY_WITH_ACK_TEXT,
+}
 export type {
+  AbortReason,
   ChannelBase,
   ChannelShield,
   ClientChannel,
@@ -79,6 +88,17 @@ function stringifyValue(value: unknown, by: ValueBy): string {
     },
   })
 }
+
+/** An abort reason as JSON, and the value the abort ends with. A reason JSON can't hold gives an abort without one, and
+ *  its `refusal`, which the end throws or reports once it ended: an abort always ends the channel. */
+function serializeAbortReason(reason: unknown): AbortReason {
+  try {
+    return { value: reason, serialized: stringifyValue(reason, 'abort'), refusal: null }
+  } catch (error) {
+    return { value: undefined, serialized: stringifyValue(undefined, 'abort'), refusal: { error } }
+  }
+}
+type AbortReason = { value: unknown; serialized: string; refusal: { error: unknown } | null }
 
 const toTag = Object.prototype.toString
 /** A buffer's own `byteLength` getter, which throws for anything without the buffer's internal slot. A page that isn't

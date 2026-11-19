@@ -15,12 +15,18 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyValue, withReady } from '../channel.js'
+import {
+  LOSSY_WITH_ACK_TEXT,
+  neverInEffect,
+  serializeAbortReason,
+  stringifyValue,
+  withReady,
+  type AbortReason,
+} from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { ChannelMux } from './ChannelMux.js'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
@@ -458,11 +464,22 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
     if (this._phase !== 'open') return
+    const reason = serializeAbortReason(abortValue)
+    this.abortWith(reason, message)
+    if (reason.refusal) throw reason.refusal.error
+  }
+
+  /** Ends the channel with `reason`, sent to its page, unless serializing it, which runs the app's getters and
+   *  `toJSON`, ended it already. */
+  private abortWith(reason: AbortReason, message?: string): void {
+    if (this._phase !== 'open') return
     this._phase = 'closing'
-    const serializedAbortValue = stringify(abortValue)
-    this.dropUnhanded()
-    this.sendEnd((peer) => peer.sendSequenced(encode.abort, serializedAbortValue))
-    this.shutdown(createAbortError(abortValue, message))
+    try {
+      this.dropUnhanded()
+      this.sendEnd((peer) => peer.sendSequenced(encode.abort, reason.serialized))
+    } finally {
+      this.shutdown(createAbortError(reason.value, message))
+    }
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
@@ -1011,13 +1028,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.shutdown(err)
   }
 
-  /** @internal A callback threw `Abort`: aborts the response carrying the channel if there is one, else the channel. */
+  /** @internal A callback threw `Abort`: aborts the response carrying the channel if there is one, else the channel.
+   *  A reason JSON can't hold is reported, and the abort goes without it, to the response's other values too. */
   _abortFromCallback(err: AbortError): void {
-    if (this.responseAbort) {
-      this.responseAbort(err.abortValue)
-    } else {
-      this.abort(err.abortValue)
-    }
+    const reason = serializeAbortReason(err.abortValue)
+    if (this.responseAbort) this.responseAbort(reason.value)
+    else this.abortWith(reason)
+    if (reason.refusal) handleCallbackBug(reason.refusal.error)
   }
 
   /** `pageGone`: the page left or never attached, so nothing the channel holds for it can reach it. */

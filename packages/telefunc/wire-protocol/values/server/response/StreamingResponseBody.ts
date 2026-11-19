@@ -17,6 +17,7 @@ import type { TelefuncId } from '../../../../node/server/runTelefunc/serializeTe
 import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
+import { serializeAbortReason, stringifyValue } from '../../../channel/channel.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
 import { Fifo } from '../../../../utils/Fifo.js'
 
@@ -190,8 +191,8 @@ function buildInlineResponseBody(runContext: {
       cancelProducers()
       // Propagate aborts to side-channels (request argument channels etc.)
       // regardless of cancellation state — listeners care even when the
-      // consumer is already gone.
-      if (isAbort(err)) responseAbort.abort(err.abortValue)
+      // consumer is already gone. A reason JSON can't hold goes to none of them: the error frame reports it.
+      if (isAbort(err)) responseAbort.abort(serializeAbortReason(err.abortValue).value)
       // Error frame: [marker][u32 payload_len][payload].
       const errorBytes = encodeErrorPayload(err, telefuncId)
       await emit(encodeFrame(encodeU32(STREAMING_ERROR_FRAME_MARKER)))
@@ -227,6 +228,8 @@ function encodeErrorPayload(err: unknown, telefuncId: TelefuncId): Uint8Array<Ar
         type: STREAMING_ERROR_TYPE.ABORT,
         abortValue: abortError.abortValue,
       }
+      // The rule for every abort reason, which refuses bytes JSON would turn into an object.
+      stringifyValue(abortError.abortValue, 'abort')
       errorPayload = stringify(payload)
     } catch (serializationErr) {
       // Abort value not serializable — fall back to bug.
