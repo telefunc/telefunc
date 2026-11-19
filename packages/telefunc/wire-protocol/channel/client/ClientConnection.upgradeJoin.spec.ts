@@ -9,13 +9,14 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { ClientConnection } from './ClientConnection.js'
+import { ClientConnection, type MuxChannel } from './ClientConnection.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'
 import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 // This spec pins the upgrade's order, not its deadlines: a loaded runner must not reach one between steps.
 vi.mock('../../constants.js', async (importOriginal) => ({
@@ -34,29 +35,6 @@ const settle = async () => {
 }
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
-
-/** The frames the connection let through to the channel, in dispatch order. */
-function createChannel(dispatched: DecodedFrame[]) {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame(frame: DecodedFrame) {
-      dispatched.push(frame)
-    },
-    _onEnded() {},
-    _attach: {
-      // Never at the edge of its credit: its data frames wait for the batch timer.
-      sendCredit: { leavesCredit: () => true },
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      capWindows() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
 
 class FakeWebSocket {
   static OPEN = 1
@@ -142,14 +120,14 @@ type Harness = {
   pushOld: (frame: Uint8Array) => void
   dispatched: DecodedFrame[]
   connection: ClientConnection
-  channel: ReturnType<typeof createChannel>
+  channel: MuxChannel
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
  *  the moment the barrier has been emitted — the start of the join, before either completion frame lands. */
 async function upgradeToBarrier(): Promise<Harness> {
   const dispatched: DecodedFrame[] = []
-  const channel = createChannel(dispatched)
+  const channel = fakeMuxChannel({ _dispatchFrame: (frame) => dispatched.push(frame) })
   const sessionId = crypto.randomUUID()
   let ix = 0
   const downstream = makeDownstream()
@@ -215,7 +193,7 @@ async function upgradeToBarrier(): Promise<Harness> {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
     transports: ['sse', 'ws'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -297,7 +275,7 @@ describe('SSE→WS handoff join', () => {
 
 describe('SSE→WS barrier on batch POSTs', () => {
   test('a barrier waiting for the POST out goes once it is answered, though a PING queued behind it', async () => {
-    const channel = createChannel([])
+    const channel = fakeMuxChannel()
     const downstream = makeDownstream()
     const posts: Array<{ frames: DecodedFrame[]; answer: () => void }> = []
     const fetchImpl = (async (_url: string, init: RequestInit) => {
@@ -318,7 +296,7 @@ describe('SSE→WS barrier on batch POSTs', () => {
     // The old wire keeps delivering, as it would the download the barrier waits behind.
     const delivering = setInterval(() => downstream.push(encode.pong()), 200)
     try {
-      ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+      ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
         transports: ['sse', 'ws'],
         fetchImpl,
         connectionKey: crypto.randomUUID(),

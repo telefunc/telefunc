@@ -6,33 +6,12 @@ import {
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
   RECONCILE_TIMEOUT_MS,
-  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { encode } from '../../wire/frame.js'
 import { ClientConnection } from './ClientConnection.js'
-
-/** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
-function createChannel(id = crypto.randomUUID()) {
-  return {
-    id,
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onEnded() {},
-    _attach: {
-      // Never at the edge of its credit: its data frames wait for the batch timer.
-      sendCredit: { leavesCredit: () => true },
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      capWindows() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 /** A `fetch` whose SSE downstream body emits only what a test hands it and never closes: a silently
  *  stalled stream (no error, no FIN), so the RECONCILED frame that clears `reconciling`
@@ -72,7 +51,7 @@ describe('SSE reconcile watchdog', () => {
     vi.useFakeTimers()
     const { fetchImpl, getSseDownstreamOpens } = createStalledTransport()
 
-    ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
+    ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), {
       transports: [CHANNEL_TRANSPORT.SSE],
       fetchImpl,
       connectionKey: crypto.randomUUID(),
@@ -94,9 +73,9 @@ describe('SSE reconcile watchdog', () => {
     vi.useFakeTimers()
     const { fetchImpl } = createStalledTransport()
     const ended: unknown[] = []
-    const channel = { ...createChannel(), _onEnded: (err: unknown) => ended.push(err) }
+    const channel = fakeMuxChannel({ _onEnded: (err) => ended.push(err) })
 
-    ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
       transports: [CHANNEL_TRANSPORT.SSE],
       fetchImpl,
       connectionKey: crypto.randomUUID(),
@@ -115,7 +94,7 @@ describe('SSE reconcile watchdog', () => {
     vi.useFakeTimers()
     const { fetchImpl, downstreams } = createStalledTransport()
 
-    ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
+    ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), {
       transports: [CHANNEL_TRANSPORT.SSE],
       fetchImpl,
       connectionKey: crypto.randomUUID(),
@@ -172,7 +151,7 @@ describe('WebSocket reconcile watchdog', () => {
     vi.useFakeTimers()
     globalThis.WebSocket = SilentWebSocket as unknown as typeof WebSocket
 
-    ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
+    ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), {
       transports: [CHANNEL_TRANSPORT.WS],
       fetchImpl: createStalledTransport().fetchImpl,
       connectionKey: crypto.randomUUID(),

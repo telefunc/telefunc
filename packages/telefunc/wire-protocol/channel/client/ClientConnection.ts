@@ -24,6 +24,8 @@ import type { Heartbeat } from './Heartbeat.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
 import type { ChannelAttach } from './ChannelAttach.js'
+import type { SendCredit } from '../../flowControl/SendCredit.js'
+import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
@@ -49,7 +51,16 @@ interface MuxChannel {
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
   /** Its credits as the connection drives them across wires. */
-  readonly _attach: ChannelAttach
+  readonly _attach: MuxChannelAttach
+}
+
+/** What the connection drives of a channel's `ChannelAttach`. */
+type MuxChannelAttach = Pick<
+  ChannelAttach,
+  'state' | 'capWindows' | 'onBatched' | 'onUpgradeJoined' | 'unconfirmedWant'
+> & {
+  readonly sendCredit: Pick<SendCredit, 'leavesCredit'>
+  readonly receiveCredit: Pick<ReceiveCredit, 'acknowledge' | 'answered' | 'onProbeAnswered'>
 }
 
 interface MuxConnection {

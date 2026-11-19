@@ -12,27 +12,7 @@ import { SendGate } from './SendGate.js'
 import { decode, encode } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
-
-function createChannel() {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onEnded() {},
-    _attach: {
-      // Never at the edge of its credit: its data frames wait for the batch timer.
-      sendCredit: { leavesCredit: () => true },
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      capWindows() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 /** A text frame is its value, a RECONCILE `RECONCILE <the channels it names>`. */
 function label({ frame }: OutboundFrame): string {
@@ -71,7 +51,7 @@ function connect(carriesReconcileInOpen: boolean) {
   return {
     wire,
     register(ix: number): ChannelRecord {
-      const record = channels.add(ix, createChannel() as never, new ReplayBuffer(1_000_000))
+      const record = channels.add(ix, fakeMuxChannel(), new ReplayBuffer(1_000_000))
       exchange.scheduleRegisterReconcile()
       return record
     },

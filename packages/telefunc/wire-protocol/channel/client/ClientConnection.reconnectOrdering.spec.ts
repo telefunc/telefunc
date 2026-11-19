@@ -15,37 +15,17 @@
 import { describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ClientConnection } from './ClientConnection.js'
+import { ClientConnection, type MuxChannel } from './ClientConnection.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ServerChannel } from '../server/ServerChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { decodeU32, concat } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 /** Polls until `check` passes: a step waits for the event it needs, however loaded the machine. */
 const until = (check: () => void) => vi.waitFor(check, { timeout: 10_000, interval: 5 })
-
-function createChannel(id = crypto.randomUUID()) {
-  return {
-    id,
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onEnded() {},
-    _attach: {
-      // Never at the edge of its credit: its data frames wait for the batch timer.
-      sendCredit: { leavesCredit: () => true },
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      capWindows() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
 
 /** SSE downstream response stream the client reads (server→client). */
 function makeSseDownstream() {
@@ -118,9 +98,9 @@ type Sends<Page> = {
 }
 
 /** Seq 1, then seq 2, straight on the connection of a stub channel. */
-const plainSends: Sends<{ conn: ClientConnection; channel: never }> = {
+const plainSends: Sends<{ conn: ClientConnection; channel: MuxChannel }> = {
   open: (fetchImpl) => {
-    const channel = createChannel() as never
+    const channel = fakeMuxChannel()
     const conn = ClientConnection.getOrCreate(TELEFUNC_URL, channel, {
       transports: ['sse'],
       fetchImpl,
@@ -137,7 +117,7 @@ const plainSends: Sends<{ conn: ClientConnection; channel: never }> = {
  * Connect, send seq 1, sever the wire (optionally losing seq 1 in flight), send seq 2 while
  * reconnecting, then let the reconnect settle. Returns what the server channel actually received.
  */
-async function runScenario<Page = { conn: ClientConnection; channel: never }>(
+async function runScenario<Page = { conn: ClientConnection; channel: MuxChannel }>(
   loseSeq1: boolean,
   sends: Sends<Page> = plainSends as unknown as Sends<Page>,
 ): Promise<{ received: unknown[]; wire2Upstream: number[] }> {
