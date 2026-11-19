@@ -849,7 +849,9 @@ function ChannelDemo() {
     if (!channel || channel.isClosed) return
     addLog('system', `queueing send({ ack: true }) + close() for channel ${channelId}`)
     const ackPromise = channel.send('offline-close', { ack: true })
-    const closePromise = channel.close({ timeout: 10_000 })
+    // As long as the server keeps the channel for a page that went away (`reconnectTimeout`, 60 s): under Docker the page
+    // reconnects once the proxy is back, and a backoff step of up to 5 s later.
+    const closePromise = channel.close({ timeout: 60_000 })
     void closePromise.finally(() => {
       clientPendingAckCloseReconnectChannelRef.current = null
     })
