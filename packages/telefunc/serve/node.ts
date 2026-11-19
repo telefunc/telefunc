@@ -82,7 +82,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       }),
     }))
 
-    httpServer.on('upgrade', (req, socket, head) => {
+    httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       const config = getServerConfig()
       if (getRequestPathname(req.url ?? '') !== config.telefuncUrl) return
       if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
@@ -90,7 +90,11 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
-      const request = new Request('http://localhost' + req.url)
+      // The upgrade hook reads the handshake's headers (upgradeOrigin.ts).
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(req.headers))
+        for (const one of [value ?? []].flat()) headers.append(name, one)
+      const request = new Request('http://localhost' + req.url, { headers })
       sockets.set(request, socket)
       adapter.handleUpgrade(req, socket, head, request)
     })

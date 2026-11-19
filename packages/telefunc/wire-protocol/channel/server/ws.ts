@@ -6,6 +6,7 @@ import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '..
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
+import { upgradeRefusal } from './upgradeOrigin.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -53,7 +54,7 @@ function getTelefuncChannelHooks({
   }
 
   return defineHooks({
-    upgrade,
+    upgrade: (request) => upgradeRefusal(request) ?? upgrade?.(request),
     open: (peer) => {
       const request = wireRequest(peer)
       // A page on another version reloads: none of its frames could be read.

@@ -55,6 +55,7 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
+import { parseAllowedOrigin } from '../../wire-protocol/channel/server/upgradeOrigin.js'
 import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
@@ -85,6 +86,16 @@ type ChannelConfigUser = {
    * Connections arriving on a transport not listed here are immediately rejected.
    */
   transports?: ChannelTransports
+  /**
+   * The origins of other sites' pages that may open a WebSocket to this server, as a browser sends them
+   * (`'https://app.example.com'`); a leading `*.` stands for any one subdomain label (`'https://*.example.com'`). A
+   * page of this server's own origin needs no entry, behind a proxy too where it forwards `X-Forwarded-Host`.
+   *
+   * https://telefunc.com/transport#websocket
+   *
+   * @default []
+   */
+  allowedOrigins?: string[]
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -140,6 +151,7 @@ type ChannelConfigUser = {
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
+  allowedOrigins: string[]
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -358,6 +370,7 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
+    allowedOrigins: channel.allowedOrigins ?? [],
     reconnectTimeout,
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
@@ -544,6 +557,16 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath, "['sse'] or ['ws']")
         break
+      case 'allowedOrigins': {
+        assertUsage(Array.isArray(value), `\`${configPath}\` should be an array of origins`)
+        const wrong = value.find((entry: unknown) => typeof entry !== 'string' || parseAllowedOrigin(entry) === null)
+        assertUsage(
+          wrong === undefined,
+          `\`${configPath}\` lists ${JSON.stringify(wrong)}: an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'`,
+        )
+        next[key] = value
+        break
+      }
       case 'pingInterval':
         assertDuration(
           value,

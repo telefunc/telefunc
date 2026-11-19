@@ -57,6 +57,8 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         // A test dropped an SSE stream's connection (wire-sockets.ts).
         log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+        // upgrade-e2e-test.ts's upgrade from another site's page.
+        log.logText.includes('A WebSocket upgrade from https://another-site.example was refused') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
         (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))

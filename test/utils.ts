@@ -3,6 +3,7 @@ export { testRunClassic }
 export { withNetworkConditions }
 export { newCDPSession }
 export { sendRefusedWarning }
+export { upgradeStatus }
 
 import {
   page,
@@ -16,8 +17,37 @@ import {
   editFile,
   editFileRevert,
 } from '@brillout/test-e2e'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { randomBytes } from 'node:crypto'
 
 const sendRefusedWarning = 'A channel refused a `send()`'
+
+/** The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`. */
+function upgradeStatus(origin: string): Promise<number | undefined> {
+  const url = new URL('/_telefunc', getServerUrl())
+  return new Promise((resolve, reject) => {
+    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': randomBytes(16).toString('base64'),
+        Origin: origin,
+      },
+    })
+    req.on('upgrade', (res, socket) => {
+      socket.destroy()
+      resolve(res.statusCode)
+    })
+    req.on('response', (res) => {
+      res.resume()
+      resolve(res.statusCode)
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
 
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.

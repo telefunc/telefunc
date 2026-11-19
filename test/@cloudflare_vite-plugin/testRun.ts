@@ -3,7 +3,7 @@ export { testCloudflareBindings }
 
 import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { sendRefusedWarning, testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
+import { sendRefusedWarning, testCounter, testRunClassic, upgradeStatus, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
@@ -21,7 +21,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       (log.logText.includes('disconnected: ::write(') &&
         (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s KV refuses a presence write.
-      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key'),
+      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key') ||
+      // testChannel()'s upgrade from another site's page.
+      log.logText.includes('A WebSocket upgrade from https://another-site.example was refused'),
   })
   testTodolist()
   testChannel()
@@ -126,6 +128,8 @@ function testChannel() {
       { timeout: 10000 },
     )
     page.off('websocket', onWebSocket)
+    // The page's own origin opened it; a page of another site may not.
+    expect(await upgradeStatus('https://another-site.example')).toBe(403)
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {

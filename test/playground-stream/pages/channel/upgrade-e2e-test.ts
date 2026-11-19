@@ -12,6 +12,7 @@ import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
 
@@ -19,6 +20,12 @@ function testUpgrade() {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const isSseOnly = transports.length === 1 && transports[0] === 'sse'
+
+  if (transports.includes('ws'))
+    test("a WebSocket upgrade from a page of another site is refused, and one from the server's own origin opens", async () => {
+      expect(await upgradeStatus('https://another-site.example')).toBe(403)
+      expect(await upgradeStatus(new URL(getServerUrl()).origin)).toBe(101)
+    })
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.
   if (!expectsUpgrade && !isSseOnly) return

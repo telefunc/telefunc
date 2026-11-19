@@ -87,6 +87,21 @@ All channels share a single multiplexed connection per server URL, so opening ma
 - **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
 
+### WebSocket
+
+The server opens a WebSocket only for a page of its own origin: it answers an upgrade from a page of another origin with 403, and that page stays on SSE. Behind a reverse proxy that changes `Host`, have it forward the public host in `X-Forwarded-Host`. For a page on another origin than your server, list that origin:
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+// The pages are served from app.example.com, the telefunctions from api.example.com
+config.channel.allowedOrigins = ['https://app.example.com']
+```
+
+> A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`. A client that isn't a browser sends no `Origin` and isn't refused.
+
 
 
 ## Recommended setup
