@@ -325,10 +325,10 @@ class SseTransport implements UpgradeSource {
     handshakeOk: Promise<'ok'>,
     abortController: AbortController,
   ): Promise<boolean> {
-    const timeout = new Promise<'timeout'>((resolve) =>
-      setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
-    )
-    const result = await Promise.race([handshakeOk, timeout, upload.ended])
+    const timeout = createDeferred<'timeout'>()
+    const timer = setTimeout(() => timeout.resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS)
+    const result = await Promise.race([handshakeOk, timeout.promise, upload.ended])
+    clearTimeout(timer)
     if (this.transportAbort !== abortController) {
       abortController.abort()
       return false
@@ -418,7 +418,7 @@ class SseTransport implements UpgradeSource {
         }
       }
     } catch {
-      if (abortController.signal.aborted) return
+      // A failed read ends the wire as its end does.
     } finally {
       reader.cancel()
       // The old SSE reader's death must NOT trample a successor openStream's streamRequest /
@@ -768,25 +768,15 @@ function createSseEventStreamReader(
 
   const onEvent = (event: Uint8Array<ArrayBuffer>) => ready.push(event)
 
+  /** The next event, or `null` once the stream ended; a failed read rejects. */
   const readNextEntry = async (): Promise<Uint8Array<ArrayBuffer> | null> => {
     while (true) {
-      if (ready.length > 0) return ready.shift()!
-
-      let done: boolean
-      let value: Uint8Array<ArrayBuffer> | undefined
-      let readError: unknown
-      try {
-        ;({ done, value } = await reader.read())
-      } catch (err) {
-        readError = err
-        done = true
-      }
-      if (done) {
-        if (abortController.signal.aborted || cancelled) return null
-        throw readError ?? new Error('Connection lost before all SSE frames were received.')
-      }
-      onChunk(value!.byteLength)
-      sse.push(value!, onEvent)
+      const event = ready.shift()
+      if (event !== undefined) return event
+      const { done, value } = await reader.read()
+      if (done) return null
+      onChunk(value.byteLength)
+      sse.push(value, onEvent)
     }
   }
 
