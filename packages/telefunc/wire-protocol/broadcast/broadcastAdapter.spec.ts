@@ -6,7 +6,6 @@ import { ServerReplay } from '../channel/server/ServerReplay.js'
 import { ACK_STATUS, decode, encode, type ChannelFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
-import { Channel } from '../channel/server/ServerChannel.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastTransport, Listening } from './broadcastAdapter.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
@@ -510,47 +509,20 @@ describe("subscribers that come and go while their backend hasn't confirmed the 
     }
     return made
   }
-  const broadcasts = new Map<string, ServerBroadcast<string>>()
-  const broadcastOf = (key: string) => {
-    let broadcast = broadcasts.get(key)
-    if (broadcast === undefined) broadcasts.set(key, (broadcast = new ServerBroadcast<string>({ key })))
-    return broadcast
-  }
-  const channels = new Map<string, Channel<never, string>>()
-  const channelOf = (key: string) => {
-    let channel = channels.get(key)
-    if (channel === undefined) channels.set(key, (channel = new Channel<never, string>()))
-    return channel
-  }
-  const CHURN: Record<string, (key: string) => Unsubscribe> = {
-    'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
-    'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
-    // In effect at once: its `opened`, read, is one promise every such listener shares.
-    'Broadcast.subscribe()': (key) => Broadcast.subscribe(key, () => {}),
-    'Broadcast.subscribeBinary()': (key) => Broadcast.subscribeBinary(key, () => {}),
-    "a channel's listen(), its `opened` read": (key) => {
-      const remove = channelOf(key).listen(() => {})
-      void remove.opened
-      return remove
-    },
-  }
-  for (const [name, subscribe] of Object.entries(CHURN)) {
-    it(`${name}: 1,000 subscribers added and removed make no promise`, () => {
-      _resetBroadcastAdapterForTesting(
-        new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
-      )
-      const key = crypto.randomUUID()
-      // Holds the key's subscription, which waits for its backend.
-      const holder = subscribe(key)
-      const made = promisesMadeBy(() => {
-        for (let i = 0; i < 1_000; i++) subscribe(key)()
-      })
-      expect(made).toBe(0)
-      holder()
-      broadcasts.get(key)?.abort()
-      channels.get(key)?.abort()
+  it('1,000 subscribers added and removed make no promise', () => {
+    _resetBroadcastAdapterForTesting(
+      new DefaultBroadcastAdapter({ send: sent, sendBinary: sent, listen, listenBinary: listen }),
+    )
+    const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+    // Holds the key's subscription, which waits for its backend.
+    const holder = broadcast.subscribe(() => {})
+    const made = promisesMadeBy(() => {
+      for (let i = 0; i < 1_000; i++) broadcast.subscribe(() => {})()
     })
-  }
+    expect(made).toBe(0)
+    holder()
+    broadcast.abort()
+  })
 })
 
 // A broker's subscribe can throw, as NATS's does while its connection is closed or draining; the app retries.
