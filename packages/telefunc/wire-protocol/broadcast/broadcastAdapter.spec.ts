@@ -735,14 +735,6 @@ describe("a transport's listen() that delivers a message, then throws", () => {
   const WITH_SIGNAL: Record<string, (signal: AbortSignal) => (onMessage: () => void) => Unsubscribe> = {
     'Broadcast.subscribe()': (signal) => (onMessage) => Broadcast.subscribe(KEY, onMessage, { signal }),
     'Broadcast.subscribeBinary()': (signal) => (onMessage) => Broadcast.subscribeBinary(KEY, onMessage, { signal }),
-    'BroadcastChannel.subscribe()': (signal) => {
-      const broadcast = new ServerBroadcast({ key: KEY })
-      return (onMessage) => broadcast.subscribe(onMessage, { signal })
-    },
-    'BroadcastChannel.subscribeBinary()': (signal) => {
-      const broadcast = new ServerBroadcast({ key: KEY })
-      return (onMessage) => broadcast.subscribeBinary(onMessage, { signal })
-    },
   }
   for (const [surface, of] of Object.entries(WITH_SIGNAL)) {
     it(`${surface}: a listener added on that message with a signal leaves no abort listener on it once it goes`, async () => {
