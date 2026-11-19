@@ -75,8 +75,16 @@ function stringifyValue(value: unknown, by: ValueBy): string {
     replacer(key, slot) {
       if (typeof slot !== 'object' || slot === null) return undefined
       if (!ArrayBuffer.isView(slot) && !isBuffer(slot)) return undefined
-      const name = toTag.call(slot).slice('[object '.length, -1)
-      assertUsage(false, REFUSED[by](key === '' ? `this \`${name}\`` : `the \`${name}\` in it`))
+      let name = toTag.call(slot).slice('[object '.length, -1)
+      let at: string | null = null
+      // The refusal is what matters: naming the bytes, or where they are, may fail on an app's object.
+      try {
+        name = slot.constructor.name
+        if (key !== '') at = pathOf(value, this, key)
+      } catch {}
+      const which =
+        key === '' ? `this \`${name}\`` : at === null ? `a \`${name}\` in it` : `the \`${name}\` at \`${at}\``
+      assertUsage(false, REFUSED[by](which))
     },
   })
 }
@@ -100,6 +108,29 @@ function isBuffer(value: object): boolean {
   if (proto === Object.prototype || proto === Array.prototype) return false
   const tag = toTag.call(value)
   return tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]'
+}
+
+/** Where `holder[key]` is in `value`, as `a.b[0]`; searched only for a value refused. It reads data properties only, so
+ *  no getter or `toJSON` runs, and is null where that doesn't reach `holder`: behind a getter, or inside a `Map` or a
+ *  `Set`, which the serializer copies. */
+function pathOf(value: unknown, holder: object, key: string): string | null {
+  const seen = new Set<object>()
+  const search = (at: unknown, path: (string | number)[]): (string | number)[] | null => {
+    if (typeof at !== 'object' || at === null || seen.has(at)) return null
+    seen.add(at)
+    const isArray = Array.isArray(at)
+    if (at === holder) return [...path, isArray ? Number(key) : key]
+    for (const k of Object.keys(at)) {
+      const field = Object.getOwnPropertyDescriptor(at, k)
+      if (!field || !('value' in field)) continue
+      const found = search(field.value, [...path, isArray ? Number(k) : k])
+      if (found) return found
+    }
+    return null
+  }
+  const path = search(value, [])
+  if (!path) return null
+  return path.map((step, i) => (typeof step === 'number' ? `[${step}]` : i === 0 ? step : `.${step}`)).join('')
 }
 
 type ChannelListenReturn<T> = [T] extends [never]
