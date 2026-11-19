@@ -39,6 +39,7 @@ import type { BroadcastKind } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import { withoutContext } from '../../../node/server/context/context.js'
+import { invokeChannelListeners } from '../../../node/server/context/invokeWithoutContext.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -59,6 +60,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   _publishShield: ShieldValidator | undefined
 
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
+  /** Where a listener's error goes: its `Abort` aborts the channel, so the listeners after it get nothing. */
+  private readonly onListenerError = (err: unknown): boolean => this._end._handleCallbackError(err)
   private readonly routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
   /** What waits for each kind's subscription to take effect: its subscribers' and its page's. */
@@ -187,10 +190,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   private deliverBroadcastMessage(payload: string, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     const data = parse(payload) as ChannelData<T>
-    for (const { listener } of this.subscribers.text.list()) {
-      if (!listener) continue
-      if (this.callListener(listener, data, info)) return
-    }
+    const publish = { data, info }
+    if (invokeChannelListeners(this.subscribers.text.list(), callWithPublish, publish, this.onListenerError)) return
     // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
     if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.text))
@@ -198,29 +199,10 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
 
   private deliverBroadcastBinaryMessage(payload: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
-    for (const { listener } of this.subscribers.binary.list()) {
-      if (!listener) continue
-      // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-      if (this.callListener(listener, new Uint8Array(binaryData(payload)), info)) return
-    }
+    const publish = { data: payload, info }
+    if (invokeChannelListeners(this.subscribers.binary.list(), callWithOwnBytes, publish, this.onListenerError)) return
     if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary))
-  }
-
-  /** Calls `listener` with a publish, with no context; true where it threw `Abort`, which aborts the channel, so the
-   *  rest get none. */
-  private callListener<D>(
-    listener: (data: D, info: ChannelPublishInfo) => unknown,
-    data: D,
-    info: ChannelPublishInfo,
-  ): boolean {
-    try {
-      const result = withoutContext(() => listener(data, info))
-      if (isPromise(result)) result.catch((err: unknown) => this._end._handleCallbackError(err))
-    } catch (err) {
-      return this._end._handleCallbackError(err)
-    }
-    return false
   }
 
   // --- Internal broadcast helpers ---
@@ -439,9 +421,7 @@ const Broadcast = {
   /** As `subscribe()`, for binary publishes. */
   subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
     if (options?.signal?.aborted) return withReady(() => {})
-    // A copy of its own, as a `BroadcastChannel` listener gets.
-    const decode = (payload: Uint8Array) => new Uint8Array(binaryData(payload))
-    return subscribeRoute({ key, kind: 'binary' }, decode, callback, options?.signal)
+    return subscribeRoute({ key, kind: 'binary' }, ownBytes, callback, options?.signal)
   },
 }
 
@@ -459,7 +439,8 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   const subscription = new RouteSubscription({
     route,
     receiver: (payload, info) => {
-      callStaticListener(callback, decode(payload), { key: route.key, seq: info.seq, timestamp: info.timestamp })
+      const data = decode(payload)
+      withoutContext(callStaticListener, callback, data, { key: route.key, seq: info.seq, timestamp: info.timestamp })
     },
     onReady: () => readiness.settle(true),
     // A `ready` that resolved stays resolved.
@@ -479,19 +460,37 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   return withReady(remove, readiness)
 }
 
-/** Calls `callback` with no context, and reports its error as a channel listener's is, but an Abort: there is no
- *  channel to close. */
+/** Calls `callback`, and reports its error as a channel listener's is, but an Abort: there is no channel to close. */
 function callStaticListener<D>(
   callback: (data: D, info: ChannelPublishInfo) => unknown,
   data: D,
   info: ChannelPublishInfo,
 ): void {
   try {
-    const pending = withoutContext(() => callback(data, info))
+    const pending = callback(data, info)
     if (isPromise(pending)) pending.catch(reportStaticListenerError)
   } catch (err) {
     reportStaticListenerError(err)
   }
+}
+
+/** A publish as a channel's listeners get it. */
+type Publish<D> = { data: D; info: ChannelPublishInfo }
+
+function callWithPublish<D>(
+  listener: (data: D, info: ChannelPublishInfo) => unknown,
+  { data, info }: Publish<D>,
+): unknown {
+  return listener(data, info)
+}
+
+function callWithOwnBytes(listener: BroadcastBinaryListener, { data, info }: Publish<Uint8Array>): unknown {
+  return listener(ownBytes(data), info)
+}
+
+/** A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer. */
+function ownBytes(payload: Uint8Array): Uint8Array {
+  return new Uint8Array(binaryData(payload))
 }
 
 function reportStaticListenerError(err: unknown): void {

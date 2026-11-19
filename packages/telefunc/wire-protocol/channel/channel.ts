@@ -1,4 +1,12 @@
-export { invokeChannelListener, stringifyMessage, withReady, neverInEffect, Readiness, LOSSY_WITH_ACK_TEXT }
+export {
+  invokeChannelListener,
+  invokeChannelListeners,
+  stringifyMessage,
+  withReady,
+  neverInEffect,
+  Readiness,
+  LOSSY_WITH_ACK_TEXT,
+}
 export type {
   ChannelBase,
   ChannelShield,
@@ -25,7 +33,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import type { Listeners } from '../../utils/Listeners.js'
+import type { Listeners, Registration } from '../../utils/Listeners.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
@@ -69,6 +77,26 @@ function invokeChannelListener<Args extends unknown[]>(
   } catch (error) {
     return handleError(error)
   }
+}
+
+/** `call(listener, arg)` for each of `listeners` still registered, each failure routed as `invokeChannelListener` routes
+ *  it. True where `handleError` returned true for a synchronous throw, which ends the walk. */
+function invokeChannelListeners<L, A>(
+  listeners: readonly Registration<L>[],
+  call: (listener: L, arg: A) => unknown,
+  arg: A,
+  handleError: (error: unknown) => boolean | void,
+): boolean {
+  for (const { listener } of listeners) {
+    if (listener === null) continue
+    try {
+      const result = call(listener, arg)
+      if (isPromise(result)) void result.catch(handleError)
+    } catch (error) {
+      if (handleError(error)) return true
+    }
+  }
+  return false
 }
 
 /** What `send(data, { lossy: true, ack: true })` throws, on either end. */
