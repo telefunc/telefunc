@@ -22,11 +22,11 @@ function restoreContext_sync<T>(context: Context, fn: () => T): T {
   return fn()
 }
 
-function withoutContext_sync<T>(fn: () => T): T {
+function withoutContext_sync<Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args): R {
   const { context } = syncState
   syncState.context = null
   try {
-    return fn()
+    return fn(...args)
   } finally {
     syncState.context = context
   }

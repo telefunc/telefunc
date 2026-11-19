@@ -50,11 +50,12 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
   return globalObject.asyncStore.run({ ...globalObject.asyncStore.getStore(), ...rawContext }, fn)
 }
 
-function withoutContext_async<T>(fn: () => T): T {
+function withoutContext_async<Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args): R {
   assert(globalObject.asyncStore)
   const store = globalObject.asyncStore.getStore()
-  if (store === undefined) return fn()
+  // Outside any store there is no context to withhold, and inside a withheld one it is withheld already.
+  if (store === undefined || store[WITHHELD_CONTEXT]) return fn(...args)
   // An adapter's scope stays: on Cloudflare, the session a publish or subscribe from `fn` goes through.
   const { [PROVIDED_CONTEXT]: _provided, [REQUEST_CONTEXT]: _request, ...adapterScope } = store
-  return globalObject.asyncStore.run({ ...adapterScope, [WITHHELD_CONTEXT]: true }, fn)
+  return globalObject.asyncStore.run({ ...adapterScope, [WITHHELD_CONTEXT]: true }, fn, ...args)
 }

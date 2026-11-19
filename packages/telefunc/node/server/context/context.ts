@@ -19,7 +19,7 @@ type Context = {
 
 type ContextGetter = () => Context | null
 type RestoreContext = <T>(context: Context, fn: () => T) => T
-type WithoutContext = <T>(fn: () => T) => T
+type WithoutContext = <Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args) => R
 type ProvideTelefuncContext = (context: Telefunc.Context) => void
 
 const globalObject = getGlobalObject<{
@@ -50,10 +50,10 @@ function restoreContext<T>(context: Context, fn: () => T): T {
   return globalObject.restoreContext(context, fn)
 }
 
-/** Runs `fn` where `getContext()` throws: a server-side callback that delivers other users' messages gets no user's
- *  context, whoever's code delivered the message. */
-function withoutContext<T>(fn: () => T): T {
-  return globalObject.withoutContext(fn)
+/** Runs `fn(...args)` where `getContext()` throws: a server-side callback that delivers other users' messages gets no
+ *  user's context, whoever's code delivered the message. The arguments are passed, so a delivery needs no closure. */
+function withoutContext<Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args): R {
+  return globalObject.withoutContext(fn, ...args)
 }
 
 function provideContext(context: Telefunc.Context): void {
