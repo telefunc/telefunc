@@ -3,7 +3,7 @@ export { onWireResume, onWireBurst, onWireEnd, onWireLarge, onWireOpen, onWireHe
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
-import { onServerAction } from '../../server-actions'
+import { forgetServerAction, onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
 
 /**
@@ -87,6 +87,9 @@ async function onWireEnd(before: number) {
   })
   ch.onClose((err) => {
     cleanupState[`wireEnd_${ch.id}_onClose`] = describeEnd(err)
+    // The one of the two a test didn't run.
+    forgetServerAction(`wireEnd_${ch.id}_close`)
+    forgetServerAction(`wireEnd_${ch.id}_abort`)
   })
   onServerAction(`wireEnd_${ch.id}_close`, async () => {
     sendBefore()
@@ -150,9 +153,14 @@ async function onWireRelease(count: number) {
 
 // Apart from onWireRelease: a closure made there would share the scope that holds the channel.
 function reportRelease(id: string, channel: WeakRef<object>) {
-  onServerAction(`wireRelease_${id}`, () => {
-    cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
-  })
+  // A test polls it.
+  onServerAction(
+    `wireRelease_${id}`,
+    () => {
+      cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
+    },
+    { once: false },
+  )
 }
 
 /** A channel the page sends numbered text on. cleanupState: wireUpload_<id> = the server's tally. */
