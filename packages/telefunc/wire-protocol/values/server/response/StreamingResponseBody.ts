@@ -14,7 +14,7 @@ import {
 } from '../../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../../node/server/context/requestContext.js'
 import type { TelefuncId } from '../../../../node/server/runTelefunc/serializeTelefunctionResult.js'
-import { restoreContext } from '../../../../node/server/context/context.js'
+import { restoreContext, isAsyncMode } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
@@ -125,7 +125,9 @@ function buildInlineResponseBody(runContext: {
     pending: Promise<{ type: 'chunk'; entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
   }
   const advance = (entry: RaceEntry) => {
-    entry.pending = entry.iter.next().then((result) => ({ type: 'chunk', entry, result }))
+    // Without AsyncLocalStorage the context ends with the synchronous call, so each pull restores it.
+    const next = isAsyncMode() ? entry.iter.next() : restoreContext(context, () => entry.iter.next())
+    entry.pending = next.then((result) => ({ type: 'chunk', entry, result }))
     // While paused nothing races it, so its failure waits for the resume without counting as unhandled.
     if (flow) entry.pending.catch(() => {})
   }
@@ -133,16 +135,8 @@ function buildInlineResponseBody(runContext: {
   void (async () => {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     try {
-      // The telefunc context is restored around the whole merge loop, like the
-      // channel pump (ChannelResponseBody.ts) does, so `getContext()` works
-      // inside producer bodies (generator code runs lazily, on `.next()`).
+      // With AsyncLocalStorage, this one restore covers the producers for the whole loop.
       await restoreContext(context, async () => {
-        // The producers' first `.next()` must run inside the synchronous
-        // stretch of the restored context: in sync mode the context global is
-        // cleared on the next macrotask, and the header `emit` below can
-        // suspend until the consumer's first read (the Web sink applies
-        // backpressure from the first push). So start the pulls before
-        // emitting the header.
         const active: RaceEntry[] = []
         for (const { producer, index } of producers) {
           const entry: RaceEntry = { index, iter: producer.chunks, pending: null! }
