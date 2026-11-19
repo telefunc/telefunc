@@ -195,7 +195,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     data: ChannelData<ClientToServer>,
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
@@ -227,7 +227,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): void | Promise<unknown> | Promise<void> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
       return this.sendNewest(encode.binary, data)

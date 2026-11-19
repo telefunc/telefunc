@@ -45,6 +45,8 @@ class ChannelLifecycle {
   private cleanupAwaitsOutcome = false
   /** It ended with a terminal word of its own, sent behind everything it sent before. */
   private sentOwnEnd = false
+  /** What a send made after the end throws, made at the first one. */
+  private sendAfterEndError: ChannelClosedError | undefined = undefined
 
   private openedPromise?: Promise<void>
   private resolveOpened?: () => void
@@ -161,14 +163,23 @@ class ChannelLifecycle {
     return false
   }
 
-  /** A callback's `Abort` aborts the channel: true where `err` is one. */
+  /** A callback's `Abort` aborts the channel: true where `err` is one. A send the callback made after the end raced
+   *  the end, as a send it awaited does, so what that send threw isn't reported either. */
   handleCallbackError(err: unknown): boolean {
     if (isAbort(err)) {
       this.owner._abortFromCallback(err)
       return true
     }
-    this.report(err)
+    if (this.sendAfterEndError === undefined || err !== this.sendAfterEndError) this.report(err)
     return false
+  }
+
+  /** What `send()` throws once the channel takes no more sends: after the end, one error for the channel, with what it
+   *  ended with as `cause`. */
+  sendRefusal(): ChannelClosedError {
+    if (!this.ending.ended) return new ChannelClosedError()
+    this.sendAfterEndError ??= new ChannelClosedError(undefined, this.ending.error && { cause: this.ending.error })
+    return this.sendAfterEndError
   }
 
   /** Reports what a callback threw or rejected with, unless it is this channel's own end, as a send it awaited rejects
