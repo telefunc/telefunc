@@ -4,14 +4,18 @@ import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import type { RegisterWire, RenewWire } from './RoomAuthority.js'
+import type { LaneId } from '../backend/contract.js'
 
 /** A session's Room subscriptions against an authority that answers each call from `answers`, in order; opening a stub
  *  to it throws the next of `answers.open`, while one is left. */
-function setup(answers: {
-  register: Array<RegisterWire | Error | Promise<never>>
-  renew: Array<RenewWire | Error>
-  open?: Array<Error | undefined>
-}) {
+function setup(
+  answers: {
+    register: Array<RegisterWire | Error | Promise<never>>
+    renew: Array<RenewWire | Error>
+    open?: Array<Error | undefined>
+  },
+  lane: LaneId = { kind: 'semantic' },
+) {
   const calls = { register: 0, renew: 0 }
   const answer = <T>(queue: Array<T | Error | Promise<never>>): Promise<T> => {
     const next = queue.shift()!
@@ -33,7 +37,7 @@ function setup(answers: {
   } as unknown as CloudflareRoomDriver
   const subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
   const receiver = { deliver() {} }
-  const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } }, receiver)
+  const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane }, receiver)
   const states: string[] = []
   const reasons: unknown[] = []
   attempt.onStateChange((state, reason) => {
@@ -99,6 +103,19 @@ describe('a Cloudflare Room lane', () => {
     const { calls, reasons } = setup({ register: [late, 'registered'], renew: [] })
     await vi.advanceTimersByTimeAsync(12_000)
     expect({ registered: calls.register, reasons }).toEqual({ registered: 1, reasons: [['closed', 'reset']] })
+  })
+
+  // An inbox is ready once its registration went out: a message to its member then follows it to the authority.
+  it('that is an inbox whose first route registration failed as retryable is lost until it is sent again', async () => {
+    const { attempt, states } = setup(
+      { register: [transient(false), 'registered'], renew: [] },
+      { kind: 'inbox', member: 'm' },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(attempt.state()).toBe('lost')
+    await vi.advanceTimersByTimeAsync(1_000)
+    // Ready when `subscribe()` returned.
+    expect(states).toEqual(['lost', 'ready'])
   })
 
   it('unsubscribed while its first route registration waits to be made again, registers it no more', async () => {

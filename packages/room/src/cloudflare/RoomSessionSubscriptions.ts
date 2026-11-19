@@ -192,7 +192,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
   }
 
   /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, which
-   *  core reports. */
+   *  core reports. An inbox ready once it went out is lost meanwhile: what is sent to its member may miss it. */
   private failFirst(error: unknown): void {
     if (this.state() === 'closed') return
     const delay = transientRetryDelay(error, ++this.firstFailures, Date.now() - this.firstRegistrationAt)
@@ -200,6 +200,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
       this.stop()
       return this.transition('closed', error)
     }
+    if (this.state() === 'ready') this.transition('lost')
     this.retry = setTimeout(() => {
       this.retry = null
       void this.register()
