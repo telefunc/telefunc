@@ -21,6 +21,11 @@ import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getChannelMux } from '../../channel/server/ChannelMux.js'
 import { installAsyncContext } from '../../../node/server/context/async.js'
+import { onBug } from '../../../node/server/runTelefunc/onBug.js'
+
+/** What the server reported through `onBug()`. */
+const bugs: unknown[] = []
+onBug((bug) => bugs.push(bug))
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -527,83 +532,102 @@ describe("a subscriber's `ready` on Cloudflare", () => {
 
       // Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. Neither appeared on
       // any error local workerd raised, so these errors are made here.
-      const transient = (overloaded: boolean) =>
-        Object.assign(new Error('Durable Object is overloaded or reset'), { retryable: true, overloaded })
+      const transient = (overloaded: boolean, message = 'Durable Object is overloaded or reset') =>
+        Object.assign(new Error(message), { retryable: true, overloaded })
 
-      /** The subscriber's `ready` and how many presence writes reached the authority, `ms` after it subscribed. */
-      async function firstRegistration(fail: (written: number) => Error | undefined, ms: number) {
+      /** What the subscriber's `ready` settled with (`'resolved'`, the cause of its rejection, or `'pending'`), when each
+       *  presence write reached the authority in ms after it subscribed, and the bugs reported, `ms` after it subscribed:
+       *  the n-th write fails with `failures[n]`, while one is left, and the subscriber is removed at `removeAt`. */
+      async function firstRegistration(failures: Error[], { ms = 2_000, random = 1, removeAt = Infinity } = {}) {
         vi.useFakeTimers()
-        // The longest waits Cloudflare's backoff draws, so each write comes in its own step below.
-        vi.spyOn(Math, 'random').mockReturnValue(1)
-        const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+        vi.spyOn(Math, 'random').mockReturnValue(random)
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        bugs.length = 0
+        // A test may make more than one.
+        disposeBackend()
         const { state, presences, inObject } = worker()
-        state.fail = fail(0)
-        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        let ready = 'pending'
-        void outcome(subscriber.ready).then((settled) => (ready = settled))
-        let written = 0
-        for (let elapsed = 0; elapsed < ms; elapsed += 10) {
-          await vi.advanceTimersByTimeAsync(10)
-          if (presences.length > written) state.fail = fail((written = presences.length))
+        const startedAt = Date.now()
+        const writtenAt: number[] = []
+        const written = () => {
+          while (writtenAt.length < presences.length) writtenAt.push(Date.now() - startedAt)
+          state.fail = failures[presences.length]
         }
-        const result = { ready, written: presences.length, reported: reported.mock.calls.length > 0 }
-        subscriber()
-        return result
+        state.fail = failures[0]
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        written()
+        let ready: unknown = 'pending'
+        subscriber.ready.then(
+          () => (ready = 'resolved'),
+          (err: unknown) => (ready = err instanceof Error ? err.cause : err),
+        )
+        for (let elapsed = 1; elapsed <= ms; elapsed++) {
+          await vi.advanceTimersByTimeAsync(1)
+          written()
+          if (elapsed === removeAt) subscriber()
+        }
+        if (removeAt === Infinity) subscriber()
+        return { ready, writtenAt, bugs: [...bugs] }
       }
 
-      it("a first presence write that fails as retryable is written again within a second, and the subscriber's `ready` resolves once it is stored", async () => {
-        expect(await firstRegistration((written) => (written < 2 ? transient(false) : undefined), 2_000)).toEqual({
-          ready: 'resolved',
-          written: 3,
-          reported: false,
+      it("a first presence write that fails as retryable twice is written again after the waits the backoff draws, and the subscriber's `ready` resolves once it is stored", async () => {
+        const failures = [transient(false, 'first'), transient(false, 'second')]
+        expect({
+          1: await firstRegistration(failures, { random: 1 }),
+          0.5: await firstRegistration(failures, { random: 0.5 }),
+        }).toEqual({
+          1: { ready: 'resolved', writtenAt: [0, 100, 300], bugs: [] },
+          0.5: { ready: 'resolved', writtenAt: [0, 50, 150], bugs: [] },
         })
       })
 
-      it("a first presence write that fails as retryable 3 times rejects the subscriber's `ready` with that error, is reported, and is not written again", async () => {
-        expect(await firstRegistration(() => transient(false), 2_000)).toEqual({
-          ready: 'Durable Object is overloaded or reset',
-          written: 3,
-          reported: true,
-        })
+      it("a first presence write that fails as retryable 3 times rejects the subscriber's `ready` with the last error, reports it once, and is not written again", async () => {
+        const last = transient(false, 'third')
+        const { ready, writtenAt, bugs } = await firstRegistration([
+          transient(false, 'first'),
+          transient(false, 'second'),
+          last,
+        ])
+        expect(writtenAt).toEqual([0, 100, 300])
+        expect(ready).toBe(last)
+        expect(bugs.map((bug) => (bug instanceof Error ? bug.cause : bug))).toEqual([last])
+        expect(bugs.map((bug) => bug instanceof Error && bug.cause === last)).toEqual([true])
       })
 
-      it("a first presence write that fails as overloaded rejects the subscriber's `ready` with that error, and is not written again", async () => {
-        expect(await firstRegistration(() => transient(true), 2_000)).toEqual({
-          ready: 'Durable Object is overloaded or reset',
-          written: 1,
-          reported: true,
+      it("a first presence write that fails as overloaded, at once or once written again, rejects the subscriber's `ready` with that error, and is not written again", async () => {
+        const overloaded = transient(true, 'overloaded')
+        const atOnce = await firstRegistration([overloaded])
+        const writtenAgain = await firstRegistration([transient(false), overloaded])
+        expect({ atOnce: atOnce.writtenAt, writtenAgain: writtenAgain.writtenAt }).toEqual({
+          atOnce: [0],
+          writtenAgain: [0, 100],
         })
+        expect([atOnce.ready, writtenAgain.ready]).toEqual([overloaded, overloaded])
+        expect([atOnce.ready === overloaded, writtenAgain.ready === overloaded]).toEqual([true, true])
+        expect([atOnce.bugs.length, writtenAgain.bugs.length]).toEqual([1, 1])
       })
 
       // The runtime retries a call itself for up to 10 s; a failure that reaches the code that late isn't made again.
-      it("a first presence write that fails as retryable 10 seconds in rejects the subscriber's `ready`, and is not written again", async () => {
+      it("a first presence write that fails as retryable 10 seconds in rejects the subscriber's `ready` with that error, and is not written again", async () => {
         vi.useFakeTimers()
         vi.spyOn(console, 'error').mockImplementation(() => {})
         const { state, presences, inObject } = worker()
+        const failed = transient(false)
         state.held = new Promise((resolve) => setTimeout(resolve, 10_000))
-        state.fail = transient(false)
+        state.fail = failed
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        let ready = 'pending'
-        void outcome(subscriber.ready).then((settled) => (ready = settled))
+        let ready: unknown = 'pending'
+        subscriber.ready.catch((err: unknown) => (ready = err instanceof Error ? err.cause : err))
         state.held = undefined
         await vi.advanceTimersByTimeAsync(12_000)
-        expect({ ready, written: presences.length }).toEqual({
-          ready: 'Durable Object is overloaded or reset',
-          written: 1,
-        })
+        expect(presences).toHaveLength(1)
+        expect(ready).toBe(failed)
         subscriber()
       })
 
-      it('a subscriber removed while its retryable first presence write waits to be written again leaves no other write', async () => {
-        vi.useFakeTimers()
-        const { state, presences, inObject } = worker()
-        state.fail = transient(false)
-        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await vi.advanceTimersByTimeAsync(0)
-        subscriber()
-        state.fail = undefined
-        await vi.advanceTimersByTimeAsync(60_000)
-        expect(presences).toHaveLength(1)
+      it('a subscriber removed while its retryable first presence write waits 50 ms to be written again leaves no other write', async () => {
+        const waiting = await firstRegistration([transient(false)], { ms: 60, random: 0.5 })
+        const removed = await firstRegistration([transient(false)], { random: 0.5, removeAt: 25 })
+        expect({ waiting: waiting.writtenAt, removed: removed.writtenAt }).toEqual({ waiting: [0, 50], removed: [0] })
       })
 
       // A refresh that fails loses the subscription for a while, whatever the failure: the next one that succeeds restores it.
