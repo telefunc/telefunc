@@ -403,15 +403,18 @@ function RxJSDemo() {
           setResult('')
           const subject = await onSubjectNoHandler()
           const received: string[] = []
+          // Sent until the server errors the subject: the page's subject sends nothing before the server's subscription
+          // reached it.
+          const sending = setInterval(() => subject.next('hello-from-client'), 100)
           subject.subscribe({
             next(v) {
               received.push(v)
             },
             error(err) {
+              clearInterval(sending)
               setResult(JSON.stringify({ received, error: String(err?.message ?? err) }))
             },
           })
-          setTimeout(() => subject.next('hello-from-client'), 200)
         }}
       >
         Subject no-handler (server survives)

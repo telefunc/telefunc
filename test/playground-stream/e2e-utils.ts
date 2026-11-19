@@ -42,12 +42,14 @@ export {
 import { page, getServerUrl, expectLog, autoRetry } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
 import type { BackendFault } from './failing-backend'
-import { execSync } from 'node:child_process'
+import { execFile, execSync } from 'node:child_process'
 import { dirname } from 'node:path'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
+const execFileAsync = promisify(execFile)
 
 /**
  * Force-severs every browser-to-origin connection by restarting the Caddy container.
@@ -56,18 +58,24 @@ const playgroundDir = dirname(fileURLToPath(import.meta.url))
  * survives), so the only reliable way to test reconnect on those wires is to terminate
  * Caddy at the TCP layer.
  */
-function restartProxy() {
-  execSync('docker compose restart proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function restartProxy() {
+  await composeProxy('restart')
 }
 
 /** Like `restartProxy` but split — stop indefinitely, then `startProxy` brings it back.
  *  Use when the test needs to perform actions while disconnected (queued sends, clicks). */
-function stopProxy() {
-  execSync('docker compose stop proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function stopProxy() {
+  await composeProxy('stop')
 }
 
-function startProxy() {
-  execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function startProxy() {
+  await composeProxy('start')
+}
+
+/** Without blocking the test: a page event or a timer armed before it is handled while Docker works, which may take
+ *  longer than the timer. */
+async function composeProxy(command: 'restart' | 'stop' | 'start') {
+  await execFileAsync('docker', ['compose', command, 'proxy'], { cwd: playgroundDir })
 }
 
 /** Restarts the stack's Redis, which keeps no data across a restart. */

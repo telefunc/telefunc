@@ -11,6 +11,7 @@ import {
   stopProxy,
   startProxy,
   countConnections,
+  sleep,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
@@ -91,6 +92,7 @@ type ChannelState = {
   binaryBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
   paced: { channelId: string; receivedBytes: number; closeErr: string | null; ended: boolean } | null
   textBurst: { channelId: string; received: number; inOrder: boolean; closeErr: string | null } | null
+  textBurstProgress: { received: number; reconnects: number } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
@@ -98,6 +100,32 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
   openAbort: { channelId: string; abortValue: unknown } | null
+}
+
+/** The page's text burst once it ended; until then, a failure that says where the page got to. */
+async function endedTextBurst() {
+  const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+  if (textBurst === null) throw new Error(`The page's text burst hasn't ended: ${JSON.stringify(textBurstProgress)}`)
+  return textBurst
+}
+
+/** The page's text burst once it ended, however long that takes on the machine's link, as long as the page gets further:
+ *  one that got no further in `stalledAfter` ms fails, saying where it got to. */
+async function textBurstEnded(stalledAfter: number) {
+  let progress = ''
+  let progressedAt = Date.now()
+  while (true) {
+    const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+    if (textBurst !== null) return textBurst
+    const now = JSON.stringify(textBurstProgress)
+    if (now !== progress) {
+      progress = now
+      progressedAt = Date.now()
+    } else if (Date.now() - progressedAt > stalledAfter) {
+      throw new Error(`The page's text burst got no further in ${stalledAfter} ms: ${now}`)
+    }
+    await sleep(500)
+  }
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -469,7 +497,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
         // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
         // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
-        restartProxy()
+        await restartProxy()
       } else {
         // dev/preview: single-instance, no proxy to restart — setOffline still works
         // because batch-only SSE without streamRequest gets blocked by Chromium's offline
@@ -520,7 +548,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
 
       // Go offline
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
@@ -531,7 +559,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
       // Arm reconnect watcher, then come back online.
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -629,14 +657,14 @@ function testChannel(isDev: boolean, inDocker = false) {
         channelId = state.clientPendingAckCloseReconnectChannelId
       })
 
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
       await page.click('#channel-test-client-pending-ack-close-reconnect')
 
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -1129,12 +1157,12 @@ function testChannel(isDev: boolean, inDocker = false) {
       await page.click('#channel-test-lossy-from-page-open')
       await autoRetry(async () => expect(await readLossyFromPage()).deep.equal([]))
 
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
       await page.click('#channel-test-lossy-from-page-send')
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await reconnectSignalPromise
 
@@ -1182,10 +1210,10 @@ function testChannel(isDev: boolean, inDocker = false) {
       await navigate(`${getServerUrl()}/channel`)
       await page.click('#channel-test-lossy-before-plain')
       await autoRetry(async () => expect(await lossyBeforePlain()).toBe('listening'))
-      if (inDocker) stopProxy()
+      if (inDocker) await stopProxy()
       else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
-      if (inDocker) startProxy()
+      if (inDocker) await startProxy()
       else await page.context().setOffline(false)
       await autoRetry(
         async () => expect(await lossyBeforePlain()).deep.equal({ received: [10, 'plain', 20], seqsAhead: [0, 1, 2] }),
@@ -1340,7 +1368,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-unawaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
@@ -1354,7 +1382,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await page.click('#channel-test-text-burst-awaited-6000')
     await autoRetry(
       async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
+        const burst = await endedTextBurst()
         expect(burst.received).toBe(6000)
         expect(burst.inOrder).toBe(true)
         expect(burst.closeErr).toBe(null)
@@ -1366,19 +1394,17 @@ function testChannel(isDev: boolean, inDocker = false) {
   test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
-    await autoRetry(
-      async () => {
-        const burst = (await getResult<ChannelState>('#channel-state')).textBurst!
-        expect(burst.closeErr).toBe(null)
-        expect(burst.received).greaterThan(3000)
-        expect(burst.received).lessThan(18000)
-        expect(burst.inOrder).toBe(true)
-        const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
-        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
-      },
-      { timeout: 60_000 },
-    )
+    // What the page receives is about 444 MB of events, so how long it takes is the link's: the card waits while the
+    // page gets further (it says so each 500 messages, about 44 MB).
+    const burst = await textBurstEnded(30_000)
+    expect(burst.closeErr).toBe(null)
+    expect(burst.received).greaterThan(3000)
+    expect(burst.received).lessThan(18000)
+    expect(burst.inOrder).toBe(true)
+    // The server records these before it sends the page its 'end'.
+    const ss = await getCleanupState()
+    expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
+    expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
     expectLog(sendRefusedWarning)
   })
 

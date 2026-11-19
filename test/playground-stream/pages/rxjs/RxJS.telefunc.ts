@@ -231,17 +231,18 @@ async function onShieldObservableArg(input$: Observable<number>) {
   })
 }
 
-// Server returns a Subject, subscribes to it with NO error handler, then
-// errors it shortly after. Server must not crash (onUnhandledError swallows).
+// Server returns a Subject, subscribes to it with NO error handler, and errors it once the page's message reached it.
+// Server must not crash (onUnhandledError swallows).
 async function onSubjectNoHandler() {
   const subject = new Subject<string>()
   subject.subscribe((v) => {
     cleanupState.noHandlerReceived = v
+    // Once the wire handed the page's message over: it doesn't send the page what the subject does inside that.
+    queueMicrotask(() => subject.error(new Error('no-handler-error')))
   })
   const { onClose } = getContext()
   onClose(() => {
     cleanupState.noHandlerClosed = 'true'
   })
-  setTimeout(() => subject.error(new Error('no-handler-error')), 600)
   return subject
 }
