@@ -9,7 +9,7 @@ import { seqNear, seqThrough } from '../../wire/seq.js'
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
 type ChannelState =
-  | { tag: 'pending'; initial: boolean }
+  | { tag: 'pending' }
   | { tag: 'open' }
   | {
       tag: 'closed'
@@ -119,13 +119,18 @@ class ChannelTable {
     this.records.get(ix)?.replay.acknowledge(lastSeq)
   }
 
+  /** Whether a RECONCILE lists it as `initial`: the server hasn't attached it yet. */
+  isInitial({ state }: ChannelRecord): boolean {
+    return state.tag === 'pending' || (state.tag === 'closed' && state.initial)
+  }
+
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
   add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
     const record: ChannelRecord = {
       ix,
       channel,
-      state: { tag: 'pending', initial: true },
+      state: { tag: 'pending' },
       replay,
       lastSeq: 0,
       awaited: false,
@@ -144,8 +149,7 @@ class ChannelTable {
   close(record: ChannelRecord): void {
     assert(record.state.tag !== 'closed')
     this.byChannel.delete(record.channel)
-    const initial = record.state.tag === 'pending' && record.state.initial
-    record.state = { tag: 'closed', initial, delivered: false, reported: false }
+    record.state = { tag: 'closed', initial: record.state.tag === 'pending', delivered: false, reported: false }
     this.closed.add(record)
   }
 

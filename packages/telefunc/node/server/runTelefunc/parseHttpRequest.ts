@@ -19,7 +19,7 @@ import { getGcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
@@ -273,16 +273,10 @@ function logParseException(err: unknown, runContext: RunContext) {
   )
 }
 
-const VALID_STREAM_TRANSPORTS: StreamTransport[] = [
-  STREAM_TRANSPORT.BINARY_INLINE,
-  STREAM_TRANSPORT.SSE_INLINE,
-  STREAM_TRANSPORT.CHANNEL,
-]
-
 function resolveStreamTransport(parsed: object, fallback: StreamTransport): StreamTransport {
-  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport', 'string')) return fallback
-  const transport = parsed.stream.transport as StreamTransport
-  return VALID_STREAM_TRANSPORTS.includes(transport) ? transport : fallback
+  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport')) return fallback
+  const { transport } = parsed.stream
+  return isStreamTransport(transport) ? transport : fallback
 }
 
 function isWrongMethod(runContext: { request: Request; logMalformedRequests: boolean }) {

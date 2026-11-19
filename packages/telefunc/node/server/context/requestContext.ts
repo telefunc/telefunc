@@ -6,6 +6,7 @@ import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
 import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -127,18 +128,15 @@ function createResponseAbortSource(releaseCallHold: () => void): ResponseAbortSo
   const abortCallbacks: Array<(abortError: AbortError) => void> = []
   let aborted = false
   let abortError: AbortError | null = null
-  let rejectAbortPromise: ((err: unknown) => void) | null = null
-  const errorPromise = new Promise<never>((_resolve, reject) => {
-    rejectAbortPromise = reject
-  })
-  errorPromise.catch(() => {})
+  const error = createDeferred<never>()
+  error.promise.catch(() => {})
 
   return {
     abort(abortValue) {
       if (aborted) return
       aborted = true
       abortError = Abort(abortValue)
-      rejectAbortPromise?.(abortError)
+      error.reject(abortError)
       for (const cb of abortCallbacks) {
         try {
           cb(abortError)
@@ -156,7 +154,7 @@ function createResponseAbortSource(releaseCallHold: () => void): ResponseAbortSo
       }
       abortCallbacks.push(cb)
     },
-    errorPromise,
+    errorPromise: error.promise,
   }
 }
 

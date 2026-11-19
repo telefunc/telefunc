@@ -54,7 +54,7 @@ import {
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
-import { pingDeadline } from '../../wire-protocol/wire/pingDeadline.js'
+import { reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
@@ -416,7 +416,7 @@ function fillUnset(current: unknown, val: unknown): unknown {
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
   const c = getChannelConfig()
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(c.pingInterval) + c.reconnectTimeout)
+  return reconnectWindowOf(c.pingInterval, c.reconnectTimeout)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.

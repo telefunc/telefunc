@@ -16,7 +16,6 @@ import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   type ChannelTransport,
-  TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
@@ -31,7 +30,7 @@ import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
 
-import { pingDeadline } from '../../wire/pingDeadline.js'
+import { reconnectWindowOf } from '../../wire/pingDeadline.js'
 
 import { WsTransport } from './WsTransport.js'
 import { SseTransport } from './SseTransport.js'
@@ -205,7 +204,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** How long the page waits for a server that went away: until the pong deadline, then `reconnectTimeout` more. */
   reconnectWindow(): number {
-    return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.liveness.pingInterval) + this.reconnectTimeoutMs)
+    return reconnectWindowOf(this.liveness.pingInterval, this.reconnectTimeoutMs)
   }
 
   /** Called once the channel sends nothing more. */

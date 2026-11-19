@@ -356,7 +356,7 @@ class AttachExchange {
         this.gate.release(record)
         continue
       }
-      const isInitial = record.state.tag !== 'open' && record.state.initial
+      const isInitial = this.channels.isInitial(record)
       if (skipUndeclared && isInitial && !record.awaited) continue
       this.channels.markDeclared(record)
       this.inFlight.ixes.set(ix, isInitial)

@@ -69,6 +69,12 @@ export const CHANNEL_TRANSPORT = {
 /** Transport for streamed values returned by telefunctions. */
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
 
+const STREAM_TRANSPORTS: readonly unknown[] = Object.values(STREAM_TRANSPORT)
+/** Whether `value` names a stream transport. */
+export function isStreamTransport(value: unknown): value is StreamTransport {
+  return STREAM_TRANSPORTS.includes(value)
+}
+
 /** `config.stream` as the user set it, validated. */
 export function parseStreamConfig(val: unknown): { transport?: StreamTransport } {
   assertUsage(isObject(val), 'config.stream should be an object')
@@ -76,7 +82,7 @@ export function parseStreamConfig(val: unknown): { transport?: StreamTransport }
   for (const [key, value] of Object.entries(val)) {
     assertUsage(key === 'transport', `Unknown config.stream.${key}`)
     assertUsage(
-      value === 'binary-inline' || value === 'sse-inline' || value === 'channel',
+      isStreamTransport(value),
       "`config.stream.transport` should be 'binary-inline', 'sse-inline', or 'channel'",
     )
     next.transport = value
