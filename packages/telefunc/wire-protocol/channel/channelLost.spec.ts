@@ -7,7 +7,7 @@ import type { Duplex } from 'node:stream'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
-import { ChannelCloseUnknownError, ChannelPageLeftError } from './channelErrors.js'
+import { ChannelClosedError, ChannelCloseUnknownError, ChannelPageLeftError } from './channelErrors.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -122,4 +122,36 @@ test('a page in a close whose reconnect reaches an updated server ends with Chan
   expect(end).toBeInstanceOf(ChannelCloseUnknownError)
   expect(end?.cause).toEqual(new NetworkError('The server was updated since this page loaded: reload the page.', true))
   await expect(closing).resolves.toBe(end)
+}, 10_000)
+
+/** The page decides a close and has the server's CLOSE_DONE when its connection is lost for good, its own cleanup
+ *  running `cleanupMs`: how each end's `closed` reads. */
+async function pageDecidesHoldingTheResult({ cleanupMs, timeoutMs }: { cleanupMs: number; timeoutMs: number }) {
+  const [channel, page] = await pair()
+  let cleanedUp = false
+  page.onClose(async () => {
+    await new Promise((resolve) => setTimeout(resolve, cleanupMs))
+    cleanedUp = true
+  })
+  const closing = page.close({ timeout: timeoutMs })
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  upgrades.otherWireVersion = true
+  dropWire()
+  const end = await page.closed
+  return { end, cleanedUp, closing, server: await channel.closed }
+}
+
+test("a page that decides and has the server's result when its connection is lost for good closes once its cleanup is done", async () => {
+  const { end, cleanedUp, closing, server } = await pageDecidesHoldingTheResult({ cleanupMs: 1_500, timeoutMs: 5_000 })
+  expect(end).toBeNull()
+  expect(cleanedUp).toBe(true)
+  await expect(closing).resolves.toBeNull()
+  // The verdict can't reach the server.
+  expect(server).toBeInstanceOf(ChannelCloseUnknownError)
+}, 10_000)
+
+test("a page that decides and has the server's result when its connection is lost for good times out with a cleanup past the close's timeout", async () => {
+  const { end, cleanedUp } = await pageDecidesHoldingTheResult({ cleanupMs: 3_000, timeoutMs: 2_000 })
+  expect(end).toEqual(new ChannelClosedError('Channel close timed out'))
+  expect(cleanedUp).toBe(false)
 }, 10_000)

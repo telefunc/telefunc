@@ -169,8 +169,10 @@ class ChannelEnding {
   }
 
   /** The connection ended for good with `err`. During a close, the verdict can no longer cross, on either end: it ends
-   *  with that unknown, `err` its cause. */
+   *  with that unknown, `err` its cause. A decider that has the other end's CLOSE_DONE still chooses the verdict, once
+   *  its own side is done. */
   connectionLost(err: Error): void {
+    if (this.role === 'decider' && this.peerDone) return
     this.endWith(this.role === null ? err : new ChannelCloseUnknownError({ cause: err }))
   }
 
