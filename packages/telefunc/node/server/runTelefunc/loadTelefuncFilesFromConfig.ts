@@ -26,7 +26,7 @@ async function loadTelefuncFilesFromConfig(runContext: {
     telefuncFiles.map(async (telefuncFilePathAbsolute) => {
       const telefuncFilePath = resolveTelefuncFilePath(telefuncFilePathAbsolute, root)
       telefuncFilesAll.push(telefuncFilePath)
-      if (!isTelefuncFilePath(runContext.telefuncFilePath)) {
+      if (!runContext.telefuncFilePath || !isTelefuncFilePath(runContext.telefuncFilePath)) {
         return
       }
       assert(isTelefuncFilePath(telefuncFilePath))

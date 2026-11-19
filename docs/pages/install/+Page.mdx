@@ -43,7 +43,7 @@ orders.listen((event) => render(event))
 await server.createOrder('product-1', 2)
 ```
 
-> Standalone telefunctions defined without `shield()` accept zero arguments by default (calls carrying arguments receive a 422 `ShieldValidationError`). To accept arbitrary arguments, declare `shield([shield.type.any], ...)`.
+> Standalone telefunctions defined without `shield()` accept zero arguments by default (calls carrying arguments receive a 422 `ShieldValidationError`). To accept an argument of any type, declare `shield([shield.type.any], ...)` (or provide a validator for each parameter).
 
 ## Vite plugin
 

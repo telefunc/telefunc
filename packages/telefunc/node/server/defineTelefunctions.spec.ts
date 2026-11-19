@@ -3,6 +3,7 @@ import { defineTelefunctions } from './defineTelefunctions.js'
 import { serve } from './telefunc.js'
 import { shield } from './shield.js'
 import { clearRegistration } from './runTelefunc/loadTelefuncFilesUsingRegistration.js'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { createClient } from '../../client/createClient.js'
 import { withContext } from '../../client/withContext.js'
 import { abort } from '../../client/abort.js'
@@ -49,6 +50,12 @@ describe('defineTelefunctions', () => {
         first: async () => {},
       })
     }).toThrow('is already registered')
+
+    expect(() => {
+      defineTelefunctions({
+        toString: async () => 'ok',
+      })
+    }).not.toThrow()
   })
 
   it('throws usage error for non-function values', () => {
@@ -185,6 +192,43 @@ describe('defineTelefunctions', () => {
         }),
       })
       expect(res.statusCode).toBe(400)
+    })
+
+    it('handles non-JSON types (like BigInt) in args without crashing on shield error logging', async () => {
+      defineTelefunctions({
+        noShieldFn: async () => 'ok',
+      })
+
+      const res = await serve({
+        url: '/_telefunc',
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', 'x-telefunc-request': 'txt' },
+        body: stringify({
+          file: '',
+          name: 'noShieldFn',
+          args: [BigInt('12345678901234567890')],
+        }),
+      })
+      expect(res.statusCode).toBe(422)
+    })
+
+    it('allows standalone telefunctions and file-based telefunctions to coexist', async () => {
+      defineTelefunctions({
+        standalonePing: async () => 'pong',
+      })
+
+      const resPing = await serve({
+        url: '/_telefunc',
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', 'x-telefunc-request': 'txt' },
+        body: JSON.stringify({
+          file: '',
+          name: 'standalonePing',
+          args: [],
+        }),
+      })
+      expect(resPing.statusCode).toBe(200)
+      expect(await resPing.getBody()).toContain('pong')
     })
   })
 })

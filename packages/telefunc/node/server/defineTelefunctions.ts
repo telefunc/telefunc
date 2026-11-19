@@ -27,7 +27,7 @@ function defineTelefunctions<T extends Record<string, (...args: any[]) => any>>(
       '`defineTelefunctions(api)`: "then" is a reserved name and cannot be used as a telefunction name.',
     )
 
-    if (registered && registered[''] && name in registered['']) {
+    if (registered && registered[''] && Object.hasOwn(registered[''], name)) {
       assertUsage(false, `\`defineTelefunctions(api)\`: telefunction \`"${name}"\` is already registered.`)
     }
 

@@ -14,25 +14,30 @@ async function loadTelefuncFiles(runContext: {
   telefuncFilesManuallyProvidedByUser: string[] | null
   telefuncFilePath: string
 }): Promise<{ telefuncFilesLoaded: TelefuncFiles; telefuncFilesAll: string[] }> {
-  // - defineTelefunctions()
-  // - Next.js
-  // - Nuxt 2
-  // - Vite in production if @brillout/vite-plugin-server-entry fails (see comment below)
-  {
-    const telefuncFilesLoaded = loadTelefuncFilesUsingRegistration()
-    if (telefuncFilesLoaded) {
-      const telefuncFilesAll = Object.keys(telefuncFilesLoaded)
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('registration'))
-      return { telefuncFilesLoaded, telefuncFilesAll }
-    }
+  const registered = loadTelefuncFilesUsingRegistration()
+
+  // Standalone telefunctions defined via defineTelefunctions()
+  if (runContext.telefuncFilePath === '' && registered && registered['']) {
+    const telefuncFilesAll = Object.keys(registered)
+    return { telefuncFilesLoaded: registered, telefuncFilesAll }
+  }
+
+  // Next.js / Nuxt 2 / Vite production fallback registration
+  if (registered && runContext.telefuncFilePath && registered[runContext.telefuncFilePath]) {
+    const telefuncFilesAll = Object.keys(registered)
+    return { telefuncFilesLoaded: registered, telefuncFilesAll }
   }
 
   // - The user can manually provide the list of `.telefunc.js` files using `config.telefuncFiles`
   {
     if (runContext.telefuncFilesManuallyProvidedByUser) {
       assert(hasProp(runContext, 'telefuncFilesManuallyProvidedByUser', 'string[]')) // Help TS narrow `runContext`
-      const { telefuncFilesLoaded, telefuncFilesAll } = await loadTelefuncFilesFromConfig(runContext)
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('manually provided by user'))
+      const res = await loadTelefuncFilesFromConfig(runContext)
+      const telefuncFilesLoaded: TelefuncFiles = { ...registered, ...res.telefuncFilesLoaded }
+      const telefuncFilesAll = Array.from(
+        new Set([...(registered ? Object.keys(registered) : []), ...res.telefuncFilesAll]),
+      )
+      assertUsage(telefuncFilesAll.length > 0, getNothingFoundErr('manually provided by user'))
       return { telefuncFilesLoaded, telefuncFilesAll }
     }
   }
@@ -47,10 +52,17 @@ async function loadTelefuncFiles(runContext: {
   {
     const res = await loadTelefuncFilesUsingVite(runContext, false)
     if (res) {
-      const { telefuncFilesLoaded, viteProvider, telefuncFilesAll } = res
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr(viteProvider))
+      const telefuncFilesLoaded: TelefuncFiles = { ...registered, ...res.telefuncFilesLoaded }
+      const telefuncFilesAll = Array.from(
+        new Set([...(registered ? Object.keys(registered) : []), ...res.telefuncFilesAll]),
+      )
+      assertUsage(telefuncFilesAll.length > 0, getNothingFoundErr(res.viteProvider))
       return { telefuncFilesLoaded, telefuncFilesAll }
     }
+  }
+
+  if (registered && Object.keys(registered).length > 0) {
+    return { telefuncFilesLoaded: registered, telefuncFilesAll: Object.keys(registered) }
   }
 
   if (isVikeApp()) {

@@ -73,6 +73,7 @@ Mount the middleware in your `AppModule`:
 // Environment: server
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common'
 import { TelefuncMiddleware } from './telefunc.middleware'
+import './api' // Import telefunction definitions so they register on startup
 
 @Module({})
 export class AppModule implements NestModule {

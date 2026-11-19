@@ -1,6 +1,7 @@
 export { applyShield }
 
 import { shieldApply, shieldIsMissing, logShieldError } from '../shield.js'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assertWarning } from '../../../utils/assert.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import type { Telefunction } from '../types.js'
@@ -27,7 +28,7 @@ function applyShield(runContext: {
             telefuncFilePath,
             subject: 'the arguments passed',
             wrongType: `Expected 0 arguments because standalone telefunction has no shield(), but received ${telefunctionArgs.length}`,
-            extra: `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
+            extra: `Arguments: \`${stringify(telefunctionArgs)}\`.`,
           },
           runContext.serverConfig.log.shieldErrors,
         )
@@ -59,7 +60,7 @@ function applyShield(runContext: {
       telefuncFilePath,
       subject: 'the arguments passed',
       wrongType: applyResult,
-      extra: `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
+      extra: `Arguments: \`${stringify(telefunctionArgs)}\`.`,
     },
     runContext.serverConfig.log.shieldErrors,
   )
