@@ -6,7 +6,8 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
-import { ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
+import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
+import { ChannelClosedError } from '../../wire-protocol/channel/channelErrors.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 
 function createPeer(frames: Uint8Array[]) {
@@ -258,6 +259,41 @@ describe('self-initiated close', () => {
       await expect(channel.closed).resolves.toBeUndefined()
     })
   }
+
+  test.each([false, true])(
+    "a BroadcastChannel (lossy: %s) refuses a publish from the call of its close() on, as its page's does, and the static publish to its key still goes",
+    async (lossy) => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<number>({ key, lossy })
+      const frames: Uint8Array[] = []
+      channel._registerChannel()
+      channel._attachPeer(createPeer(frames))
+      const page = fromPage(channel, frames)
+      const got: unknown[] = []
+      Broadcast.subscribe<number>(key, (data) => void got.push(data))
+      /** What a call threw, as its class and message. */
+      const refusal = (call: () => unknown) => {
+        try {
+          call()
+        } catch (err) {
+          return { refused: err instanceof ChannelClosedError, message: err instanceof Error ? err.message : err }
+        }
+        return 'went'
+      }
+      const closed = { refused: true, message: 'Channel is closed' }
+
+      const closing = channel.close()
+      expect(refusal(() => channel.publish(1))).toEqual(closed)
+      expect(refusal(() => channel.publishBinary(new Uint8Array([1])))).toEqual(closed)
+      page.closeAck()
+      await expect(closing).resolves.toBe(0)
+      expect(refusal(() => channel.publish(2))).toEqual(closed)
+      expect(refusal(() => channel.publishBinary(new Uint8Array([2])))).toEqual(closed)
+
+      await Broadcast.publish(key, 3)
+      expect(got).toEqual([3])
+    },
+  )
 
   test('buffered send flushes before close request on attachPeer', async () => {
     const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
