@@ -199,14 +199,6 @@ describe('cloudflare broadcast routing', () => {
     expect(resolveCloudflareLocationHint(createCloudflareRequest(), 'weur')).toBe('weur')
   })
 
-  it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    const shardCount = getBucketCoordinatorScale(2, 'weur')
-
-    expect(getDeterministicKeyBucketIndex('room/alpha', shardCount)).toBe(
-      getDeterministicKeyBucketIndex('room/alpha', shardCount),
-    )
-  })
-
   it('assigns room keys only within the bucket-coordinator subset', () => {
     for (const bucket of ['weur', 'apac', 'oc'] as const) {
       expect(getDeterministicKeyBucketIndex('room/alpha', getBucketCoordinatorScale(2, bucket))).toBe(0)
@@ -275,7 +267,7 @@ describe('cloudflare broadcast routing', () => {
     expect(() => assertLocationFallbackIsScaled(undefined, 'weur')).not.toThrow()
   })
 
-  it('writes KV presence on subscribe and reads it during publish fanout', async () => {
+  it("writes the subscribing Durable Object's KV presence on subscribe", async () => {
     const transport = createTransport(1)
     const kv = createMockKV()
     const previousTransport = getBroadcastAdapter()
@@ -392,14 +384,7 @@ describe('cloudflare broadcast routing', () => {
       return originalPut(key, value, options)
     }) as any
 
-    const localRegistry = (() => {
-      // Access the local registry after attachIsolateInfo sets it up
-      transport.attachIsolateInfo('weur')
-      // We need access to the local registry for the mock binding deliver path.
-      // Use deliverToLocal which reads from the internal registry.
-      return null
-    })()
-    void localRegistry
+    transport.attachIsolateInfo('weur')
 
     transport.attachBinding(
       createBasicBinding({
@@ -675,16 +660,14 @@ describe('cloudflare broadcast routing', () => {
     })
     await flushMicrotasks(8)
 
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"first"}')
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"first"}')
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
+    // Each coordinator has both, in publish order, while the first's remote delivery is still under way.
+    const publishesTo = (target: string) =>
+      coordinatorPublishes.filter((entry) => entry.startsWith(target)).map((entry) => entry.slice(target.length))
+    expect(publishesTo('telefunc:broadcast:weur:0:')).toEqual(['{"text":"first"}', '{"text":"second"}'])
+    expect(publishesTo('telefunc:broadcast:apac:0:')).toEqual(['{"text":"first"}', '{"text":"second"}'])
 
     releaseFirstRemotePublish!()
     await Promise.all([firstPublish, secondPublish])
-
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
-    expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
 
   // Its publishes reach this Durable Object only where another one's publish finds its presence in KV.

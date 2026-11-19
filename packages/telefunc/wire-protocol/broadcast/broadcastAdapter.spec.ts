@@ -1288,7 +1288,9 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     }
   }
 
-  it('publishes go through the transport and locally-subscribed receivers see the message', async () => {
+  // The transport delivers to every node's subscribers, the publisher's own among them, and the adapter delivers only
+  // what the transport hands it: a same-node publish reaches its subscriber once, before the receipt is awaited.
+  it('a publish goes through the transport, and reaches a subscriber on the publishing node once', async () => {
     const transport = createMockTransport()
     _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
@@ -1299,29 +1301,12 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
 
-    const receipt = await sender.publish({ text: 'hello' })
-
+    const receipt = sender.publish({ text: 'hello' })
     expect(received).toEqual([{ text: 'hello' }])
-    expect(receipt.seq).toBe(1)
-    expect(typeof receipt.timestamp).toBe('number')
-  })
 
-  // The classic distributed-bus footgun: the transport delivers to all subscribers
-  // INCLUDING the publisher's own node, AND the adapter delivers locally. Without
-  // dedup, every same-node publish fans out twice.
-  it('does not double-deliver when the transport echoes back to the publisher node', () => {
-    const transport = createMockTransport()
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
-    const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    sender._registerChannel()
-    receiver._registerChannel()
-
-    const received: Array<{ text: string }> = []
-    receiver.subscribe((m) => received.push(m))
-
-    sender.publish({ text: 'hello' })
-
+    const { seq, timestamp } = await receipt
+    expect(seq).toBe(1)
+    expect(typeof timestamp).toBe('number')
     expect(received).toEqual([{ text: 'hello' }])
   })
 
