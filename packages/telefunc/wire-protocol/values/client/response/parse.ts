@@ -237,10 +237,6 @@ class FrameDemuxer {
     this.canStopReading = true
   }
 
-  private registerConsumer() {
-    this.totalConsumers++
-  }
-
   /** Cancel the given index. Follows .tee() semantics:
    *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
@@ -292,7 +288,7 @@ class FrameDemuxer {
   }
 
   create(index: number): StreamSource {
-    this.registerConsumer()
+    this.totalConsumers++
     const readNextChunk = () => this.readNextChunkForIndex(index)
     const cancel = () => this.cancelIndex(index)
     const isCancelled = () => this.cancelledIndices.has(index)

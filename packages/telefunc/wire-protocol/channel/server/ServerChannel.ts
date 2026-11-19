@@ -1,6 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
-export { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-export { NetworkError } from '../../../shared/NetworkError.js'
+export { Channel, ServerChannel }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 

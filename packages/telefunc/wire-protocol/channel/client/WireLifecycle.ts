@@ -506,7 +506,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const { attempt, startedAt } = this.reconnects ?? { attempt: 0, startedAt: performance.now() }
     if (rejected && attempt === 0) {
       this.closeAll(err)
-      this.dispose()
       return
     }
     // A closed channel whose frames the server all has needs nothing from another wire.
@@ -519,7 +518,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     if (performance.now() - startedAt > this.reconnectTimeoutMs) {
       this.closeAll(err)
-      this.dispose()
       return
     }
     this.reconnects = { attempt: attempt + 1, startedAt }

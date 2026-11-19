@@ -1,5 +1,5 @@
 export { handleSseChannelRequest }
-export type { SseChannelHttpResponse, SseWire }
+export type { SseChannelHttpResponse }
 
 import type { Readable } from 'node:stream'
 import { Fifo } from '../../../utils/Fifo.js'

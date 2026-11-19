@@ -141,7 +141,6 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
-    const page = fromPage(channel, frames)
     const closePromise = channel.close({ timeout: 10 })
 
     expect(channel.isClosed).toBe(true)
@@ -262,7 +261,6 @@ describe('self-initiated close', () => {
 
     channel._registerChannel()
     channel._attachPeer(createPeer(frames))
-    const page = fromPage(channel, frames)
     await Promise.resolve()
 
     expect(frames).toHaveLength(2)
