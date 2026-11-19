@@ -117,9 +117,15 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    // The channel moves to WebSocket, though +server.ts assigns config.channel after the adapter. The page opens it
+    // over SSE and upgrades once its RECONCILED arrives, so the welcome may come before the WebSocket opens.
+    await autoRetry(
+      async () => {
+        expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
+      },
+      { timeout: 10000 },
+    )
     page.off('websocket', onWebSocket)
-    // The channel goes over WebSocket, though +server.ts assigns config.channel after the adapter.
-    expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {
