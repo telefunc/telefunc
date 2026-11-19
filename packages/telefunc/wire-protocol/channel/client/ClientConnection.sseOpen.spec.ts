@@ -155,6 +155,18 @@ test('during a recovery, an open answered with a page of HTML is tried again', {
   expect({ opens, closed: channel.isClosed }).toEqual({ opens: 4, closed: false })
 })
 
+test('a first open refused ends the channel at once, naming the status that refused it', async () => {
+  answers.push(html(404))
+  const notFound = await openingOf(openChannel())
+  answers.push(html(502))
+  const badGateway = await openingOf(openChannel())
+  expect([(notFound as Error).message, (badGateway as Error).message]).toEqual([
+    'Server rejected SSE connection with 404 text/html',
+    'Server rejected SSE connection with 502 text/html',
+  ])
+  expect(opens).toBe(2)
+})
+
 // The page waits up to 3 s for its upload's acknowledgement.
 test(
   'a wire that ends while its upload waits for an acknowledgement is followed by another',
@@ -201,19 +213,27 @@ test(
 
 // Its window is the ping deadline, two and a half intervals over SSE, and then `reconnectTimeout`: 12.5 s, room for
 // attempts after a first handshake that took seconds, as the page starts none that couldn't reconcile in time.
-test(
-  'a recovery answered only with pages of HTML ends at its deadline, naming the last answer',
+test.each([
+  {
+    answer: 'a page of HTML',
+    status: 200,
+    message: 'The server answered the SSE connection with 200 text/html, not an event stream',
+  },
+  { answer: "a proxy's error page", status: 502, message: 'Server rejected SSE connection with 502 text/html' },
+])(
+  'a recovery answered only with $answer ends at its deadline, naming it',
   { timeout: 30_000 },
-  async () => {
-    answers.push(wire({ pingInterval: 1000, reconnectTimeout: 10_000 }), ...Array.from({ length: 20 }, () => html(200)))
+  async ({ status, message }) => {
+    answers.push(
+      wire({ pingInterval: 1000, reconnectTimeout: 10_000 }),
+      ...Array.from({ length: 20 }, () => html(status)),
+    )
     const channel = openChannel()
     expect(await openingOf(channel)).toBe('opened')
     wires.shift()?.end()
     const closing = await closingOf(channel)
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
     expect(closing).toBeInstanceOf(Error)
-    expect((closing as Error).message).toBe(
-      'The server answered the SSE connection with 200 text/html, not an event stream',
-    )
+    expect((closing as Error).message).toBe(message)
   },
 )

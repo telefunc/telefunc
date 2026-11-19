@@ -318,7 +318,9 @@ class SseTransport implements UpgradeSource {
       return null
     }
     if (!response.ok) {
-      this.failOpen(stage, abortController, { refusal: 'Server rejected SSE connection' })
+      this.failOpen(stage, abortController, {
+        refusal: `Server rejected SSE connection with ${describeAnswer(response)}`,
+      })
       return null
     }
     // As a browser's EventSource requires (HTML, "the EventSource interface"): a 200 event stream. A login page or an
