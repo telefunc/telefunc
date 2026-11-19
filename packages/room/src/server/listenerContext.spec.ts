@@ -25,4 +25,14 @@ describe("a server-side room's callbacks", () => {
     await Room.publish(id, 'hello')
     expect(read).toEqual(['throws', 'throws'])
   })
+
+  it("listen(), added in alice's context, gets no context for bob's private message that asks for a reply", async () => {
+    const room = await Room.create(`context-${crypto.randomUUID()}`)
+    const alice = await room.join({ meta: { name: 'alice' } })
+    const bob = await room.join({ meta: { name: 'bob' } })
+    provideTelefuncContext({ user: 'alice' })
+    alice.listen(() => whoseContext())
+    provideTelefuncContext({ user: 'bob' })
+    await expect(bob.send(alice.id, 'hello', { ack: true })).resolves.toBe('throws')
+  })
 })

@@ -2,7 +2,7 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js'
 export { tetherTo, untether } from '../../utils/wrapProxy.js'
-export { invokeChannelListener } from './context/invokeWithoutContext.js'
+export { invokeChannelListener, soleAnswer } from './context/invokeWithoutContext.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { reconnectWindow } from './serverConfig.js'
@@ -13,7 +13,7 @@ export type { QueueMemory } from '../../wire-protocol/channel/channelMessages.js
 // Utilities the add-ons share with core.
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 export { Fifo } from '../../utils/Fifo.js'
-export { soleAnswer, TWO_ANSWERS } from '../../wire-protocol/channel/listenerAnswer.js'
+export { TWO_ANSWERS } from '../../wire-protocol/channel/listenerAnswer.js'
 export { getOrCreate } from '../../utils/getOrCreate.js'
 export { isObject } from '../../utils/isObject.js'
 export { Listeners } from '../../utils/Listeners.js'
