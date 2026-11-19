@@ -161,22 +161,19 @@ type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => 
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 /** Removes the listener, as aborting its `signal` does. `opened` resolves once the listener is in effect, at once for
- *  `listen()`, and rejects if its channel closes first or, for a server-side `Broadcast.subscribe()`, if its
- *  subscription fails. What removing the listener while `opened` waits does, and each case's error, is on the page.
+ *  `listen()`, and rejects where it never will be, as where its channel closes first; each case is on the page.
  *
  *  https://telefunc.com/channel#when-opened-settles */
 type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
+/** `0`: this end received the close acknowledgement; `1`: it did not. `closed` gives the final outcome. */
 type ChannelCloseResult = 0 | 1
 type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 
-/**
- * Internal base — `TOut` is what this side sends, `TIn` is what this side receives.
- * Each can be a raw message type or a handler signature `(msg) => ack`.
- * Shared base for `Channel` and `ClientChannel`.
- */
+/** The channel surface both ends share: `TOut` is what this end sends, `TIn` what it receives, each a message type or a
+ *  `(message) => answer` signature. */
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
   readonly isClosed: boolean
