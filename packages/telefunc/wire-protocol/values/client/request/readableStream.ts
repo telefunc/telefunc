@@ -2,6 +2,7 @@ export { readableStreamReplacer }
 
 import type { ClientReplacerContext, StreamingReplacerType, ReadableStreamRequestContract } from '../../types.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../../constants.js'
+import { producerOfStream } from '../../producerOfStream.js'
 
 const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContract, ClientReplacerContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
@@ -10,26 +11,5 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContrac
     const { metadata, close, abort } = context.sendStream(() => readableStreamReplacer.createProducer(value))
     return { metadata, close, abort }
   },
-  createProducer: (value) => {
-    const reader = value.getReader()
-    const chunks = (async function* () {
-      try {
-        while (true) {
-          const { done, value: chunk } = await reader.read()
-          if (done) break
-          yield chunk
-        }
-      } finally {
-        await reader.cancel()
-      }
-    })()
-    return {
-      chunks,
-      cancel: (reason) => {
-        // Nothing awaits these: they reject with the source's error, or its cancel() failure.
-        chunks.return(undefined).catch(() => {})
-        reader.cancel(reason).catch(() => {})
-      },
-    }
-  },
+  createProducer: (value) => producerOfStream(value),
 }
