@@ -513,27 +513,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;
    *  an open one applies the RECONCILE's broadcast want before `onOpen` fires. */
   _attachPeer(peer: IndexedPeer, state?: AttachState): void {
-    if (this._phase === 'ended') {
-      this.sendHeldForAttach(peer)
-      this.offlineBuffer.flush(peer)
-      this.sendPendingAckRes(peer)
-      this.sendPendingEnd(peer)
-      return
+    const live = this._phase !== 'ended'
+    if (live) {
+      if (this.ttlTimer) clearTimeout(this.ttlTimer)
+      this.ttlTimer = null
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+      this.peer = peer
+      this._replayBuffer?.moving()
+      this.receiveCredit.attach(peer.sender.sendWait())
+      if (state?.want) this.onPeerWant(state.want)
     }
-    if (this.ttlTimer) clearTimeout(this.ttlTimer)
-    this.ttlTimer = null
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
-    this.peer = peer
-    this._replayBuffer?.moving()
-    this.receiveCredit.attach(peer.sender.sendWait())
-    if (state?.want) this.onPeerWant(state.want)
+    // What the page gets on attach, in this order: the held sends, the offline buffer, the answers, the end.
     this.sendHeldForAttach(peer)
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
     this.sendPendingEnd(peer)
-    if (this._phase === 'closing') return
-    this.lifecycle.fireOpen()
+    if (live && this._phase !== 'closing') this.lifecycle.fireOpen()
   }
 
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
