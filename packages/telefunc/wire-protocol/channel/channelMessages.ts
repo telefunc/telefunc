@@ -91,7 +91,7 @@ async function* iterateMessages<M extends Message<unknown>>(
     memory?.letGo(size)
   }
   // The message the loop is at: its listener's promise settles once the loop takes the next step or ends.
-  let current: { consumed: () => void } | undefined
+  let current: { message: M; consumed: () => void; size: number } | undefined
   const consumeCurrent = () => {
     current?.consumed()
     current = undefined
@@ -145,18 +145,18 @@ async function* iterateMessages<M extends Message<unknown>>(
     subscribe(receive, { signal: registrations.signal })
     while (true) {
       if (error !== undefined) throw error
-      const next = queue.shift()
-      if (!next) {
+      current = queue.shift()
+      if (current === undefined) {
         if (ended) return
         await new Promise<void>((resolve) => {
           wake = resolve
         })
         continue
       }
-      letGo(next.size)
-      current = next
+      letGo(current.size)
       try {
-        yield next.message
+        // Read through `current`, which an abort lets go of: a local would keep the message while the loop waits here.
+        yield current.message
       } finally {
         consumeCurrent()
       }
