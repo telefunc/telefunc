@@ -341,7 +341,7 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(page.read).toEqual(['R'])
   })
 
-  test("of another realm, and shared ones, are a usage error too, and an object that only claims a buffer's tag goes", () => {
+  test('of another realm, and shared ones, are a usage error too', () => {
     const channel = new Channel()
     const other = runInNewContext(
       '({ buffer: new ArrayBuffer(2), shared: new SharedArrayBuffer(2), view: new Uint8Array(2) })',
@@ -351,7 +351,6 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(() => channel.send(new SharedArrayBuffer(2))).toThrow('turns this `SharedArrayBuffer` into a plain object')
     expect(() => channel.send([other.shared], { ack: true })).toThrow('the `SharedArrayBuffer` in it')
     expect(() => channel.send({ v: other.view })).toThrow('the `Uint8Array` in it')
-    expect(() => channel.send({ [Symbol.toStringTag]: 'ArrayBuffer', n: 1 })).not.toThrow()
   })
 
   test('nested at any depth, are a usage error naming `publishBinary()`, and nothing is published', async () => {

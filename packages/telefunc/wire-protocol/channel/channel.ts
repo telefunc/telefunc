@@ -93,32 +93,13 @@ function serializeAbortReason(reason: unknown): AbortReason {
 type AbortReason = { value: unknown; serialized: string; refusal: { error: unknown } | null }
 
 const toTag = Object.prototype.toString
-/** A buffer's own `byteLength` getter, which throws for anything without the buffer's internal slot. A page that isn't
- *  cross-origin isolated has no `SharedArrayBuffer`, and no realm of it makes one. */
-const readByteLength = {
-  '[object ArrayBuffer]': Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')?.get,
-  '[object SharedArrayBuffer]':
-    typeof SharedArrayBuffer === 'undefined'
-      ? undefined
-      : Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength')?.get,
-}
-
-/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm. A plain object or an array of this realm
- *  is none, which one prototype read tells; for the rest, the tag names a candidate and the buffer's getter confirms
- *  it, so an object that only claims the tag isn't one. Confirming every object that way would cost a throw each. */
-function isBuffer(value: object): value is ArrayBufferLike {
+/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm, by its tag. A plain object or an array
+ *  of this realm is none, which one prototype read tells. */
+function isBuffer(value: object): boolean {
   const proto = Object.getPrototypeOf(value)
   if (proto === Object.prototype || proto === Array.prototype) return false
-  if (value instanceof ArrayBuffer) return true
   const tag = toTag.call(value)
-  const read = tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]' ? readByteLength[tag] : undefined
-  if (!read) return false
-  try {
-    read.call(value)
-    return true
-  } catch {
-    return false
-  }
+  return tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]'
 }
 
 type ChannelListenReturn<T> = [T] extends [never]
