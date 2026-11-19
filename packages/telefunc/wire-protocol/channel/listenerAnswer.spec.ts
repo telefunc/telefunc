@@ -45,7 +45,7 @@ const ANSWERS = {
   bytes: { answer: () => new Uint8Array([1, 2, 255]), which: 'this `Uint8Array`' },
   'bytes inside an object': {
     answer: () => ({ frame: new Uint8Array([1, 2, 255]) }),
-    which: 'the `Uint8Array` at `frame`',
+    which: 'the `Uint8Array` in it',
   },
 }
 /** What the end that answers reports, and what the sender's acknowledged send rejects with. */

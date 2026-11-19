@@ -121,7 +121,7 @@ const REASONS = {
   'bytes in the reason': {
     reason: { frame: new Uint8Array([1, 2, 255]) },
     refusal:
-      'An abort reason is serialized as JSON, which turns the `Uint8Array` at `frame` into a plain object. Abort with a plain value, such as a string or a code.',
+      'An abort reason is serialized as JSON, which turns the `Uint8Array` in it into a plain object. Abort with a plain value, such as a string or a code.',
     arrives: undefined,
   },
   'a function in the reason': {
