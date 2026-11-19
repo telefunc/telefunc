@@ -120,6 +120,8 @@ Every listener (`onChange()`, `onJoin()`, `subscribe()`, `listen()`, …) return
 useEffect(() => room.subscribe((message) => addMessage(message)), [room])
 ```
 
+On the server, `getContext()` throws inside a room's event and message listeners (`onJoin()`, `onChange()`, `subscribe()`, `listen()`, …), since they run for what other users do: read the context before you add them. The hooks you pass to `Room.guard()` aren't listeners: they run for the client the room is returned to (see <Link href="#control-who-can-join-and-post" />).
+
 ## Stop listening
 
 Pass `{ signal }` to a listener registration to remove it when you abort the signal, or use `messages()` to iterate messages. Each message is `{ type, data, info }`: `type` is `'text'` or `'binary'`, and `data` and `info` are what a `subscribe()` or `subscribeBinary()` listener receives, with `info.from` the sender's `id`, `meta` and `identity` as they were when the message arrived:
@@ -386,8 +388,6 @@ export async function onStartMatch() {
 > A page that falls behind gets every message, so state it may skip goes on a track, published with <Link href="#stream-audio-or-video">`lossy: true`</Link>, where it skips to the newest frame.
 
 A hidden participant can do everything a participant does, but players don't see it among the room's participants.
-
-On the server, `getContext()` throws inside a room's callbacks (`listen()`, `subscribe()`, `onJoin()`, `onClose()`, …), since they run for what other users do: read the context before you add them.
 
 To let players send it commands, return it with the room:
 
