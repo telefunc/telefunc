@@ -62,12 +62,9 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
   // Each upgrade's socket, by the request its upgrade hook gets.
   const sockets = new WeakMap<Request, Duplex>()
-  const ws = crossws({
-    hooks: getTelefuncChannelHooks({
-      upgrade: (request) => ({ context: { socket: sockets.get(request) } }),
-      send: sendInTaskWrite,
-    }),
-  })
+  // Made with the first upgrade listener: the hooks enable the WebSocket transport, which an app that serves only
+  // `serve({ request })` doesn't have.
+  let ws: ReturnType<typeof crossws> | undefined
 
   function installWebSocket(server: HttpServerOrWrapper): void {
     const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
@@ -78,6 +75,12 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     }
     if (registeredServers.has(httpServer)) return
     registeredServers.add(httpServer)
+    const adapter = (ws ??= crossws({
+      hooks: getTelefuncChannelHooks({
+        upgrade: (request) => ({ context: { socket: sockets.get(request) } }),
+        send: sendInTaskWrite,
+      }),
+    }))
 
     httpServer.on('upgrade', (req, socket, head) => {
       const config = getServerConfig()
@@ -89,7 +92,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       }
       const request = new Request('http://localhost' + req.url)
       sockets.set(request, socket)
-      ws.handleUpgrade(req, socket, head, request)
+      adapter.handleUpgrade(req, socket, head, request)
     })
   }
 
