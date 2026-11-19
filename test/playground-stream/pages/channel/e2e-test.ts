@@ -11,6 +11,7 @@ import {
   stopProxy,
   startProxy,
   countConnections,
+  sleep,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 
@@ -106,6 +107,25 @@ async function endedTextBurst() {
   const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
   if (textBurst === null) throw new Error(`The page's text burst hasn't ended: ${JSON.stringify(textBurstProgress)}`)
   return textBurst
+}
+
+/** The page's text burst once it ended, however long that takes on the machine's link, as long as the page gets further:
+ *  one that got no further in `stalledAfter` ms fails, saying where it got to. */
+async function textBurstEnded(stalledAfter: number) {
+  let progress = ''
+  let progressedAt = Date.now()
+  while (true) {
+    const { textBurst, textBurstProgress } = await getResult<ChannelState>('#channel-state')
+    if (textBurst !== null) return textBurst
+    const now = JSON.stringify(textBurstProgress)
+    if (now !== progress) {
+      progress = now
+      progressedAt = Date.now()
+    } else if (Date.now() - progressedAt > stalledAfter) {
+      throw new Error(`The page's text burst got no further in ${stalledAfter} ms: ${now}`)
+    }
+    await sleep(500)
+  }
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -1374,19 +1394,17 @@ function testChannel(isDev: boolean, inDocker = false) {
   test('channel: of 18,000 acknowledgement requests of 64 KiB the server sends in one loop, those past maxMemory are refused and the channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
-    await autoRetry(
-      async () => {
-        const burst = await endedTextBurst()
-        expect(burst.closeErr).toBe(null)
-        expect(burst.received).greaterThan(3000)
-        expect(burst.received).lessThan(18000)
-        expect(burst.inOrder).toBe(true)
-        const ss = await getCleanupState()
-        expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
-        expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
-      },
-      { timeout: 60_000 },
-    )
+    // What the page receives is about 444 MB of events, so how long it takes is the link's: the card waits while the
+    // page gets further (it says so each 500 messages, about 44 MB).
+    const burst = await textBurstEnded(30_000)
+    expect(burst.closeErr).toBe(null)
+    expect(burst.received).greaterThan(3000)
+    expect(burst.received).lessThan(18000)
+    expect(burst.inOrder).toBe(true)
+    // The server records these before it sends the page its 'end'.
+    const ss = await getCleanupState()
+    expect(ss[`textBurst_${burst.channelId}_error`]).toContain('config.channel.maxMemory')
+    expect(ss[`textBurst_${burst.channelId}_acked`]).toBe(String(burst.received))
     expectLog(sendRefusedWarning)
   })
 
