@@ -5,6 +5,7 @@ export {
   onCloseStream,
   onCloseChannel,
   onKeptChannel,
+  onChannelTheServerCloses,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -113,6 +114,22 @@ async function onKeptChannel() {
   ch.onClose((err) => {
     cleanupState.keptChannel = err ? err.name : 'none'
   })
+  return ch.client
+}
+
+/** cleanupState: channelTheServerCloses = 'closing' once the server's close() has the page's acknowledgement and its
+ *  own cleanup ran, then what that close() resolved with: its error's name, or 'null'. */
+async function onChannelTheServerCloses() {
+  const ch = new Channel<never, never>()
+  cleanupState.channelTheServerCloses = 'pending'
+  ch.onOpen(() => void closeAndRecord())
+  ch.onClose(() => {
+    cleanupState.channelTheServerCloses = 'closing'
+  })
+  async function closeAndRecord() {
+    const err = await ch.close({ timeout: 30_000 })
+    cleanupState.channelTheServerCloses = err ? err.name : 'null'
+  }
   return ch.client
 }
 
