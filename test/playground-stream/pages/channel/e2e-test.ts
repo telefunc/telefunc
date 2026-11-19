@@ -1,4 +1,4 @@
-export { testChannel, testChannelApi }
+export { testChannel }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'

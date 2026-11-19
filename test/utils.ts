@@ -37,8 +37,12 @@ async function withNetworkConditions<T>(conditions: NetworkConditions, run: () =
     await emulate(conditions)
     return await run()
   } finally {
-    await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
-    await cdp.detach()
+    // Detached even where lifting the throttle fails, as on a page that closed meanwhile.
+    try {
+      await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
+    } finally {
+      await cdp.detach()
+    }
   }
 }
 

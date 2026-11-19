@@ -1,4 +1,4 @@
-export { MESSAGE_BYTES, textMessage, binaryMessage, Tally }
+export { textMessage, binaryMessage, Tally }
 export type { TallyState }
 
 /** 16 KiB, so a few dozen messages are past what a replay buffer once kept of what was on the wire. */
@@ -34,10 +34,9 @@ class Tally {
     return n
   }
 
-  binary(message: Uint8Array): number {
+  binary(message: Uint8Array): void {
     const n = new DataView(message.buffer, message.byteOffset).getUint32(0)
     if (n !== this.state.binary || (this.alternating && this.state.text !== n + 1)) this.state.inOrder = false
     this.state.binary++
-    return n
   }
 }
