@@ -7,7 +7,6 @@ import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolati
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
-import { ChannelClosedError } from '../../wire-protocol/channel/channelErrors.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 
 function createPeer(frames: Uint8Array[]) {
@@ -259,41 +258,6 @@ describe('self-initiated close', () => {
       await expect(channel.closed).resolves.toBeUndefined()
     })
   }
-
-  test.each([false, true])(
-    "a BroadcastChannel (lossy: %s) refuses a publish from the call of its close() on, as its page's does, and the static publish to its key still goes",
-    async (lossy) => {
-      const key = crypto.randomUUID()
-      const channel = new ServerBroadcast<number>({ key, lossy })
-      const frames: Uint8Array[] = []
-      channel._registerChannel()
-      channel._attachPeer(createPeer(frames))
-      const page = fromPage(channel, frames)
-      const got: unknown[] = []
-      Broadcast.subscribe<number>(key, (data) => void got.push(data))
-      /** What a call threw, as its class and message. */
-      const refusal = (call: () => unknown) => {
-        try {
-          call()
-        } catch (err) {
-          return { refused: err instanceof ChannelClosedError, message: err instanceof Error ? err.message : err }
-        }
-        return 'went'
-      }
-      const closed = { refused: true, message: 'Channel is closed' }
-
-      const closing = channel.close()
-      expect(refusal(() => channel.publish(1))).toEqual(closed)
-      expect(refusal(() => channel.publishBinary(new Uint8Array([1])))).toEqual(closed)
-      page.closeAck()
-      await expect(closing).resolves.toBe(0)
-      expect(refusal(() => channel.publish(2))).toEqual(closed)
-      expect(refusal(() => channel.publishBinary(new Uint8Array([2])))).toEqual(closed)
-
-      await Broadcast.publish(key, 3)
-      expect(got).toEqual([3])
-    },
-  )
 
   test('buffered send flushes before close request on attachPeer', async () => {
     const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
@@ -636,4 +600,58 @@ describe('a listen() callback that an earlier one stopped during the same messag
 
     expect(asked).toEqual([])
   })
+})
+
+// The channel page's chat example announces a leave from `onClose()`: on the server, a publish goes to the key.
+describe("a server BroadcastChannel's publish from its onClose()", () => {
+  const ENDS = {
+    'the server closed it': (channel: ServerBroadcast<string>, frames: Uint8Array[]) => {
+      const closing = channel.close()
+      fromPage(channel, frames).closeAck()
+      return closing
+    },
+    'its page left': (channel: ServerBroadcast<string>) => channel._onPeerGone(),
+  }
+  for (const [end, endIt] of Object.entries(ENDS))
+    for (const awaitsFirst of [false, true])
+      for (const binary of [false, true])
+        test(`${binary ? 'publishBinary()' : 'publish()'} reaches the key's other subscribers once ${end}${awaitsFirst ? ', from a callback that awaits first' : ''}`, async () => {
+          const key = crypto.randomUUID()
+          const channel = new ServerBroadcast<string>({ key })
+          const frames: Uint8Array[] = []
+          channel._registerChannel()
+          channel._attachPeer(createPeer(frames))
+          const sibling = new ServerBroadcast<string>({ key })
+          const got: { by: string; data: unknown }[] = []
+          const unsubscribes = binary
+            ? [
+                Broadcast.subscribeBinary(key, (data) => void got.push({ by: 'Broadcast', data: [...data] })),
+                sibling.subscribeBinary((data) => void got.push({ by: 'sibling', data: [...data] })),
+              ]
+            : [
+                Broadcast.subscribe<string>(key, (data) => void got.push({ by: 'Broadcast', data })),
+                sibling.subscribe((data) => void got.push({ by: 'sibling', data })),
+              ]
+          let failed: unknown
+          channel.onClose(async () => {
+            try {
+              if (awaitsFirst) await new Promise((resolve) => setTimeout(resolve, 10))
+              if (binary) await channel.publishBinary(new Uint8Array([7]))
+              else await channel.publish('left')
+            } catch (err) {
+              failed = err
+            }
+          })
+          await endIt(channel, frames)
+          while (got.length < 2 && failed === undefined) await new Promise((resolve) => setTimeout(resolve, 1))
+          for (const unsubscribe of unsubscribes) unsubscribe()
+          const data = binary ? [7] : 'left'
+          expect({ failed, got }).toEqual({
+            failed: undefined,
+            got: expect.arrayContaining([
+              { by: 'Broadcast', data },
+              { by: 'sibling', data },
+            ]),
+          })
+        })
 })

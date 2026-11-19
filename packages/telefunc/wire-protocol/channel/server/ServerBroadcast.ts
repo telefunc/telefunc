@@ -132,10 +132,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
-  /** From the call of `close()` on, it refuses, as its page's does: `Broadcast.publish()` publishes to the key without a
-   *  channel. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this._phase !== 'open') throw new ChannelClosedError()
     const serialized = stringifyValue(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
@@ -152,7 +149,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this._phase !== 'open') throw new ChannelClosedError()
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
