@@ -130,87 +130,74 @@ const REASONS = {
     arrives: undefined,
   },
 }
-type ReasonName = keyof typeof REASONS
-type End = 'server' | 'page'
-// One row per outcome on each path: a reason JSON holds, and one it refuses. Bytes and a function are refused by
-// different code (the bytes rule, the serializer), so the paths share them out.
-const HOLDS_AND_BYTES: ReasonName[] = ['a reason JSON holds', 'bytes in the reason']
-const HOLDS_AND_FUNCTION: ReasonName[] = ['a reason JSON holds', 'a function in the reason']
-/** A reason JSON holds on one end, and a refused one on each: bytes on the server, a function on the page. */
-const ON_ENDS: [End, ReasonName][] = [
-  ['server', 'a reason JSON holds'],
-  ['server', 'bytes in the reason'],
-  ['page', 'a function in the reason'],
-]
 
-describe('abort(reason)', () => {
-  for (const [aborting, name] of ON_ENDS) {
-    const { reason, refusal, arrives } = REASONS[name]
-    test(`called on the ${aborting} with ${name}: both ends end${refusal ? ' without it, and the call throws once they did' : ' with it'}`, async () => {
-      const [channel, page] = await pair()
-      const [aborter, other] = aborting === 'server' ? [channel, page] : [page, channel]
-      const got = closings({ channel, page })
-      other.listen(() => new Promise(() => {}))
-      const pending = aborter.send('waits', { ack: true })
+for (const aborting of ['server', 'page'] as const) {
+  describe(`abort(reason) called on the ${aborting}`, () => {
+    for (const [name, { reason, refusal, arrives }] of Object.entries(REASONS)) {
+      test(`with ${name}: both ends end${refusal ? ' without it, and the call throws once they did' : ' with it'}`, async () => {
+        const [channel, page] = await pair()
+        const [aborter, other] = aborting === 'server' ? [channel, page] : [page, channel]
+        const got = closings({ channel, page })
+        other.listen(() => new Promise(() => {}))
+        const pending = aborter.send('waits', { ack: true })
 
-      const report = await reported(async () => {
-        if (refusal) expect(() => aborter.abort(reason)).toThrow(refusal)
-        else aborter.abort(reason)
-        await settled(got)
+        const report = await reported(async () => {
+          if (refusal) expect(() => aborter.abort(reason)).toThrow(refusal)
+          else aborter.abort(reason)
+          await settled(got)
+        })
+
+        expect(got).toEqual({ channel: { abortValue: arrives }, page: { abortValue: arrives } })
+        expect(aborter.isClosed).toBe(true)
+        expect(other.isClosed).toBe(true)
+        expect(endOf(await pending.catch((err: unknown) => err))).toEqual({ abortValue: arrives })
+        expect(report).toEqual({ page: [], server: [] })
       })
+    }
 
-      expect(got).toEqual({ channel: { abortValue: arrives }, page: { abortValue: arrives } })
-      expect(aborter.isClosed).toBe(true)
-      expect(other.isClosed).toBe(true)
-      expect(endOf(await pending.catch((err: unknown) => err))).toEqual({ abortValue: arrives })
-      expect(report).toEqual({ page: [], server: [] })
+    test('a getter in the reason that aborts the channel: it ends once, with the reason that ended it', async () => {
+      const [channel, page] = await pair()
+      const aborter = aborting === 'server' ? channel : page
+      const got = closings({ channel, page })
+      aborter.abort({
+        get first() {
+          aborter.abort('from the getter')
+          return 1
+        },
+      })
+      await settled(got)
+      expect(got).toEqual({ channel: { abortValue: 'from the getter' }, page: { abortValue: 'from the getter' } })
     })
-  }
-
-  test('called on the page with a getter in the reason that aborts the channel: it ends once, with the reason that ended it', async () => {
-    const [channel, page] = await pair()
-    const got = closings({ channel, page })
-    page.abort({
-      get first() {
-        page.abort('from the getter')
-        return 1
-      },
-    })
-    await settled(got)
-    expect(got).toEqual({ channel: { abortValue: 'from the getter' }, page: { abortValue: 'from the getter' } })
   })
-})
 
-// Each end reports a refused reason where it ran: the server to `onBug`, the page as a channel error, so each has one.
-describe('Abort(reason) thrown by a listener, answering an acknowledged send', () => {
-  for (const [aborting, name] of ON_ENDS) {
-    const { reason, refusal, arrives } = REASONS[name]
-    test(`on the ${aborting} with ${name}: both ends end${refusal ? ' without it, the error is reported once where it ran,' : ' with it,'} and the send rejects as aborted`, async () => {
-      const [channel, page] = await pair()
-      const [aborter, sender] = aborting === 'server' ? [channel, page] : [page, channel]
-      const got = closings({ channel, page })
-      aborter.listen(() => {
-        throw Abort(reason)
-      })
-      let rejection: unknown
-      const report = await reported(async () => {
-        rejection = await sender.send('ask', { ack: true }).catch((err: unknown) => err)
-        await settled(got)
-      })
+  describe(`Abort(reason) thrown by a listener on the ${aborting}, answering an acknowledged send`, () => {
+    for (const [name, { reason, refusal, arrives }] of Object.entries(REASONS)) {
+      test(`with ${name}: both ends end${refusal ? ' without it, the error is reported once where it ran,' : ' with it,'} and the send rejects as aborted`, async () => {
+        const [channel, page] = await pair()
+        const [aborter, sender] = aborting === 'server' ? [channel, page] : [page, channel]
+        const got = closings({ channel, page })
+        aborter.listen(() => {
+          throw Abort(reason)
+        })
+        let rejection: unknown
+        const report = await reported(async () => {
+          rejection = await sender.send('ask', { ack: true }).catch((err: unknown) => err)
+          await settled(got)
+        })
 
-      expect(endOf(rejection)).toEqual({ abortValue: arrives })
-      expect(got).toEqual({ channel: { abortValue: arrives }, page: { abortValue: arrives } })
-      expect(report).toEqual({
-        page: refusal && aborting === 'page' ? [expect.stringContaining(refusal)] : [],
-        server: refusal && aborting === 'server' ? [expect.stringContaining(refusal)] : [],
+        expect(endOf(rejection)).toEqual({ abortValue: arrives })
+        expect(got).toEqual({ channel: { abortValue: arrives }, page: { abortValue: arrives } })
+        expect(report).toEqual({
+          page: refusal && aborting === 'page' ? [expect.stringContaining(refusal)] : [],
+          server: refusal && aborting === 'server' ? [expect.stringContaining(refusal)] : [],
+        })
       })
-    })
-  }
-})
+    }
+  })
+}
 
 describe('Abort(reason) thrown by a listener on a channel a telefunction returned, which aborts its response', () => {
-  for (const name of HOLDS_AND_BYTES) {
-    const { reason, refusal, arrives } = REASONS[name]
+  for (const [name, { reason, refusal, arrives }] of Object.entries(REASONS)) {
     test(`with ${name}: both ends end${refusal ? ' without it, and the error is reported once,' : ' with it,'} and the page's send rejects as aborted`, async () => {
       carried.reason = reason
       const response = await fetch(`${origin}/_telefunc`, {
@@ -239,8 +226,7 @@ describe('Abort(reason) thrown by a listener on a channel a telefunction returne
 })
 
 describe('Abort(reason) thrown by a stream a telefunction returned', () => {
-  for (const name of HOLDS_AND_FUNCTION) {
-    const { reason, refusal, arrives } = REASONS[name]
+  for (const [name, { reason, refusal, arrives }] of Object.entries(REASONS)) {
     test(`with ${name}: its page gets ${refusal ? 'a bug, and the error is reported' : 'the reason'}`, async () => {
       const report = await reported(async () => {
         const payload = encodeErrorPayload(Abort(reason), { telefunctionName: 'onStream', telefuncFilePath: FILE })
@@ -250,10 +236,7 @@ describe('Abort(reason) thrown by a stream a telefunction returned', () => {
       })
       expect(report).toEqual({ page: [], server: refusal ? [expect.stringContaining(refusal)] : [] })
     })
-  }
 
-  for (const name of HOLDS_AND_BYTES) {
-    const { reason, refusal, arrives } = REASONS[name]
     test(`with ${name}: a channel beside it in the response ends ${refusal ? 'without it, and the error is reported once' : 'with it'}`, async () => {
       carried.reason = reason
       let channel: ServerChannel<unknown, unknown> | null = null
