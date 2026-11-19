@@ -2,7 +2,7 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js'
 export { tetherTo, untether } from '../../utils/wrapProxy.js'
-export { invokeChannelListener } from '../../wire-protocol/channel/channel.js'
+export { invokeChannelListener } from './context/invokeWithoutContext.js'
 export { handleCallbackBug } from './runTelefunc/validateTelefunctionError.js'
 export { hostLocal } from '../../wire-protocol/channel/server/ChannelMux.js'
 export { reconnectWindow } from './serverConfig.js'

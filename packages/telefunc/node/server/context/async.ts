@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
 import { PROVIDED_CONTEXT } from './getContext.js'
+import { REQUEST_CONTEXT } from './requestContext.js'
 import type { Context } from './context.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
@@ -20,6 +21,7 @@ function installAsyncContext(AsyncLocalStorageClass: typeof AsyncLocalStorage): 
   installAsyncMode({
     provideTelefuncContext_async,
     restoreContext_async,
+    withoutContext_async,
     getContextStore: () => globalObject.asyncStore?.getStore() ?? null,
   })
 }
@@ -46,4 +48,13 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
   assert(globalObject.asyncStore)
   // A nested scope, such as a request in Cloudflare's session scope, overrides only the keys it sets.
   return globalObject.asyncStore.run({ ...globalObject.asyncStore.getStore(), ...rawContext }, fn)
+}
+
+function withoutContext_async<T>(fn: () => T): T {
+  assert(globalObject.asyncStore)
+  const store = globalObject.asyncStore.getStore()
+  if (store === undefined) return fn()
+  // An adapter's scope stays: on Cloudflare, the session a publish or subscribe from `fn` goes through.
+  const { [PROVIDED_CONTEXT]: _provided, [REQUEST_CONTEXT]: _request, ...adapterScope } = store
+  return globalObject.asyncStore.run(adapterScope, fn)
 }

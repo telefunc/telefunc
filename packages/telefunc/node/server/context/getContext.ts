@@ -15,7 +15,8 @@ const PROVIDED_CONTEXT: unique symbol = Symbol.for('telefunc.providedContext')
 
 function getContext<Context extends object = Telefunc.Context>(): Context & TelefuncBuiltins {
   const raw = getRawContext()
-  if (!raw) {
+  // An adapter's scope alone, such as Cloudflare's session, holds no context of the app's.
+  if (!raw || (raw[PROVIDED_CONTEXT] === undefined && raw[REQUEST_CONTEXT] === undefined)) {
     if (isAsyncMode()) {
       assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')
     }

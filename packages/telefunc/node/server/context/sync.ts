@@ -1,4 +1,5 @@
 export { restoreContext_sync }
+export { withoutContext_sync }
 export { provideTelefuncContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -19,6 +20,16 @@ function restoreContext_sync<T>(context: Context, fn: () => T): T {
     syncState.context = null
   }, 0)
   return fn()
+}
+
+function withoutContext_sync<T>(fn: () => T): T {
+  const { context } = syncState
+  syncState.context = null
+  try {
+    return fn()
+  } finally {
+    syncState.context = context
+  }
 }
 
 function provideTelefuncContext_sync(context: Telefunc.Context) {

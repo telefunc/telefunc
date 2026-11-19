@@ -38,6 +38,7 @@ import { EVERY_STREAM } from '../ownStream.js'
 import type { BroadcastKind } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
+import { withoutContext } from '../../../node/server/context/context.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -206,14 +207,15 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary))
   }
 
-  /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
+  /** Calls `listener` with a publish, with no context; true where it threw `Abort`, which aborts the channel, so the
+   *  rest get none. */
   private callListener<D>(
     listener: (data: D, info: ChannelPublishInfo) => unknown,
     data: D,
     info: ChannelPublishInfo,
   ): boolean {
     try {
-      const result = listener(data, info)
+      const result = withoutContext(() => listener(data, info))
       if (isPromise(result)) result.catch((err: unknown) => this._end._handleCallbackError(err))
     } catch (err) {
       return this._end._handleCallbackError(err)
@@ -477,14 +479,15 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   return withReady(remove, readiness)
 }
 
-/** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
+/** Calls `callback` with no context, and reports its error as a channel listener's is, but an Abort: there is no
+ *  channel to close. */
 function callStaticListener<D>(
   callback: (data: D, info: ChannelPublishInfo) => unknown,
   data: D,
   info: ChannelPublishInfo,
 ): void {
   try {
-    const pending = callback(data, info)
+    const pending = withoutContext(() => callback(data, info))
     if (isPromise(pending)) pending.catch(reportStaticListenerError)
   } catch (err) {
     reportStaticListenerError(err)
