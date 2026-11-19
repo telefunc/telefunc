@@ -41,12 +41,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** The rates frames crossed at. The probe of the wire's first large frame gives one in a round trip: that frame's
    *  acknowledgement comes only when all of it arrived, which on a slow link is seconds of publishes later. */
   private readonly pieceRate = new PieceRate()
-  /** When the newest acknowledged data arrived, in ms on the page's clock, counted from the first data an
-   *  acknowledgement covered. */
-  private arrivedAt = 0
-  /** The shortest time, in ms, an acknowledgement took to come back, up to the clocks' offset: one that waited behind
-   *  no queue on the path. */
-  private leastBack = Number.POSITIVE_INFINITY
   /** The least time from data handed to the acknowledgement that covered it, `Infinity` before one. */
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
@@ -106,7 +100,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const rate = this.pathRate()
     // Unmeasured, the path takes the least any sender sends ahead and as much again as the page said it took, which
     // doubles each round trip as TCP's slow start does, until acknowledgements of data that waited give the rate.
-    if (rate === 0) return WIRE_SEND_AHEAD_MIN_BYTES + this.confirmed() - this.unconfirmed()
+    if (rate === 0) return WIRE_SEND_AHEAD_MIN_BYTES + this.sender.confirmedBytes - this.unconfirmed()
     // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
     // The rate's rise waits for acknowledgements, which go a gap apart however short the round trip.
     const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
@@ -145,14 +139,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return 0
   }
 
-  /** What the page said it took of what the sender handed. */
-  private confirmed(): number {
-    return Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
-  }
-
   /** What the sender handed that the page hasn't said it took. */
   private unconfirmed(): number {
-    return this.sender.transmittedBytes - this.confirmed()
+    return this.sender.transmittedBytes - this.sender.confirmedBytes
   }
 
   /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
@@ -177,10 +166,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (!this.sender.acknowledged(ack)) return false
     const now = performance.now()
     const spanMs = ack.spanUs / 1000
-    this.arrivedAt += spanMs
-    this.leastBack = Math.min(this.leastBack, now - ack.heldMs - this.arrivedAt)
     // When the newest data the acknowledgement covers arrived, on this clock.
-    const arrived = this.arrivedAt + this.leastBack
+    const arrived = this.sender.arrivedAt
     const acknowledged = this.sender.acknowledgedBytes
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()

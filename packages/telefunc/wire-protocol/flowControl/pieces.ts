@@ -106,6 +106,14 @@ class PieceSender {
   private firstAt = 0
   /** The bytes the receiver reported taking in its newest heartbeat. */
   heartbeatBytes = 0
+  /** When the newest acknowledged data arrived, in ms on the receiver's clock, counted from the first data an
+   *  acknowledgement covered. */
+  private peerArrivedAt = 0
+  /** How long the newest acknowledgement took to come back, in ms, up to the clocks' offset. */
+  lastBack = 0
+  /** The shortest time, in ms, an acknowledgement took to come back, up to the clocks' offset: one that waited behind
+   *  no queue on the path. */
+  leastBack = Number.POSITIVE_INFINITY
   /** The bytes handed to the socket, headers and announcements included, counted as the receiver counts them. */
   transmittedBytes = 0
   /** The probe in flight. `end` is the count of bytes handed to the socket when the probe ended; `second` is where
@@ -582,11 +590,25 @@ class PieceSender {
       this.announcedEnds.shift()
     }
     this.acknowledgedAt = performance.now()
+    this.peerArrivedAt += spanMs
+    this.lastBack = this.acknowledgedAt - heldMs - this.peerArrivedAt
+    if (this.lastBack < this.leastBack) this.leastBack = this.lastBack
     const arrived = this.acknowledgedAt - heldMs
     this.sampleAnnouncements(arrived)
     this.sampleSent(arrived)
     if (probe !== null && this.acknowledgedBytes >= probe.end) this.probe = null
     return true
+  }
+
+  /** When the newest acknowledged data arrived, on this clock: its arrival on the receiver's, moved by the least
+   *  time back. */
+  get arrivedAt(): number {
+    return this.peerArrivedAt + this.leastBack
+  }
+
+  /** What the receiver said it took: by its acknowledgements, or its newest heartbeat where that says more. */
+  get confirmedBytes(): number {
+    return Math.max(this.acknowledgedBytes, this.heartbeatBytes)
   }
 
   /** Raises the floor from the announcements an ack that arrived at `arrived` covers, and drops them. */
