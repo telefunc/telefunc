@@ -36,7 +36,7 @@ function createStalledTransport() {
         cancelled = true
       },
     })
-    return new Response(body, { status: 200 })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
   }) as unknown as typeof fetch
   return { fetchImpl, downstreams, getSseDownstreamOpens: () => downstreams.length }
 }

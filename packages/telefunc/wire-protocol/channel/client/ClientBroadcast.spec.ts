@@ -12,7 +12,8 @@ import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 
 /** An SSE downstream that never sends a byte. */
-const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+const stalledFetch: typeof fetch = async () =>
+  new Response(new ReadableStream({ start() {} }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
 
 beforeEach(() => {
   vi.stubGlobal('fetch', stalledFetch)

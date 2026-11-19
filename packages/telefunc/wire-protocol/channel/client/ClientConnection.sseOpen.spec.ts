@@ -105,15 +105,20 @@ function openChannel() {
   return channel
 }
 
-/** What the channel's opening came to within `ms`: its error, `'opened'`, or `'pending'`. */
-async function openingOf(channel: ClientChannel, ms = 3000) {
-  return Promise.race([
-    channel.opened.then(
-      () => 'opened' as const,
-      (err: unknown) => err,
-    ),
-    delay(ms).then(() => 'pending' as const),
-  ])
+/** What the channel's opening came to: its error, or `'opened'`. */
+function openingOf(channel: ClientChannel) {
+  return channel.opened.then(
+    () => 'opened' as const,
+    (err: unknown) => err,
+  )
+}
+
+/** What the channel's end came to: its error, or `'closed'`. */
+function closingOf(channel: ClientChannel) {
+  return channel.closed.then(
+    () => 'closed' as const,
+    (err: unknown) => err,
+  )
 }
 
 test('a first open answered with a page of HTML ends the channel at once, naming what it got', async () => {
@@ -143,26 +148,22 @@ test('during a recovery, an open answered with a page of HTML is tried again', {
   expect(await openingOf(channel)).toBe('opened')
   answers.push(html(200), html(502))
   wires.shift()?.end()
-  for (let waited = 0; opens < 4 && waited < 6000; waited += 100) await delay(100)
+  while (opens < 4) await delay(50)
   expect({ opens, closed: channel.isClosed }).toEqual({ opens: 4, closed: false })
 })
 
-// Its window is the ping deadline, two and a half intervals over SSE, and then `reconnectTimeout`: 3.5 s.
+// Its window is the ping deadline, two and a half intervals over SSE, and then `reconnectTimeout`: 12.5 s, room for
+// attempts after a first handshake that took seconds, as the page starts none that couldn't reconcile in time.
 test(
   'a recovery answered only with pages of HTML ends at its deadline, naming the last answer',
-  { timeout: 15_000 },
+  { timeout: 30_000 },
   async () => {
-    answers.push(wire({ pingInterval: 1000, reconnectTimeout: 1000 }), ...Array.from({ length: 20 }, () => html(200)))
+    answers.push(wire({ pingInterval: 1000, reconnectTimeout: 10_000 }), ...Array.from({ length: 20 }, () => html(200)))
     const channel = openChannel()
     expect(await openingOf(channel)).toBe('opened')
     wires.shift()?.end()
-    const closing = await Promise.race([
-      channel.closed.then(
-        () => 'closed',
-        (err: unknown) => err,
-      ),
-      delay(8000),
-    ])
+    const closing = await closingOf(channel)
+    expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
     expect(closing).toBeInstanceOf(Error)
     expect((closing as Error).message).toBe(
       'The server answered the SSE connection with 200 text/html, not an event stream',

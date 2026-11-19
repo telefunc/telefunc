@@ -14,7 +14,11 @@ import { TAG } from '../../wire/tags.js'
 import { CHANNEL_TRANSPORT, CREDIT_MSG_WINDOW_INITIAL, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
-const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
+const stalledFetch = (async () =>
+  new Response(new ReadableStream({ start() {} }), {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })) as typeof fetch
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] })
