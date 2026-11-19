@@ -10,6 +10,8 @@ export {
   addressOf,
   isUnreachable,
   isRefusal,
+  isReadOnly,
+  ReplicaRefusal,
 }
 export type { RedisClient, SubscriberSocket }
 
@@ -105,10 +107,22 @@ function isUnreachable(error: unknown): boolean {
 const REFUSAL =
   /^(?:NOPERM |READONLY |ERR ACL failure in script: |ERR The user executing the script |ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?(?:The user executing the script |-READONLY |-NOPERM ))/
 
+/** A replica's refusal of a write, at top level or inside a script. */
+const READ_ONLY =
+  /^(?:READONLY |ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?-READONLY )/
+
+/** A write a replica refused, as the backend reports it: it was given, or now reaches, a replica. */
+class ReplicaRefusal extends Error {}
+
 /** Redis refused the command, which stands until an operator changes its ACL or role; `BUSY`, `LOADING` and the like
  *  pass. */
 function isRefusal(error: unknown): error is Error {
+  if (error instanceof ReplicaRefusal) return true
   return error instanceof Error && error.name === 'ReplyError' && REFUSAL.test(error.message)
+}
+
+function isReadOnly(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'ReplyError' && READ_ONLY.test(error.message)
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
@@ -119,6 +133,13 @@ function createCommandClient(redis: RedisClient): RedisClient {
     throw new Error(
       "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use " +
         'installRedis(redis, { prefix }) instead',
+    )
+  }
+  // ioredis's Sentinel connector takes the server whose role is `role`, the primary unless the app sets 'slave'.
+  if (!isCluster(redis) && redis.options.sentinels?.length && redis.options.role === 'slave') {
+    throw new Error(
+      "installRedis(): the client's Sentinel role is 'slave', so it reaches a replica, and Telefunc writes to the " +
+        'primary: leave out `role`',
     )
   }
   const commands = isCluster(redis)

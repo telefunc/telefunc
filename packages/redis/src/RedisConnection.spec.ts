@@ -14,6 +14,12 @@ function client(options: { username?: string; password?: string; tls?: object; p
   return redis
 }
 
+function replyError(message: string): Error {
+  const error = new Error(message)
+  error.name = 'ReplyError'
+  return error
+}
+
 function installed(redis: Redis): RedisConnection {
   const connection = new RedisConnection({ redis, prefix: 'tf:' })
   connection.holdFor(redis)
@@ -65,5 +71,30 @@ describe('a client installed again', () => {
     replaced.disconnect()
     await new Promise((resolve) => setImmediate(resolve))
     expect(current.status).toBe('wait')
+  })
+})
+
+describe('a client of a replica', () => {
+  it('a Sentinel client set to reach a replica is refused at install, saying so', () => {
+    const sentinel = new Redis({
+      lazyConnect: true,
+      sentinels: [{ host: '127.0.0.1', port: 26390 }],
+      name: 'main',
+      role: 'slave',
+    })
+    clients.push(sentinel)
+    expect(() => new RedisConnection({ redis: sentinel, prefix: 'tf:' })).toThrow(
+      "installRedis(): the client's Sentinel role is 'slave', so it reaches a replica, and Telefunc writes to the primary: leave out `role`",
+    )
+  })
+
+  it("a command a replica refuses with READONLY rejects with an error that names the replica, Redis's as its cause", async () => {
+    const connection = installed(client())
+    const readOnly = replyError("READONLY You can't write against a read only replica.")
+    const rejection = connection.send(() => Promise.reject(readOnly))
+    await expect(rejection).rejects.toThrow(
+      "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes: give installRedis() a client of the primary",
+    )
+    await expect(rejection).rejects.toMatchObject({ cause: readOnly })
   })
 })
