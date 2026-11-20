@@ -145,6 +145,52 @@ describe('a failure of Redis, as the backend reports it', () => {
   })
 })
 
+/** What a real client rejects a write with when nothing listens at its port: `options` decide which error it is. */
+async function rejectionOfWrite(options: {
+  enableOfflineQueue: boolean
+  maxRetriesPerRequest: number | null
+  retryStrategy: () => number | null
+}): Promise<unknown> {
+  const redis = new Redis({ host: '127.0.0.1', port: 6390, lazyConnect: true, ...options })
+  redis.on('error', () => {})
+  clients.push(redis)
+  return redis.set('tf:k', 'v').then(
+    () => 'answered',
+    (error: unknown) => error,
+  )
+}
+
+describe('a write whose connection failed, as ioredis rejects it', () => {
+  it("never written, as the backend's client keeps no offline queue: it didn't run", async () => {
+    const unsent = await rejectionOfWrite({
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: null,
+      retryStrategy: () => 50,
+    })
+    expect(redisFailure(unsent, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+  })
+
+  it('in the queue when the connection closed for good: it may have run', async () => {
+    const closed = await rejectionOfWrite({
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: null,
+      retryStrategy: () => null,
+    })
+    expect(closed).toMatchObject({ message: 'Connection is closed.' })
+    expect(redisFailure(closed, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+
+  it('in the queue when ioredis gave up retrying it: it may have run', async () => {
+    const gaveUp = await rejectionOfWrite({
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => 50,
+    })
+    expect(gaveUp).toMatchObject({ name: 'MaxRetriesPerRequestError' })
+    expect(redisFailure(gaveUp, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+})
+
 describe('the address a failure names', () => {
   function cluster(nodes: ConstructorParameters<typeof Cluster>[0]): Cluster {
     const redis = new Cluster(nodes, { lazyConnect: true })
