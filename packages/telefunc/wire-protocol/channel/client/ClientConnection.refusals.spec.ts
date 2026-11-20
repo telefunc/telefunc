@@ -170,3 +170,32 @@ test('the size the page learned outlives a move to WebSocket and the fallback to
   expect(Math.max(...after.map(({ bytes }) => bytes))).toBeLessThanOrEqual(learned)
   expect(page.ended).toEqual([])
 })
+
+test('the request that marks the move to WebSocket stays within the size the page learned', async () => {
+  serveSse()
+  world.postLimit = 18_120
+  world.holdReady = true
+  const page = openChannel(['sse', 'ws'])
+  await advance(SSE_RECONCILE_DEADLINE_MS + 500)
+  sendTexts(page.channel, 12, 3_000)
+  await advance(2_000)
+  const refused = defined(
+    world.posts.find(({ status }) => status === 413),
+    'the 413 that taught the page its size',
+  )
+  const learned = Math.floor(refused.bytes / 2)
+  const from = world.posts.length
+  // A small POST is still out when the WebSocket is ready, and a text that fits the learned size alone waits behind it
+  // (msg16 R1.5).
+  world.postAnswers = [{ tag: 'slow', ms: 500 }]
+  void page.channel.send('held').catch(() => {})
+  await advance(120)
+  void page.channel.send('x'.repeat(18_000)).catch(() => {})
+  defined(world.heldReady.shift(), "the WebSocket's READY")()
+  await advance(2_000)
+  const after = world.posts.slice(from)
+  expect(after.filter(({ status }) => status === 413)).toEqual([])
+  expect(Math.max(...after.map(({ bytes }) => bytes))).toBeLessThanOrEqual(learned)
+  expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(14)
+  expect(page.ended).toEqual([])
+})

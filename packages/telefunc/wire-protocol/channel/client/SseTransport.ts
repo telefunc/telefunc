@@ -168,20 +168,17 @@ class SseTransport implements UpgradeSource {
     return 'emitted'
   }
 
-  /** The barrier goes last in a POST of its own with the outbox, whatever its answer (see `sendStandalonePost`). */
+  /** The barrier goes last in a POST of its own with the outbox, whatever its answer (see `sendStandalonePost`). Past a
+   *  size the page learned, the outbox's data goes ahead in POSTs of its own, under the same byte rule and with the
+   *  answers every POST has (`flushOutbox`). It ends: sends are held from the barrier's emission (`gatesSends`). */
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     // The outbox goes with the barrier, so it waits only for the POST out, whose frames the server must take first.
-    if (this.flushing) {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      await new Promise<void>((resolve) => {
-        this.barrierTurn = resolve
-        timer = setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS)
-      })
-      clearTimeout(timer)
-      this.barrierTurn = null
+    if (!(await this.takeTurn())) return 'not-emitted'
+    while (this.owner.ssePostLimit < Infinity && this.outbox.some(isSequenced) && this.hasWire() && !signal.aborted) {
+      void this.flushOutbox()
+      if (!this.flushing) break
+      if (!(await this.takeTurn())) return 'not-emitted'
     }
-    // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
-    if (this.flushing) return 'not-emitted'
     if (!this.hasWire() || signal.aborted) {
       // The turn the POST's end handed it held the outbox back: it goes on as that end would have sent it.
       this.flushNextOrDrain()
@@ -195,6 +192,22 @@ class SseTransport implements UpgradeSource {
     // and a barrier that may have arrived counts as arrived. The wait only delays the flip.
     await settledOrAborted(this.sendStandalonePost(queued), signal)
     return 'emitted'
+  }
+
+  /** Waits for the POST out to end, `UPGRADE_DRAIN_TIMEOUT_MS` at most; its end hands the turn here (`barrierTurn`)
+   *  instead of sending the outbox. Whether no POST is out then: one still out is an upload, which the barrier would
+   *  wait behind as long as it takes. */
+  private async takeTurn(): Promise<boolean> {
+    if (this.flushing) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await new Promise<void>((resolve) => {
+        this.barrierTurn = resolve
+        timer = setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS)
+      })
+      clearTimeout(timer)
+      this.barrierTurn = null
+    }
+    return !this.flushing
   }
 
   start(): void {
