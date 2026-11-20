@@ -51,8 +51,9 @@ type TelefuncExtensionStub = {
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 
-/** A sequenced payload for the subscribers of `routes` on each member DO it reaches. */
-type BroadcastDelivery = { routes: BroadcastRoute[]; payload: BroadcastPayload; info: OrderingInfo }
+/** A sequenced payload for the subscribers of `routes` on each member DO it reaches. `owed`: its sender awaits every
+ *  receiver, so a member DO that has none for a route it wasn't released from counts it lost. */
+type BroadcastDelivery = { routes: BroadcastRoute[]; payload: BroadcastPayload; info: OrderingInfo; owed?: true }
 
 /** The buckets a Durable Object can be placed in, by `locationHint`. */
 const CLOUDFLARE_BUCKETS: readonly string[] = DEFAULT_BROADCAST_BUCKETS

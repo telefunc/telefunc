@@ -296,7 +296,7 @@ class RoomAuthority {
     if (handing !== undefined) return handing
     const { inc, laneKey, seq, timestamp, payload } = handoff
     const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now())
-    const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp })
+    const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp }, true)
     const handed = lostReason(delivery).then((lost) => {
       this.transaction((sql) => deleteHandoff(sql, handoff))
       this.handingOn.delete(key)
@@ -315,14 +315,18 @@ class RoomAuthority {
     { mark, laneKeys, routes }: AcceptedCommit,
   ): Promise<AcceptedCommitWire> {
     this.resumeHandoffs()
-    const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
+    const owed = lane.kind === 'inbox' || lane.kind === 'control'
+    const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark, owed)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
-    if (lane.kind !== 'inbox' && lane.kind !== 'control') {
+    if (!owed) {
       // No committer awaits a data or binary frame's handoff, so a lost one is reported here.
       void reportIfLost(delivery, roomId, lane)
       return receipt
     }
-    const lost = await lostReason(delivery)
+    const lost =
+      lane.kind === 'inbox' && routes.length === 0
+        ? `no session holds the inbox of '${lane.member}'`
+        : await lostReason(delivery)
     if (lost !== null) receipt.lost = lost
     return receipt
   }

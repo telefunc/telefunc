@@ -17,6 +17,7 @@ import type {
 } from './broadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
 import type { TelefuncDurableObjectNamespace } from './namespace.js'
+import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
 import { CloudflareBackend } from './CloudflareBackend.js'
@@ -100,7 +101,7 @@ function createBasicBinding(
           return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
         },
         telefuncBroadcastDeliver(request: any) {
-          return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
+          return overrides?.onDeliver?.(id, request) ?? Promise.resolve(0)
         },
         telefuncBroadcastGrant(member: string) {
           return overrides?.onPresence?.(id, { op: 'grant', member }) ?? Promise.resolve(1)
@@ -431,14 +432,13 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       // Each member Durable Object takes a delivery in its own session, as its `telefuncBroadcastDeliver` does.
       onDeliver(id, request) {
         const session = byName.get(id.name)
-        if (session === undefined) return Promise.resolve()
+        if (session === undefined) return Promise.resolve(0)
         delivering.in = id.name
         try {
-          withCloudflareSession(session, () => session.broadcast.deliver(request))
+          return Promise.resolve(withCloudflareSession(session, () => session.broadcast.deliver(request)))
         } finally {
           delivering.in = null
         }
-        return Promise.resolve()
       },
     })
     const byName = new Map<string, CloudflareSession>()
@@ -466,6 +466,14 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       sessions,
       session,
       delivering,
+      /** A sender's delivery of `routes` to the named member DOs, through the coordinators, as Room's fanout sends it. */
+      forward: (routes: BroadcastRoute[], members: string[], owed: boolean) =>
+        broadcast.forward(
+          new OrderedStubs(),
+          'room:test',
+          { routes, payload: 'frame', info: { seq: 1, timestamp: 1 }, ...(owed ? { owed: true } : {}) },
+          members.map((member) => ({ member, bucket: 'weur' as const })),
+        ),
     }
   }
 
@@ -558,6 +566,37 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       await vi.waitFor(() => expect(ready).toBe(true))
       expect(present('room:test').map(({ member }) => member)).toEqual(['telefunc-shard-weur-0'])
       remove()
+    })
+
+    // A private message's sender learns that it was lost where a Durable Object it went to had no receiver for it.
+    describe('a delivery whose sender is owed every receiver', () => {
+      const route: BroadcastRoute = { key: 'room:lane', kind: 'text' }
+      const [first, second] = ['telefunc-shard-weur-0', 'telefunc-shard-weur-1']
+
+      it('to a Durable Object that has no receiver for its route rejects', async () => {
+        const { forward } = worker()
+        await expect(forward([route], [first], true)).rejects.toThrow('lost to 1/1')
+      })
+
+      it('to two Durable Objects rejects where one has no receiver, though the other took it', async () => {
+        const { forward, sessions } = worker()
+        const taken: unknown[] = []
+        sessions.first.broadcast.subscribeLocal(route, { deliver: (payload) => void taken.push(payload) })
+        await expect(forward([route], [first, second], true)).rejects.toThrow('lost to 1/2')
+        expect(taken).toEqual(['frame'])
+      })
+
+      it('to a Durable Object whose receiver was released on purpose counts as taken', async () => {
+        const { forward, sessions } = worker()
+        const release = sessions.first.broadcast.subscribeLocal(route, { deliver() {} })
+        release()
+        await expect(forward([route], [first], true)).resolves.toBeUndefined()
+      })
+
+      it('that is a publish, owed no receiver, resolves where a Durable Object has none', async () => {
+        const { forward } = worker()
+        await expect(forward([route], [first], false)).resolves.toBeUndefined()
+      })
     })
 
     // A page that subscribes and then announces itself, as a chat's "joined", hears its own announcement.

@@ -68,7 +68,8 @@ type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   /** Resolves to how many of the member DOs it names failed to take the delivery. */
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<number>
-  telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<void>
+  /** How many of an owed delivery's routes it had no receiver for. */
+  telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<number>
   /** A new grant for the member DO, for its writes of presence at this key's authority (`leases.ts`). */
   telefuncBroadcastGrant(member: string): Promise<number>
   telefuncBroadcastHold(request: BroadcastHoldRequest): Promise<LeaseRegistered>
@@ -251,6 +252,9 @@ class CloudflareBroadcastAuthorityState {
   }
 }
 
+/** The receiver of a local route released on purpose: what still comes for it is taken, and dropped. */
+const RELEASED: BackendReceiver = { deliver() {} }
+
 type CloudflareBroadcastMemberOptions = { broadcast: CloudflareBroadcast; id: string; calls: BroadcastCalls }
 
 /** A session DO's Broadcast membership: its routes' presence at their key authorities, its subscriptions, and the
@@ -298,28 +302,36 @@ class CloudflareBroadcastMember {
   }
 
   /** Takes `route`'s deliveries for `receiver` with no presence at the key's authority: for a sender that keeps its
-   *  own list of receivers, as a room authority does. A later `subscribeLocal()` to the route replaces it. */
+   *  own list of receivers, as a room authority does. A later `subscribeLocal()` to the route replaces it. Released, the
+   *  route takes what still comes for it and drops it, as released on purpose, until it is subscribed again. */
   subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void {
     const routeKey = broadcastRouteKey(route)
     this.localReceivers.set(routeKey, receiver)
     return () => {
-      if (this.localReceivers.get(routeKey) === receiver) this.localReceivers.delete(routeKey)
+      if (this.localReceivers.get(routeKey) === receiver) this.localReceivers.set(routeKey, RELEASED)
     }
   }
 
   /** A coordinator's delivery to this DO. The authority forwards only to an unexpired record, so what arrives is
-   *  owed, lost route or not. */
-  deliver({ routes, payload, info }: BroadcastDelivery): void {
+   *  owed, lost route or not. Returns how many of an owed delivery's routes this DO has no receiver for, as after it
+   *  restarted. */
+  deliver({ routes, payload, info, owed }: BroadcastDelivery): number {
+    let missing = 0
     for (const route of routes) {
       const routeKey = broadcastRouteKey(route)
       const receiver = this.routes.get(routeKey)?.attempt?.receiver ?? this.localReceivers.get(routeKey)
+      if (receiver === undefined) {
+        if (owed) missing++
+        continue
+      }
       // A receiver's bug is no lost delivery, and the routes after it still get theirs.
       try {
-        receiver?.deliver(payload, info)
+        receiver.deliver(payload, info)
       } catch (error) {
         console.error(error)
       }
     }
+    return missing
   }
 
   async unsubscribe(memberRoute: MemberRoute): Promise<void> {
@@ -547,7 +559,7 @@ class CloudflareBroadcast {
   }
 
   /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. Returns how many
-   *  failed to take it. */
+   *  failed to take it, or had no receiver for an owed one. */
   async forwardToBucket(calls: BroadcastCalls, { members, ...delivery }: BroadcastForwardRequest): Promise<number> {
     const deliveries = await Promise.allSettled(
       members.map((member) =>
@@ -594,11 +606,20 @@ class CloudflareBroadcast {
   }
 }
 
-/** Logs the deliveries that failed, with the first one's reason; returns how many. */
-function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<unknown>[]): number {
-  const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
-  if (failed.length > 0) {
-    console.error(`${delivery} lost to ${failed.length}/${outcomes.length} Durable Objects: ${failed[0]!.reason}`)
+/** Logs the deliveries that failed, with the first one's reason; returns how many, with the routes a member DO had no
+ *  receiver for. */
+function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<number>[]): number {
+  let failed = 0
+  let missing = 0
+  let reason: unknown
+  for (const outcome of outcomes) {
+    if (outcome.status === 'fulfilled') {
+      missing += outcome.value
+    } else {
+      if (failed === 0) reason = outcome.reason
+      failed++
+    }
   }
-  return failed.length
+  if (failed > 0) console.error(`${delivery} lost to ${failed}/${outcomes.length} Durable Objects: ${reason}`)
+  return failed + missing
 }
