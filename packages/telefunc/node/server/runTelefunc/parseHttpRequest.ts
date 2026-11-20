@@ -22,6 +22,7 @@ import type { ServerReviverContext } from '../../../wire-protocol/values/types.j
 import { isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
+import { REQUEST_KIND_REFUSAL, type Refusal } from '../../../wire-protocol/refusal.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
@@ -63,7 +64,8 @@ type ParseResult =
       isMalformedRequest: false
     }
   | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
-  | { isMalformedRequest: true }
+  /** `refusal`: Telefunc's own, which the answer marks. */
+  | { isMalformedRequest: true; refusal?: Refusal }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
@@ -77,7 +79,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
       `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
       runContext,
     )
-    return { isMalformedRequest: true }
+    return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)

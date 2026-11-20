@@ -27,8 +27,8 @@ import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routin
 import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
 import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
-import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
-import { WIRE_VERSION_REFUSAL, refusalContentType } from '../wire-protocol/refusal.js'
+import { STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+import { REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, refusalContentType } from '../wire-protocol/refusal.js'
 
 // A subscription finds its Durable Object through AsyncLocalStorage, which a compatibility flag enables. A Worker without
 // it still serves telefunctions and channels; a Broadcast subscribed on the server asks for the flag (broadcast.ts). The
@@ -190,11 +190,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
       const requestKind = isWebSocketRequest ? null : getRequestKind(request, config.telefuncUrl)
       if (requestKind === REQUEST_KIND.INVALID) {
-        // Telefunc's own, marked as the SSE handler marks its refusals: the page leaves SSE rather than retry. The body
-        // stays what a telefunction call reads.
-        return new Response(STATUS_BODY_MALFORMED_REQUEST, {
+        return new Response(REQUEST_KIND_REFUSAL.reason, {
           status: STATUS_CODE_MALFORMED_REQUEST,
-          headers: { 'Content-Type': refusalContentType({ kind: 'route', reason: STATUS_BODY_MALFORMED_REQUEST }) },
+          headers: { 'Content-Type': refusalContentType(REQUEST_KIND_REFUSAL) },
         })
       }
       if (requestKind === REQUEST_KIND.SSE && !namesWireVersion(request)) {

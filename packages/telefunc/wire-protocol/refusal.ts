@@ -1,6 +1,14 @@
-export { FRAME_REFUSAL, REFUSAL_MEDIA_TYPE, WIRE_VERSION_REFUSAL, frameRefusal, refusalContentType }
+export {
+  FRAME_REFUSAL,
+  REFUSAL_MEDIA_TYPE,
+  REQUEST_KIND_REFUSAL,
+  WIRE_VERSION_REFUSAL,
+  frameRefusal,
+  refusalContentType,
+}
 export type { FrameRefusalCause, Refusal, RefusalKind, RefusalContentType }
 
+import { STATUS_BODY_MALFORMED_REQUEST } from '../shared/constants.js'
 import { ERROR_REASON } from './wire/frame.js'
 
 /** The media type of Telefunc's own refusals of the page's SSE requests, so that the page tells them from an answer of
@@ -26,6 +34,11 @@ const WIRE_VERSION_REFUSAL = {
   kind: 'reload',
   reason: 'The server runs another wire version: reload the page.',
 } as const satisfies Refusal
+
+/** A request whose `x-telefunc-request` header is missing, invalid or contradicts its `_telefunc` URL parameter, as
+ *  behind a proxy that drops the header: the page leaves SSE rather than retry. Every adapter that answers it says this,
+ *  with the body a telefunction call reads. */
+const REQUEST_KIND_REFUSAL = { kind: 'route', reason: STATUS_BODY_MALFORMED_REQUEST } as const satisfies Refusal
 
 /** Why the server can't take a frame of the page's: the sentence the page's error gives, and the ERROR that tells it on
  *  the wire where no refusal does. A channel learns its end with the same error however it reaches the page. */

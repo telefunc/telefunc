@@ -2,7 +2,7 @@ export { runTelefunc }
 export type { HttpResponse }
 
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
-import type { RefusalContentType } from '../../wire-protocol/refusal.js'
+import { refusalContentType, type RefusalContentType } from '../../wire-protocol/refusal.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -322,7 +322,8 @@ async function runTelefunc_(
   {
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      const contentType = parsed.refusal ? refusalContentType(parsed.refusal) : malformedRequest.contentType
+      return createHttpResponse({ ...malformedRequest, contentType })
     }
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
