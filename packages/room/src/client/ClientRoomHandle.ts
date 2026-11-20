@@ -231,8 +231,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   }
 
   private declareParts(): void {
-    const parts: RoomWantParts = { members: [...this.memberTexts], tracks: [...this.tracks.values()] }
-    this.end._setWantParts(parts)
+    this.end._setWantParts((): RoomWantParts => ({ members: [...this.memberTexts], tracks: [...this.tracks.values()] }))
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */

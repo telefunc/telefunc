@@ -31,6 +31,8 @@ import { EVERY_STREAM } from '../ownStream.js'
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
+  /** Reads the parts that changed in this task, until it declares them. */
+  private dueParts: (() => unknown) | null = null
 
   constructor(options: ClientChannelOptions) {
     super(options)
@@ -74,10 +76,19 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal Changes what an add-on built on it wants beyond its two kinds (`Want`'s `parts`), as `_setSubscribed`
-   *  does. */
-  _setWantParts(parts: unknown): void {
+   *  does, once for all the changes of a task: `parts` reads them when it declares them. */
+  _setWantParts(parts: () => unknown): void {
     if (this.stopped) return
-    this.connection.sendWant(this, this._attach.changeWant({ parts }))
+    if (this.dueParts === null) this.connection.wantDue(this)
+    this.dueParts = parts
+  }
+
+  /** @internal Declares the parts that changed in this task, if any. */
+  _declareWant(): void {
+    const parts = this.dueParts
+    this.dueParts = null
+    if (parts === null || this.stopped) return
+    this.connection.sendWant(this, this._attach.changeWant({ parts: parts() }))
   }
 
   publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {

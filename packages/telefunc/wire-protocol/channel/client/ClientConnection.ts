@@ -98,6 +98,8 @@ interface MuxConnection {
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
   deliveredBefore(ms: number): number
   sendWant(channel: MuxChannel, want: Want): void
+  /** `channel` declares its want as this task ends, or before the page sends a channel's frame or calls the server. */
+  wantDue(channel: DueWant): void
   /** The server confirmed every want `channel` sent: a call carries none of it. */
   wantSettled(channel: MuxChannel): void
   unregister(channel: MuxChannel): void
@@ -159,7 +161,20 @@ const globalObject = getGlobalObject<{
   connections: Map<string, ClientConnection>
   /** The page's channels with a want the server hasn't confirmed, by the `telefuncUrl` of the calls that carry it. */
   wanting: Map<string, Set<MuxChannel>>
-}>('channel/client/ClientConnection.ts', { connections: new Map(), wanting: new Map() })
+  /** The page's channels whose want changed in this task and isn't declared yet, by `telefuncUrl`. */
+  wantsDue: Map<string, Set<DueWant>>
+}>('channel/client/ClientConnection.ts', { connections: new Map(), wanting: new Map(), wantsDue: new Map() })
+
+/** A channel whose want changed in this task, which it declares once. */
+type DueWant = { _declareWant(): void }
+
+/** Declares the wants that changed in this task of the page's channels on `telefuncUrl`. */
+function declareWantsDue(telefuncUrl: string): void {
+  const due = globalObject.wantsDue.get(telefuncUrl)
+  if (due === undefined) return
+  globalObject.wantsDue.delete(telefuncUrl)
+  for (const channel of due) channel._declareWant()
+}
 
 /** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
  *  frames and hands them to its send gate; the wire lifecycle carries them. */
@@ -204,6 +219,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   /** The wants of the page's broadcasts on `telefuncUrl` that the server hasn't confirmed: a call to it carries them, so
    *  its server applies them before the telefunction runs. Undefined where there are none. */
   static unconfirmedWants(telefuncUrl: string): CallWant[] | undefined {
+    declareWantsDue(telefuncUrl)
     const wanting = globalObject.wanting.get(telefuncUrl)
     if (wanting === undefined) return undefined
     const wants: CallWant[] = []
@@ -241,6 +257,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     onQueued?: (seq: number) => void,
     stream: string = OWN_STREAM,
   ): number {
+    declareWantsDue(this.telefuncUrl)
     const record = this.channels.of(channel)
     if (record === undefined) return 0
     const frame = this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
@@ -390,6 +407,16 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     let wanting = globalObject.wanting.get(this.telefuncUrl)
     if (wanting === undefined) globalObject.wanting.set(this.telefuncUrl, (wanting = new Set()))
     wanting.add(channel)
+  }
+
+  wantDue(channel: DueWant): void {
+    let due = globalObject.wantsDue.get(this.telefuncUrl)
+    if (due === undefined) {
+      globalObject.wantsDue.set(this.telefuncUrl, (due = new Set()))
+      const { telefuncUrl } = this
+      queueMicrotask(() => declareWantsDue(telefuncUrl))
+    }
+    due.add(channel)
   }
 
   wantSettled(channel: MuxChannel): void {

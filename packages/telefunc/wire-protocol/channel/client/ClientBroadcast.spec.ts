@@ -269,6 +269,36 @@ it("1,000 page subscribers added and removed while the server hasn't confirmed m
   page.abort()
 })
 
+// Room's page declares a want's parts at each change: 4,096 track subscriptions in one loop would build and send 4,096
+// wants, each with every track subscribed so far.
+it('parts changed 4,096 times in one task are one want, read once, which a call made after them carries', () => {
+  const telefuncUrl = `http://test.local/${crypto.randomUUID()}/_telefunc`
+  const page = new ClientBroadcast(channelOptions(telefuncUrl))
+  const tracks: string[] = []
+  let reads = 0
+  for (let i = 0; i < 4_096; i++) {
+    tracks.push(`x${i}`)
+    page._setWantParts(() => {
+      reads++
+      return { tracks: [...tracks] }
+    })
+  }
+  expect(ClientConnection.unconfirmedWants(telefuncUrl)).toEqual([
+    { channel: page.id, version: 1, text: false, binary: false, parts: { tracks } },
+  ])
+  expect(reads).toBe(1)
+  page.abort()
+})
+
+// A publish made right after a change of the parts reaches the server after the want that declares it.
+it('parts changed in a task are declared before a publish made after them in that task', () => {
+  const page = new ClientBroadcast(channelOptions(`http://test.local/${crypto.randomUUID()}/_telefunc`))
+  page._setWantParts(() => ({ tracks: ['x'] }))
+  page.publish('after').catch(() => {})
+  expect(page._attach.unconfirmedWant).toEqual({ version: 1, text: false, binary: false, parts: { tracks: ['x'] } })
+  page.abort()
+})
+
 function channelOptions(telefuncUrl = 'http://test.local/_telefunc') {
   return {
     channelId: crypto.randomUUID(),
