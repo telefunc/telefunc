@@ -1,15 +1,21 @@
-// How each end's `closed` reads when the page leaves, or the page's connection is lost for good during a close. Over a
-// real server and page, on a WebSocket the spec can cut.
+// How each end's `closed` reads when the page leaves, or the page's connection is lost for good during a close, and
+// what an ended broadcast keeps of its page's wire. Over a real server and page, on a WebSocket the spec can cut.
 
-import { afterAll, beforeAll, expect, test } from 'vitest'
+import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import type { Duplex } from 'node:stream'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { ChannelClosedError, ChannelCloseUnknownError, ChannelPageLeftError } from './channelErrors.js'
 import { ServerChannel } from './server/ServerChannel.js'
+import { ServerBroadcast } from './server/ServerBroadcast.js'
+import type { IndexedPeer } from './server/IndexedPeer.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { ClientBroadcast } from './client/ClientBroadcast.js'
+import { isAbort } from '../../shared/Abort.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
 // The page's transport listens for `pagehide` on the global object, as in a browser.
@@ -154,4 +160,45 @@ test("a page that decides and has the server's result when its connection is los
   const { end, cleanedUp } = await pageDecidesHoldingTheResult({ cleanupMs: 3_000, timeoutMs: 2_000 })
   expect(end).toEqual(new ChannelClosedError('Channel close timed out'))
   expect(cleanedUp).toBe(false)
+}, 10_000)
+
+// A collection the test can force, as `node --expose-gc` gives.
+setFlagsFromString('--expose-gc')
+const gc: unknown = runInNewContext('gc')
+
+test("an ended broadcast the app keeps lets go of its page's wire once the page confirmed the abort", async () => {
+  Object.assign(upgrades, { refuse: false, otherWireVersion: false })
+  // The app keeps the broadcast, as a publisher to its key.
+  const channel = new ServerBroadcast<string>({ key: crypto.randomUUID() })
+  const peers: WeakRef<IndexedPeer>[] = []
+  const attach = channel._attachPeer.bind(channel)
+  channel._attachPeer = (peer, state) => {
+    peers.push(new WeakRef(peer))
+    attach(peer, state)
+  }
+  getChannelMux().registerChannel(channel)
+  const connection = { telefuncUrl, transports: ['ws' as const], idleTimeout: 0, connectionKey: crypto.randomUUID() }
+  const page = new ClientBroadcast<string>({ channelId: channel.id, connection })
+  // Another channel keeps the page's wire open.
+  const other = new ServerChannel<unknown, unknown>()
+  getChannelMux().registerChannel(other)
+  const otherPage = new ClientChannel<unknown, unknown>({ channelId: other.id, connection })
+  await Promise.all([channel.opened, page.opened, other.opened, otherPage.opened])
+  channel.abort('stop')
+  expect(isAbort(await page.closed)).toBe(true)
+  // The page's next heartbeat confirms the abort, and the server releases the channel.
+  await vi.waitFor(
+    async () => {
+      if (typeof gc !== 'function') throw new Error('no gc')
+      for (let i = 0; i < 4; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        gc()
+      }
+      expect(peers.length).toBeGreaterThan(0)
+      expect(peers.filter((peer) => peer.deref() !== undefined)).toEqual([])
+    },
+    { timeout: 6_000, interval: 250 },
+  )
+  expect(channel.key).toBeDefined()
+  other.abort()
 }, 10_000)

@@ -534,6 +534,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.endOverflowed()
   }
 
+  /** @internal Its page needs nothing more of it: no overflow can take the abort's place, and it lets go of the wire. */
+  override _release(): void {
+    this.owesAbort = false
+    this.endedOn = null
+    super._release()
+  }
+
   /** A wire that closed has none of its publishes: once ended, its page away is cut as an open one's (`unhanded`). */
   override _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
     if (this.endedOn?.sender === peer.sender) this.endedOn = null
