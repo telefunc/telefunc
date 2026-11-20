@@ -106,23 +106,22 @@ test('a page that stays silent past the ping deadline loses its wire', async () 
   expect(performance.now() - openedAt).toBeGreaterThanOrEqual(2_000)
 })
 
-test('a ping deadline judged while its timer runs ahead of the performance clock rechecks one timer later, with no negative delay', async () => {
+test('a silent page whose ping deadline is judged while its timer runs ahead of the performance clock loses its wire, and no timer gets a negative delay', async () => {
   // Node runs a timer by the loop's clock, read as its turn began; `performance.now()` moves on as the turn works. Here
   // it reads 1 ms later at each read in a turn, so a timer armed after some reads runs before its time on that clock.
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   let readsThisTurn = 0
   const now = vi.spyOn(performance, 'now').mockImplementation(() => Date.now() + readsThisTurn++)
+  // How many clock reads a turn makes depends on all the code that runs in it, so whether a delay would have been
+  // negative here varies from run to run: DeadlineTimer.spec.ts makes that case on purpose.
   const delays: number[] = []
   let turns = 0
-  // The timer turn that armed a timer due at once: the recheck's.
-  let armedNowAt: number | undefined
   const realSetTimeout = globalThis.setTimeout
   const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
     callback: () => void,
     delay?: number,
   ) => {
     delays.push(delay ?? 0)
-    if ((delay ?? 0) <= 0) armedNowAt ??= turns
     return realSetTimeout(callback, delay)
   }) as typeof setTimeout)
   try {
@@ -140,11 +139,9 @@ test('a ping deadline judged while its timer runs ahead of the performance clock
       head += decoder.decode(value, { stream: true })
     }
     let ended = false
-    let endedAt: number | undefined
     void (async () => {
       while (!(await events.read()).done);
       ended = true
-      endedAt = turns
     })()
     // The page stays silent: each turn of timers, until the wire is cut.
     while (!ended && turns < 100) {
@@ -154,8 +151,6 @@ test('a ping deadline judged while its timer runs ahead of the performance clock
     }
     expect(ended).toBe(true)
     expect(delays.filter((delay) => delay < 0)).toEqual([])
-    expect(armedNowAt).toBeDefined()
-    expect(endedAt).toBeGreaterThan(armedNowAt ?? Infinity)
   } finally {
     setTimeoutSpy.mockRestore()
     now.mockRestore()
