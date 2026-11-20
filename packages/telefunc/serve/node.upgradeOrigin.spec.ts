@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from 'vitest'
+import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, request, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { Telefunc } from './node.js'
@@ -91,6 +91,27 @@ test.each<[string, number, () => Record<string, string>]>([
   ],
 ])('the WebSocket upgrade of %s is answered %i', async (_case, status, headers) => {
   expect(await upgradeStatus(headers())).toBe(status)
+})
+
+test("a refused upgrade's warning names the origin, says what its page does, and how to let it open, once per origin", async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const origin = 'https://warned-site.example'
+    expect(await upgradeStatus({ Host: host, Origin: origin })).toBe(REFUSED)
+    expect(await upgradeStatus({ Host: host, Origin: origin })).toBe(REFUSED)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const warning = String(warn.mock.calls[0]?.[0])
+    expect(warning).toContain(`A WebSocket upgrade from ${origin} was refused`)
+    // What the page does depends on its transports, which the server doesn't know: the warning says both.
+    expect(warning).toContain('A page that also takes SSE stays on SSE')
+    expect(warning).toContain(
+      "one with WebSocket alone can't connect, and its channels end as when the server is unreachable",
+    )
+    expect(warning).toContain('forward the public host in `X-Forwarded-Host`')
+    expect(warning).toContain('add that origin to `config.channel.allowedOrigins`')
+  } finally {
+    warn.mockRestore()
+  }
 })
 
 test.each([

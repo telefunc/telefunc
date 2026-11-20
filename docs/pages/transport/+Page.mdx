@@ -89,7 +89,7 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ### WebSocket
 
-The server opens a WebSocket only for a page of its own origin: it answers an upgrade from a page of another origin with 403, and that page stays on SSE. Behind a reverse proxy that changes `Host`, have it forward the public host in `X-Forwarded-Host`. For a page on another origin than your server, list that origin:
+The server opens a WebSocket only for a page of its own origin: it answers an upgrade from a page of another origin with 403. A page whose transports include SSE stays on SSE. A page with `['ws']` alone can't connect: it keeps trying, as it does for a server that is down, and past <Link href="/channel-config">`reconnectTimeout`</Link> its channels end with `NetworkError`. Behind a reverse proxy that changes `Host`, have it forward the public host in `X-Forwarded-Host`. For a page on another origin than your server, list that origin:
 
 ```ts
 // Environment: server
@@ -101,6 +101,8 @@ config.channel.allowedOrigins = ['https://app.example.com']
 ```
 
 > A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`. A client that isn't a browser sends no `Origin` and isn't refused.
+
+> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin, and the browser's console shows the failed handshake.
 
 
 

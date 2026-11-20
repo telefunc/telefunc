@@ -29,7 +29,7 @@ function upgradeRefusal(request: Request): Response | undefined {
   if (url && (isServersHost(url, request) || isAllowed(url))) return undefined
   assertWarning(
     false,
-    `A WebSocket upgrade from ${origin ?? 'a page that sent no Origin'} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. Its page stays on SSE.`,
+    `A WebSocket upgrade from ${origin ?? 'a page that sent no Origin'} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable. Behind a proxy that rewrites \`Host\`, have it forward the public host in \`X-Forwarded-Host\`; for a page of another origin, add that origin to \`config.channel.allowedOrigins\`.`,
     { onlyOnce: `upgradeRefusal:${origin}` },
   )
   return new Response(null, { status: 403 })
