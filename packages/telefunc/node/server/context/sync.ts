@@ -30,6 +30,6 @@ function provideTelefuncContext_sync(context: Telefunc.Context) {
 }
 
 /** @internal — Read sync context. Used by context.ts as the default getter. */
-export function getSyncContext(): Context | null {
+export function getContext_sync(): Context | null {
   return syncState.context
 }

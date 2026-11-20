@@ -6,7 +6,7 @@ export { isAsyncMode }
 export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { restoreContext_sync, provideTelefuncContext_sync, getSyncContext } from './sync.js'
+import { restoreContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
@@ -27,7 +27,7 @@ const globalObject = getGlobalObject<{
   neverRestored: boolean
   isAsyncMode: boolean
 }>('context.ts', {
-  getContext: getSyncContext,
+  getContext: getContext_sync,
   restoreContext: restoreContext_sync,
   provideTelefuncContext: provideTelefuncContext_sync,
   neverRestored: true,
