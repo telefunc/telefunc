@@ -56,5 +56,6 @@ function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
     arguments.length === 1 || isCallable(fn),
     '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
   )
-  return provideContext({ [PROVIDED_CONTEXT]: context }, fn)
+  if (fn) return restoreContext({ [PROVIDED_CONTEXT]: context }, fn)
+  provideContext(context)
 }

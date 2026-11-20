@@ -127,6 +127,10 @@ test('a call never reads the context another caller gives provideTelefuncContext
   expect(await userAfterWait).toBe('throws')
 })
 
+test('provideTelefuncContext(context) without `fn` throws', () => {
+  expect(() => provideTelefuncContext({ user: 'A' })).toThrow()
+})
+
 test('provideTelefuncContext(context, fn) returns what `fn` returns', () => {
   expect(provideTelefuncContext({ user: 'A' }, readUser)).toBe('A')
   const promise = Promise.resolve(true)

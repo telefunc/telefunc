@@ -8,6 +8,7 @@ export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { restoreContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
+import type { Telefunc } from './TelefuncNamespace.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
 type Context = {
@@ -18,7 +19,7 @@ type Context = {
 
 type ContextGetter = () => Context | null
 type RestoreContext = <T>(context: Context, fn: () => T) => T
-type ProvideTelefuncContext = (context: Context, fn?: () => unknown) => unknown
+type ProvideTelefuncContext = (context: Telefunc.Context) => void
 
 const globalObject = getGlobalObject<{
   getContext: ContextGetter
@@ -50,9 +51,9 @@ function getRawContext(): Context | null {
  * for another request, cannot read it.
  *
  * When: Telefunc wraps the telefunction, an extension's `onTelefunctionResult()` hook, a `getContext().onClose()`
- * callback, and the loop that reads a generator or stream the telefunction returned and the call that cancels it.
- * Without AsyncLocalStorage it also wraps each pull of that loop (`restoreContextInSyncMode()`) and `useData()` during
- * a server render.
+ * callback, the `fn` of `provideTelefuncContext(context, fn)`, and the loop that reads a generator or stream the
+ * telefunction returned and the call that cancels it. Without AsyncLocalStorage it also wraps each pull of that loop
+ * (`restoreContextInSyncMode()`) and `useData()` during a server render.
  *
  * With `telefunc/async_hooks` it is `AsyncLocalStorage.run()`, and the context also follows `fn` across its `await`s.
  */
@@ -66,8 +67,8 @@ function restoreContextInSyncMode<T>(context: Context, fn: () => T): T {
   return globalObject.isAsyncMode ? fn() : restoreContext(context, fn)
 }
 
-function provideContext(context: Context, fn?: () => unknown): unknown {
-  return globalObject.provideTelefuncContext(context, fn)
+function provideContext(context: Telefunc.Context): void {
+  globalObject.provideTelefuncContext(context)
 }
 
 // ── Async mode ─────────────────────────────────────────────────────

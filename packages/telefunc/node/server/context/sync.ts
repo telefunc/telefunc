@@ -14,12 +14,11 @@ function getContext_sync(): Context | null {
   return syncState.context
 }
 
-function provideTelefuncContext_sync(context: Context, fn?: () => unknown): unknown {
+function provideTelefuncContext_sync(): void {
   assertUsage(
-    fn,
+    false,
     "[provideTelefuncContext(context)] The context object cannot be provided this way without Async Hooks. Pass a callback instead: `provideTelefuncContext(context, () => someTelefunction())`. Alternatively, add `import 'telefunc/async_hooks'`, or pass `context` to serve(). See https://telefunc.com/provideTelefuncContext",
   )
-  return restoreContext_sync(context, fn)
 }
 
 function restoreContext_sync<T>(context: Context, fn: () => T): T {
