@@ -738,13 +738,19 @@ return {commit, unpack(counters)}
 //   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
 const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${NOW_LUA}
 tf_allowed('HSET', KEYS[2], '', '')
-if ARGV[3] == '' then tf_allowed('ZREM', KEYS[3], '') else tf_allowed('ZADD', KEYS[3], '0', '') end
+-- The check's time is read before the first write, as TIME is a call the user's ACL can refuse too.
+local at
+if ARGV[3] == '' then
+  tf_allowed('ZREM', KEYS[3], '')
+else
+  tf_allowed('ZADD', KEYS[3], '0', '')
+  at = math.max(tonumber(ARGV[3]), tf_now() + tonumber(ARGV[4]))
+end
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-if ARGV[3] == '' then
+if at == nil then
   redis.call('ZREM', KEYS[3], ARGV[1])
 else
-  local at = math.max(tonumber(ARGV[3]), tf_now() + tonumber(ARGV[4]))
   redis.call('ZADD', KEYS[3], string.format('%.0f', at), ARGV[1])
 end
 return 1
