@@ -1,4 +1,5 @@
 export {
+  U32_SIZE,
   encodeU32,
   decodeU32,
   concat,

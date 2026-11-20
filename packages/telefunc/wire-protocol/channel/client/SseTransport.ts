@@ -17,7 +17,13 @@ import {
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
 import { heartbeatHold } from '../../wire/pingDeadline.js'
-import { encodeU32, encodeLengthPrefixedBlob, encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.js'
+import {
+  U32_SIZE,
+  encodeU32,
+  encodeLengthPrefixedBlob,
+  encodeSseRequest,
+  encodeSseRequestMetadata,
+} from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
@@ -490,13 +496,18 @@ class SseTransport implements UpgradeSource {
     return entries
   }
 
-  /** Takes what the next POST carries from the head of the outbox: entries while they come to less than `postBytes`, as
-   *  the headroom lets them in, and never past `postLimit`; one at least. A replay that refills the outbox goes so too. */
+  /** Takes what the next POST carries from the head of the outbox, in bytes as its body goes on the wire (its metadata,
+   *  and four bytes of length before each frame): entries while the body comes to less than `postBytes`, which one may
+   *  pass, and never past `postLimit`, except a first entry larger alone, which goes alone. A replay that refills the
+   *  outbox goes so too. */
   private takeOutboxHead(): OutboxEntry[] {
     let count = 0
     let bytes = 0
+    let body = encodeSseRequestMetadata({ connId: this.connId }).byteLength
     for (const { frame } of this.outbox) {
-      if (count > 0 && (bytes >= this.postBytes || bytes + frame.byteLength > this.postLimit)) break
+      const size = U32_SIZE + frame.byteLength
+      if (count > 0 && (body >= this.postBytes || body + size > this.postLimit)) break
+      body += size
       bytes += frame.byteLength
       count++
     }
