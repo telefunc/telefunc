@@ -37,7 +37,7 @@ async function openOverSse(count: number) {
 const gotOf = (ix: number) => world.server.got.filter((got) => got.ix === ix)
 
 /** The most a reconnect waits, with the fixture's jitter. */
-const MOST_BACKOFF_MS = 4_500
+const MOST_BACKOFF_MS = 7_250
 
 test('a channel whose data never gets through ends at the first loss after reconnectTimeout, naming what the page saw', async () => {
   const opened = await openOverSse(2)
@@ -131,10 +131,21 @@ test('while a channel holds a date, a reconnect answer does not reset the attemp
   const page = (await openOverSse(1))(0)
   world.server.cuts.add(0)
   void page.channel.send('never through').catch(() => {})
-  // Before the channel ends: with the fixture's jitter the delays are 0.45, 0.9, 1.8, 3.6 s, then 4.5 s each.
+  // Before the channel ends: with the fixture's jitter the first delay is 0.45 s, then, the data waiting since that
+  // loss, 1.45, 2.9 and 5.8 s, between each step and half a step more: the fourth reconnect comes past 10 s.
   await advance(RECONNECT_TIMEOUT_MS)
   expect(page.ended).toEqual([])
-  expect(world.streams.length).toBeLessThanOrEqual(7)
+  expect(world.streams.length).toBeLessThanOrEqual(4)
+})
+
+test('a loss with no data waiting since an earlier one reconnects within the first step, as before', async () => {
+  const page = (await openOverSse(1))(0)
+  world.server.drops.add(0)
+  void page.channel.send('taken, unconfirmed').catch(() => {})
+  await advance(1_000)
+  defined(world.streams.at(-1), 'an event stream').end()
+  await advance(500)
+  expect(world.streams).toHaveLength(2)
 })
 
 test('a channel closed behind its stuck data is judged as an open one: it ends with the cause, and its close settles', async () => {
@@ -239,7 +250,8 @@ test('a channel that got through and then stalls is dated from the loss after it
   void page.channel.send('through after a while').catch(() => {})
   await advance(6_000)
   world.server.cuts.delete(0)
-  await advance(6_000)
+  // The next attempt, the data waiting since the first loss, comes at most a step and a half later.
+  await advance(MOST_BACKOFF_MS + 2_000)
   expect(gotOf(0)).toHaveLength(1)
   world.server.cuts.add(0)
   const stalledAt = performance.now()

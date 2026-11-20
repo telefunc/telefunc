@@ -638,7 +638,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.closeAll(this.recovery.lost)
       return
     }
-    if (this.recovery === null && !this.anyStalled()) this.attempt = 0
+    // Data that has waited since an earlier loss: the attempts go on from where they were, at no less than their step.
+    const stalled = this.anyStalled()
+    if (this.recovery === null && !stalled) this.attempt = 0
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
       if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
@@ -654,7 +656,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const attempt = this.attempt++
     // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
     // deadline ends the channels.
-    const delay = Math.max(reconnectDelay(attempt), retryAfterMs)
+    const delay = Math.max(reconnectDelay(attempt, stalled), retryAfterMs)
     this.enterReconnecting(performance.now() + delay + this.handshakeMs < recovery.deadline ? delay : null)
   }
 
@@ -773,11 +775,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 }
 
-/** How long the page waits before reconnect `attempt` (0 after a loss): a random part of a delay that doubles from
- *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, so pages that lost their wires together,
- *  to a proxy or a server that restarted, don't come back together, on the first attempt or at the cap. */
-function reconnectDelay(attempt: number): number {
-  return Math.random() * Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+/** How long the page waits before reconnect `attempt` (0 after a loss): a step that doubles from
+ *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, drawn at random so that pages that lost
+ *  their wires together, to a proxy or a server that restarted, don't come back together, on the first attempt or at
+ *  the cap: anywhere in the step, or, while a channel's data has waited since an earlier loss (`stalled`), between the
+ *  step and half a step more, so what can't get through goes again no more often than on 0.3.1, which waited the step
+ *  itself (its client/connection.ts:1191). */
+function reconnectDelay(attempt: number, stalled: boolean): number {
+  const step = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+  return stalled ? (1 + Math.random() / 2) * step : Math.random() * step
 }
 
 // ── Transport registry ──
