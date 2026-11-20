@@ -82,3 +82,13 @@ describe('after a batch POST is refused for its size', () => {
     expect(world.server.got.filter(({ ix }) => ix === 0)).toEqual([])
   })
 })
+
+test("a batch of the connection's own frames refused again after a reconnect ends the connection, naming the answer", async () => {
+  const page = (await openOverSse(1))(0)
+  // Every POST that carries no data, the page's PINGs: refused as a gateway that doesn't know the request refuses it.
+  world.controlAnswers = Array.from({ length: 100 }, () => ({ tag: 'refused' as const, status: 400 }))
+  await advance(30_000)
+  expect(page.ended).toHaveLength(1)
+  expect(page.ended[0]?.err?.message).toMatch(/refused with 400 text\/html/)
+  expect(world.streams.length).toBeLessThanOrEqual(3)
+})

@@ -104,6 +104,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private attemptStartedAt: number | null = null
   /** How long the last wire took from its start to its RECONCILED: the room an attempt needs before the deadline. */
   private handshakeMs = 0
+  /** The wire on which a request carrying only the connection's own frames was refused, until a PONG came. */
+  private ownFramesRefusedOn: number | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -347,6 +349,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onTransportPong(ended: PongEntry[]): void {
+    this.ownFramesRefusedOn = null
     this.liveness.onPong(ended)
   }
 
@@ -396,8 +399,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** Counts the refusal against the channels whose sequenced frames are among `frames`, through the highest seq
    *  refused: one whose frames were refused on an earlier wire too, so after the connection was established again, ends.
-   *  A 200 for another request clears nothing: what counts is what the server has of each channel. */
+   *  A 200 for another request clears nothing: what counts is what the server has of each channel. A request that
+   *  carried none of their data counts against the connection (`refusedOwnFrames`). */
   onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean {
+    const ownFramesOnly = !frames.some((frame) => frame[0] !== undefined && isSequencedTag(frame[0]))
+    if (ownFramesOnly) return this.refusedOwnFrames(answer)
     const refused = new Set<ChannelRecord>()
     const refusedAgain = new Set<ChannelRecord>()
     for (const frame of frames) {
@@ -423,6 +429,23 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       )
     }
     return refusedAgain.size === 0 || refused.size > refusedAgain.size
+  }
+
+  /** A refused request that carried only the connection's own frames, as its PINGs: it ends once they were refused on
+   *  an earlier wire too and no PONG came since, naming `answer`. Whether the connection is to be established again. */
+  private refusedOwnFrames(answer: string): boolean {
+    const before = this.ownFramesRefusedOn
+    if (before === null || before === this.wire) {
+      this.ownFramesRefusedOn = this.wire
+      return true
+    }
+    this.closeAll(
+      new NetworkError(
+        `Connection closed: the page's requests to keep its connection were refused with ${answer}, again after a reconnect. Something between the page and the server refuses them.`,
+        true,
+      ),
+    )
+    return false
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
