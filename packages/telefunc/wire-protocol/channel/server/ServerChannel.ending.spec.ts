@@ -1121,3 +1121,61 @@ for (const ending of ['close', 'abort'] as const) {
     }
   })
 }
+
+test("a lossy subscriber whose page never confirms a publish isn't kept on by newer ones: it ends when one publish would", async () => {
+  // Lossy publishes keep coming while every wire is lost before one is whole: each newer one takes the place of the one
+  // waiting, and none renews the date.
+  const { create } = defined(OVERDUE['a lossy broadcast subscriber'])
+  const publishes = async (_: ServerChannel, key: string) => {
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name)
+  }
+  const { ended, reads } = await overdue(create, publishes, 11_000)
+  expect(ended.map((err) => err?.message)).toEqual([unconfirmedFor(10_000)])
+  expect(reads).toEqual(['0:ERROR'])
+})
+
+test("a subscriber its server shed to nothing for another object's publish, its page lost again past reconnectTimeout, ends with the shedding's cause: nothing of it is unconfirmed", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const adapter = getBroadcastAdapter()
+  adapter.ownerOf = (request) => request?.url ?? 'server'
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const request = new Request('http://one.test/')
+  const ended: (Error | undefined)[] = []
+  channel.onClose((err) => void ended.push(err))
+  const page = overWebSocket([channel, other], [request, new Request('http://two.test/')])
+  await Broadcast.publish(key, 'p1' + 'x'.repeat(600_000))
+  channel._onPeerDisconnect(defined(page.peers[0]), 10_000)
+  await vi.advanceTimersByTimeAsync(5_000)
+  // The page comes back behind another channel's large frame: the replay of p1 waits for the wire.
+  const blocker = new ServerChannel()
+  const back = overWebSocket([])
+  blocker._registerChannel()
+  back.attach(blocker, 1)
+  void blocker.send('b1' + 'x'.repeat(600_000))
+  await vi.advanceTimersByTimeAsync(0)
+  const again = back.attach(channel, 0, 0, request)
+  // Room for less than one more publish under the most the server holds, so making room for one sheds to nothing.
+  const filler: MemoryHolder = { heldBytes: 0 }
+  hold(filler, getChannelConfig().maxMemory - ledgerTotal() - 300_000)
+  const release = () => releaseHolder(filler)
+  try {
+    // The other object's publish sheds p1, which no wire has: the channel holds nothing for its page.
+    await Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000))
+    await vi.advanceTimersByTimeAsync(6_000)
+    channel._onPeerDisconnect(again, 10_000)
+    expect(ended).toEqual([])
+    // Its next event, the page's attach, ends it with its own cause.
+    overWebSocket([]).attach(channel, 0, 0, request)
+    expect(ended.map((err) => err?.message)).toEqual([
+      'Broadcast closed: the server could not hold even the newest message for its client',
+    ])
+  } finally {
+    vi.useRealTimers()
+    release()
+    other.abort()
+    blocker.abort()
+    delete adapter.ownerOf
+  }
+})
