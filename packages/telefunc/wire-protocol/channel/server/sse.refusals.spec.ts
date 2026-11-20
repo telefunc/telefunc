@@ -5,6 +5,8 @@
 
 import { afterEach, expect, test } from 'vitest'
 
+import { createDeferred } from '../../../utils/createDeferred.js'
+
 import { WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
@@ -113,4 +115,34 @@ test("a channel's frame the server refuses is refused `frames`, naming the chann
   expect(answer.statusCode).toBe(400)
   expect(answer.contentType).toMatch(refusal('frames', '0'))
   await cancel(opened)
+})
+
+test('a streaming upload whose wire closes under it is answered `retry`, not 200', async () => {
+  const { connId, opened } = await openWire()
+  // The page's events: the RECONCILED, which also lets the upload's frames through.
+  const events = opened.body instanceof ReadableStream ? opened.body.getReader() : null
+  if (events === null) throw new Error('no Web event stream')
+  expect((await events.read()).done).toBe(false)
+  const reading = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
+  let reads = 0
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull: (controller) => {
+        if (++reads === 1) controller.enqueue(encodeSseRequestMetadata({ connId, streamRequest: true }))
+        else reading.resolve(controller)
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  const answer = post(body)
+  const controller = await reading.promise
+  // The event stream ends, closing the wire, while the upload's next frame is on its way.
+  await events.cancel()
+  const ping = encode.ping([])
+  controller.enqueue(encodeU32(ping.byteLength))
+  controller.enqueue(ping)
+  controller.close()
+  const answered = await answer
+  expect(answered.statusCode).toBe(400)
+  expect(answered.contentType).toMatch(refusal('retry'))
 })

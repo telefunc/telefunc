@@ -370,7 +370,8 @@ class SseServerTransport {
     } finally {
       await this.settlePendingDispatches(wire)
     }
-    return wire.refused ? refuse(wire.refused) : okResponse()
+    // Its wire closed under it, with a frame it read left unrun: refused, as a batch POST that met the close is.
+    return wire.closed ? closedUnder(wire) : okResponse()
   }
 
   /** The page left for good: its wire closes as a WebSocket's does when its page leaves. One its page lost first has
