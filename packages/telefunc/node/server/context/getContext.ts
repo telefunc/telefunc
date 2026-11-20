@@ -7,7 +7,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isCallable } from '../../../utils/isCallable.js'
 import { isObject } from '../../../utils/isObject.js'
 import { objectAssign } from '../../../utils/objectAssign.js'
-import { getRawContext, provideContext, isAsyncMode } from './context.js'
+import { getRawContext, provideContext, restoreContext, isAsyncMode } from './context.js'
 import { REQUEST_CONTEXT } from './requestContext.js'
 import type { RequestContext } from './requestContext.js'
 import type { Telefunc } from './TelefuncNamespace.js'
@@ -27,7 +27,7 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
 
   const reqCtx = raw[REQUEST_CONTEXT] as RequestContext | undefined
   const builtins: TelefuncBuiltins = reqCtx
-    ? { onClose: (cb) => reqCtx.onClose(cb), signal: reqCtx.signal }
+    ? { onClose: (cb) => reqCtx.onClose(() => restoreContext(raw, cb)), signal: reqCtx.signal }
     : // SSR — no request context available
       { onClose: () => {}, signal: new AbortController().signal }
 
