@@ -239,3 +239,21 @@ test('an onClose() callback that sends on its own channel after the end is repor
   })
   expect(server).toEqual([expect.any(ChannelClosedError)])
 })
+
+test('a callback that rejects with no value once its channel closed gracefully is reported', async () => {
+  const [channel, page] = await pair()
+  let resume = () => {}
+  const resumed = new Promise<void>((resolve) => (resume = resolve))
+  const { server } = await reported(async () => {
+    channel.onOpen(async () => {
+      await resumed
+      return Promise.reject()
+    })
+    await page.close({ timeout: 1_000 })
+    await channel.closed
+    resume()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  })
+  expect(await channel.closed).toBeNull()
+  expect(server).toEqual([new Error('undefined')])
+})

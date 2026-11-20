@@ -171,10 +171,10 @@ class ChannelLifecycle {
     return this.sendAfterEndError
   }
 
-  /** Reports what a callback threw or rejected with, unless it is this channel's own end, as a send it awaited rejects
-   *  with: that is no bug, and `closed` gives it already. */
+  /** Reports what a callback threw or rejected with, unless it is the error this channel ended with, as a send it
+   *  awaited rejects with: that is no bug, and `closed` gives it already. */
   private report(err: unknown): void {
-    if (this.ending.ended && err === this.ending.error) return
+    if (this.ending.error !== undefined && err === this.ending.error) return
     this.reportError(err)
   }
 
