@@ -8,12 +8,12 @@ import {
   createSubscriberSocket,
   isCluster,
   rawWrites,
-  redisFailure,
   type RawCommand,
   type RedisClient,
   type SubscriberSocket,
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
+import { redisFailure } from './redisFailure.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'

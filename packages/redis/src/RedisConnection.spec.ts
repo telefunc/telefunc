@@ -2,7 +2,8 @@ import { inspect } from 'node:util'
 import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
-import { addressOf, redisFailure } from './ioredis.js'
+import { addressOf } from './ioredis.js'
+import { redisFailure } from './redisFailure.js'
 
 const clients: Array<Redis | Cluster> = []
 afterEach(() => {

@@ -1,5 +1,6 @@
-// ioredis policy: a client's deployment, the connection the backend's commands run on, subscriber creation, and calls
-// to defined commands.
+// The client library's facts: the command client and subscriber socket the backend builds from an app's client, a
+// client's deployment and address, which raw commands write by ioredis's own command table, its wording for a command
+// it never wrote, and calls to defined commands. What a store's reply means is redisFailure.ts's.
 export {
   createCommandClient,
   createSubscriberSocket,
@@ -9,8 +10,8 @@ export {
   deploymentOf,
   connectsAlike,
   addressOf,
-  redisFailure,
-  isRefusal,
+  isReplyError,
+  isUnsent,
 }
 export type { RedisClient, SubscriberSocket, RawCommand }
 
@@ -18,8 +19,8 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { hasFlag } from '@ioredis/commands'
 import { Cluster, type Redis } from 'ioredis'
-import { BackendError, isObject } from 'telefunc/__internal'
-import { assert, isBug } from './assert.js'
+import { isObject } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
@@ -136,170 +137,17 @@ function nodeAddress(node: unknown): string {
   return `${host}:${typeof node.port === 'number' || typeof node.port === 'string' ? node.port : 6379}`
 }
 
-/** How Redis 5 and 6 and Dragonfly wrap the refusal of a call a script makes. */
-const IN_SCRIPT = String.raw`ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?`
-
-/** Redis's refusal of a command its user's ACL denies, at top level or inside a script: Redis 7 and later word a
- *  script's ACL refusal as `ERR`. */
-const ACL_REFUSAL = new RegExp(
-  String.raw`^(?:NOPERM |ERR ACL failure in script: |ERR The user executing the script |${IN_SCRIPT}(?:The user executing the script |-NOPERM ))`,
-)
-
-/** A replica's refusal of a write, at top level or inside a script. */
-const READ_ONLY = new RegExp(String.raw`^(?:READONLY |${IN_SCRIPT}-READONLY )`)
-
-/** Redis's refusal of a login: Redis 6 and later, and Redis 5's `AUTH`. */
-const LOGIN_REFUSAL = /^(?:WRONGPASS |NOAUTH |ERR invalid password)/
-
-/** What to do about a failed command, by Redis's error code. */
-const WHAT_TO_DO: Record<string, string> = {
-  BUSY: "another client's script keeps Redis busy; end it with SCRIPT KILL",
-  LOADING: 'Redis is loading its data; the backend can use it once that ends',
-  NOREPLICAS: 'fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do',
-  OOM: 'Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction',
-  WRONGTYPE: "a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
-}
-
-/** Redis's codes for a state in which it can't serve this now, and a later call may succeed. */
-const PASSING = new Set(['LOADING', 'BUSY', 'MASTERDOWN', 'TRYAGAIN', 'CLUSTERDOWN', 'NOREPLICAS', 'OOM'])
-
-/** A command Redis doesn't know: disabled or renamed by its operator. */
-const UNKNOWN_COMMAND = /^ERR unknown (?:sub)?command /
-
-/** Redis's refusal of a command before running it: at top level; inside a script, `READONLY`, `OOM`, `MISCONF` and
- *  `NOREPLICAS`, which Redis 7 and Valkey raise there only until the script writes; and an ACL refusal inside one of
- *  Telefunc's write scripts, which checks each of its calls before its first write (`tf_allowed`). */
-const REFUSED_BEFORE_RUNNING =
-  /^(?:(?:NOPERM|WRONGPASS|NOAUTH|LOADING|BUSY|READONLY|OOM|MISCONF|NOREPLICAS) |ERR unknown command |ERR ACL failure in script: |ERR The user executing the script )/
-
-/** A write script's guard's refusal before its first write (`GUARD_LUA`, commands.ts), by its word: WRONGTYPE for a
- *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
-const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
-
 /** ioredis's rejection of a command it didn't write, as the backend's command client keeps no offline queue. */
 const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQueue options is false$/
 
-/** What one dispatch of a command proves when it fails: one that can't write changed nothing, and one that may write
- *  didn't run only where it was never written or Redis refused it before running it. */
-function outcomeOf(error: unknown, writes: boolean): BackendError['outcome'] {
-  if (!writes) return 'not-run'
-  if (!(error instanceof Error)) return 'may-have-run'
-  if (isReplyError(error) && GUARD_REFUSAL.test(error.message)) return 'not-run'
-  const proof = isReplyError(error) ? REFUSED_BEFORE_RUNNING : UNSENT
-  return proof.test(error.message) ? 'not-run' : 'may-have-run'
+/** ioredis's rejection of a command it never wrote. */
+function isUnsent(error: unknown): boolean {
+  return error instanceof Error && UNSENT.test(error.message)
 }
 
-/** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that may write
- *  (`writes`) or one that can't: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what failed and what to do,
- *  with Redis's error code (the first word of its reply) or the connection's, and holds nothing of ioredis' error: not
- *  the command, its arguments (a password, a message's bytes) or a nested error. An error the backend's own `assert()`
- *  threw passes as it is, and so does one this made. */
-function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unknown {
-  if (error instanceof BackendError || isBug(error)) return error
-  const where = addressOf(redis)
-  const outcome = outcomeOf(error, writes)
-  if (!isReplyError(error)) {
-    const code = connectionCode(error)
-    return new BackendError({
-      code: 'unreachable',
-      outcome,
-      message: `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
-    })
-  }
-  const { message } = error
-  const guarded = GUARD_REFUSAL.exec(message)
-  if (guarded !== null) {
-    // In Telefunc's own words, as for every reply: the reply's text names the key.
-    const [word, held] =
-      guarded[1] === 'WRONGTYPE'
-        ? ['WRONGTYPE', 'a key of another type than Telefunc keeps there']
-        : ['ERR', "a value Telefunc didn't write"]
-    return new BackendError({
-      code: 'failed',
-      outcome,
-      message:
-        `Redis at ${where} holds, under Telefunc's prefix, ${held}, so Telefunc's Redis backend changed nothing ` +
-        `(${word}): keep that prefix to Telefunc`,
-    })
-  }
-  const code = replyCode(message)
-  const tagged = code === undefined ? '' : ` (${code})`
-  if (READ_ONLY.test(message)) {
-    return refusal({
-      code: 'unavailable',
-      outcome,
-      message:
-        `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
-        'client of the primary',
-    })
-  }
-  if (ACL_REFUSAL.test(message)) {
-    return refusal({
-      code: 'denied',
-      outcome,
-      message:
-        `Redis at ${where} refused Telefunc's Redis backend a command, key or channel by its user's ACL${tagged}: ` +
-        'allow that user what the ACL rule in the docs of @telefunc/redis lists',
-    })
-  }
-  if (LOGIN_REFUSAL.test(message)) {
-    return new BackendError({
-      code: 'denied',
-      outcome,
-      message:
-        `Redis at ${where} refused the login of Telefunc's Redis backend${tagged}: check the username and password ` +
-        'of the client given to installRedis()',
-    })
-  }
-  if (UNKNOWN_COMMAND.test(message)) {
-    return new BackendError({
-      code: 'denied',
-      outcome,
-      message:
-        `Redis at ${where} doesn't run a command Telefunc's Redis backend sends, as its operator disabled or renamed ` +
-        'it: allow the commands the ACL rule in the docs of @telefunc/redis lists',
-    })
-  }
-  const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
-  return new BackendError({
-    code: code !== undefined && PASSING.has(code) ? 'unavailable' : 'failed',
-    outcome,
-    message:
-      `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
-      (toDo === undefined ? ": Redis's log may say why" : `: ${toDo}`),
-  })
-}
-
-/** A failure `isRefusal()` knows. */
-function refusal(failure: ConstructorParameters<typeof BackendError>[0]): BackendError {
-  const error = new BackendError(failure)
-  refusals.add(error)
-  return error
-}
-
-/** An error Redis replied with, as ioredis gives it. */
+/** An error Redis replied with, as ioredis gives it: by its name, as an app may load another copy of the errors' class. */
 function isReplyError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'ReplyError'
-}
-
-/** The first word of the reply a script's call got, where it is a code, else of Redis's reply. */
-function replyCode(message: string): string | undefined {
-  const inScript = new RegExp(`^${IN_SCRIPT}-?`).exec(message)
-  const words = [message.split(' ', 1)[0]]
-  if (inScript !== null) words.unshift(message.slice(inScript[0].length).split(' ', 1)[0])
-  return words.find((word) => word !== undefined && /^[A-Z][A-Z_]*$/.test(word))
-}
-
-/** The system's code of a failed connection, such as `ECONNREFUSED`. */
-function connectionCode(error: unknown): string | undefined {
-  if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') return undefined
-  return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
-}
-
-/** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role;
- *  `BUSY`, `LOADING` and the like pass. */
-function isRefusal(error: unknown): error is BackendError {
-  return error instanceof BackendError && refusals.has(error)
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
@@ -363,13 +211,11 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-const { subscriberNodes, clusterWaits, refusals } = getGlobalObject('ioredis.ts', () => ({
+const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
   /** The node each Cluster's subscriber was last duplicated from. */
   subscriberNodes: new WeakMap<Cluster, Redis>(),
   /** One wait per connecting Cluster, however often subscribers reopen during it. */
   clusterWaits: new WeakMap<Cluster, Promise<void>>(),
-  /** The failures that are Redis's refusal by ACL or role (`isRefusal()`). */
-  refusals: new WeakSet<BackendError>(),
 }))
 
 function clusterReady(cluster: Cluster): Promise<void> {
