@@ -127,18 +127,15 @@ async function onBroadcastStartReadFailed() {
     await backend.publish(route, 'before')
     await receivedCount(received, 1)
     const run = connection.run.bind(connection)
-    let failed = false
+    let startReads = 0
     connection.run = (async (command: never, input: never) => {
-      if (command === REDIS_COMMANDS.broadcastStart && !failed) {
-        failed = true
-        throw new Error('the start read failed')
-      }
+      if (command === REDIS_COMMANDS.broadcastStart && startReads++ === 0) throw new Error('the start read failed')
       return run(command, input)
     }) as typeof connection.run
     const binary = backend.subscribe({ key: route.key, kind: 'binary' }, { deliver() {} })
     await backend.publish(route, 'beside the failed read')
     await receivedCount(received, 2)
-    return { received, reported, binary: binary.state() }
+    return { received, reported, binary: binary.state(), startReads }
   } finally {
     await stop()
   }

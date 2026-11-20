@@ -150,10 +150,11 @@ function testBroadcastRedisSubscriberDropped() {
           received: ['before', 'beside the failed read'],
           reported: [],
           binary: 'ready',
+          startReads: 2,
         })
       },
       { timeout: 10_000 },
     )
-    expectLog('the start read failed')
+    expectLog("Telefunc's Redis backend can't reach Redis at")
   })
 }
