@@ -553,7 +553,8 @@ class SseTransport implements UpgradeSource {
         return
       }
       if (answer?.tag === 'tooLarge') {
-        this.postLimit = Math.floor(body.size / 2)
+        // A lone frame's body may be larger than what the page learned: it never raises that.
+        this.postLimit = Math.min(this.postLimit, Math.floor(body.size / 2))
         this.postBytes = Math.min(this.postBytes, this.postLimit)
         // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
         if (queued.length > 1) {

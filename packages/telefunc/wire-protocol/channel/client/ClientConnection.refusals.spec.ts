@@ -42,4 +42,26 @@ describe('after a batch POST is refused for its size', () => {
     expect(after.filter(({ bytes }) => bytes > learned)).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(400)
   })
+
+  test('a message refused alone never raises the size the page learned from a larger batch', async () => {
+    const opened = await openOverSse(2)
+    const alone = opened(0)
+    const batch = opened(1)
+    world.postLimit = 40_000
+    sendTexts(batch.channel, 20, 4_000)
+    await advance(5_000)
+    const learnedFrom = world.posts.find(({ status }) => status === 413)
+    expect(learnedFrom).toBeDefined()
+    // Twice as large as the server takes: refused alone, on this wire and on the next.
+    sendTexts(alone.channel, 1, 100_000)
+    await advance(3_000)
+    const loneAt = world.posts.findIndex(({ status, bytes }) => status === 413 && bytes > 100_000)
+    expect(loneAt).toBeGreaterThan(0)
+    sendTexts(batch.channel, 20, 4_000)
+    await advance(5_000)
+    // The batch goes as before, in POSTs the server takes: none past the size the page learned.
+    const refusedBatches = world.posts.slice(loneAt).filter(({ status, bytes }) => status === 413 && bytes < 100_000)
+    expect(refusedBatches).toEqual([])
+    expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(40)
+  })
 })
