@@ -8,7 +8,7 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 let server: Server
 let host: string
 /** The array the app assigns, which it may change afterwards. */
-const appOrigins = ['https://app.example.com', 'https://*.example.org']
+const appOrigins = ['https://app.example.com', 'https://*.example.org', 'https://bücher.example']
 
 beforeAll(async () => {
   config.channel.allowedOrigins = appOrigins
@@ -69,6 +69,11 @@ test.each<[string, number, () => Record<string, string>]>([
   ],
   ['a page of an allowed origin', OPENS, () => ({ Host: host, Origin: 'https://app.example.com' })],
   ['a page of one subdomain under an allowed wildcard', OPENS, () => ({ Host: host, Origin: 'https://a.example.org' })],
+  [
+    'a page of an allowed origin whose entry writes its host as a person does',
+    OPENS,
+    () => ({ Host: host, Origin: 'https://xn--bcher-kva.example' }),
+  ],
   ['a page of another site', REFUSED, () => ({ Host: host, Origin: 'https://another-site.example' })],
   [
     'a page of another site the browser says is cross-site',
@@ -138,7 +143,14 @@ test.each([
   'https://app.*.example.com',
   'https://*example.com',
   'https://app.example.com/path',
-])('`allowedOrigins` refuses %s at configuration, saying what an entry looks like', (entry) => {
+  'https://app.example.com/.',
+  'https://app.example.com\\',
+  'https://user@app.example.com',
+  'https://app.example.com?',
+  'https://app.example.com#',
+  ' https://app.example.com',
+  'https://app.exa\tmple.com',
+])('`allowedOrigins` refuses %j at configuration, saying what an entry looks like', (entry) => {
   expect(() => {
     config.channel.allowedOrigins = [entry]
   }).toThrow(
@@ -171,7 +183,7 @@ test("a later change of the app's array doesn't change `allowedOrigins`, and rea
   })
   expect(await upgradeStatus({ Host: host, Origin: 'https://pushed.example' })).toBe(REFUSED)
   const readBack = config.channel.allowedOrigins
-  expect(readBack).toEqual(['https://app.example.com', 'https://*.example.org'])
+  expect(readBack).toEqual(['https://app.example.com', 'https://*.example.org', 'https://bücher.example'])
   expect(Object.isFrozen(readBack)).toBe(true)
 })
 
