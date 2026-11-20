@@ -7,8 +7,16 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 
 let server: Server
 let host: string
-/** The array the app assigns, which it may change afterwards. */
-const appOrigins = ['https://app.example.com', 'https://*.example.org', 'https://bücher.example']
+/** The array the app assigns, which it may change afterwards: origins of sites, of app shells with a scheme of their own
+ *  (Capacitor on iOS, Tauri on macOS and Linux), and one written as an address bar shows it. */
+const appOrigins = [
+  'https://app.example.com',
+  'https://*.example.org',
+  'https://bücher.example',
+  'capacitor://localhost',
+  'tauri://localhost',
+  'https://pages.example.com/',
+]
 
 beforeAll(async () => {
   config.channel.allowedOrigins = appOrigins
@@ -68,6 +76,21 @@ test.each<[string, number, () => Record<string, string>]>([
     () => ({ Host: host, Origin: 'https://public.example.net', 'X-Forwarded-Host': 'public.example.net, inner' }),
   ],
   ['a page of an allowed origin', OPENS, () => ({ Host: host, Origin: 'https://app.example.com' })],
+  [
+    'a page of the allowed app shell origin capacitor://localhost',
+    OPENS,
+    () => ({ Host: host, Origin: 'capacitor://localhost' }),
+  ],
+  [
+    'a page of the allowed app shell origin tauri://localhost',
+    OPENS,
+    () => ({ Host: host, Origin: 'tauri://localhost' }),
+  ],
+  [
+    'a page of an origin allowed with one trailing slash, as an address bar shows it',
+    OPENS,
+    () => ({ Host: host, Origin: 'https://pages.example.com' }),
+  ],
   ['a page of one subdomain under an allowed wildcard', OPENS, () => ({ Host: host, Origin: 'https://a.example.org' })],
   [
     'a page of an allowed origin whose entry writes its host as a person does',
@@ -105,7 +128,7 @@ test.each<[string, number, () => Record<string, string>]>([
   [
     "a page of an app shell with a scheme of its own, which the app doesn't allow, against a Host of the same name",
     REFUSED,
-    () => ({ Host: 'localhost', Origin: 'capacitor://localhost' }),
+    () => ({ Host: 'localhost', Origin: 'ionic://localhost' }),
   ],
   [
     'a page of the same origin behind a proxy that sends an empty X-Forwarded-Host',
@@ -140,6 +163,14 @@ test("a refused upgrade's warning names the origin, says what its page does, and
   } finally {
     warn.mockRestore()
   }
+})
+
+test("the WebSocket upgrade of a page of an app shell origin the app does not allow is refused, and its warning says only to list that origin, as a proxy's host can't be the shell's", async () => {
+  const { lines } = await refuseAll(['capacitor://another-app'])
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('A WebSocket upgrade from capacitor://another-app was refused')
+  expect(lines[0]).toContain('add that origin to `config.channel.allowedOrigins`')
+  expect(lines[0]).not.toContain('X-Forwarded-Host')
 })
 
 test.each([
@@ -209,7 +240,14 @@ test("a later change of the app's array doesn't change `allowedOrigins`, and rea
   })
   expect(await upgradeStatus({ Host: host, Origin: 'https://pushed.example' })).toBe(REFUSED)
   const readBack = config.channel.allowedOrigins
-  expect(readBack).toEqual(['https://app.example.com', 'https://*.example.org', 'https://bücher.example'])
+  expect(readBack).toEqual([
+    'https://app.example.com',
+    'https://*.example.org',
+    'https://bücher.example',
+    'capacitor://localhost',
+    'tauri://localhost',
+    'https://pages.example.com/',
+  ])
   expect(Object.isFrozen(readBack)).toBe(true)
 })
 
