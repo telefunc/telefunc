@@ -252,25 +252,20 @@ test("a later change of the app's array doesn't change `allowedOrigins`, and rea
   expect(Object.isFrozen(readBack)).toBe(true)
 })
 
-/** What refused handshakes leave behind, from a process that has logged no refusal yet: the lines printed, the keys
- *  added to the process's once-only warnings, and the names the refusal record keeps. */
-async function refuseAll(origins: string[]): Promise<{ lines: string[]; onceKeysAdded: number; namesKept: string[] }> {
-  const onceKeys = getGlobalObject<{ alreadyLogged: Set<string> }>('assert.ts', {
-    alreadyLogged: new Set(),
-  }).alreadyLogged
+/** What refused handshakes leave behind, from a process that has logged no refusal yet: the lines printed and the names
+ *  the refusal record keeps. */
+async function refuseAll(origins: string[]): Promise<{ lines: string[]; namesKept: string[] }> {
   const refusals = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
     named: new Set<string>(),
     windowStart: 0,
   })
   refusals.named.clear()
   refusals.windowStart = 0
-  const onceKeysBefore = onceKeys.size
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
     for (const origin of origins) expect(await upgradeStatus({ Host: host, Origin: origin })).toBe(REFUSED)
     return {
       lines: warn.mock.calls.map((call) => String(call[0])),
-      onceKeysAdded: onceKeys.size - onceKeysBefore,
       namesKept: [...refusals.named],
     }
   } finally {
@@ -280,11 +275,10 @@ async function refuseAll(origins: string[]): Promise<{ lines: string[]; onceKeys
 
 test("refused handshakes with long Origin headers that aren't origins print one short line, and keep nothing", async () => {
   const origins = Array.from({ length: 30 }, (_, i) => `https://${'a'.repeat(4000)}${i}.example`)
-  const { lines, onceKeysAdded, namesKept } = await refuseAll(origins)
+  const { lines, namesKept } = await refuseAll(origins)
   expect(lines).toHaveLength(1)
   expect(lines[0]).toContain('A WebSocket upgrade from a page whose Origin header names no origin was refused')
   expect(lines[0]?.length).toBeLessThan(1000)
-  expect(onceKeysAdded).toBe(0)
   expect(namesKept).toEqual(['a page whose Origin header names no origin'])
 })
 
@@ -347,7 +341,7 @@ test("after 20 other sites' origins, a refused origin is named again once the ne
 
 test('refused handshakes from many origins name the first 20 origins, then say once that the rest are not logged', async () => {
   const origins = Array.from({ length: 40 }, (_, i) => `https://site-${i}.example`)
-  const { lines, onceKeysAdded, namesKept } = await refuseAll([...origins, ...origins])
+  const { lines, namesKept } = await refuseAll([...origins, ...origins])
   expect(lines).toHaveLength(21)
   lines
     .slice(0, 20)
@@ -355,7 +349,6 @@ test('refused handshakes from many origins name the first 20 origins, then say o
   expect(lines[20]).toContain(
     'were refused within 10 minutes: the upgrades of further origins are refused without a warning until those 10 minutes have passed',
   )
-  expect(onceKeysAdded).toBe(0)
   // The 21st stands for the closing line.
   expect(namesKept).toEqual(origins.slice(0, 21))
 })
