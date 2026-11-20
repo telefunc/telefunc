@@ -2,6 +2,20 @@ export { upgradeRefusal, parseAllowedOrigin }
 
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { assertWarning } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+
+/** How many refused origins a process names in its log. An app whose own pages are refused finds their origin among the
+ *  first it names; past this many, a refusal keeps and prints nothing, however many origins clients send. */
+const REFUSED_ORIGINS_NAMED_MAX = 20
+/** The longest hostname DNS has: a longer one is no page's origin. */
+const HOSTNAME_MAX = 253
+
+const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
+  /** The refused origins the log named, by the name it gave them. */
+  named: new Set<string>(),
+  /** Past the bound: no refusal is logged any more. */
+  quiet: false,
+})
 
 /** An entry of `config.channel.allowedOrigins`: one origin, or any one subdomain label under `parent`. */
 type AllowedOrigin = { origin: string } | { protocol: string; port: string; parent: string }
@@ -27,12 +41,35 @@ function upgradeRefusal(request: Request): Response | undefined {
   if (site === 'same-origin') return undefined
   const url = origin !== null && URL.canParse(origin) ? new URL(origin) : null
   if (url && (isServersHost(url, request) || isAllowed(url))) return undefined
+  warnRefusal(origin === null ? 'a page that sent no Origin' : nameOf(url))
+  return new Response(null, { status: 403 })
+}
+
+/** The refused page's origin as the log names it: the parsed origin, never the header's own text. */
+function nameOf(url: URL | null): string {
+  if (url === null || url.origin === 'null' || url.hostname.length > HOSTNAME_MAX)
+    return 'a page whose Origin header names no origin'
+  return url.origin
+}
+
+/** Once per name, for the first `REFUSED_ORIGINS_NAMED_MAX` names; the next one says that the rest are not logged. */
+function warnRefusal(name: string): void {
+  if (globalObject.quiet || globalObject.named.has(name)) return
+  if (globalObject.named.size === REFUSED_ORIGINS_NAMED_MAX) {
+    globalObject.quiet = true
+    assertWarning(
+      false,
+      `WebSocket upgrades from more than ${REFUSED_ORIGINS_NAMED_MAX} origins were refused: the upgrades of further origins are refused without a warning.`,
+      { onlyOnce: false },
+    )
+    return
+  }
+  globalObject.named.add(name)
   assertWarning(
     false,
-    `A WebSocket upgrade from ${origin ?? 'a page that sent no Origin'} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable. Behind a proxy that rewrites \`Host\`, have it forward the public host in \`X-Forwarded-Host\`; for a page of another origin, add that origin to \`config.channel.allowedOrigins\`.`,
-    { onlyOnce: `upgradeRefusal:${origin}` },
+    `A WebSocket upgrade from ${name} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable. Behind a proxy that rewrites \`Host\`, have it forward the public host in \`X-Forwarded-Host\`; for a page of another origin, add that origin to \`config.channel.allowedOrigins\`.`,
+    { onlyOnce: false },
   )
-  return new Response(null, { status: 403 })
 }
 
 /** The host a client reached: the first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. */

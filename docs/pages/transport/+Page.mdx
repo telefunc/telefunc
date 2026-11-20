@@ -102,7 +102,7 @@ config.channel.allowedOrigins = ['https://app.example.com']
 
 > A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`. A client that isn't a browser sends no `Origin` and isn't refused.
 
-> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin, and the browser's console shows the failed handshake.
+> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin and for the first 20 origins it refuses, and the browser's console shows the failed handshake.
 
 
 
