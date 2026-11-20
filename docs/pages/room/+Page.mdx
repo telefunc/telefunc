@@ -246,6 +246,34 @@ console.log(reply) // 'ok'
 
 A callback that returns `undefined` only observes, so it can stand beside the one that replies. If two callbacks return a value, `send()` rejects.
 
+When `send({ ack: true })` gets no reply, it rejects with a `RoomError`, whose `code` says why:
+
+```js
+// Environment: client
+
+import { RoomError } from '@telefunc/room/client'
+
+try {
+  await me.send(alice, { move: 'e4' }, { ack: true })
+} catch (err) {
+  if (err instanceof RoomError && err.code === 'DM_RECIPIENT_WENT_AWAY') showMoveAsUnanswered()
+  else throw err
+}
+```
+
+| `code` | Why |
+|---|---|
+| `DM_HANDLER_THREW` | The recipient's `listen()` callback threw. Its error is logged where the recipient runs, and not sent to you, as a telefunction's error stays on the server. To reject with a value, throw <Link href="/Abort">`Abort(value)`</Link>. |
+| `DM_RECIPIENT_WENT_AWAY` | The recipient got the message, and its page went away before it replied. `send()` rejects once the server learns that the page is gone. |
+| `PARTICIPANT_LEFT` | The recipient left, or you did, before it replied. |
+| `PARTICIPANT_NOT_FOUND` | The recipient isn't in the room. |
+| `DM_NO_LISTENER` | The recipient no longer listens. |
+| `DM_INBOX_OVERFLOW` | The recipient's messages waiting for its first `listen()` passed 2 MiB, and this one was the oldest. |
+| `DM_TWO_REPLIES` | Two of the recipient's callbacks returned a value. |
+| `DM_TIMEOUT` | No reply came within 60 seconds. |
+| `ROOM_CLOSED` | The room closed. |
+| `MESSAGE_LOST` | The message's handoff to the recipient failed (see below). |
+
 > A private message is delivered at most once: when it can't be handed on to the recipient, `send()` rejects, and the message isn't sent again. `publish()` is at most once too, <Link href="/channel#delivery">like Broadcast's</Link>. Room logs on your server each message, join or leave it knows it couldn't hand on.
 
 
@@ -697,6 +725,23 @@ Properties: `id`, `meta`, `identity`, `joinedAt` (Unix epoch milliseconds), `isC
 | `onAfterJoin(member, { joinedAt })` | After a join. |
 | `onAfterPublish(from, message, { seq, timestamp, track })` | After a message or a binary frame to everyone. |
 | `onAfterSend(from, to, message, { seq, timestamp })` | After a private message. |
+
+### `RoomError`
+
+Room's methods reject with a `RoomError`, exported by `@telefunc/room` and `@telefunc/room/client`. Its `code` is stable, for your code to branch on; its `message` is for people. Beside the codes of an <Link href="#send-a-private-message">acknowledged `send()`</Link>:
+
+| `code` | Why |
+|---|---|
+| `ROOM_NOT_FOUND` / `ROOM_EXISTS` | No room has the id given / `Room.create()` found one. |
+| `ROOM_CLOSING` / `ROOM_CLOSED` | The room is closing / closed. |
+| `JOIN_NOT_GUARDED` | A client called `join()` on a room whose telefunction didn't say who may join (see <Link href="#control-who-can-join-and-post" />). |
+| `NOT_A_PARTICIPANT` | The participant didn't join through this page's connection. |
+| `PARTICIPANT_NOT_FOUND` / `PARTICIPANT_LEFT` | The participant isn't in the room / left. |
+| `LIMIT_REACHED` | A page's room joined too many participants, or a participant publishes on too many named tracks. |
+| `MESSAGE_LOST` | A private message's handoff to its recipient failed after it was sent, and it isn't sent again. |
+| `BACKEND_TIMEOUT` | The room's backend didn't get a subscription ready or hand a message on within 60 seconds. |
+| `MALFORMED` | Room couldn't read what the page sent, and ended the page's connection. |
+| `INTERNAL` | A bug, reported in your server's logs, or in the recipient's client logs where a page's reply couldn't be sent. |
 
 
 ## See also

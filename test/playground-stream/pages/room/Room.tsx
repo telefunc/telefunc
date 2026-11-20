@@ -128,7 +128,7 @@ import {
   onWatcherLeaves,
 } from './Room.telefunc'
 import { defineParticipantField, watchersOf } from '@telefunc/room/__internal'
-import type { LocalParticipant } from '@telefunc/room/client'
+import { RoomError, type LocalParticipant } from '@telefunc/room/client'
 import { demandNames, type NamedDemand } from './demandNames'
 import { publishMine } from './publishMine'
 
@@ -996,6 +996,47 @@ function Room() {
       <button id="test-room-join-only-away" onClick={() => goAway?.()}>
         Set away
       </button>
+
+      {scenario(
+        'dm-ack-outcomes',
+        'Acknowledged DM outcomes',
+        "Send to another tab's handler that throws, then to one it holds while its tab goes away",
+        async () => {
+          const [roomId, room] = await createRoom('dm-ack-outcomes')
+          setResult(JSON.stringify({ roomId }))
+          const me = await room.join({ meta: { name: 'Sender' } })
+          // The test joins `Recipient` from another tab, and navigates that tab away once its handler holds `hold`.
+          const recipient = await new Promise<string>((resolve) =>
+            room.onJoin((member) => member.meta.name === 'Recipient' && resolve(member.id)),
+          )
+          const outcome = async (sent: Promise<unknown>) => {
+            const start = performance.now()
+            try {
+              return { resolved: await sent }
+            } catch (err) {
+              const isRoomError = err instanceof RoomError
+              const code = typeof err === 'object' && err !== null && 'code' in err ? err.code : null
+              const message = err instanceof Error ? err.message : String(err)
+              return { isRoomError, code, message, seconds: Math.round((performance.now() - start) / 1000) }
+            }
+          }
+          const threw = await outcome(me.send(recipient, 'throw', { ack: true }))
+          const wentAway = await outcome(me.send(recipient, 'hold', { ack: true }))
+          setResult(JSON.stringify({ roomId, threw, wentAway }))
+        },
+      )}
+      {scenario('dm-ack-recipient', null, 'Join the room named in the URL, and take its DMs', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId') ?? ''
+        const room = await onGetRoom(roomId)
+        keepReachable(room)
+        const me = await room.join({ meta: { name: 'Recipient' } })
+        me.listen((data) => {
+          if (data === 'throw') throw new Error("the handler's own message")
+          setResult(JSON.stringify('holding'))
+          return new Promise(() => {})
+        })
+        setResult(JSON.stringify('joined'))
+      })}
 
       {scenario('malformed', 'Malformed requests', 'Join, and say goodbye to whoever leaves', async () => {
         const [roomId, room] = await createRoom('malformed')

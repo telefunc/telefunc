@@ -4,6 +4,8 @@ export type { RoomConfig } from './server/config.js'
 // `Room` is both the statics object and the instance type: one export carries both meanings.
 export { Room } from './server/lazyRoom.js'
 export type { ParticipantInfo, RoomGuards } from './server/roomStatics.js'
+export { RoomError } from './shared/RoomError.js'
+export type { RoomErrorCode } from './shared/RoomError.js'
 export type {
   RoomInfo,
   RoomOptions,

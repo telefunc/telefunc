@@ -4,7 +4,6 @@ import { handleCallbackBug } from 'telefunc/__internal'
 import { assertUsage } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { type TrackKey } from '../shared/binary.js'
-import { ROOM_BUG_MESSAGE } from '../shared/errors.js'
 import { ownMessage } from '../shared/arguments.js'
 import {
   type MemberMetaUpdate,
@@ -42,7 +41,6 @@ class ServerLocalParticipant extends ParticipantBase {
   private metaMirror: MetaMirror | null = null
   /** The client holding this participant, which its inbox forwards to instead of local listeners. */
   private holder: RoomParticipantStub | null = null
-  protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
   private readonly incomingDemand: ServerLocalParticipantOptions['incomingDemand']
 

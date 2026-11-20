@@ -14,9 +14,10 @@ import {
   TWO_ANSWERS,
   utf8ByteLength,
 } from 'telefunc/__internal'
+import { Abort } from 'telefunc/client'
 import { assertUsage } from '../utils/assert.js'
 import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
-import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
+import { DM_FAILURE, participantLeftError } from './errors.js'
 import {
   assertKnownOptions,
   assertPublishOptions,
@@ -164,8 +165,6 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   abstract get isConnected(): boolean
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
-  /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
-  protected abstract readonly _bugMessage: string
 
   /** What a message it sends carries of `data`: the value itself, which a page's wire copies on its way. */
   protected _ownMessage(data: unknown): unknown {
@@ -322,14 +321,16 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     this.fireAll(this.messageListeners, msg.data, this.inboxSender(msg))
   }
 
-  /** Channel's rule (`soleAnswer`) picks the reply; a throw is the failure reply (see `toRoomFailure`: a bug is
-   *  reported here, the sender gets only that it failed). */
+  /** Channel's rule (`soleAnswer`) picks the reply. An `Abort()` the handler throws is its sender's rejection; any other
+   *  throw is reported here, and its sender gets only that the handler threw. */
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
     let answer: unknown
     try {
       answer = await soleAnswer(this.messageListeners?.list() ?? [], msg.data, this.inboxSender(msg))
     } catch (err) {
-      return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
+      if (err instanceof Abort) return { ok: false, kind: 'abort', abortValue: err.abortValue }
+      this._reportError(err)
+      return DM_FAILURE.handlerThrew
     }
     return answer === TWO_ANSWERS ? DM_FAILURE.twoReplies : { ok: true, value: answer }
   }

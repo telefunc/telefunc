@@ -198,6 +198,6 @@ async function rejectionOf(delivery: Promise<void>): Promise<string | null> {
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
   return raceTimeout(promise, ROOM_HORIZON_MS, () => {
-    throw new RoomError('Room subscription recovery horizon expired')
+    throw new RoomError('BACKEND_TIMEOUT', 'Room subscription recovery horizon expired')
   })
 }

@@ -152,14 +152,14 @@ async function requireRoom(store: RoomStore, id: string): Promise<RoomIncarnatio
 }
 
 function roomNotFoundError(id: string): RoomError {
-  return new RoomError(`Room not found: ${id}`)
+  return new RoomError('ROOM_NOT_FOUND', `Room not found: ${id}`)
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
   const result = await getRoomPlane().call((store) => tryCreateRoom(store, id, options))
-  if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  if (result.kind !== 'created') throw new RoomError(`Room already exists: ${id}`)
+  if (result.kind === 'closing') throw new RoomError('ROOM_CLOSING', `Room is closing: ${id}`)
+  if (result.kind !== 'created') throw new RoomError('ROOM_EXISTS', `Room already exists: ${id}`)
   return result.room
 }
 
@@ -205,7 +205,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOption
   // that opening the room may do.
   return await getRoomPlane().call(async (store) => {
     const result = await tryCreateRoom(store, id, roomOptions)
-    if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
+    if (result.kind === 'closing') throw new RoomError('ROOM_CLOSING', `Room is closing: ${id}`)
     const room = result.kind === 'created' ? result.room : await openRoom(store, { id, ...configFromHead(result.head) })
     await applyGetOptions(room, { tail })
     return room

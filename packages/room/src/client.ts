@@ -17,6 +17,8 @@ export type {
   RoomMessage,
   RoomSnapshotView,
 } from './types.js'
+export { RoomError } from './shared/RoomError.js'
+export type { RoomErrorCode } from './shared/RoomError.js'
 
 import { config } from 'telefunc/client'
 import { SERIALIZER_PREFIX_ROOM_STEM } from './shared/constants.js'

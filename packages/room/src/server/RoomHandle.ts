@@ -341,6 +341,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     // A page joins only where the telefunction that gave it the room decided who may.
     if (this.guards?.onBeforeJoin === undefined && this.guards?.anyoneCanJoin !== true) {
       throw new RoomError(
+        'JOIN_NOT_GUARDED',
         `A page called join() on room ${this.id}, but the telefunction that returned the room doesn't say who may ` +
           'join: call Room.guard(room, { onBeforeJoin }) there to admit whom you choose, or ' +
           'Room.guard(room, { anyoneCanJoin: true }) to admit anyone',

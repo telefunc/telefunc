@@ -38,6 +38,7 @@ import { isRecord, ownLeaveCause, removedCause } from './arguments.js'
 import type { TrackKey } from './binary.js'
 import type { SetChange } from '../utils/sets.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
+import type { RoomErrorCode } from './RoomError.js'
 
 type MemberSnapshot = {
   id: string
@@ -157,10 +158,12 @@ type MemberMetaUpdate =
   | { seq: number; connected: boolean }
 type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 
-/** A safe Room failure: an Abort's value, or a caller-facing message tagged with the error it rejects as. */
+/** A safe Room failure: an Abort's value, or a caller-facing message tagged with the error it rejects as, a
+ *  `RoomError`'s with its code. */
 type RoomFailure =
   | { ok: false; kind: 'abort'; abortValue: unknown }
-  | { ok: false; kind: 'shield' | 'overflow' | 'error'; message: string }
+  | { ok: false; kind: 'shield' | 'overflow'; message: string }
+  | { ok: false; kind: 'error'; code: RoomErrorCode; message: string }
 
 /** A Room answer: to a request or publish, or an ack DM's reply; the value the call resolves to, or what it rejects
  *  with. */

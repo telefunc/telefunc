@@ -89,6 +89,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** Hidden members its response handed the client: their events are relayed to it alone. */
   private readonly grantedHidden: ReadonlySet<string>
   private readonly dmReplies = new PendingDmReplies()
+  /** The replies to DMs its page got, until each is out. */
+  private readonly replying = new Set<Promise<void>>()
   readonly replay = new ReplayGate()
   private wantsText = false
   private readonly textMemberWants = new Set<string>()
@@ -108,7 +110,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
     end.onClose(() => {
       this.dmReplies.drop()
-      room.detachStub(this)
+      // Its members leave once the replies are out, so each sender learns that its recipient went away, not that it left.
+      if (this.replying.size === 0) return room.detachStub(this)
+      void Promise.allSettled(this.replying).then(() => room.detachStub(this))
     })
     end.onDisconnect(() => room.setHeldConnected(this, false))
     end.onReconnect(() => room.setHeldConnected(this, true))
@@ -246,7 +250,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   private requireMember(id: string): string {
-    if (!this.members.has(id)) throw new RoomError('Not a participant of this room (joined through this connection)')
+    if (!this.members.has(id))
+      throw new RoomError('NOT_A_PARTICIPANT', 'Not a participant of this room (joined through this connection)')
     return id
   }
 
@@ -254,7 +259,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
    *  `ROOM_VIEW_MEMBERS_MAX`, throws instead, before the join commits. */
   addMember(reqId: number, id: string, selfDelivery: boolean): void {
     if (this.members.size === ROOM_VIEW_MEMBERS_MAX) {
-      throw new RoomError(`A room view joins at most ${ROOM_VIEW_MEMBERS_MAX} participants`)
+      throw new RoomError('LIMIT_REACHED', `A room view joins at most ${ROOM_VIEW_MEMBERS_MAX} participants`)
     }
     this.members.set(id, selfDelivery)
     this.end.deliver(unorderedEventBody({ __r: 'joined', reqId, id }))
@@ -386,7 +391,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
 
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private awaitDmReply(ackId: string, sender: string): void {
-    void this.end.trackAck(this.publishDmReply(ackId, sender)).catch(reportRoomError)
+    const replied = this.publishDmReply(ackId, sender)
+    this.replying.add(replied)
+    void replied.finally(() => this.replying.delete(replied)).catch(() => {})
+    void this.end.trackAck(replied).catch(reportRoomError)
   }
 
   private async publishDmReply(ackId: string, sender: string): Promise<void> {

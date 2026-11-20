@@ -1056,6 +1056,37 @@ function testRoom() {
       ])
     }, CLOSED_TAB_WAIT)
   })
+  test("room: an acknowledged DM's sender learns, by its error's code, that the recipient's handler threw, or that its page went away after it got the message", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-dm-ack-outcomes')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const browser = page.context().browser()
+    if (!browser) throw new Error('The test page has no browser to open a second one in')
+    const context = await browser.newContext()
+    try {
+      const other = await context.newPage()
+      await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+      await other.click('#test-room-dm-ack-recipient')
+      await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"holding"'))
+      await other.goto('about:blank')
+      await autoRetry(async () => {
+        type Outcome = { isRoomError: boolean; code: unknown; message: string; seconds: number }
+        const { threw, wentAway } = await getResult<{ threw: Outcome; wentAway: Outcome }>('#room-result')
+        expect([threw.isRoomError, wentAway.isRoomError]).deep.equal([true, true])
+        expect([threw.code, threw.message]).deep.equal([
+          'DM_HANDLER_THREW',
+          "The recipient's listen() callback threw: its error is logged where the recipient runs",
+        ])
+        expect([wentAway.code, wentAway.message]).deep.equal([
+          'DM_RECIPIENT_WENT_AWAY',
+          'The recipient went away after it got the message, before it replied',
+        ])
+        expect(wentAway.seconds).lessThan(10) // not the 60 s acknowledgement timeout
+      }, CLOSED_TAB_WAIT)
+    } finally {
+      await context.close()
+    }
+  })
   for (const kind of ['request', 'publish', 'reply'] as const)
     test(`room: a page that sends a malformed Room ${kind} loses its connection: its member leaves, and the room keeps working for the others`, async () => {
       await navigate(`${getServerUrl()}/room`)

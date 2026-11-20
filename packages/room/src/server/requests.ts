@@ -25,6 +25,7 @@ import {
   type BinaryWantChange,
 } from '../shared/binary.js'
 import { isRecord } from '../shared/arguments.js'
+import { isRoomErrorCode } from '../shared/RoomError.js'
 import type {
   RoomResult,
   MemberMutationRequest,
@@ -156,8 +157,13 @@ function decodeDmReply(value: unknown): RoomResult {
   if (reply.ok === true) return { ok: true, value: reply.value }
   if (reply.ok !== false) malformed('DM reply')
   if (reply.kind === 'abort') return { ok: false, kind: 'abort', abortValue: reply.abortValue }
-  if (reply.kind !== 'shield' && reply.kind !== 'overflow' && reply.kind !== 'error') malformed('DM reply')
-  return { ok: false, kind: reply.kind, message: text(reply.message, 'DM reply') }
+  const message = text(reply.message, 'DM reply')
+  if (reply.kind === 'error') {
+    if (!isRoomErrorCode(reply.code)) malformed('DM reply')
+    return { ok: false, kind: 'error', code: reply.code, message }
+  }
+  if (reply.kind !== 'shield' && reply.kind !== 'overflow') malformed('DM reply')
+  return { ok: false, kind: reply.kind, message }
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */

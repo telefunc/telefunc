@@ -344,7 +344,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private publishOnTrack(member: string, track: string): void {
     if (!this.publishedTracks.admits(member, track)) {
-      throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
+      throw new RoomError('LIMIT_REACHED', `A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
     }
     if (this.publishedTracks.add(member, track)) this.incomingDemand.published(member, track)
   }

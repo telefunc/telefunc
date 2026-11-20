@@ -5,11 +5,12 @@ import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { isProtocolViolationError, reconnectWindow, type ServerBroadcastEnd } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import { reportRoomError } from './reportRoomError.js'
-import { ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
+import { DM_FAILURE, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
 import type { RoomFailure, RoomResult } from '../shared/protocol.js'
 assertIsNotBrowser()
 
-/** A stub's ack DMs awaiting their `dm-reply`: null at the next `await()` once its sender timed out, or on `drop()`. */
+/** A stub's ack DMs awaiting their `dm-reply`: null at the next `await()` once its sender timed out; on `drop()`, as its
+ *  page went away, that the recipient went away after it got the message. */
 class PendingDmReplies {
   private readonly pending = new Map<string, { expiresAt: number; resolve: (reply: RoomResult | null) => void }>()
 
@@ -33,7 +34,7 @@ class PendingDmReplies {
   }
 
   drop(): void {
-    for (const entry of this.pending.values()) entry.resolve(null)
+    for (const entry of this.pending.values()) entry.resolve(DM_FAILURE.wentAway)
     this.pending.clear()
   }
 }
@@ -53,7 +54,7 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
   } catch (err) {
     if (!isProtocolViolationError(err)) throw err
     end.terminateWire()
-    return Promise.resolve({ ok: false, kind: 'error', message: err.message })
+    return Promise.resolve({ ok: false, kind: 'error', code: 'MALFORMED', message: err.message })
   }
 }
 

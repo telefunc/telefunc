@@ -24,7 +24,10 @@ import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '..
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
 function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
-  end._sendReply(reply.then(declare), declare({ ok: false, kind: 'error', message: CLIENT_ROOM_BUG_MESSAGE }))
+  end._sendReply(
+    reply.then(declare),
+    declare({ ok: false, kind: 'error', code: 'INTERNAL', message: CLIENT_ROOM_BUG_MESSAGE }),
+  )
 }
 
 /** An acked request on a room's or a participant's channel, as its value or the error it failed with. */
@@ -53,7 +56,6 @@ interface PageLink extends MemberLink {
 /** A page's `LocalParticipant`: joined through a room the page holds, or returned alone by a telefunction. */
 class ClientParticipant extends ParticipantBase<PageLink> {
   private readonly watches = new Map<TrackKey, TrackWatch>()
-  protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
   /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
   private handle: WeakRef<LocalParticipant> | null = null
 
