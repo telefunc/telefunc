@@ -11,6 +11,8 @@ import { DeadlineTimer } from './DeadlineTimer.js'
 
 /** The channel end, which carries its ending's frames and answers what its callbacks throw. */
 interface ChannelLifecycleOwner {
+  /** It takes no more sends, as it begins or follows a close: the newest lossy send goes first, ahead of the stop. */
+  _stopSending(): void
   /** Sends `frame` behind every message this end still owes. */
   _sendEnding(frame: EndingFrame): void
   /** The channel ended, with `err` where it didn't close gracefully: the end lets go of what it holds. */
@@ -87,6 +89,7 @@ class ChannelLifecycle {
       side,
       port: {
         send: (frame) => this.owner._sendEnding(frame),
+        stop: () => this.owner._stopSending(),
         startCleanup: (err) => this.fireClose(err),
         end: (err) => this.onEnded(err),
         armTimer: (at) => this.timer.arm(at, () => this.ending.timerFired()),
@@ -101,7 +104,7 @@ class ChannelLifecycle {
     return this.ending.ended
   }
 
-  /** It takes no more sends: it began or follows a close, or ended. */
+  /** It takes no more sends: it began or follows a close, it sends its own end, or it ended. */
   get stopped(): boolean {
     return this.ending.stopped
   }

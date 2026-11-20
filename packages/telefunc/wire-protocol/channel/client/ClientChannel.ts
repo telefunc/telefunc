@@ -94,7 +94,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
-  protected stopped = false
   protected readonly lifecycle = new ChannelLifecycle({
     owner: this,
     side: 'page',
@@ -166,6 +165,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this.stopped
+  }
+
+  /** It takes no more sends: it began or follows a close, or ended. `ChannelEnding` owns it. */
+  protected get stopped(): boolean {
+    return this.lifecycle.stopped
   }
 
   /** @internal The connection its frames go through. */
@@ -272,11 +276,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _sendEnding(frame: EndingFrame): void {
     switch (frame.kind) {
       case 'close':
-        this.stopSending()
         this.connection.sendCloseRequest(this, frame.timeoutMs)
         return
       case 'closeAck':
-        this.stopSending()
         this.connection.sendCloseAck(this)
         return
       case 'closeDone':
@@ -287,11 +289,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** It takes no more sends; the newest lossy send held for credit goes first, ahead of the stop. */
-  private stopSending(): void {
-    if (this.stopped) return
+  /** @internal It takes no more sends; the newest lossy send held for credit goes first, ahead of the stop. */
+  _stopSending(): void {
     this.flushLossy()
-    this.stopped = true
   }
 
   abort(): void
@@ -307,7 +307,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  `toJSON`, ended it already. */
   private abortWith(reason: AbortReason, message?: string): void {
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
-      this.stopped = true
       // The newest lossy send, where it hasn't gone, is dropped.
       this.connection.sendAbort(this, reason.serialized, this.newestLossy?.seq)
     })
@@ -602,7 +601,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _finalize(err: Error | undefined): void {
-    this.stopped = true
     this.heldLossy = null
     this.listeners.clear()
     this.binaryListeners.clear()

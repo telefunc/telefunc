@@ -22,6 +22,8 @@ type EndingFrame =
 /** What one end does on the decisions of its `ChannelEnding`. */
 interface EndingPort {
   send(frame: EndingFrame): void
+  /** It takes no more sends, as it begins or follows a close: called once, before its first frame of the close. */
+  stop(): void
   /** Runs the `onClose()` cleanup with `err`, `undefined` for a graceful close; the end calls `cleanupSettled()` once
    *  the promises it returned settled. At the end it isn't awaited. */
   startCleanup(err: Error | undefined): void
@@ -58,6 +60,8 @@ class ChannelEnding {
   /** The decider's deadline, or the follower's bound. */
   private timerAt = Number.POSITIVE_INFINITY
   private didEnd = false
+  /** `endWith()` sends its own end, as an abort does. */
+  private sendsOwnEnd = false
   private endError: Error | undefined
 
   constructor({ side, port }: { side: EndingSide; port: EndingPort }) {
@@ -65,9 +69,9 @@ class ChannelEnding {
     this.port = port
   }
 
-  /** It sends nothing more: it began or follows a close, or ended. */
+  /** It sends nothing more: it began or follows a close, it sends its own end, or it ended. */
   get stopped(): boolean {
-    return this.role !== null || this.didEnd
+    return this.role !== null || this.sendsOwnEnd || this.didEnd
   }
 
   get ended(): boolean {
@@ -93,6 +97,7 @@ class ChannelEnding {
       case null:
         this.role = peerAbsent ? 'decider' : 'initiator'
         this.peerStopped = this.peerDone = peerAbsent
+        this.port.stop()
         this.port.send({ kind: 'close', timeoutMs })
         this.setTimer(at)
         break
@@ -116,6 +121,7 @@ class ChannelEnding {
       case null:
         this.role = 'follower'
         this.peerStopped = true
+        this.port.stop()
         this.port.send({ kind: 'closeAck' })
         this.setTimer(at + this.port.reconnectWindowMs())
         break
@@ -160,6 +166,7 @@ class ChannelEnding {
    *  one that arrived (no `send`), wins. It ends also where `send` throws. True where it ended it. */
   endWith(err: Error | undefined, send?: () => void): boolean {
     if (this.didEnd) return false
+    this.sendsOwnEnd = send !== undefined
     try {
       send?.()
     } finally {

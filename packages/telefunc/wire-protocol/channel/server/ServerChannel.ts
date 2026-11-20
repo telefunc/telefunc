@@ -133,7 +133,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal `closing` once `close`, `abort` or the page's CLOSE starts the close; `ended` once `shutdown` ran. */
-  _phase: 'open' | 'closing' | 'ended' = 'open'
+  /** Open; closing, once it takes no more sends; ended. `ChannelEnding` owns it. */
+  get _phase(): 'open' | 'closing' | 'ended' {
+    if (this.lifecycle.ended) return 'ended'
+    return this.lifecycle.stopped ? 'closing' : 'open'
+  }
   private didRegister = false
   protected peer: IndexedPeer | null = null
   /** The request that opened the wire the page last attached on. */
@@ -495,7 +499,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  `toJSON`, ended it already. */
   private abortWith(reason: AbortReason, message?: string): void {
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
-      this._phase = 'closing'
       // Owed, the abort is so before its close callbacks run, which may need a subscriber's memory (`ServerBroadcast.shed`).
       this.onAbortOwed()
       this.sendEnd((peer) => peer.sendSequenced(encode.abort, reason.serialized))
@@ -505,7 +508,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     const timeout = normalizeCloseTimeout(opts?.timeout)
     // A channel no telefunction returned has no page to wait for.
-    if (!this.didRegister) this.stopSending()
     return this.lifecycle.close(timeout, { peerAbsent: !this.didRegister })
   }
 
@@ -513,14 +515,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _sendEnding(frame: EndingFrame): void {
     switch (frame.kind) {
       case 'close':
-        this.stopSending()
         return this.sendEnd((peer) => {
           const seq = peer.sendCloseRequest(frame.timeoutMs)
           // Its first CLOSE is the stop boundary the page's CLOSE_ACK confirms.
           if (this.closeRequestSeq === 0) this.closeRequestSeq = seq
         })
       case 'closeAck':
-        this.stopSending()
         return this.sendEnd((peer) => peer.sendCloseAck())
       case 'closeDone':
         return this.sendEnd((peer) => peer.sendCloseDone())
@@ -529,10 +529,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** It takes no more sends; the newest lossy send goes first, ahead of the stop. */
-  private stopSending(): void {
-    if (this._phase !== 'open') return
-    this._phase = 'closing'
+  /** @internal It takes no more sends; the newest lossy send goes first, ahead of the stop. */
+  _stopSending(): void {
     this.lossySends?.flush()
   }
 
@@ -1093,7 +1091,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const pageGone = this.endsPageGone
     // What of it still waits for the wire of a page that is gone, its sends too, would reach no one.
     if (pageGone && this.peer) this.peer.sender.queue.dropWaitingFrom(this.peer.index, 'start')
-    this._phase = 'ended'
     this.lossySends?.dispose()
     const pageAttached = this.peer !== null
     this.peer = null
