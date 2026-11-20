@@ -64,4 +64,21 @@ describe('after a batch POST is refused for its size', () => {
     expect(refusedBatches).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(40)
   })
+
+  test('a channel ended for it sends nothing more of what it had queued, while the wire stays up', async () => {
+    const opened = await openOverSse(2)
+    const ended = opened(0)
+    const other = opened(1)
+    world.postLimit = 40_000
+    // Refused alone on this wire and on the next; the three after it wait behind it.
+    sendTexts(ended.channel, 1, 100_000)
+    sendTexts(ended.channel, 3, 100)
+    await advance(5_000)
+    expect(ended.ended).toHaveLength(1)
+    expect(ended.ended[0]?.err?.message).toMatch(/refused with 413 text\/html, again after a reconnect/)
+    void other.channel.send('the wire goes on')
+    await advance(2_000)
+    expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(1)
+    expect(world.server.got.filter(({ ix }) => ix === 0)).toEqual([])
+  })
 })

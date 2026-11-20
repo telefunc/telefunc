@@ -31,6 +31,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
@@ -720,6 +721,13 @@ class SseTransport implements UpgradeSource {
     }
   }
 
+  dropQueued(ix: number): void {
+    const dropped = this.outbox.filter((entry) => isDataOf(entry, ix))
+    if (dropped.length === 0) return
+    this.outbox = this.outbox.filter((entry) => !isDataOf(entry, ix))
+    this.outboxBytes -= bytesOf(dropped)
+  }
+
   abandonActiveTransport(): void {
     const abortController = this.transportAbort
     if (!abortController) return
@@ -808,6 +816,11 @@ function bytesOf(entries: readonly OutboxEntry[]): number {
   let bytes = 0
   for (const { frame } of entries) bytes += frame.byteLength
   return bytes
+}
+
+/** Whether `entry` holds a data frame of channel `ix`. */
+function isDataOf(entry: OutboxEntry, ix: number): boolean {
+  return isSequenced(entry) && readU16(entry.frame, 1) === ix
 }
 
 function isSequenced({ frame }: OutboxEntry): boolean {

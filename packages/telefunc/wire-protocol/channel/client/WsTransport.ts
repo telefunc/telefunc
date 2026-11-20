@@ -16,7 +16,8 @@ import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceive
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
+import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame } from './ClientConnection.js'
@@ -289,6 +290,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number {
     return (this.ws?.bufferedAmount ?? 0) + (this.pieces?.sender.unhandedBytes ?? 0)
+  }
+
+  /** What waits behind the rest of a frame, which goes whole. */
+  dropQueued(ix: number): void {
+    this.pieces?.sender.dropWaiting((frame) => {
+      const tag = frame[0]
+      return tag !== undefined && isSequencedTag(tag) && readU16(frame, 1) === ix
+    })
   }
 
   abandonActiveTransport(): void {

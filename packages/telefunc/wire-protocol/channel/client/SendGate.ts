@@ -210,6 +210,7 @@ class SendGate {
   release(record: ChannelRecord): void {
     this.channels.release(record)
     this.dropQueue(record.ix)
+    this.owner.transport.dropQueued(record.ix)
   }
 
   /** Drops the frames channel `ix` holds or has waiting, at the next read. */
