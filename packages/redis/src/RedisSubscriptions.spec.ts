@@ -25,7 +25,7 @@ function refusal(): Error {
 }
 
 /** Replies Redis 5.0.14, 6.0.20, 6.2.24, 7.0.15, 7.2.17, 7.4.12, 8.0.6 and 8.2.11 and Dragonfly gave through ioredis to a
- *  call its user's ACL denies or a replica refuses, at top level and inside a script. */
+ *  call its user's ACL denies, at top level and inside a script: they stand until an operator changes the ACL. */
 const REFUSALS = [
   "NOPERM this user has no permissions to run the 'get' command or its subcommand",
   'NOPERM this user has no permissions to access one of the channels used as arguments',
@@ -36,13 +36,18 @@ const REFUSALS = [
   "ERR The user executing the script can't run this command or subcommand script: d3c21d0c2b9ca22f82737626a27bcaf5d288f99f, on @user_script:1.",
   "ERR ACL failure in script: User probe has no permissions to run the 'get' command script: d3c21d0c2b9ca22f82737626a27bcaf5d288f99f, on @user_script:1.",
   'ERR ACL failure in script: No permissions to access a channel script: 9ddb5d56e1d5c3a3b21c1aad774273186b4a6d34, on @user_script:1.',
-  "READONLY You can't write against a read only replica.",
-  "READONLY You can't write against a read only replica. script: bd6f3018b28bbdb36260f19d3c44afed740db987, on @user_script:1.",
-  "ERR Error running script (call to f_bd6f3018b28bbdb36260f19d3c44afed740db987): @user_script:1: @user_script: 1: -READONLY You can't write against a read only replica.",
   'ERR Error running script (call to ee33e8171bc4a2b477d56ebe06c4d9545f5b840a): @user_script:2: -NOPERM probe has no ACL permissions',
 ]
-/** Replies that pass, and a dropped command connection. */
+/** Replies that pass, among them a replica's refusal (the same stores, at top level and inside a script), which a
+ *  failover ends, and a dropped command connection. */
 const PASSING = [
+  replyError("READONLY You can't write against a read only replica."),
+  replyError(
+    "READONLY You can't write against a read only replica. script: bd6f3018b28bbdb36260f19d3c44afed740db987, on @user_script:1.",
+  ),
+  replyError(
+    "ERR Error running script (call to f_bd6f3018b28bbdb36260f19d3c44afed740db987): @user_script:1: @user_script: 1: -READONLY You can't write against a read only replica.",
+  ),
   replyError('LOADING Redis is loading the dataset in memory'),
   replyError('BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSCRIPT.'),
   new Error('Connection is closed.'),
@@ -123,10 +128,7 @@ describe('a start read Redis answers with an error', () => {
       const closed = new Promise((resolve) => attempt.onStateChange((state, reason) => resolve([state, reason])))
 
       const refusal = await Promise.all(subscriptions.establishingOn([TEXT])).catch((error: unknown) => error)
-      expect(refusal).toMatchObject({
-        name: 'BackendError',
-        code: message.includes('READONLY') ? 'unavailable' : 'denied',
-      })
+      expect(refusal).toMatchObject({ name: 'BackendError', code: 'denied' })
       await expect(closed).resolves.toEqual(['closed', refusal])
       expect(reads).toBe(1)
     })
@@ -258,22 +260,29 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
 describe('a subscriber connection Redis refuses at its login', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it("is reported once as Telefunc's error, with Redis's code, and not the password", async () => {
-    const reports: string[] = []
-    vi.spyOn(console, 'error').mockImplementation((...args) => void reports.push(inspect(args, { depth: 8 })))
+  it("ends the subscription with Telefunc's error, with Redis's code and not the password, and logs in no more", async () => {
     const refused = Object.assign(replyError('WRONGPASS invalid username-password pair or user is disabled.'), {
       command: { name: 'hello', args: ['3', 'AUTH', 'tf', 'pw-SECRET'] },
     })
+    let logins = 0
     const { listen } = setup(undefined, async () => {
+      logins++
       throw refused
     })
-    listen(TEXT)
-
-    await expect.poll(() => reports.length).toBe(1)
-    expect(reports[0]).toContain(
-      "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    const attempt = listen(TEXT)
+    const closed = new Promise<{ state: string; reason: unknown }>((resolve) =>
+      attempt.onStateChange((state, reason) => resolve({ state, reason })),
     )
-    expect(reports[0]).not.toContain('pw-SECRET')
-    expect(reports[0]).not.toContain('args')
+
+    const { state, reason } = await closed
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect({ state, logins }).toEqual({ state: 'closed', logins: 1 })
+    expect(reason).toMatchObject({
+      name: 'BackendError',
+      code: 'denied',
+      message:
+        "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    })
+    expect(inspect(reason, { depth: 8 })).not.toContain('pw-SECRET')
   })
 })

@@ -9,15 +9,16 @@ import { addressOf, isReplyError, isUnsent, type RedisClient } from './ioredis.j
 type Code = BackendError['code']
 
 /** A reply's wording the backend tells by its kind, whatever its first word. `notRun`: the reply, given at top level or
- *  by Redis 7 and later inside a script, proves the command didn't run. `stands`: it stands until an operator changes
- *  something, so it ends a subscription (`isRefusal()`). */
+ *  by Redis 7 and later inside a script, proves the command didn't run. `stands`: it is `'denied'`, which stands until
+ *  an operator changes something, so it ends a subscription (`isRefusal()`); what is `'unavailable'` passes, and a
+ *  subscription waits it out. */
 type ReplyRow = { kind: Kind; wording: RegExp; code: Code; notRun: boolean; stands: boolean }
 type Kind = 'replica' | 'acl' | 'login' | 'unknown command'
 
 /** In order: the first row whose wording starts the reply (unwrapped, see `IN_SCRIPT`) is the reply's. */
 const REPLIES: readonly ReplyRow[] = [
-  // A replica's refusal of a write, at top level or inside a script.
-  { kind: 'replica', wording: /^READONLY /, code: 'unavailable', notRun: true, stands: true },
+  // A replica's refusal of a write, at top level or inside a script: a failover passes.
+  { kind: 'replica', wording: /^READONLY /, code: 'unavailable', notRun: true, stands: false },
   // Its user's ACL, at top level or inside a script: Redis 7 and later word a script's ACL refusal as `ERR`. An ACL
   // refusal inside one of Telefunc's write scripts comes before its first write, as each script checks its calls first
   // (`tf_allowed`).
@@ -29,11 +30,11 @@ const REPLIES: readonly ReplyRow[] = [
     stands: true,
   },
   // A refused login: Redis 6 and later, and Redis 5's `AUTH`.
-  { kind: 'login', wording: /^(?:WRONGPASS|NOAUTH) /, code: 'denied', notRun: true, stands: false },
-  { kind: 'login', wording: /^ERR invalid password/, code: 'denied', notRun: false, stands: false },
+  { kind: 'login', wording: /^(?:WRONGPASS|NOAUTH) /, code: 'denied', notRun: true, stands: true },
+  { kind: 'login', wording: /^ERR invalid password/, code: 'denied', notRun: false, stands: true },
   // A command Redis doesn't know: disabled or renamed by its operator.
-  { kind: 'unknown command', wording: /^ERR unknown command /, code: 'denied', notRun: true, stands: false },
-  { kind: 'unknown command', wording: /^ERR unknown subcommand /, code: 'denied', notRun: false, stands: false },
+  { kind: 'unknown command', wording: /^ERR unknown command /, code: 'denied', notRun: true, stands: true },
+  { kind: 'unknown command', wording: /^ERR unknown subcommand /, code: 'denied', notRun: false, stands: true },
 ]
 
 /** A reply told by its code, its first word. `notRun`: at top level, or raised by Redis 7 and later inside a script,
@@ -166,8 +167,8 @@ function connectionCode(error: unknown): string | undefined {
   return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
 }
 
-/** A refusal that stands until an operator changes something: a row of `REPLIES` that `stands`, by ACL or role;
- *  `BUSY`, `LOADING` and the like pass. */
+/** A refusal that stands until an operator changes something: a row of `REPLIES` that `stands`, an ACL refusal, a
+ *  refused login or a command Redis doesn't run; `READONLY`, `BUSY`, `LOADING` and the like pass. */
 function isRefusal(error: unknown): error is BackendError {
   return error instanceof BackendError && refusals.has(error)
 }

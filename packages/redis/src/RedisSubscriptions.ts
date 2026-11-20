@@ -264,6 +264,13 @@ class RedisSubscriptions {
 
   private lost(id: number, error: unknown): void {
     if (!this.isCurrent(id)) return
+    // A refusal, such as a refused login, stands until an operator changes the password or the ACL: the subscriptions
+    // end with it, and the backend doesn't connect again for them.
+    if (isRefusal(error)) {
+      this.disconnect()
+      for (const attempt of this.attempts()) attempt.fail(error)
+      return
+    }
     this.loseAll(error)
     // A listener may have released the last attempt, or opened one that is already connecting.
     if (this.byChannel.size === 0 || this.socket.phase !== 'idle') return
@@ -382,9 +389,9 @@ class RedisSubscriptions {
     } catch (thrown) {
       if (!this.isCurrent(id)) return
       const error = this.failure(thrown)
-      // A refusal stands until an operator changes Redis's ACL or role. Any other failure (a command-connection error,
-      // `LOADING`) is tried again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber
-      // connection stays.
+      // A refusal stands until an operator changes Redis's ACL or the password. Any other failure (a command-connection
+      // error, `READONLY` during a failover, `LOADING`) is tried again, as a drop is: the attempt awaits confirmation
+      // meanwhile, and the shared subscriber connection stays.
       if (isRefusal(error)) return attempt.fail(error)
       return this.retryRead(attempt, error)
     }
