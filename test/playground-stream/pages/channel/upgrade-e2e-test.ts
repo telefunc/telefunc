@@ -39,10 +39,11 @@ function testUpgrade(isDev: boolean) {
       if (serverRuntime() === 'node')
         expect(await rawRequestStatus(['GET /_telefunc HTTP/1.1', 'Host: a b', ...handshake])).toBe(400)
       const { host } = new URL(getServerUrl())
-      // On every runtime: a path that only begins like Telefunc's is the app's own, answered as the app answers a path
-      // that isn't Telefunc's.
+      // On every runtime: a WebSocket handshake to a path that only begins like Telefunc's is the app's own request,
+      // answered as the app answers a path that isn't Telefunc's.
       const appsAnswer = await rawRequestStatus(['GET /no-such-page HTTP/1.1', `Host: ${host}`])
-      expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`])).toBe(appsAnswer)
+      expect(appsAnswer).not.toBe('no answer')
+      expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`, ...handshake])).toBe(appsAnswer)
       // In development Vike answers both with 500, as the playground has no error page, and logs that on stderr.
       if (isDev)
         await autoRetry(async () => {
