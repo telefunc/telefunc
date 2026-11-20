@@ -401,15 +401,18 @@ class CloudflareBroadcastMember {
     )
   }
 
-  private renew(memberRoute: MemberRoute): Promise<LeaseRenewed> {
+  private async renew(memberRoute: MemberRoute): Promise<LeaseRenewed> {
     const request = this.leaseRequest(memberRoute)
-    return this.broadcast.callAuthority(
+    const sentAt = Date.now()
+    const renewed = await this.broadcast.callAuthority(
       this.calls,
       memberRoute.route.key,
       this.locatedBucket,
       (authority) => authority.telefuncBroadcastRenew(request),
-      { deadline: Date.now() + LEASE_RENEW_EVERY_MS, paused: true },
+      { deadline: sentAt + LEASE_RENEW_EVERY_MS, paused: true },
     )
+    if (renewed === 'renewed') this.grants.renewed(this.broadcast.authorityName(memberRoute.route.key), sentAt)
+    return renewed
   }
 
   /** Through the DO's ordered stubs, with its grant at the key's authority and its next order there. */

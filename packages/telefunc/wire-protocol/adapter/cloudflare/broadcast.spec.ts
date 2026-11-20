@@ -813,6 +813,33 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         })
       }
 
+      it('whose publish right after it subscribed, 100 s after its last subscriber left and another Durable Object subscribed, reaches its presence', async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { inObject, sessions } = worker()
+        const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        await first.ready
+        first()
+        await vi.advanceTimersByTimeAsync(100_000)
+        // Another Durable Object subscribes: its grant drops the first one's.
+        const other = inObject(() => Broadcast.subscribe('room:test', () => {}), sessions.second)
+        await vi.advanceTimersByTimeAsync(0)
+        await other.ready
+        const heard: string[] = []
+        const back = inObject(() => {
+          const back = Broadcast.subscribe<string>('room:test', (text) => heard.push(text))
+          void Broadcast.publish('room:test', 'joined')
+          return back
+        })
+        for (let turn = 0; turn < 5; turn++) await vi.advanceTimersByTimeAsync(0)
+        await back.ready
+        for (let turn = 0; turn < 5; turn++) await vi.advanceTimersByTimeAsync(0)
+        expect(heard).toEqual(['joined'])
+        back()
+        other()
+      })
+
       it('whose refresh is answered lapsed after the last subscriber left stores no presence', async () => {
         vi.useFakeTimers()
         vi.spyOn(console, 'error').mockImplementation(() => {})

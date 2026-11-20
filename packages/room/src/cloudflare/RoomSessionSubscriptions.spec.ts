@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS, type CloudflareMember } from 'telefunc/__internal'
+import {
+  LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS,
+  type CloudflareMember,
+  type TelefuncExtensionNamespace,
+} from 'telefunc/__internal'
 import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
-import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
+import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import type { RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { LaneId } from '../backend/contract.js'
 
@@ -55,6 +59,10 @@ function setup(
 /** Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. */
 const transient = (overloaded: boolean, message = 'reset') =>
   Object.assign(new Error(message), { retryable: true, overloaded })
+
+/** Whether `order`, as a call carried it, is under `grant`. */
+const isOrderOf = (order: unknown, grant: number | null) =>
+  typeof order === 'object' && order !== null && 'grant' in order && order.grant === grant
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -211,6 +219,49 @@ describe('a Cloudflare Room lane', () => {
 })
 
 describe('a call of a Cloudflare Room lane to its room', () => {
+  it("that a lane makes right after it subscribed again, past the room's drop of this session's grant, comes after the lane's registration", async () => {
+    // The room's authority: it holds one grant of this session's at a time, and drops it as its alarm does.
+    let current: number | null = null
+    let granted = 0
+    /** What the room's authority got, in the order it got it. */
+    const got: string[] = []
+    const calls: Record<string, (args: unknown[]) => Promise<unknown>> = {
+      grantHolder: async () => (got.push('grant'), (current = ++granted)),
+      registerRoute: async ([, order]) => {
+        const held = isOrderOf(order, current)
+        got.push(held ? 'register' : 'register refused: regrant')
+        return held ? 'registered' : 'regrant'
+      },
+      unsubscribeRoute: async ([, order]) => (isOrderOf(order, current) ? 'removed' : 'regrant'),
+      commitLane: async () => (got.push('commit'), { kind: 'accepted', seq: 1, timestamp: 1 }),
+    }
+    const namespace: TelefuncExtensionNamespace = {
+      idFromName: (name) => name,
+      idFromString: (id) => id,
+      get: () => ({
+        telefuncDurableObjectCall: (_extension, method, args) => calls[method]?.(args) ?? Promise.resolve(),
+      }),
+    }
+    const member: CloudflareMember = { bucket: 'weur', hostKey: 'host', subscribeLocal: () => () => {} }
+    const driver = new CloudflareRoomDriver({ getNamespace: () => namespace, locationFallback: 'weur' })
+    const subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
+    const subscribe = () =>
+      subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } }, { deliver() {} })
+    const first = subscribe()
+    await vi.advanceTimersByTimeAsync(0)
+    await first.unsubscribe()
+    // Past its last write by more than the time the room keeps an idle holder, the room drops this session's grant.
+    await vi.advanceTimersByTimeAsync(100_000)
+    current = null
+    got.length = 0
+    subscribe()
+    void subscriptions.callAuthority('room', (authority) =>
+      authority.commitLane('room', 'inc', { kind: 'semantic' }, new Uint8Array()),
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(got.filter((call) => call === 'register' || call === 'commit')).toEqual(['register', 'commit'])
+  })
+
   it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {
     const held = Promise.withResolvers<RegisterWire>()
     // The first lane's registration fails while the second's is on the same stub; the first's next try waits for it.

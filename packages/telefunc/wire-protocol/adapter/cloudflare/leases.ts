@@ -212,27 +212,50 @@ const REGRANTS = 2
 const REMOVE_RETRY_MIN_MS = 100
 const REMOVE_RETRY_MAX_MS = 5_000
 
+/** How long after a call the authority counted, from before it was sent, its holder's grant there surely still holds:
+ *  the authority drops a holder only once it counted nothing of it for `LEASE_TTL_MS`, by its own clock. */
+const GRANT_HOLDS_MS = LEASE_TTL_MS - LEASE_RENEW_EVERY_MS
+/** The answers of a write its authority counted as its holder's activity, under the holder's grant. */
+const COUNTED_ANSWERS: ReadonlySet<unknown> = new Set<LeaseRegistered | LeaseRemoved>([
+  'registered',
+  'stale',
+  'removed',
+])
+
 /** A Durable Object's grants at the authorities it holds leases at, and the order of its writes there. */
 class HolderGrants {
   private readonly grants = new Map<string, Promise<number>>()
+  /** By target: when the latest call the target counted as this DO's activity was sent. */
+  private readonly countedAt = new Map<string, number>()
   private seq = 0
 
-  /** Sends `write` with this DO's next order at `target`, getting a grant from `grant` first where it has none, and
-   *  again where the target answers that the grant is no longer this DO's. `write` is called at once, with the order
-   *  still to come, so it can take its place among this DO's calls to `target` before the grant is answered. */
+  /** Sends `write` with this DO's next order at `target`, getting a grant from `grant` first where it has none, or
+   *  where the target may have dropped it since, and again where the target answers that the grant is no longer this
+   *  DO's. `write` is called at once, with the order still to come, so it takes its place among this DO's calls to
+   *  `target` before the grant is answered. */
   async send<T>(
     target: string,
     grant: () => Promise<number>,
     write: (order: Promise<LeaseOrder>) => Promise<T | 'regrant'>,
   ): Promise<T> {
     for (let regrants = 0; ; regrants++) {
-      const granted = this.grantAt(target, grant)
+      const sentAt = Date.now()
+      if (sentAt - (this.countedAt.get(target) ?? -Infinity) >= GRANT_HOLDS_MS) this.grants.delete(target)
+      const granted = this.grantAt(target, grant, sentAt)
       const seq = ++this.seq
       const answer = await write(granted.then((grant) => ({ grant, seq })))
-      if (answer !== 'regrant') return answer
+      if (answer !== 'regrant') {
+        if (COUNTED_ANSWERS.has(answer)) this.counted(target, sentAt)
+        return answer
+      }
       if (this.grants.get(target) === granted) this.grants.delete(target)
       if (regrants === REGRANTS) throw new Error(`The Durable Object at '${target}' refused each grant it issued`)
     }
+  }
+
+  /** A renewal of this DO's that `target` answered renewed, sent at `sentAt`. */
+  renewed(target: string, sentAt: number): void {
+    this.counted(target, sentAt)
   }
 
   /** Sends a removal through `send` until the target answers it, waiting between tries a time that doubles, and at least
@@ -255,16 +278,23 @@ class HolderGrants {
     return first.promise
   }
 
-  private grantAt(target: string, grant: () => Promise<number>): Promise<number> {
+  private grantAt(target: string, grant: () => Promise<number>, sentAt: number): Promise<number> {
     let granted = this.grants.get(target)
     if (granted === undefined) {
       granted = grant()
       this.grants.set(target, granted)
-      // A grant that failed is asked for again by the next write.
-      granted.catch(() => {
-        if (this.grants.get(target) === granted) this.grants.delete(target)
-      })
+      // A grant counts as activity where it is issued; one that failed is asked for again by the next write.
+      granted.then(
+        () => this.counted(target, sentAt),
+        () => {
+          if (this.grants.get(target) === granted) this.grants.delete(target)
+        },
+      )
     }
     return granted
+  }
+
+  private counted(target: string, sentAt: number): void {
+    if (sentAt > (this.countedAt.get(target) ?? -Infinity)) this.countedAt.set(target, sentAt)
   }
 }
