@@ -858,6 +858,13 @@ function testRoom() {
       })
     },
   )
+  testRoomScenario<{ order: string[] }>(
+    'retain-budget',
+    'room: a retained message read after more than 1 MiB of newer live messages reached its listener is dropped, never delivered after them',
+    (r) => {
+      expect(r.order).deep.equal([...Array.from({ length: 10 }, (_, i) => `live-${i + 1}`), 'end'])
+    },
+  )
   testRoomScenario<{ held: string[] }>(
     'dm-hold',
     'room: a DM sent before listen() is held and flushed on attach',

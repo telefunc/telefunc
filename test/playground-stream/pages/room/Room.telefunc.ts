@@ -818,15 +818,15 @@ async function onJoinSpeaker(roomId: string) {
   return speaker.id
 }
 
-/** The speaker publishes `text` as a message or as bytes, on the track `t` or on none. */
+/** The speaker publishes `text` as a message or as bytes, on the track `t` or on none, retained or not. */
 async function onSpeakerPublishes(
   roomId: string,
   text: string,
-  { binary, track }: { binary: boolean; track: boolean },
+  { binary, track, retain = false }: { binary: boolean; track: boolean; retain?: boolean },
 ) {
   const speaker = speakers.get(roomId)
   if (!speaker) throw new Error(`No speaker joined room ${roomId}`)
-  const options = track ? { track: 't' } : {}
+  const options = { retain, ...(track && { track: 't' }) }
   if (binary) await speaker.publishBinary(new TextEncoder().encode(text), options)
   else await speaker.publish(text, options)
 }

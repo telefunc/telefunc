@@ -33,7 +33,8 @@ const ROOM_LEASE_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024
-// The live frames a holder's replays hold back; past it they go out at once, and the retained frames read later follow.
+// The live frames a holder's replays hold back; past it they go out at once, and a retained frame read later goes out
+// only on a lane the holder got nothing on meanwhile.
 const ROOM_REPLAY_HOLD_BYTES_MAX = 1024 * 1024
 // What holding a frame retains besides its bytes (178 bytes measured), so empty frames count too.
 const ROOM_REPLAY_HOLD_ENTRY_BYTES = 256

@@ -516,7 +516,7 @@ await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true, lossy: true })
 ```
 
-A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
+A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. Where a newer message of that publisher, or a newer frame of its on that track, reaches the listener first, as when more than 1 MiB of them arrive while Room reads the retained one, the retained one is dropped, never delivered after them. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
 
 Adding another listener while the same room is already listening to that publisher or track doesn't replay its retained message or frame. A second component that needs it calls a telefunction that returns `Room.get(id)` and subscribes on the result, without joining.
 

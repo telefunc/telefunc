@@ -408,7 +408,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     try {
       await withinRoomHorizon(reading)
     } finally {
-      // Past the horizon the held messages go out, and a retained one the read returns later follows them.
+      // Past the horizon the held messages go out, and a retained one the read returns later only where none did.
       hold.flush()
     }
   }
@@ -443,7 +443,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     try {
       await withinRoomHorizon(reading)
     } finally {
-      // Past the horizon the held frames go out, and a retained frame the read returns later follows them.
+      // Past the horizon the held frames go out, and a retained frame the read returns later only where none did.
       hold.flush()
     }
   }

@@ -2079,6 +2079,32 @@ function Room() {
         releaseRoom()
       })}
 
+      {scenario(
+        'retain-budget',
+        null,
+        'A late listener whose retained read waits past 1 MiB of live messages',
+        async () => {
+          const [roomId, view] = await createRoom('retainbudget')
+          const releaseRoom = keepReachable(view)
+          await onJoinSpeaker(roomId)
+          const track = { binary: false, track: true }
+          await onSpeakerPublishes(roomId, 'older-retained', { ...track, retain: true })
+          // Delivers the track on the server already, so live messages reach the late view while its replay reads.
+          await onWatchRoomTrack(roomId, 't')
+          await onHoldRetainedReads(roomId)
+          const late = await onGetRoom(roomId)
+          const order: string[] = []
+          late.subscribe((data) => order.push(String(data).replace(/\|.*/s, '')), { track: 't' })
+          await pollUntil(async () => ({ done: (await onHeldRetainedReads(roomId)) >= 1 }))
+          for (let n = 1; n <= 10; n++) await onSpeakerPublishes(roomId, `live-${n}|${'x'.repeat(150_000)}`, track)
+          await pollUntil(() => ({ done: order.length >= 10 }))
+          await onReleaseRetainedReads(roomId)
+          await onSpeakerPublishes(roomId, 'end', track)
+          await pollUntil(() => ({ result: { order }, done: order.includes('end') }))
+          releaseRoom()
+        },
+      )}
+
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
         const [roomId, observer] = await createRoom('dmhold')
         const bob = await onJoinAsServer(roomId, 'Bob')
