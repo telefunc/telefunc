@@ -665,19 +665,21 @@ Telefunc silently handles rejected promises from `send()`, `sendBinary()`, `publ
 
 A call that can't start throws instead of rejecting: `send()` or `sendBinary()` on a closed channel, `publish()` or `publishBinary()` on a page's closed broadcast, or a client's message over the size limit in <Link href="#binary-data" />. On the server, a closed broadcast's `publish()` still reaches its key. `.catch()` doesn't see that throw, so put a `try` around the call.
 
-To tell a send that failed because its channel closed from one that failed for another reason, check `isClosed`. It is `true` however the channel ended, while a refused `send()` on an open channel, such as one that throws `ChannelOverflowError`, leaves it `false`:
+To drop a send's failure once its channel has stopped taking sends, check `isClosed`. It is `true` from the start of a close, however the channel then ends:
 
 ```ts
 try {
   await channel.send(reply)
 } catch (err) {
-  // The channel closed: `closed` tells how
+  // The channel stopped taking sends: `closed` tells how it ends
   if (channel.isClosed) return
   throw err
 }
 ```
 
-A callback that sends to other channels handles each send's failure the same way. Otherwise the first of them whose page left stops it, and its error goes to <Link href="/onBug">`onBug()`</Link>:
+`isClosed` tells the channel's state when it is read, not why the send failed: a send that failed for another reason, such as one that rejected with `ChannelOverflowError` while the channel was open, also finds it `true` once a close has started. Code that must tell the causes apart reads the error instead.
+
+A callback that sends to other channels handles each send's failure the same way. Otherwise `Promise.all()` rejects with the first send that failed, such as one to a member whose page left, and that error goes to <Link href="/onBug">`onBug()`</Link>. The other sends still go:
 
 ```ts
 channel.listen(async (message) => {
