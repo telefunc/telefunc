@@ -1,4 +1,4 @@
-export { NetworkError, isNetworkError }
+export { NetworkError }
 
 const networkErrorBrand = Symbol.for('telefunc.NetworkError')
 
@@ -23,8 +23,12 @@ class NetworkError extends Error {
     this.isChannel = isChannel
     Error.captureStackTrace?.(this, new.target)
   }
-}
 
-function isNetworkError(thing: unknown): thing is NetworkError {
-  return thing instanceof NetworkError || (typeof thing === 'object' && thing !== null && networkErrorBrand in thing)
+  /** `instanceof NetworkError` reads the mark every copy of Telefunc puts on its network errors, as a Vite dev server
+   *  loads one copy beside Node's: an app's `NetworkError` is then another class than the one its channel's error was
+   *  made from. A subclass takes only its own kind, by its prototype. */
+  static [Symbol.hasInstance](thing: unknown): boolean {
+    if (this !== NetworkError) return Function.prototype[Symbol.hasInstance].call(this, thing)
+    return typeof thing === 'object' && thing !== null && networkErrorBrand in thing
+  }
 }
