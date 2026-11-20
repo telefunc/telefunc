@@ -80,6 +80,33 @@ test('a `frames` refusal naming a channel ends that channel at the first answer 
   expect(world.server.got.filter(({ ix }) => ix === 0)).toEqual([])
 })
 
+test("a `frames` refusal naming one of a POST's channels, as of a frame over the limit, ends that one and no other: the other's data arrives", async () => {
+  const opened = await open(2)
+  const [other, refused] = [opened(0), opened(1)]
+  world.postAnswers = [
+    typed(400, marked('kind=frames; channel=1; reason="A frame is over the server\'s frame limit."')),
+  ]
+  void other.channel.send('goes on').catch(() => {})
+  void refused.channel.send('x'.repeat(100_000)).catch(() => {})
+  await advance(5_000)
+  expect(refused.ended).toHaveLength(1)
+  expect(refused.ended[0]?.err?.message).toMatch(/over the server's frame limit/)
+  expect(other.ended).toEqual([])
+  expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(1)
+  expect(world.server.got.filter(({ ix }) => ix === 1)).toEqual([])
+})
+
+test("a `frames` refusal naming no channel, of a body the server can't frame, is counted against each of the POST's channels", async () => {
+  const opened = await open(2)
+  const pages = [opened(0), opened(1)]
+  const unframed = typed(400, marked('kind=frames; reason="The server can\'t read the request\'s frames."'))
+  // Refused twice running, as an unmarked refusal is counted: each channel ends.
+  world.postAnswers = [unframed, unframed]
+  for (const page of pages) void page.channel.send('unframed').catch(() => {})
+  await advance(10_000)
+  for (const page of pages) expect(page.ended[0]?.err?.message).toMatch(/can't read the request's frames/)
+})
+
 test('a `route` refusal of the open, with WebSocket next in the order, opens a WebSocket at once', async () => {
   serveSse()
   world.openAnswers = [{ status: 400, contentType: [marked('kind=route; reason="The server doesn\'t serve SSE."')] }]

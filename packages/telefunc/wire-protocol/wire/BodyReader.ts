@@ -9,7 +9,15 @@ import { concatAll, decodeU32 } from './envelope.js'
 const EMPTY = new Uint8Array(0)
 const DISCONNECT_MSG = 'Client disconnected during file upload'
 
-class OversizeFrameError extends Error {}
+/** A length-prefixed chunk says it is over the reader's limit. `head`: as much of the chunk's start as the reader was
+ *  asked to read of it, so that the caller can say whose it was. */
+class OversizeFrameError extends Error {
+  readonly head: Uint8Array<ArrayBuffer>
+  constructor(head: Uint8Array<ArrayBuffer> = EMPTY) {
+    super()
+    this.head = head
+  }
+}
 
 /** The request body ended mid-frame — the client disconnected or truncated the upload. Typed so error
  *  sinks discriminate an expected client truncation from a real server bug by class, not message text. */
@@ -59,12 +67,13 @@ class BodyReader {
     return new TextDecoder().decode(await this.readExact(length))
   }
 
-  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
-  async readLengthPrefixedBytesOrNull(maxBytes: number) {
+  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. A chunk over `maxBytes` throws, with
+   *  its first `headBytes` bytes read. */
+  async readLengthPrefixedBytesOrNull(maxBytes: number, headBytes = 0) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
     const length = decodeU32(lengthBytes)
-    if (length > maxBytes) throw new OversizeFrameError()
+    if (length > maxBytes) throw new OversizeFrameError(await this.readExact(Math.min(headBytes, length)))
     return this.readExact(length)
   }
 

@@ -23,7 +23,8 @@ import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '.
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
-import { encode } from '../../wire/frame.js'
+import { channelOf, encode } from '../../wire/frame.js'
+import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
@@ -293,11 +294,11 @@ class SseServerTransport {
       // A typed protocol-input fault is the client's: refused, quietly. Anything else is our bug — rethrow so the request
       // pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
-      // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not just this POST. No header
-      // of it was read: the page finds its channel.
+      // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not just this POST. Its
+      // header was read: the refusal names its channel where it is a channel's.
       if (err instanceof OversizeFrameError) {
         this.closeWireOf(connId)
-        return refuse(REFUSED.oversize)
+        return refuse({ ...REFUSED.oversize, channel: channelOf(err.head) })
       }
       if (isProtocolViolationError(err)) return refuse(REFUSED.unframed)
       throw err
@@ -363,7 +364,7 @@ class SseServerTransport {
     if (wire.closed) return closedUnder(wire)
     try {
       while (true) {
-        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
+        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
         if (!raw || wire.closed) break
         this.dispatchAndReport(wire, raw)
       }
@@ -455,7 +456,7 @@ class SseServerTransport {
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {
-      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
+      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
       if (!raw || wire.closed) break
       const outcome = await this.mux.dispatchWireMessage(wire, raw)
       if (outcome !== null) await onReconciled(outcome)

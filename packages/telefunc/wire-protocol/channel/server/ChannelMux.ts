@@ -19,13 +19,21 @@ import {
   type ChannelTransports,
   type ChannelTransport,
 } from '../../constants.js'
-import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
+import {
+  channelOf,
+  decodeClientFrame,
+  encode,
+  isOneFrame,
+  messageFrames,
+  peekTag,
+  tookOf,
+  withTook,
+} from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
-import { HEADER, readU16 } from '../../wire/header.js'
 import type { Refusal } from '../../refusal.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
@@ -89,10 +97,11 @@ type ReconcileOutcome = {
 
 /** The refusal of a frame the server can't take: it names the frame's channel where its header says one. */
 function refusedFrame(rawFrame: Uint8Array<ArrayBuffer>, err: ProtocolViolationError): Refusal {
-  const tag = rawFrame[0]
-  const channel =
-    tag !== undefined && !isWireCtrlTag(tag) && rawFrame.byteLength >= HEADER ? readU16(rawFrame, 1) : undefined
-  return { kind: 'frames', channel, reason: `The server can't take a frame of the page's: ${err.message}.` }
+  return {
+    kind: 'frames',
+    channel: channelOf(rawFrame),
+    reason: `The server can't take a frame of the page's: ${err.message}.`,
+  }
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {

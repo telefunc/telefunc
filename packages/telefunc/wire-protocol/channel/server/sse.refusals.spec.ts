@@ -100,9 +100,27 @@ test('a batch POST whose body ends in the middle of a frame is refused `retry`',
   await cancel(opened)
 })
 
-test('a frame over the frame limit is refused `frames`, naming no channel: the server reads no header of it', async () => {
+test.each([
+  ["a channel's frame", encode.close(3, 0, 1), '3'],
+  ["a frame of the connection's own", encode.ping([]), ''],
+])(
+  '%s over the frame limit is refused `frames`, naming its channel where it has one: the server reads its header',
+  async (_frame, frame, channel) => {
+    const { connId, opened } = await openWire()
+    // The length says more than the limit; only the header follows it.
+    const answer = await post(
+      bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), frame),
+    )
+    expect(answer.statusCode).toBe(400)
+    expect(answer.contentType).toMatch(refusal('frames', channel))
+    await cancel(opened)
+  },
+)
+
+test('a body the server cannot frame is refused `frames`, naming no channel', async () => {
   const { connId, opened } = await openWire()
-  const answer = await post(bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1)))
+  // A frame of no bytes: no tag, no header.
+  const answer = await post(bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(0)))
   expect(answer.statusCode).toBe(400)
   expect(answer.contentType).toMatch(refusal('frames'))
   await cancel(opened)

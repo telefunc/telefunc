@@ -13,6 +13,7 @@ export {
   decodeClientFrame,
   isSequencedFrame,
   peekTag,
+  channelOf,
 }
 export type {
   AckResultStatus,
@@ -29,7 +30,7 @@ export type {
 }
 
 import { HEADER, SEQ_OFFSET, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 } from './header.js'
-import { TAG, isSequencedTag } from './tags.js'
+import { TAG, isSequencedTag, isWireCtrlTag } from './tags.js'
 import {
   parseBarrierPayload,
   parseJsonPayload,
@@ -455,6 +456,13 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
 /** The tag is the first header byte — readable before the frame is known to be well-formed. */
 function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
+}
+
+/** The channel a frame is on, from its header alone: none for a frame of the connection's own, or for one too short to
+ *  have a header. */
+function channelOf(raw: Uint8Array): number | undefined {
+  const tag = raw[0]
+  return tag !== undefined && !isWireCtrlTag(tag) && raw.byteLength >= HEADER ? readU16(raw, 1) : undefined
 }
 
 function decode(frame: Uint8Array): DecodedFrame {
