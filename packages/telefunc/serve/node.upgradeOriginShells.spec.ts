@@ -67,13 +67,15 @@ test('the WebSocket upgrade of a page of an origin allowed with one trailing sla
   expect(await upgradeStatus('https://pages.example.com')).toBe(101)
 })
 
-test('the WebSocket upgrade of a page of an app shell origin the app does not allow is refused', async () => {
+test("the WebSocket upgrade of a page of an app shell origin the app does not allow is refused, and its warning says only to list that origin, as a proxy's host can't be the shell's", async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
     expect(await upgradeStatus('capacitor://another-app')).toBe(403)
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('A WebSocket upgrade from capacitor://another-app was refused'),
-    )
+    expect(warn).toHaveBeenCalledTimes(1)
+    const warning = String(warn.mock.calls[0]?.[0])
+    expect(warning).toContain('A WebSocket upgrade from capacitor://another-app was refused')
+    expect(warning).toContain('add that origin to `config.channel.allowedOrigins`')
+    expect(warning).not.toContain('X-Forwarded-Host')
   } finally {
     warn.mockRestore()
   }
