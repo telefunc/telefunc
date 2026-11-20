@@ -2,8 +2,8 @@ export { parseAllowedOrigin, originOf, NOT_AN_ORIGIN }
 export type { AllowedOrigin }
 
 /** A scheme and a host with nothing a URL parser would take for credentials, a path, a query or a fragment after it,
- *  and nothing it would drop: no space or control character. */
-const ORIGIN_AS_WRITTEN = /^[a-z][a-z\d+.-]*:\/\/[^/\\?#@*\s\p{Cc}]+$/iu
+ *  and nothing it would drop: no space or control character. One trailing `/` is taken, as an address bar shows a site. */
+const ORIGIN_AS_WRITTEN = /^[a-z][a-z\d+.-]*:\/\/[^/\\?#@*\s\p{Cc}]+\/?$/iu
 
 /** Why an entry that isn't written as an origin can't be one. */
 const NOT_AN_ORIGIN =

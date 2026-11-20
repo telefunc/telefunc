@@ -143,7 +143,6 @@ test("a refused upgrade's warning names the origin, says what its page does, and
 })
 
 test.each([
-  'https://app.example.com/',
   'app.example.com',
   'https://app.*.example.com',
   'https://*example.com',

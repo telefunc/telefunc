@@ -5,13 +5,19 @@ import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 
 // The pages of app shells with a scheme of their own: Capacitor on iOS, Tauri on macOS and Linux, Cordova with Ionic's
-// web view on iOS. Their own file: the entries are assigned before any page connects.
+// web view on iOS; and an entry written as an address bar shows it. Their own file: the entries are assigned before any
+// page connects.
 
 let server: Server
 let host: string
 
 beforeAll(async () => {
-  config.channel.allowedOrigins = ['capacitor://localhost', 'tauri://localhost', 'ionic://localhost']
+  config.channel.allowedOrigins = [
+    'capacitor://localhost',
+    'tauri://localhost',
+    'ionic://localhost',
+    'https://pages.example.com/',
+  ]
   server = createServer((_req, res) => res.writeHead(404).end())
   new Telefunc().installWebSocket(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -56,6 +62,10 @@ test.each(['capacitor://localhost', 'tauri://localhost', 'ionic://localhost'])(
     expect(await upgradeStatus(origin)).toBe(101)
   },
 )
+
+test('the WebSocket upgrade of a page of an origin allowed with one trailing slash, as an address bar shows it, opens', async () => {
+  expect(await upgradeStatus('https://pages.example.com')).toBe(101)
+})
 
 test('the WebSocket upgrade of a page of an app shell origin the app does not allow is refused', async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
