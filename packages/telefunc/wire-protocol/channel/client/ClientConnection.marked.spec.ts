@@ -105,3 +105,23 @@ test.each([
     expect(world.opens).toBe(1)
   },
 )
+
+test("a `frames` refusal of a frame over the server's limit ends its channel once, and leaves the size of later POSTs where it was", async () => {
+  const opened = await open(2)
+  const [refused, other] = [opened(0), opened(1)]
+  world.postAnswers = [typed(400, marked('kind=frames; reason="A frame is over the server\'s frame limit."'))]
+  void refused.channel.send('x'.repeat(100_000)).catch(() => {})
+  await advance(3_000)
+  expect(refused.ended).toHaveLength(1)
+  const refusedPost = defined(
+    world.posts.find(({ status }) => status === 400),
+    'the refused POST',
+  )
+  // Many texts at once: their POSTs are as large as the page's own sizing makes them, not halved below the refused one.
+  for (let i = 0; i < 400; i++) void other.channel.send('y'.repeat(900)).catch(() => {})
+  await advance(5_000)
+  const after = world.posts.slice(world.posts.indexOf(refusedPost) + 1).filter(({ data }) => data)
+  expect(Math.max(...after.map(({ bytes }) => bytes))).toBeGreaterThan(refusedPost.bytes / 2)
+  expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(400)
+  expect(refused.ended[0]?.err?.message).toMatch(/over the server's frame limit/)
+})
