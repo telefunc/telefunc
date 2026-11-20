@@ -813,6 +813,30 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         })
       }
 
+      it('whose refresh is answered lapsed after the last subscriber left stores no presence', async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { state, inObject, present } = worker()
+        const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        await left.ready
+        // Its refreshes fail past the presence's 90 s.
+        state.fail = new Error('reset')
+        await vi.advanceTimersByTimeAsync(90_000)
+        state.fail = undefined
+        // The next refresh reaches the authority; its answer comes after the last subscriber left.
+        const answer = Promise.withResolvers<void>()
+        state.held = answer.promise
+        await vi.advanceTimersByTimeAsync(30_000)
+        state.held = undefined
+        left()
+        await vi.advanceTimersByTimeAsync(0)
+        answer.resolve()
+        await vi.advanceTimersByTimeAsync(0)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(present('room:test').map(({ member }) => member)).toEqual([])
+      })
+
       // A Durable Object subscribes again while the withdrawal of its presence is on its way: that of its release, or the
       // one after a refresh the authority answered once it had left. Its one stub to the authority carries the withdrawal
       // ahead of the new registration (OrderedStubs), so the authority applies them in that order.
