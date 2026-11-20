@@ -93,8 +93,10 @@ type ChannelConfigUser = {
   transports?: ChannelTransports
   /**
    * The origins of other sites' pages that may open a WebSocket to this server, as a browser sends them
-   * (`'https://app.example.com'`); a leading `*.` stands for any one subdomain label (`'https://*.example.com'`). A
-   * page of this server's own origin needs no entry, behind a proxy too where it forwards `X-Forwarded-Host`.
+   * (`'https://app.example.com'`, an app shell's `'capacitor://localhost'`). A leading `*.` stands for any one subdomain
+   * label, whoever runs it (`'https://*.example.com'`). A page of this server's own origin needs no entry, behind a
+   * proxy too where it forwards `X-Forwarded-Host`. `null` and `file:` can't be listed: any site can make its page send
+   * `null`, and one `file:` entry would stand for every local file.
    *
    * https://telefunc.com/transport#websocket
    *
