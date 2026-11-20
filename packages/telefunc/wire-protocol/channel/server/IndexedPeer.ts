@@ -87,9 +87,11 @@ class IndexedPeer {
     this.commit(seq, encode.closeAck(this.index, seq))
   }
 
-  sendCloseDone(): void {
+  /** Returns its seq. */
+  sendCloseDone(): number {
     const seq = this.replay.nextSeq()
     this.commit(seq, encode.closeDone(this.index, seq))
+    return seq
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
