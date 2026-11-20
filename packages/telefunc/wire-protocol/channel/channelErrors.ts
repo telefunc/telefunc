@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelOverflowError, replayLossError }
+export { ChannelClosedError, ChannelOverflowError, replayLossError, unconfirmedError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
 
@@ -17,6 +17,15 @@ class ChannelOverflowError extends Error {
     super(message)
     this.name = 'ChannelOverflowError'
   }
+}
+
+/** How a channel ends, on both ends, when its page hasn't confirmed what the server sent on it for over
+ *  `reconnectTimeoutMs` of reconnects. */
+function unconfirmedError(reconnectTimeoutMs: number): NetworkError {
+  return new NetworkError(
+    `Channel closed: the page hasn't confirmed what the server sent on it for over ${reconnectTimeoutMs / 1_000} s of reconnects`,
+    true,
+  )
 }
 
 /** How a channel ends when a reconnect needs what the page's replay buffer dropped. */

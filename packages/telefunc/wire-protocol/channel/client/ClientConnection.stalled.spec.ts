@@ -4,7 +4,7 @@
 
 import { expect, test } from 'vitest'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
-import { encode } from '../../wire/frame.js'
+import { ERROR_REASON, encode } from '../../wire/frame.js'
 import {
   FakeWebSocket,
   PING_INTERVAL_MS,
@@ -447,5 +447,14 @@ test('a page held 90 s whose channel was dated before the hold ends at the first
   expect(world.streams).toHaveLength(2)
   expect(err?.message).toMatch(
     /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: Connection dropped/,
+  )
+})
+
+test("a channel the server ended because this page never confirmed what it sent closes with the server's cause", async () => {
+  const page = (await openOverSse(1))(0)
+  defined(world.streams.at(-1), 'the event stream').frame(encode.error(0, ERROR_REASON.UNCONFIRMED, 1))
+  await advance(100)
+  expect(defined(page.ended[0], 'the channel ending').err?.message).toBe(
+    `Channel closed: the page hasn't confirmed what the server sent on it for over ${RECONNECT_TIMEOUT_MS / 1_000} s of reconnects`,
   )
 })

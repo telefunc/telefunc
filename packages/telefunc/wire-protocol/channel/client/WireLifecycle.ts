@@ -4,7 +4,7 @@ export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, unconfirmedError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -351,7 +351,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         this.startTtlIfIdle()
         return
       case TAG.ERROR:
-        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason))
+        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason, this.reconnectTimeoutMs))
         this.startTtlIfIdle()
         return
     }
@@ -826,7 +826,7 @@ const TRANSPORT_REGISTRY: Record<
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
-function channelErrorFor(reason: number): Error {
+function channelErrorFor(reason: number, reconnectTimeoutMs: number): Error {
   if (reason === ERROR_REASON.OVERFLOW) {
     return new ChannelOverflowError(
       `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
@@ -837,5 +837,6 @@ function channelErrorFor(reason: number): Error {
       'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',
     )
   }
+  if (reason === ERROR_REASON.UNCONFIRMED) return unconfirmedError(reconnectTimeoutMs)
   return makeBugError()
 }

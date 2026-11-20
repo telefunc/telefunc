@@ -5,6 +5,9 @@ import { HELD_SEND_OVERHEAD_BYTES, heldPublishBytes, hold, letGo, type MemoryHol
 import type { PublishBody } from './PublishBody.js'
 import { SeqQueue } from '../SeqQueue.js'
 
+/** When a channel's unconfirmed data was dated, at a loss of its page's wire. */
+type Stall = { since: number }
+
 /** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
 type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean }
 
@@ -19,6 +22,7 @@ class ServerReplay {
   private pushedSeq = 0
   /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
   private movedAt = 0
+  private stallDate: Stall | null = null
 
   constructor(holder: MemoryHolder) {
     this.holder = holder
@@ -51,12 +55,29 @@ class ServerReplay {
    *  sent behind others, publishes or frames, only lowers it. */
   leastConfirmMs = Number.POSITIVE_INFINITY
 
+  /** Since when its page hasn't confirmed what it holds, across the page's losses of its wire; null while the page
+   *  confirms something of it after each. */
+  get stall(): Stall | null {
+    return this.stallDate
+  }
+
+  /** Whether it holds something its page hasn't confirmed. */
+  get unconfirmed(): boolean {
+    return this.frames.length > 0 || this.publishes.length > 0
+  }
+
+  /** Its page's wire went at `at`: what the page hasn't confirmed is dated from then, unless it is already. */
+  dateStall(at: number): void {
+    if (this.stallDate === null && this.unconfirmed) this.stallDate = { since: at }
+  }
+
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     const frames = this.frames.indexAfter(lastSeq)
     for (let i = 0; i < frames; i++) this.letFrameGo(this.frames.at(i))
     this.frames.dropOldest(frames)
     const publishes = this.publishes.indexAfter(lastSeq)
+    if (frames > 0 || publishes > 0) this.stallDate = null
     if (publishes === 0) return
     // Only the oldest can be alone: the others were sent while it was unconfirmed.
     const alone = this.publishes.at(0).alone
@@ -150,6 +171,7 @@ class ServerReplay {
   }
 
   dispose(): void {
+    this.stallDate = null
     while (this.frames.length > 0) this.letFrameGo(this.frames.pop())
     while (this.publishes.length > 0) this.letPublishGo(this.publishes.pop())
   }

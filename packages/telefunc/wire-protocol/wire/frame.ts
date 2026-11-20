@@ -93,6 +93,8 @@ const ERROR_REASON = {
   /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
    *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
   NOT_IN_EFFECT: 0x03 as const,
+  /** Its page hasn't confirmed what the server sent on it for over `reconnectTimeout` of reconnects. */
+  UNCONFIRMED: 0x04 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]

@@ -964,3 +964,160 @@ test("on a WebSocket, a stream argument's reader reads the chunks queued before 
   fromPage(channel, encode.window(0, CREDIT_WINDOW_INITIAL_BYTES, 1))
   expect(ledgerTotal()).toBe(held)
 })
+
+// A channel whose data its page never confirms while the page keeps coming back: dated at a detach, judged at the next
+// detach once the page attached after the date, as the page judges its own (decisions/516-sse-carrier.md, msg41 D1).
+
+/** The cause a channel ends with once its page hasn't confirmed its data for `reconnectTimeout`. */
+const unconfirmedFor = (reconnectTimeout: number) =>
+  `Channel closed: the page hasn't confirmed what the server sent on it for over ${reconnectTimeout / 1_000} s of reconnects`
+
+/** A channel of `create`'s over a WebSocket whose page took `sent()` and never confirms it: its wire goes at 0, its page
+ *  comes back at 5 s having nothing, and that wire goes at `secondLossAt`. Returns how it ended, and what a page that
+ *  comes back after that reads. */
+async function overdue(
+  create: (key: string) => ServerChannel,
+  sent: (channel: ServerChannel, key: string) => Promise<unknown>,
+  secondLossAt: number,
+) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const key = crypto.randomUUID()
+  const channel = create(key)
+  const ended: (Error | undefined)[] = []
+  channel.onClose((err) => void ended.push(err))
+  const [peer] = overWebSocket([channel]).peers
+  await sent(channel, key)
+  channel._onPeerDisconnect(defined(peer), 10_000)
+  await vi.advanceTimersByTimeAsync(5_000)
+  const again = overWebSocket([]).attach(channel, 0)
+  await vi.advanceTimersByTimeAsync(secondLossAt - 5_000)
+  channel._onPeerDisconnect(again, 10_000)
+  vi.useRealTimers()
+  const back = overWebSocket([])
+  back.attach(channel, 0)
+  return { ended, reads: await back.readAll() }
+}
+
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error('Expected a value')
+  return value
+}
+
+const OVERDUE: Record<
+  string,
+  { create: (key: string) => ServerChannel; sent: (channel: ServerChannel, key: string) => Promise<unknown> }
+> = {
+  'a channel': { create: () => new ServerChannel(), sent: async (channel) => void channel.send('p1') },
+  'a broadcast subscriber': {
+    create: (key) => new ServerBroadcast<string>({ key }),
+    sent: async (_, key) => void (await Broadcast.publish(key, 'p1')),
+  },
+  'a lossy broadcast subscriber': {
+    create: (key) => new ServerBroadcast<string>({ key, lossy: true }),
+    sent: async (_, key) => void (await Broadcast.publish(key, 'p1')),
+  },
+}
+
+for (const [what, { create, sent }] of Object.entries(OVERDUE)) {
+  test(`${what} whose page never confirms what it sent ends at the first detach past reconnectTimeout after the page came back: both ends read the cause, the page nothing else`, async () => {
+    const { ended, reads } = await overdue(create, sent, 11_000)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]?.message).toBe(unconfirmedFor(10_000))
+    expect(reads).toEqual(['0:ERROR'])
+  })
+}
+
+test('a channel whose page lost its wire again inside reconnectTimeout goes on: its data goes again', async () => {
+  const { create, sent } = defined(OVERDUE['a channel'])
+  const { ended, reads } = await overdue(create, sent, 9_000)
+  expect(ended).toEqual([])
+  expect(reads).toEqual(['0:p1'])
+})
+
+test("a channel whose page confirmed something between its losses isn't judged on the date before: its data gets through between resets", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | undefined)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    void channel.send('p2')
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(5_000)
+    // The page has p1 now: what it hasn't confirmed is dated from its next loss.
+    const again = overWebSocket([]).attach(channel, 0, 1)
+    await vi.advanceTimersByTimeAsync(6_000)
+    channel._onPeerDisconnect(again, 10_000)
+    await vi.advanceTimersByTimeAsync(5_000)
+    const third = overWebSocket([]).attach(channel, 0, 1)
+    await vi.advanceTimersByTimeAsync(4_000)
+    channel._onPeerDisconnect(third, 10_000)
+    expect(ended).toEqual([])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('a channel is judged from its first loss without a confirmation since, not from its newest', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | undefined)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    // Losses at 0, 6 and 11 s, the page back between them having nothing: only the last is past 10 s from the first.
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const second = overWebSocket([]).attach(channel, 0)
+    await vi.advanceTimersByTimeAsync(5_000)
+    channel._onPeerDisconnect(second, 10_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const third = overWebSocket([]).attach(channel, 0)
+    await vi.advanceTimersByTimeAsync(4_000)
+    channel._onPeerDisconnect(third, 10_000)
+    expect(ended.map((err) => err?.message)).toEqual([unconfirmedFor(10_000)])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test("a page simply away isn't judged by the date: the grace period ends it, as before", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | undefined)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(ended.map((err) => err?.message)).toEqual([
+      'Channel timed out: client did not reconnect within grace period',
+    ])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+for (const ending of ['close', 'abort'] as const) {
+  test(`a channel the app ends with ${ending}() while its unconfirmed data holds a date leaves nothing pending`, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const channel = new ServerChannel()
+      const [peer] = overWebSocket([channel]).peers
+      void channel.send('p1')
+      channel._onPeerDisconnect(defined(peer), 10_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      const again = overWebSocket([]).attach(channel, 0)
+      if (ending === 'close') void channel.close({ timeout: 1_000 })
+      else channel.abort()
+      channel._onPeerDisconnect(again, 10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+}

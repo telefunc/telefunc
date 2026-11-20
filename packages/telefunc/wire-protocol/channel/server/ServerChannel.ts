@@ -48,7 +48,7 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, replayLossError, unconfirmedError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
@@ -807,6 +807,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lossySends?.flush()
     this.peer = null
     this.receiveCredit.detach()
+    if (this.endUnconfirmed(reconnectTimeout)) return
+    this._replayBuffer?.dateStall(performance.now())
     this.reconnectTimer = unrefTimer(
       setTimeout(() => {
         this.reconnectTimer = null
@@ -815,6 +817,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
       }, reconnectTimeout),
     )
+  }
+
+  /** Ends the channel, at a loss of its page's wire, if what it sent hasn't been confirmed for over `reconnectTimeout`
+   *  of its page's reconnects: dated at a loss, and the page attached since, as a loss needs a page attached. What it
+   *  held goes, and the page reads the end alone at its next attach. A page that stays away is the grace period's. */
+  private endUnconfirmed(reconnectTimeout: number): boolean {
+    const replay = this._replayBuffer
+    const stall = replay?.stall
+    if (!replay || !stall || !replay.unconfirmed || performance.now() - stall.since <= reconnectTimeout) return false
+    replay.dispose()
+    this.endWithError(ERROR_REASON.UNCONFIRMED, unconfirmedError(reconnectTimeout))
+    return true
   }
 
   /** @internal The page reattached but never acknowledged this channel: it ends. */
