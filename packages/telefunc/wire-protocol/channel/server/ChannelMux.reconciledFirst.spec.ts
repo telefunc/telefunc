@@ -209,6 +209,49 @@ test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONC
   page.close()
 })
 
+test("a BARRIER riding behind a PING in one WebSocket message gets its RECONCILED on the WebSocket it commits, which then carries the channel's frames", async () => {
+  const old = openWebSocket({ reads: true })
+  const channel = new ServerChannel()
+  old.mux.registerChannel(channel)
+  await old.mux.onWireMessage(
+    old.wire,
+    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  const sessionId = old.wire.sessionId
+  if (sessionId === undefined) throw new Error('no session on the old wire')
+  const upgraded = openWebSocket({ reads: true })
+  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ upgradeId: 'u1', sessionId }))
+  const ping = encode.ping([])
+  const barrier = encode.barrier({ sessionId, upgradeId: 'u1', open: [{ id: channel.id, ix: 0, lastSeq: 0 }] })
+  await old.mux.onWireMessage(old.wire, encode.message([ping, barrier], ping.byteLength + HEADER + barrier.byteLength))
+  void channel.send('after the upgrade')
+  await vi.waitFor(() => expect(upgraded.frames.some((frame) => frame[0] === TAG.TEXT)).toBe(true))
+  expect(order(upgraded.frames)).toEqual(['RECONCILED', '1:after the upgrade'])
+  old.close()
+  upgraded.close()
+})
+
+test('a WebSocket message of a RECONCILE and a BARRIER ends its wire: a page has one of them out at a time', async () => {
+  const old = openWebSocket({ reads: true })
+  const channel = new ServerChannel()
+  old.mux.registerChannel(channel)
+  const attach = { id: channel.id, ix: 0, lastSeq: 0 }
+  await old.mux.onWireMessage(old.wire, encode.reconcile({ open: [{ ...attach, initial: true }] }))
+  const sessionId = old.wire.sessionId
+  if (sessionId === undefined) throw new Error('no session on the old wire')
+  const upgraded = openWebSocket({ reads: true })
+  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ upgradeId: 'u1', sessionId }))
+  const reconcile = encode.reconcile({ sessionId, open: [attach] })
+  const barrier = encode.barrier({ sessionId, upgradeId: 'u1', open: [attach] })
+  await old.mux.onWireMessage(
+    old.wire,
+    encode.message([reconcile, barrier], reconcile.byteLength + HEADER + barrier.byteLength),
+  )
+  expect(old.state.terminated).toBe(true)
+  old.close()
+  upgraded.close()
+})
+
 test('a reconcile that throws a bug ends its wire, transiently: nothing stays held on a wire that is up', async () => {
   const page = openWebSocket()
   vi.spyOn(SessionRegistry.prototype, 'setSession').mockImplementationOnce(() => {

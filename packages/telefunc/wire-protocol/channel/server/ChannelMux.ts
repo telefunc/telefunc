@@ -323,12 +323,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  /** As `onWireMessage`, but a RECONCILE's outcome is returned for the caller to send: SSE sends the RECONCILED once
-   *  the stream it answers is open. */
+  /** As `onWireMessage`, but a RECONCILE's or BARRIER's outcome is returned for the caller to send: SSE sends the
+   *  RECONCILED once the stream it answers is open. */
   dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.wires.get(wire)
     if (!entry) return Promise.resolve(null)
-    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
+    let outcome: Promise<ReconcileOutcome | null> | null = null
     try {
       if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, rawFrame, 'alone')
       // Every frame but the last arrives riding.
@@ -338,14 +338,17 @@ class ChannelMux implements UpgradeStagesOwner {
       while (!next.done && entry.state.closed === null) {
         const frame = next.value
         next = frames.next()
+        const settles = frame[0] === TAG.RECONCILE || frame[0] === TAG.BARRIER
+        // Each one owes a RECONCILED, and a page has one out at a time.
+        assertProtocol(!settles || outcome === null, 'a second RECONCILE or BARRIER in one message')
         const dispatched = this.dispatchFrame(entry, frame, next.done ? 'alone' : 'riding')
-        if (frame[0] === TAG.RECONCILE) outcome = dispatched
+        if (settles) outcome = dispatched
       }
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
       this.terminateWire(wire)
     }
-    return outcome
+    return outcome ?? Promise.resolve(null)
   }
 
   /** PING and PIECES_ACK skip the recv chain, which would tie liveness to its slowest handler. */
