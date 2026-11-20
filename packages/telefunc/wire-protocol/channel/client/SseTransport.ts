@@ -516,6 +516,8 @@ class SseTransport implements UpgradeSource {
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
     // Sequenced frames replay after RECONCILED: sent now, they'd pass a POST in flight, making its frames duplicates.
     const movedOutbox = this.takeOutbox().filter(isWindowRefresh)
+    // So does what waited behind a stalled try on a wire before, however that wire ended.
+    this.dropStalled()
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
@@ -689,8 +691,8 @@ class SseTransport implements UpgradeSource {
     else this.flushNextOrDrain()
   }
 
-  /** The held data goes with its wire, or with the barrier that leaves it: the next wire's replay sends what the server
-   *  lacks. */
+  /** The held data goes with its wire, as the next one opens, or with the barrier that leaves it: the next wire's replay
+   *  sends what the server lacks. */
   private dropStalled(): void {
     if (this.stalledTimer) clearTimeout(this.stalledTimer)
     this.stalledTimer = null
@@ -875,7 +877,6 @@ class SseTransport implements UpgradeSource {
     this.connecting = false
     this.openPending = false
     if (this.streamRequest.tag === 'active') this.streamRequest = { tag: 'idle' }
-    this.dropStalled()
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)

@@ -2,7 +2,7 @@
 // after its date, as on 0.3.1 (decisions/516-sse-carrier.md, 13:08Z step 3). A REAL ClientChannel and its connection
 // against a scripted server (scriptedServer.fixture.ts), over SSE batch POSTs unless a test says otherwise.
 
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import {
@@ -125,6 +125,33 @@ test('the event stream ending while stalled data waits to go again is a loss as 
   expect(
     world.posts.filter(({ data }) => data).length - world.posts.slice(0, after).filter(({ data }) => data).length,
   ).toBe(0)
+})
+
+test('data that waits at the cap when its event stream ends waits no more: the next wire, up before that wait would end, sends it at once and once', async () => {
+  world.server.settings = { reconnectTimeout: 120_000 }
+  const page = (await openOverSse(1))(0)
+  // Each delay's draw, which the test sets.
+  let draw = 0.9
+  vi.spyOn(Math, 'random').mockImplementation(() => draw)
+  world.server.cuts.add(0)
+  void page.channel.send('never through').catch(() => {})
+  // Its tries' waits double to the 5 s cap.
+  await advance(30_000)
+  const dataPosts = () => world.posts.filter(({ data }) => data).length
+  const tries = dataPosts()
+  // The next try is cut, and its wait is the cap's longest: 7.5 s.
+  draw = 0.999
+  for (let t = 0; dataPosts() === tries && t < 100; t++) await advance(100)
+  // Its wire goes at once, and the next opens after the cap's shortest delay, 5 s: before that wait would end.
+  draw = 0
+  defined(world.streams.at(-1), 'the event stream').end()
+  await advance(5_500)
+  const wire = world.streams.length
+  // Its replay goes as the next wire reconciles, not when the lost wire's wait would have ended, and alone: its own wait
+  // runs to 10 s.
+  expect(world.posts.filter((post) => post.data && post.wire === wire)).toHaveLength(1)
+  await advance(2_500)
+  expect(world.posts.filter((post) => post.data && post.wire === wire)).toHaveLength(1)
 })
 
 test("a healthy send waits for a stalled channel's POST in flight that is slow and not cut: its deadline bounds it", async () => {
