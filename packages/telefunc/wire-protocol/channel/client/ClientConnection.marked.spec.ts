@@ -56,6 +56,18 @@ test.each([
   },
 )
 
+test('a refusal whose reason is a quoted string with escapes gives the page the reason unescaped', async () => {
+  const opened = await open(2)
+  const [refused, other] = [opened(0), opened(1)]
+  world.postAnswers = [typed(400, marked('kind=frames; channel=0; reason="A \\"quoted\\" word and a back\\\\slash."'))]
+  void refused.channel.send('refused').catch(() => {})
+  await advance(3_000)
+  expect(refused.ended.map(({ err }) => err?.message)).toEqual([
+    'Channel closed: the server refused what the page sent on it: A "quoted" word and a back\\slash.',
+  ])
+  expect(other.ended).toEqual([])
+})
+
 test('a marked refusal followed by an unmarked value is read as unmarked: refused twice, the channel ends naming it', async () => {
   const page = (await open(1))(0)
   const contentType = [marked('kind=retry; reason="No wire."'), 'text/html']
