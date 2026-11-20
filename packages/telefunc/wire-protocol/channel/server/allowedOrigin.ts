@@ -9,17 +9,22 @@ const ORIGIN_AS_WRITTEN = /^[a-z][a-z\d+.-]*:\/\/[^/\\?#@*\s\p{Cc}]+\/?$/iu
 const NOT_AN_ORIGIN =
   "an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'"
 
+/** The longest origin a page can have: the longest scheme in IANA's URI scheme registry (36 characters,
+ *  `microsoft.windows.camera.multipicker`), `://`, the longest hostname DNS has (253 characters) and a port (`:65535`). */
+const ORIGIN_MAX = 36 + '://'.length + 253 + ':65535'.length
+
 /** An entry of `config.channel.allowedOrigins`: one origin, or any one subdomain label under `parent`. */
 type AllowedOrigin = { origin: string } | { protocol: string; port: string; parent: string }
 
 /** The origin of `url` in the one form the upgrade rule compares: the URL standard's serialization where it gives one
  *  (`http`, `https`, `ws`, `wss`, `ftp`); for the scheme of an app shell's own (`capacitor://localhost`), whose origin
  *  the standard leaves opaque, the scheme and the host in lower case. Null for a URL whose page has no origin to list:
- *  a `file:` one, or one with no host. */
+ *  a `file:` one, one with no host, or one longer than any origin (`ORIGIN_MAX`). */
 function originOf(url: URL): string | null {
-  if (url.origin !== 'null') return url.origin
-  if (url.protocol === 'file:' || url.host === '') return null
-  return `${url.protocol}//${url.host.toLowerCase()}`
+  const opaque = url.origin === 'null'
+  if (opaque && (url.protocol === 'file:' || url.host === '')) return null
+  const origin = opaque ? `${url.protocol}//${url.host.toLowerCase()}` : url.origin
+  return origin.length <= ORIGIN_MAX ? origin : null
 }
 
 /** The entry as an origin (`'https://app.example.com'`, `'capacitor://localhost'`), where a leading `*.` label stands

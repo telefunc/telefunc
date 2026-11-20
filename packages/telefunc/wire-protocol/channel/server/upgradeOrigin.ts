@@ -11,8 +11,6 @@ const REFUSED_ORIGINS_NAMED_MAX = 20
 /** How long a window of refusal names lasts: the next one names refused origins afresh, so an app's own is never left out
  *  of the log for good. */
 const REFUSED_ORIGINS_WINDOW_MS = 10 * 60 * 1000
-/** The longest hostname DNS has: a longer one is no page's origin. */
-const HOSTNAME_MAX = 253
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
   /** The refused origins the log named in this window, by the name it gave them. One past the bound stands for the
@@ -40,7 +38,7 @@ function upgradeRefusal(request: Request, host: string): Response | undefined {
   // A browser writes a page's origin in one form (`originOf()`): a header written any other way names none.
   const page = url !== null && originOf(url) === origin ? url : null
   if (page !== null && isAllowed(page, origin)) return undefined
-  if (page === null || page.hostname.length > HOSTNAME_MAX)
+  if (page === null)
     warnRefusal(
       'a page whose Origin header names no origin',
       "its Origin header isn't an origin as a browser writes one, or is the `null` of a page that has none",

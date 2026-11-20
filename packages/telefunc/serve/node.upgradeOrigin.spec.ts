@@ -255,6 +255,17 @@ test('a refused page whose Origin is a `blob:` URL with a long host is named as 
   expect(lines[0]?.length).toBeLessThan(1000)
 })
 
+test('refused pages whose Origin has a scheme longer than any origin has are named as ones with no origin, in one short line, and keep one name', async () => {
+  // A scheme of an app shell's own has an origin of its own form (`capacitor://localhost`): its length is bounded too.
+  const origins = Array.from({ length: 21 }, (_, i) => `${'s'.repeat(8000)}${i}://x`)
+  const { lines, namesKept } = await refuseAll(origins)
+  expect(lines).toEqual([
+    expect.stringContaining('A WebSocket upgrade from a page whose Origin header names no origin was refused'),
+  ])
+  expect(lines[0]?.length).toBeLessThan(1000)
+  expect(namesKept).toEqual(['a page whose Origin header names no origin'])
+})
+
 test.each([
   ['a path', 'https://app.example.com/page'],
   ['upper case', 'HTTPS://APP.EXAMPLE.COM'],
