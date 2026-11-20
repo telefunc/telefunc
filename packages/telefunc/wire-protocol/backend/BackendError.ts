@@ -17,13 +17,11 @@ type BackendCallOutcome = 'not-run' | 'may-have-run'
 /** A Broadcast or Room call the backend's store failed. `instanceof BackendError` holds for one made by another copy of
  *  Telefunc too. */
 class BackendError extends Error {
-  readonly [backendErrorMark] = true as const
   readonly code: BackendErrorCode
   readonly outcome: BackendCallOutcome
 
   constructor({ code, outcome, message }: { code: BackendErrorCode; outcome: BackendCallOutcome; message: string }) {
     super(message)
-    Object.setPrototypeOf(this, new.target.prototype)
     this.name = 'BackendError'
     this.code = code
     this.outcome = outcome
@@ -33,3 +31,4 @@ class BackendError extends Error {
     return typeof thing === 'object' && thing !== null && backendErrorMark in thing
   }
 }
+Object.defineProperty(BackendError.prototype, backendErrorMark, { value: true })
