@@ -135,7 +135,7 @@ test("a channel's frame the server refuses is refused `frames`, naming the chann
   await cancel(opened)
 })
 
-test('a streaming upload whose wire closes under it is answered `retry`, not 200, and the frame it read after the close is not dispatched', async () => {
+test('a streaming upload whose wire closes under it is answered `retry` at the frame it reads after the close, which is not dispatched, without reading the rest of its body', async () => {
   const { connId, opened, channel } = await openWire()
   const got: unknown[] = []
   channel.listen((message) => void got.push(message))
@@ -161,8 +161,10 @@ test('a streaming upload whose wire closes under it is answered `retry`, not 200
   const text = encode.text(0, JSON.stringify('after the close'), 1)
   controller.enqueue(encodeU32(text.byteLength))
   controller.enqueue(text)
+  // The body stays open: the answer comes without its end.
+  const answered = await Promise.race([answer, new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000))])
   controller.close()
-  const answered = await answer
+  if (answered === null) throw new Error('no answer while the body was open')
   expect(answered.statusCode).toBe(400)
   expect(answered.contentType).toMatch(refusal('retry'))
   expect(got).toEqual([])
