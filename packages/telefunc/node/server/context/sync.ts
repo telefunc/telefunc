@@ -1,6 +1,6 @@
-export { restoreContext_sync }
-export { provideTelefuncContext_sync }
 export { getContext_sync }
+export { provideTelefuncContext_sync }
+export { restoreContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
