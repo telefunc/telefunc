@@ -39,8 +39,9 @@ type WireSenderOptions = {
 /** A wire's headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
 type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
-/** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
- *  peers of its channels send through it, and once the wire closed it drops what they send. */
+/** Sends a wire's frames in call order, but for a RECONCILED and an attach probe's answer, which go ahead of what waits
+ *  for the RECONCILED; terminates the wire once its backlog passes what its channels allow. The peers of its channels
+ *  send through it, and once the wire closed it drops what they send. */
 class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, WireQueue {
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
@@ -64,7 +65,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private pastBacklog = false
   /** A RECONCILED is owed: what is sent meanwhile is held behind it. */
   private owed = false
-  /** What was sent while a RECONCILED was owed, in order: the frames themselves, which a replay also keeps. */
+  /** What was sent while a RECONCILED was owed, in order: channels' frames, which their replay also keeps, and the
+   *  wire's own control frames, which the next attach sends anew if the wire goes. */
   private readonly held: Uint8Array<ArrayBuffer>[] = []
   /** Their bytes, which the backlog counts as it does what the socket holds. */
   private heldBytes = 0
@@ -106,8 +108,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.owed = true
   }
 
-  /** An attach probe's answer, which says no credit ran out and names no round trip: the one frame that goes ahead of
-   *  what is held, since a RECONCILED of many channels would read the path as slower than it is. */
+  /** An attach probe's answer, which says no credit ran out and names no round trip: written ahead of what is held, since
+   *  a RECONCILED of many channels would read the path as slower than it is. On a WebSocket, the acknowledgements the
+   *  sender carries ride ahead of it in its message, as they do of any frame written. */
   answerProbe(ix: number, probe: number): void {
     const answer = encode.bdpPingAck(ix, probe, Infinity, Infinity)
     if (this.admit(answer)) this.hand(answer)
