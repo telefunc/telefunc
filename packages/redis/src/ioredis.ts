@@ -8,17 +8,15 @@ export {
   deploymentOf,
   connectsAlike,
   addressOf,
-  isUnreachable,
+  redisFailure,
   isRefusal,
-  isReadOnly,
-  ReplicaRefusal,
 }
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { Cluster, type Redis } from 'ioredis'
-import { assert } from './assert.js'
+import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
@@ -90,17 +88,6 @@ function addressOf(redis: RedisClient): string {
   return sentinels?.length ? `Sentinel master ${name}` : `${host}:${port}`
 }
 
-/** ioredis' errors for a command it couldn't send: with no retries, an unreachable Redis fails it at once. */
-function isUnreachable(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  return (
-    error.name === 'MaxRetriesPerRequestError' ||
-    error.name === 'ClusterAllFailedError' ||
-    error.message === 'Connection is closed.' ||
-    error.message === 'None of startup nodes is available'
-  )
-}
-
 /** How Redis 5 and 6 and Dragonfly wrap the refusal of a call a script makes. */
 const IN_SCRIPT = String.raw`ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?`
 
@@ -113,18 +100,98 @@ const ACL_REFUSAL = new RegExp(
 /** A replica's refusal of a write, at top level or inside a script. */
 const READ_ONLY = new RegExp(String.raw`^(?:READONLY |${IN_SCRIPT}-READONLY )`)
 
-/** A write a replica refused, as the backend reports it: it was given, or now reaches, a replica. */
-class ReplicaRefusal extends Error {}
+/** Redis's refusal of a login: Redis 6 and later, and Redis 5's `AUTH`. */
+const LOGIN_REFUSAL = /^(?:WRONGPASS |NOAUTH |ERR invalid password)/
 
-/** Redis refused the command, by its user's ACL or as a replica, which stands until an operator changes the ACL or the
- *  role; `BUSY`, `LOADING` and the like pass. */
-function isRefusal(error: unknown): error is Error {
-  if (error instanceof ReplicaRefusal || isReadOnly(error)) return true
-  return error instanceof Error && error.name === 'ReplyError' && ACL_REFUSAL.test(error.message)
+/** What to do about a failed command, by Redis's error code. */
+const WHAT_TO_DO: Record<string, string> = {
+  BUSY: "another client's script keeps Redis busy; end it with SCRIPT KILL",
+  LOADING: 'Redis is loading its data; the backend can use it once that ends',
+  OOM: 'Redis reached its maxmemory; raise it, with maxmemory-policy noeviction',
+  WRONGTYPE: "a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
 }
 
-function isReadOnly(error: unknown): error is Error {
-  return error instanceof Error && error.name === 'ReplyError' && READ_ONLY.test(error.message)
+/** A failure of Redis, or of the connection to it, as the backend reports it: what failed and what to do, with Redis's
+ *  error code (the first word of its reply) or the connection's. It holds none of what ioredis' error does: the command,
+ *  its arguments (a password, a message's bytes) or a nested error. */
+class RedisFailure extends Error {
+  /** `NOPERM`, `WRONGPASS`, `ECONNREFUSED` and the like. */
+  readonly code: string | undefined
+  /** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role. */
+  readonly refused: boolean
+  constructor(message: string, code: string | undefined, refused: boolean) {
+    super(message)
+    this.code = code
+    this.refused = refused
+  }
+}
+
+/** What the backend reports of an error ioredis gave on a connection of `redis`'s: the one place a failure of Redis
+ *  becomes Telefunc's. An error the backend's own `assert()` threw passes as it is, and so does one this made. */
+function redisFailure(error: unknown, redis: RedisClient): unknown {
+  if (error instanceof RedisFailure || isBug(error)) return error
+  const where = addressOf(redis)
+  if (!(error instanceof Error) || error.name !== 'ReplyError') {
+    const code = connectionCode(error)
+    return new RedisFailure(
+      `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
+      code,
+      false,
+    )
+  }
+  const { message } = error
+  const code = replyCode(message)
+  const tagged = code === undefined ? '' : ` (${code})`
+  if (READ_ONLY.test(message)) {
+    return new RedisFailure(
+      `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
+        'client of the primary',
+      code,
+      true,
+    )
+  }
+  if (ACL_REFUSAL.test(message)) {
+    return new RedisFailure(
+      `Redis at ${where} refused Telefunc's Redis backend a command, key or channel by its user's ACL${tagged}: allow ` +
+        'that user what the ACL rule in the docs of @telefunc/redis lists',
+      code,
+      true,
+    )
+  }
+  if (LOGIN_REFUSAL.test(message)) {
+    return new RedisFailure(
+      `Redis at ${where} refused the login of Telefunc's Redis backend${tagged}: check the username and password of ` +
+        'the client given to installRedis()',
+      code,
+      false,
+    )
+  }
+  const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
+  return new RedisFailure(
+    `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
+      (toDo === undefined ? ": Redis's log may say why" : `: ${toDo}`),
+    code,
+    false,
+  )
+}
+
+/** The first word of the reply a script's call got, where it is a code, else of Redis's reply. */
+function replyCode(message: string): string | undefined {
+  const inScript = new RegExp(`^${IN_SCRIPT}-?`).exec(message)
+  const words = [message.split(' ', 1)[0]]
+  if (inScript !== null) words.unshift(message.slice(inScript[0].length).split(' ', 1)[0])
+  return words.find((word) => word !== undefined && /^[A-Z][A-Z_]*$/.test(word))
+}
+
+/** The system's code of a failed connection, such as `ECONNREFUSED`. */
+function connectionCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') return undefined
+  return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
+}
+
+/** Redis refused it, by its user's ACL or as a replica; `BUSY`, `LOADING` and the like pass. */
+function isRefusal(error: unknown): error is RedisFailure {
+  return error instanceof RedisFailure && error.refused
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters

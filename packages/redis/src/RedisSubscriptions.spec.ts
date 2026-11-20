@@ -1,3 +1,4 @@
+import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import type { SubscriberSocket } from './ioredis.js'
@@ -47,11 +48,14 @@ const PASSING = [
   new Error('Connection is closed.'),
 ]
 
-function setup(subscribe: SubscriberSocket['subscribe'] = async () => {}) {
+function setup(
+  subscribe: SubscriberSocket['subscribe'] = async () => {},
+  connect: SubscriberSocket['connect'] = async () => {},
+) {
   /** What Redis sends the subscriber socket: a frame on a channel. */
   let publish = (_channel: string, _frame: Buffer) => {}
   const socket: SubscriberSocket = {
-    connect: async () => {},
+    connect,
     subscribe,
     unsubscribe: async () => {},
     ping: async () => {},
@@ -61,7 +65,10 @@ function setup(subscribe: SubscriberSocket['subscribe'] = async () => {}) {
       return socket
     },
   }
-  const connection = { openSubscriberSocket: async () => socket } as unknown as RedisConnection
+  const connection = {
+    openSubscriberSocket: async () => socket,
+    client: { options: { host: '127.0.0.1', port: 6390 } },
+  } as unknown as RedisConnection
   const subscriptions = new RedisSubscriptions({ connection })
   const delivered: string[] = []
   const listen = (
@@ -106,18 +113,21 @@ function frameOf(place: number, text: string, { lane, seq = place }: { lane?: st
 
 describe('a start read Redis answers with an error', () => {
   for (const message of REFUSALS) {
-    it(`closes the subscription with Redis's error, where it reads ${message.slice(0, 60)}`, async () => {
-      const refused = replyError(message)
+    it(`closes the subscription with Telefunc's refusal, where it reads ${message.slice(0, 60)}`, async () => {
       let reads = 0
       const { subscriptions, listen } = setup()
       const attempt = listen(TEXT, async () => {
         reads++
-        throw refused
+        throw replyError(message)
       })
       const closed = new Promise((resolve) => attempt.onStateChange((state, reason) => resolve([state, reason])))
 
-      await expect(Promise.all(subscriptions.establishingOn([TEXT]))).rejects.toBe(refused)
-      await expect(closed).resolves.toEqual(['closed', refused])
+      const refusal = await Promise.all(subscriptions.establishingOn([TEXT])).catch((error: unknown) => error)
+      expect(refusal).toMatchObject({
+        refused: true,
+        code: message.includes('READONLY') ? 'READONLY' : expect.any(String),
+      })
+      await expect(closed).resolves.toEqual(['closed', refusal])
       expect(reads).toBe(1)
     })
   }
@@ -159,15 +169,14 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     expect(binary.state()).toBe('ready')
   })
 
-  it('fails with the reason when Redis refuses the subscription of its own kind it waits for', async () => {
-    const refused = refusal()
+  it('fails with the refusal when Redis refuses the subscription of its own kind it waits for', async () => {
     const { listen, sends } = setup(async (...channels) => {
-      if (channels.includes(TEXT)) throw refused
+      if (channels.includes(TEXT)) throw refusal()
     })
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toBe(refused)
+    await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toMatchObject({ refused: true, code: 'NOPERM' })
   })
 
   it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
@@ -243,5 +252,28 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
     expect(delivered).toEqual(['early'])
     expect(reports).toHaveLength(1)
     expect(String(reports[0])).not.toMatch(/bug/i)
+  })
+})
+
+describe('a subscriber connection Redis refuses at its login', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it("is reported once as Telefunc's error, with Redis's code, and not the password", async () => {
+    const reports: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args) => void reports.push(inspect(args, { depth: 8 })))
+    const refused = Object.assign(replyError('WRONGPASS invalid username-password pair or user is disabled.'), {
+      command: { name: 'hello', args: ['3', 'AUTH', 'tf', 'pw-SECRET'] },
+    })
+    const { listen } = setup(undefined, async () => {
+      throw refused
+    })
+    listen(TEXT)
+
+    await expect.poll(() => reports.length).toBe(1)
+    expect(reports[0]).toContain(
+      "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    )
+    expect(reports[0]).not.toContain('pw-SECRET')
+    expect(reports[0]).not.toContain('args')
   })
 })

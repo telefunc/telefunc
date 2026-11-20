@@ -1,3 +1,4 @@
+import { inspect } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
@@ -18,6 +19,16 @@ function replyError(message: string): Error {
   const error = new Error(message)
   error.name = 'ReplyError'
   return error
+}
+
+/** A reply error as ioredis gives it: the command it answered, with its arguments, is on it. */
+function answered(message: string, command: { name: string; args: unknown[] }): Error {
+  return Object.assign(replyError(message), { command })
+}
+
+/** All of a rejection as Node prints it, its causes and own properties too. */
+async function printed(rejection: Promise<unknown>): Promise<string> {
+  return inspect(await rejection.catch((error: unknown) => error), { depth: 8 })
 }
 
 function installed(redis: Redis): RedisConnection {
@@ -88,13 +99,49 @@ describe('a client of a replica', () => {
     )
   })
 
-  it("a command a replica refuses with READONLY rejects with an error that names the replica, Redis's as its cause", async () => {
+  it('a command a replica refuses with READONLY rejects with an error that names the replica and READONLY, and no cause', async () => {
     const connection = installed(client())
     const readOnly = replyError("READONLY You can't write against a read only replica.")
     const rejection = connection.send(() => Promise.reject(readOnly))
     await expect(rejection).rejects.toThrow(
-      "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes: give installRedis() a client of the primary",
+      "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
     )
-    await expect(rejection).rejects.toMatchObject({ cause: readOnly })
+    await expect(rejection).rejects.toMatchObject({ code: 'READONLY', refused: true })
+    await expect(rejection).rejects.not.toHaveProperty('cause')
+  })
+})
+
+describe('a failure of Redis, as a command rejects with it', () => {
+  it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", async () => {
+    const connection = installed(client())
+    const refused = answered('WRONGPASS invalid username-password pair or user is disabled.', {
+      name: 'auth',
+      args: ['tf', 'pw-SECRET'],
+    })
+    const rejection = connection.send(() => Promise.reject(refused))
+    await expect(rejection).rejects.toThrow(
+      "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    )
+    const text = await printed(rejection)
+    expect(text).not.toContain('pw-SECRET')
+    expect(text).not.toContain('args')
+  })
+
+  it("a script Redis fails: Telefunc's error, with Redis's code, and not the message it was publishing", async () => {
+    const connection = installed(client())
+    const failed = answered(
+      'WRONGTYPE Operation against a key holding the wrong kind of value script: 06f79f6ab4, on @user_script:1.',
+      {
+        name: 'evalsha',
+        args: ['06f79f6ab4', '2', 'tf:0:seq:{k}', 'tf:0:t:{k}', Buffer.from('body-SECRET')],
+      },
+    )
+    const rejection = connection.send(() => Promise.reject(failed))
+    await expect(rejection).rejects.toThrow(
+      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
+    )
+    const text = await printed(rejection)
+    expect(text).not.toContain('body-SECRET')
+    expect(text).not.toContain('args')
   })
 })

@@ -2,15 +2,12 @@ export { RedisConnection }
 
 import { assert } from './assert.js'
 import {
-  addressOf,
   callDefinedCommand,
   connectsAlike,
   createCommandClient,
-  isUnreachable,
   createSubscriberSocket,
   isCluster,
-  isReadOnly,
-  ReplicaRefusal,
+  redisFailure,
   type RedisClient,
   type SubscriberSocket,
 } from './ioredis.js'
@@ -57,21 +54,12 @@ class RedisConnection {
     return this.commands
   }
 
-  /** Sends `command` on the command client. A Redis it can't reach, or a replica, rejects with where it looked,
-   *  Redis's or ioredis' error as the cause: that error names a retry limit the backend set, not the app. */
+  /** Sends `command` on the command client; a failure of Redis rejects as the backend reports it (`redisFailure()`). */
   async send<Output>(command: (client: RedisClient) => Promise<Output>): Promise<Output> {
     try {
       return await command(this.commands)
     } catch (error) {
-      if (isReadOnly(error)) {
-        throw new ReplicaRefusal(
-          `Telefunc's Redis backend reached a replica at ${addressOf(this.commands)}, which refuses writes: give ` +
-            'installRedis() a client of the primary',
-          { cause: error },
-        )
-      }
-      if (!isUnreachable(error)) throw error
-      throw new Error(`Telefunc's Redis backend can't reach Redis at ${addressOf(this.commands)}`, { cause: error })
+      throw redisFailure(error, this.commands)
     }
   }
 

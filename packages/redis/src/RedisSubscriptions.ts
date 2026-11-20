@@ -5,7 +5,7 @@ import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
-import { isRefusal, type SubscriberSocket } from './ioredis.js'
+import { isRefusal, redisFailure, type SubscriberSocket } from './ioredis.js'
 import { decodeOrderingFrame } from './orderingFrame.js'
 import type { RedisConnection } from './RedisConnection.js'
 
@@ -202,7 +202,7 @@ class RedisSubscriptions {
     try {
       socket = await this.connection.openSubscriberSocket()
     } catch (error) {
-      return this.lost(id, error)
+      return this.lost(id, this.failure(error))
     }
     if (!this.isCurrent(id)) return socket.disconnect()
     connecting.socket = socket
@@ -211,13 +211,13 @@ class RedisSubscriptions {
     })
     let lastError: unknown = new Error('Redis subscriber connection closed')
     socket.on('error', (error: unknown) => {
-      lastError = error
+      lastError = this.failure(error)
     })
     socket.on('close', () => this.lost(id, lastError))
     try {
       await socket.connect()
     } catch (error) {
-      return this.lost(id, error)
+      return this.lost(id, this.failure(error))
     }
     if (!this.isCurrent(id)) return
     const connected: ConnectedSocket = {
@@ -306,7 +306,7 @@ class RedisSubscriptions {
       await this.syncChannelsOnce(connection)
     } catch (error) {
       // The connection dropped, or Redis can't serve it now (`BUSY`, `LOADING`): start over on a fresh one.
-      return this.lost(connection.id, error)
+      return this.lost(connection.id, this.failure(error))
     }
     // Recovered once the channels are subscribed, not when the socket connects: a SUBSCRIBE Redis can't serve keeps
     // backing off.
@@ -341,7 +341,8 @@ class RedisSubscriptions {
     const { id, socket, subscribed } = connection
     try {
       await socket.subscribe(...channels)
-    } catch (error) {
+    } catch (thrown) {
+      const error = this.failure(thrown)
       if (!isRefusal(error)) throw error
       if (!this.isCurrent(id)) return
       if (channels.length > 1) {
@@ -377,8 +378,9 @@ class RedisSubscriptions {
       // A resume delivers what the starts count that reached this connection. A frame published just before the read can
       // still be on its way, and the acknowledgment of a repeated SUBSCRIBE comes after it.
       if (!attempt.establishing) await socket.subscribe(...attempt.channels)
-    } catch (error) {
+    } catch (thrown) {
       if (!this.isCurrent(id)) return
+      const error = this.failure(thrown)
       // A refusal stands until an operator changes Redis's ACL or role. Any other failure (a command-connection error,
       // `LOADING`) is tried again, as a drop is: the attempt awaits confirmation meanwhile, and the shared subscriber
       // connection stays.
@@ -408,6 +410,11 @@ class RedisSubscriptions {
       }, this.readRetryDelay),
     )
     this.readRetryDelay = Math.min(this.readRetryDelay * 2, RECONNECT_DELAY_MAX_MS)
+  }
+
+  /** What the backend reports of an error of the subscriber connection (`redisFailure()`). */
+  private failure(error: unknown): unknown {
+    return redisFailure(error, this.connection.client)
   }
 
   private attempts(): Set<RedisAttempt> {
