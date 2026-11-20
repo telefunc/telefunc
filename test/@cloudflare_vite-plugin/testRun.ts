@@ -21,9 +21,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       (log.logText.includes('disconnected: ::write(') &&
         (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s KV refuses a presence write.
-      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key') ||
-      // testChannel()'s upgrade from another site's page.
-      log.logText.includes('A WebSocket upgrade from https://another-site.example was refused'),
+      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key'),
   })
   testTodolist()
   testChannel()
@@ -128,8 +126,14 @@ function testChannel() {
       { timeout: 10000 },
     )
     page.off('websocket', onWebSocket)
-    // The page's own origin opened it; a page of another site may not.
-    expect(await upgradeStatus('https://another-site.example')).toBe(403)
+    // The page's own origin opened it; a page of another site may not. The Worker answers it 403, and the dev and
+    // preview server of @cloudflare/vite-plugin, which hands upgrades to the Worker, ends the connection without
+    // passing on an answer that isn't a WebSocket (its dist/index.mjs, `if (!workerWebSocket) socket.destroy()`).
+    expect(await upgradeStatus('https://another-site.example')).toBe('no answer')
+    // The server's warning comes through its own output, apart from the connection.
+    await autoRetry(() => expectLog('A WebSocket upgrade from https://another-site.example was refused'), {
+      timeout: 5000,
+    })
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {

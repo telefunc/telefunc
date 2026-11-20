@@ -23,8 +23,11 @@ import { randomBytes } from 'node:crypto'
 
 const sendRefusedWarning = 'A channel refused a `send()`'
 
-/** The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`. */
-function upgradeStatus(origin: string): Promise<number | undefined> {
+/**
+ * The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`, or `'no answer'`
+ * where it ends the connection without one.
+ */
+function upgradeStatus(origin: string): Promise<number | undefined | 'no answer'> {
   const url = new URL('/_telefunc', getServerUrl())
   return new Promise((resolve, reject) => {
     const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
@@ -44,7 +47,11 @@ function upgradeStatus(origin: string): Promise<number | undefined> {
       res.resume()
       resolve(res.statusCode)
     })
-    req.on('error', reject)
+    req.on('error', (err) => {
+      // Node's client names a connection that ended before any answer this way.
+      if (err.message === 'socket hang up') resolve('no answer')
+      else reject(err)
+    })
     req.end()
   })
 }
