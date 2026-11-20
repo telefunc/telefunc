@@ -4,13 +4,12 @@ export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WireClose }
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { DeadlineTimer } from '../DeadlineTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
-  TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
   WIRE_MAX_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
@@ -106,7 +105,7 @@ type WireClose = 'transient' | 'pageLeft' | 'rejected'
 type DetachReason = WireClose | 'recoveryFailed'
 
 type WireState = {
-  pingTimer: ReturnType<typeof setTimeout> | null
+  pingTimer: DeadlineTimer
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
   /** Each frame, piece and announcement the wire delivered. */
@@ -230,7 +229,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const entry: WireEntry = {
       wire,
       state: {
-        pingTimer: null,
+        pingTimer: new DeadlineTimer({ unref: true }),
         lastReceivedAt: 0,
         deliveries,
         pongedAt: performance.now(),
@@ -901,9 +900,7 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   private clearPingTimer(state: WireState): void {
-    if (!state.pingTimer) return
-    clearTimeout(state.pingTimer)
-    state.pingTimer = null
+    state.pingTimer.disarm()
   }
 
   private pingDeadlineOf(entry: WireEntry): number {
@@ -914,36 +911,28 @@ class ChannelMux implements UpgradeStagesOwner {
   private resetPingTimer(entry: WireEntry): void {
     if (entry.state.closed !== null) return
     entry.state.lastReceivedAt = performance.now()
-    this.armPingDeadline(entry, this.pingDeadlineOf(entry))
+    this.armPingDeadline(entry, entry.state.lastReceivedAt + this.pingDeadlineOf(entry))
   }
 
-  /** `recheck`: the deadline had passed when the timer last ran, and is judged again once the server read its sockets. */
-  private armPingDeadline(entry: WireEntry, ms: number, recheck = false): void {
+  /** Judges the wire at `dueAt`, on the `performance` clock. `recheck`: the deadline had passed when the timer last
+   *  ran, and is judged again once the server read its sockets. */
+  private armPingDeadline(entry: WireEntry, dueAt: number, recheck = false): void {
     const { wire, state, transport } = entry
-    this.clearPingTimer(state)
-    const dueAt = performance.now() + ms
-    state.pingTimer = unrefTimer(
-      setTimeout(() => {
-        state.pingTimer = null
-        // A PING waits behind what the page queued, so the wire is dead only a deadline after its last bytes and after
-        // the data it announced.
-        const deadline = this.pingDeadlineOf(entry)
-        const deadAt = Math.max(
-          state.lastReceivedAt + deadline,
-          entry.sender.pieces?.receiver.expectedBy(deadline) ?? 0,
-        )
-        const now = performance.now()
-        if (now < deadAt) return this.armPingDeadline(entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
-        // Timers run before the sockets are read: after server code that held the event loop past the deadline, the
-        // page's PING may be waiting unread, on a POST the server reads only some turns later. The page gets back the
-        // time the timer ran late, when the server read nothing.
-        // `dueAt` is on the performance clock, which runs ahead of the timers' within a turn: a timer may run before it.
-        if (!recheck) return this.armPingDeadline(entry, Math.min(Math.max(0, now - dueAt), TIMER_DELAY_MAX_MS), true)
-        // Transient close so each channel gets its `reconnectTimeout` grace via
-        // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
-        transport.terminateWire(wire)
-      }, ms),
-    )
+    state.pingTimer.arm(dueAt, () => {
+      // A PING waits behind what the page queued, so the wire is dead only a deadline after its last bytes and after
+      // the data it announced.
+      const deadline = this.pingDeadlineOf(entry)
+      const deadAt = Math.max(state.lastReceivedAt + deadline, entry.sender.pieces?.receiver.expectedBy(deadline) ?? 0)
+      const now = performance.now()
+      if (now < deadAt) return this.armPingDeadline(entry, deadAt)
+      // Timers run before the sockets are read: after server code that held the event loop past the deadline, the
+      // page's PING may be waiting unread, on a POST the server reads only some turns later. The page gets back the
+      // time the timer ran late, when the server read nothing.
+      if (!recheck) return this.armPingDeadline(entry, now + (now - dueAt), true)
+      // Transient close so each channel gets its `reconnectTimeout` grace via
+      // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
+      transport.terminateWire(wire)
+    })
   }
 }
 

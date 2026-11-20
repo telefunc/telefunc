@@ -24,7 +24,7 @@ import {
 } from '../../wire-protocol/channel/channelErrors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
-import { CREDIT_MSG_WINDOW_INITIAL } from '../../wire-protocol/constants.js'
+import { CREDIT_MSG_WINDOW_INITIAL, TIMER_DELAY_MAX_MS } from '../../wire-protocol/constants.js'
 import { getChannelConfig, reconnectWindow } from './serverConfig.js'
 import { onBug } from './runTelefunc/onBug.js'
 
@@ -564,6 +564,28 @@ describe('a close whose verdict never crosses', () => {
       // It sends nothing in the verdict's place: the page decides.
       expect(tagsOf(frames)).toEqual([TAG.CLOSE_ACK, TAG.CLOSE_DONE])
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a close timeout as long as a timer holds: the server waits it and the reconnect window past it, through timers no longer than that', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const timers = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+      const frames: Uint8Array[] = []
+      channel._registerChannel()
+      channel._attachPeer(createPeer(frames))
+      fromPage(channel, frames).closeRequest(TIMER_DELAY_MAX_MS)
+      const longest = () => Math.max(...timers.mock.calls.map(([, delay]) => delay ?? 0))
+      expect(longest()).toBeLessThanOrEqual(TIMER_DELAY_MAX_MS)
+      await vi.advanceTimersByTimeAsync(TIMER_DELAY_MAX_MS + reconnectWindow() - 1)
+      expect(channel._phase).not.toBe('ended')
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(channel.closed).resolves.toBeInstanceOf(ChannelCloseUnknownError)
+      expect(longest()).toBeLessThanOrEqual(TIMER_DELAY_MAX_MS)
+    } finally {
+      timers.mockRestore()
       vi.useRealTimers()
     }
   })

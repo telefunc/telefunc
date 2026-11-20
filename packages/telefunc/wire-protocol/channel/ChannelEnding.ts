@@ -193,8 +193,6 @@ class ChannelEnding {
 
   timerFired(): void {
     if (this.didEnd) return
-    // A timer may fire a fraction of a millisecond before the clock it is read on says it is due.
-    if (this.port.now() < this.timerAt) return this.port.armTimer(this.timerAt)
     if (this.role === 'follower') return this.finish(new ChannelCloseUnknownError())
     this.progress()
   }

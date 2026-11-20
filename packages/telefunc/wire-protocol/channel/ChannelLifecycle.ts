@@ -7,6 +7,7 @@ import { ChannelEnding, type EndingFrame, type EndingSide } from './ChannelEndin
 import { isAbort, type AbortError } from '../../shared/Abort.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { DeadlineTimer } from './DeadlineTimer.js'
 
 /** The channel end, which carries its ending's frames and answers what its callbacks throw. */
 interface ChannelLifecycleOwner {
@@ -38,7 +39,7 @@ class ChannelLifecycle {
   private closeListeners = new Listeners<ChannelCloseCallback>()
   /** The cleanup's callbacks whose promises haven't settled, and the run that calls them. */
   private runningCleanup = 0
-  private timer: ReturnType<typeof setTimeout> | null = null
+  private readonly timer = new DeadlineTimer()
   /** The close callback being called, and whether it read this channel's outcome (`closed` or `close()`) as it ran: a
    *  graceful close doesn't wait for the promise of a cleanup that waits for the close. */
   private callingCleanup = false
@@ -88,20 +89,8 @@ class ChannelLifecycle {
         send: (frame) => this.owner._sendEnding(frame),
         startCleanup: (err) => this.fireClose(err),
         end: (err) => this.onEnded(err),
-        armTimer: (at) => {
-          if (this.timer !== null) clearTimeout(this.timer)
-          this.timer = setTimeout(
-            () => {
-              this.timer = null
-              this.ending.timerFired()
-            },
-            Math.max(0, at - performance.now()),
-          )
-        },
-        disarmTimer: () => {
-          if (this.timer !== null) clearTimeout(this.timer)
-          this.timer = null
-        },
+        armTimer: (at) => this.timer.arm(at, () => this.ending.timerFired()),
+        disarmTimer: () => this.timer.disarm(),
         now: () => performance.now(),
         reconnectWindowMs,
       },
