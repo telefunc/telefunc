@@ -12,10 +12,14 @@ import type { Telefunc } from './TelefuncNamespace.js'
 const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context> }>('getContext/async.ts', {})
 
 installAsyncMode({
+  getContext_async,
   provideTelefuncContext_async,
   restoreContext_async,
-  getContext_async,
 })
+
+function getContext_async() {
+  return globalObject.asyncStore?.getStore() ?? null
+}
 
 function provideTelefuncContext_async(context: Telefunc.Context): void {
   assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
@@ -36,8 +40,4 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
   )
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
   return globalObject.asyncStore.run(rawContext, fn)
-}
-
-function getContext_async() {
-  return globalObject.asyncStore?.getStore() ?? null
 }
