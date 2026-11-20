@@ -232,6 +232,27 @@ test('a refused page whose origin is opaque is named as such, not by what its Or
   ])
 })
 
+test('a refused page whose Origin is a `blob:` URL with a long host is named as one with no origin, in one short line', async () => {
+  // A `blob:` URL's own host is empty: its origin, the name a refusal prints, is its inner URL's.
+  const { lines, namesKept } = await refuseAll([`blob:https://${'a'.repeat(4000)}.example/id`])
+  expect(namesKept).toEqual(['a page whose Origin header names no origin'])
+  expect(lines).toHaveLength(1)
+  expect(lines[0]?.length).toBeLessThan(1000)
+})
+
+test.each([
+  ['a path', 'https://app.example.com/page'],
+  ['upper case', 'HTTPS://APP.EXAMPLE.COM'],
+])(
+  "an Origin header with %s isn't written as a browser sends an origin: the upgrade is refused, though that origin is allowed, and the warning doesn't say to allow it",
+  async (_case, header) => {
+    const { lines, namesKept } = await refuseAll([header])
+    expect(namesKept).toEqual(['a page whose Origin header names no origin'])
+    expect(lines).toEqual([expect.stringContaining("its Origin header isn't an origin as a browser writes one")])
+    expect(lines[0]).not.toContain('add that origin')
+  },
+)
+
 test('refused handshakes from many origins name the first 20 origins, then say once that the rest are not logged', async () => {
   const origins = Array.from({ length: 40 }, (_, i) => `https://site-${i}.example`)
   const { lines, onceKeysAdded, namesKept } = await refuseAll([...origins, ...origins])

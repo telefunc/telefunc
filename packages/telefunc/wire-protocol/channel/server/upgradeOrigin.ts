@@ -25,20 +25,23 @@ function upgradeRefusal(request: Request): Response | undefined {
   if (origin === null && site === null) return undefined
   if (site === 'same-origin') return undefined
   const url = origin !== null && URL.canParse(origin) ? new URL(origin) : null
-  if (url && (isServersHost(url, request) || isAllowed(url))) return undefined
-  warnRefusal(origin === null ? 'a page that sent no Origin' : nameOf(url))
+  if (origin !== null && url !== null && isServersHost(origin, url.protocol, request)) return undefined
+  // A browser writes a page's origin as the URL standard serializes it: a header written any other way names none.
+  const page = url !== null && url.origin === origin ? url : null
+  if (page && isAllowed(page)) return undefined
+  if (origin === null) warnRefusal('a page that sent no Origin', 'it sent no Origin header')
+  else if (page === null || page.hostname.length > HOSTNAME_MAX)
+    warnRefusal(
+      'a page whose Origin header names no origin',
+      "its Origin header isn't an origin as a browser writes one, or is the `null` of a page that has none",
+    )
+  else warnRefusal(page.origin)
   return new Response(null, { status: 403 })
 }
 
-/** The refused page's origin as the log names it: the parsed origin, never the header's own text. */
-function nameOf(url: URL | null): string {
-  if (url === null || url.origin === 'null' || url.hostname.length > HOSTNAME_MAX)
-    return 'a page whose Origin header names no origin'
-  return url.origin
-}
-
-/** Once per name, for the first `REFUSED_ORIGINS_NAMED_MAX` names; the next one says that the rest are not logged. */
-function warnRefusal(name: string): void {
+/** Once per name, for the first `REFUSED_ORIGINS_NAMED_MAX` names; the next one says that the rest are not logged.
+ *  `noOrigin` says why the page has no origin `config.channel.allowedOrigins` could list, where it has none. */
+function warnRefusal(name: string, noOrigin?: string): void {
   if (globalObject.quiet || globalObject.named.has(name)) return
   if (globalObject.named.size === REFUSED_ORIGINS_NAMED_MAX) {
     globalObject.quiet = true
@@ -50,18 +53,23 @@ function warnRefusal(name: string): void {
     return
   }
   globalObject.named.add(name)
+  const pageAfter =
+    "A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable."
   assertWarning(
     false,
-    `A WebSocket upgrade from ${name} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable. Behind a proxy that rewrites \`Host\`, have it forward the public host in \`X-Forwarded-Host\`; for a page of another origin, add that origin to \`config.channel.allowedOrigins\`.`,
+    noOrigin === undefined
+      ? `A WebSocket upgrade from ${name} was refused: it isn't this server's origin, and \`config.channel.allowedOrigins\` doesn't list it. ${pageAfter} Behind a proxy that rewrites \`Host\`, have it forward the public host in \`X-Forwarded-Host\`; for a page of another origin, add that origin to \`config.channel.allowedOrigins\`.`
+      : `A WebSocket upgrade from ${name} was refused: ${noOrigin}, so no entry of \`config.channel.allowedOrigins\` can let it open. ${pageAfter}`,
     { onlyOnce: false },
   )
 }
 
-/** The host a client reached: the first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. */
-function isServersHost(origin: URL, request: Request): boolean {
+/** Whether `origin`, the `Origin` header, is the origin of the host the client reached, on the page's `protocol`: the
+ *  first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. */
+function isServersHost(origin: string, protocol: string, request: Request): boolean {
   const host = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || request.headers.get('host')
-  const reached = `${origin.protocol}//${host}`
-  return host !== null && URL.canParse(reached) && new URL(reached).host === origin.host
+  const reached = `${protocol}//${host}`
+  return host !== null && URL.canParse(reached) && new URL(reached).origin === origin
 }
 
 function isAllowed(origin: URL): boolean {
