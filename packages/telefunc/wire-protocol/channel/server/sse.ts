@@ -21,7 +21,6 @@ import { createPushReadable, type PushReadable } from '../../../utils/pushReadab
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
-import { clientLeft } from '../../../node/server/runTelefunc/clientLeft.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
 import { encode } from '../../wire/frame.js'
@@ -253,7 +252,12 @@ class SseServerTransport {
     terminateWire: (wire) => this.terminateWire(wire),
   }
 
-  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+  /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does. */
+  async handleRequest(
+    request: Request,
+    readable: Readable | undefined,
+    clientLeft: (err: unknown) => boolean,
+  ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
     if (!namesWireVersion(request)) return wireVersionRefused()
@@ -266,7 +270,7 @@ class SseServerTransport {
     const useNodeStream = readable !== undefined
     let connId: string | null = null
     try {
-      const reader = new BodyReader(source, (err) => clientLeft(err, request, readable))
+      const reader = new BodyReader(source, clientLeft)
       const rawMetadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
       if (rawMetadata === null) return noBody()
       const metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
@@ -574,7 +578,11 @@ function okResponse(): SseChannelHttpResponse {
   return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+async function handleSseChannelRequest(
+  request: Request,
+  readable: Readable | undefined,
+  clientLeft: (err: unknown) => boolean,
+): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable)
+  return globalObject.sseTransport.handleRequest(request, readable, clientLeft)
 }

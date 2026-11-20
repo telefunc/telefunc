@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { once } from 'node:events'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
@@ -10,29 +12,10 @@ import { onBug } from '../node/server/runTelefunc/onBug.js'
 // fails on the app's side: printed and given to `onBug()` as the app's own error. A client that leaves stays quiet.
 
 vi.hoisted(() => vi.stubEnv('NODE_ENV', 'development'))
-const app = vi.hoisted(() => ({
-  file: '/uploadBody.telefunc.ts',
-  /** Called when `readsBlob` starts reading its argument. */
-  onRead: () => {},
-  telefunctions: {
-    readsBlob: async (blob: Blob) => {
-      app.onRead()
-      return (await blob.text()).length
-    },
-    /** Reads the second `Blob` even when the first one's read fails. */
-    readsBoth: async (first: Blob, second: Blob) => {
-      app.onRead()
-      await first.text().catch(() => {})
-      return (await second.text()).length
-    },
-  },
-}))
-vi.mock('../node/server/runTelefunc/loadTelefuncFiles.js', () => ({
-  loadTelefuncFiles: async () => ({
-    telefuncFilesLoaded: { [app.file]: app.telefunctions },
-    telefuncFilesAll: [app.file],
-  }),
-}))
+// The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
+const file = '/requestBody.telefunc.js'
+config.root = dirname(fileURLToPath(import.meta.url))
+config.telefuncFiles = [`${config.root}${file}`]
 config.disableNamingConvention = true
 
 const telefunc = new Telefunc()
@@ -63,7 +46,7 @@ function frame(text: string): Uint8Array {
 const binaryStart = concat(
   frame(
     JSON.stringify({
-      file: app.file,
+      file,
       name: 'readsBlob',
       args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size: FILE_SIZE, type: '' })}`],
     }),
@@ -74,7 +57,7 @@ const binaryStart = concat(
 const twoBlobsStart = concat(
   frame(
     JSON.stringify({
-      file: app.file,
+      file,
       name: 'readsBoth',
       args: [0, 1].map((index) => `!TelefuncBlob:${JSON.stringify({ index, size: FILE_SIZE, type: '' })}`),
     }),
@@ -126,16 +109,13 @@ function recordErrors(): { printed: string[]; bugs: unknown[] } {
   onTestFinished(() => {
     error.mockRestore()
     bugListener = undefined
-    app.onRead = () => {}
   })
   return { printed, bugs }
 }
 
-/** Resolves when `readsBlob` starts reading its argument. */
-function blobRead(): Promise<void> {
-  return new Promise((resolve) => {
-    app.onRead = resolve
-  })
+/** Resolves when `readsBlob` or `readsBoth` starts reading its argument. */
+async function blobRead(): Promise<void> {
+  await once(process, 'requestBody.telefunc:read')
 }
 
 /** Sends a POST of `kind` with `start` from a socket of the test's own; resolves once Telefunc read the first bytes. */

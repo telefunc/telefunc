@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { once } from 'node:events'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
@@ -9,26 +11,14 @@ import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
 
 // Development, where Telefunc also prints a malformed request: set before Telefunc first reads it, which it keeps.
 vi.hoisted(() => vi.stubEnv('NODE_ENV', 'development'))
-const app = vi.hoisted(() => ({
-  file: '/requestBody.telefunc.ts',
-  telefunctions: {
-    hello: async () => 'hello',
-    // Its own outgoing request fails: the app's error, whatever its code.
-    callsAnotherServer: async () => {
-      throw Object.assign(new Error('the other server reset the connection'), { code: 'ECONNRESET' })
-    },
-  },
-}))
-vi.mock('../node/server/runTelefunc/loadTelefuncFiles.js', () => ({
-  loadTelefuncFiles: async () => ({
-    telefuncFilesLoaded: { [app.file]: app.telefunctions },
-    telefuncFilesAll: [app.file],
-  }),
-}))
+// The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
+const file = '/requestBody.telefunc.js'
+config.root = dirname(fileURLToPath(import.meta.url))
+config.telefuncFiles = [`${config.root}${file}`]
 config.disableNamingConvention = true
 
 const telefunc = new Telefunc()
-const body = JSON.stringify({ file: app.file, name: 'hello', args: [] })
+const body = JSON.stringify({ file, name: 'hello', args: [] })
 const headers = { 'x-telefunc-request': 'txt', 'content-type': 'text/plain' }
 
 let server: Server
@@ -187,7 +177,7 @@ test('a telefunction that throws an error with the code of a reset connection is
   const response = await fetch(`http://127.0.0.1:${port}/_telefunc`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ file: app.file, name: 'callsAnotherServer', args: [] }),
+    body: JSON.stringify({ file, name: 'callsAnotherServer', args: [] }),
   })
   expect(response.status).toBe(500)
   expect(printed).toEqual([expect.stringContaining('the other server reset the connection')])

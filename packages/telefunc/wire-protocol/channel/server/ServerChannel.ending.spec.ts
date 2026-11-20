@@ -93,7 +93,7 @@ async function overSse(channels: ServerChannel[]) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   const connId = crypto.randomUUID()
   const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
-  const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }))
+  const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
   await Promise.all(channels.map((channel) => channel.opened))
   const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
   const events = new SseEvents()
@@ -116,7 +116,11 @@ async function overSse(channels: ServerChannel[]) {
     },
     /** The page leaves for good, as a closed tab does. */
     leave: () =>
-      handleSseChannelRequest(new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) })),
+      handleSseChannelRequest(
+        new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) }),
+        undefined,
+        () => false,
+      ),
     /** Ends the page's event stream. */
     close: () => reader.cancel(),
   }

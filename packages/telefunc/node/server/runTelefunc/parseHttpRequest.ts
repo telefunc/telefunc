@@ -9,7 +9,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
 import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
-import { clientLeft } from './clientLeft.js'
+import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -34,6 +34,8 @@ type RunContext = {
    *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
    *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
   readable?: Readable
+  /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
+  clientLeft: ClientLeft
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -70,7 +72,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -81,7 +83,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable)
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
@@ -91,7 +93,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
+  const { text, registerFile, consumeFile } = await readBody(request, readable, clientLeft, requestKind)
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -170,6 +172,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
+  clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
@@ -179,7 +182,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new BodyReader(source, (err) => clientLeft(err, request, readable))
+    const reader = new BodyReader(source, clientLeft)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
@@ -187,7 +190,7 @@ async function readBody(
     }
   }
   return {
-    text: await readText(request, readable),
+    text: await readText(request, clientLeft),
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
@@ -200,11 +203,11 @@ async function readBody(
 
 /** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
  *  call's is; any other failure is thrown as it is. */
-async function readText(request: Request, readable: Readable | undefined): Promise<string> {
+async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
   try {
     return await request.text()
   } catch (err) {
-    if (clientLeft(err, request, readable)) throw new StreamTruncatedError({ cause: err })
+    if (clientLeft(err)) throw new StreamTruncatedError({ cause: err })
     throw err
   }
 }

@@ -1,4 +1,4 @@
-export { serve, serveNode, telefunc }
+export { serve, serveNode, serveRuntimeRequest, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
@@ -7,6 +7,7 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
+import { noTransportEvidence, socketShowsClientLeft, type ClientLeft } from './runTelefunc/clientLeft.js'
 
 type HttpRequestResolved = {
   request: Request
@@ -16,6 +17,8 @@ type HttpRequestResolved = {
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
+  /** Whether a failed read of the body is the client leaving, on the evidence of the server that received the request. */
+  clientLeft: ClientLeft
 }
 
 type HttpRequest =
@@ -86,6 +89,16 @@ async function serveNode(
   return httpResponse
 }
 
+/** `serve()` for the adapters of a runtime's own server (`Bun.serve`, `Deno.serve`), which pass how that server shows a
+ *  failed body read is its client leaving. */
+async function serveRuntimeRequest(
+  httpRequest: Extract<HttpRequest, { request: Request }>,
+  clientLeft: ClientLeft,
+): Promise<HttpResponse> {
+  assertHttpRequest(httpRequest, 1)
+  return runTelefunc({ request: httpRequest.request, context: httpRequest.context, clientLeft })
+}
+
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   // TO-DO/next-major-release: remove
@@ -100,7 +113,7 @@ async function resolveHttpRequest(
   response?: Writable,
 ): Promise<HttpRequestResolved & { unwatch?: () => void }> {
   if ('request' in httpRequest) {
-    return { request: httpRequest.request, context: httpRequest.context }
+    return { request: httpRequest.request, context: httpRequest.context, clientLeft: noTransportEvidence }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
@@ -112,7 +125,13 @@ async function resolveHttpRequest(
       httpRequest.headers,
       response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
+    return {
+      request,
+      readable: httpRequest.readable,
+      context: httpRequest.context,
+      clientLeft: socketShowsClientLeft(httpRequest.readable),
+      unwatch,
+    }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request(url, {
@@ -120,7 +139,7 @@ async function resolveHttpRequest(
     body: httpRequest.body,
     headers: normalizeHeaders(httpRequest.headers),
   })
-  return { request, context: httpRequest.context }
+  return { request, context: httpRequest.context, clientLeft: noTransportEvidence }
 }
 
 function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {

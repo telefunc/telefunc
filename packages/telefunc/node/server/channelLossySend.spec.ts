@@ -539,6 +539,8 @@ describe('a large lossy send near the memory budget', () => {
     const post = (frames: Uint8Array<ArrayBuffer>[], extra = {}) =>
       handleSseChannelRequest(
         new Request(url, { method: 'POST', body: encodeSseRequest({ connId, ...extra }, frames) }),
+        undefined,
+        () => false,
       )
     const open = [{ id: channel.id, ix: 0, lastSeq: 0, initial: true as const }]
     // The peer the mux attaches it with says how long its wire takes to confirm a send.

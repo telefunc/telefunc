@@ -12,7 +12,11 @@ config.channel = { pingInterval: 1000 }
 
 function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-  return handleSseChannelRequest(new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit))
+  return handleSseChannelRequest(
+    new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit),
+    undefined,
+    () => false,
+  )
 }
 
 test('a batch POST whose wire closed before its frames ran is refused', async () => {

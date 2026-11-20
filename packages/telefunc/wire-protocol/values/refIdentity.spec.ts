@@ -644,6 +644,7 @@ describe('extension wire types registered while a telefunc module loads', () => 
 
     const parsed = await parseHttpRequest({
       request,
+      clientLeft: () => false,
       requestContext,
       logMalformedRequests: false,
       serverConfig: getServerConfig(),

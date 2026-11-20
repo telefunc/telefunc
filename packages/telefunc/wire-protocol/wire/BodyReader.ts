@@ -45,13 +45,13 @@ class BodyReader {
   private disconnected = false
   /** Why a read of the source failed: its client left (the body is truncated), or the app's own error. */
   private failure: { error: unknown; clientLeft: boolean } | undefined
-  /** Whether a read's failure is the client leaving, on the transport's evidence (`clientLeft()`, the caller's). */
-  private isClientLeaving: (err: unknown) => boolean
+  /** Whether a read's failure is the client leaving, on the evidence of the server that received the request (the caller's). */
+  private clientLeft: (err: unknown) => boolean
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
-  constructor(source: ReadableStream<Uint8Array> | Readable, isClientLeaving: (err: unknown) => boolean) {
-    this.isClientLeaving = isClientLeaving
+  constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean) {
+    this.clientLeft = clientLeft
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
     // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
     // bypasses Node's webstreams `dequeueValue` overhead, which is why we accept
@@ -177,7 +177,7 @@ class BodyReader {
       return value
     } catch (error) {
       this.disconnected = true
-      this.failure = { error, clientLeft: this.isClientLeaving(error) }
+      this.failure = { error, clientLeft: this.clientLeft(error) }
       if (!this.failure.clientLeft) throw error
       return null
     }
