@@ -211,10 +211,10 @@ async function refuseAll(origins: string[]): Promise<{ lines: string[]; onceKeys
   }).alreadyLogged
   const refusals = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
     named: new Set<string>(),
-    quiet: false,
+    windowStart: 0,
   })
   refusals.named.clear()
-  refusals.quiet = false
+  refusals.windowStart = 0
   const onceKeysBefore = onceKeys.size
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
@@ -269,6 +269,22 @@ test.each([
   },
 )
 
+test("after 20 other sites' origins, a refused origin is named again once the next 10 minutes begin", async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  onTestFinished(() => {
+    vi.useRealTimers()
+  })
+  const strangers = Array.from({ length: 20 }, (_, i) => `https://stranger-${i}.example`)
+  await refuseAll(strangers)
+  vi.setSystemTime(Date.now() + 10 * 60 * 1000)
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  onTestFinished(() => warn.mockRestore())
+  expect(await upgradeStatus({ Host: host, Origin: 'https://own-pages.example' })).toBe(REFUSED)
+  expect(warn).toHaveBeenCalledWith(
+    expect.stringContaining('A WebSocket upgrade from https://own-pages.example was refused'),
+  )
+})
+
 test('refused handshakes from many origins name the first 20 origins, then say once that the rest are not logged', async () => {
   const origins = Array.from({ length: 40 }, (_, i) => `https://site-${i}.example`)
   const { lines, onceKeysAdded, namesKept } = await refuseAll([...origins, ...origins])
@@ -276,7 +292,10 @@ test('refused handshakes from many origins name the first 20 origins, then say o
   lines
     .slice(0, 20)
     .forEach((line, i) => expect(line).toContain(`A WebSocket upgrade from https://site-${i}.example was refused`))
-  expect(lines[20]).toContain('were refused: the upgrades of further origins are refused without a warning')
+  expect(lines[20]).toContain(
+    'were refused within 10 minutes: the upgrades of further origins are refused without a warning until those 10 minutes have passed',
+  )
   expect(onceKeysAdded).toBe(0)
-  expect(namesKept).toEqual(origins.slice(0, 20))
+  // The 21st stands for the closing line.
+  expect(namesKept).toEqual(origins.slice(0, 21))
 })

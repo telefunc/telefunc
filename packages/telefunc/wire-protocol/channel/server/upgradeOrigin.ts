@@ -5,17 +5,21 @@ import { originOf } from './allowedOrigin.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
-/** How many refused origins a process names in its log. An app whose own pages are refused finds their origin among the
- *  first it names; past this many, a refusal keeps and prints nothing, however many origins clients send. */
+/** How many refused origins the log names in a window. An app whose own pages are refused finds their origin among the
+ *  first it names; past this many, a refusal prints nothing until the window ends, however many origins clients send. */
 const REFUSED_ORIGINS_NAMED_MAX = 20
+/** How long a window of refusal names lasts: the next one names refused origins afresh, so an app's own is never left out
+ *  of the log for good. */
+const REFUSED_ORIGINS_WINDOW_MS = 10 * 60 * 1000
 /** The longest hostname DNS has: a longer one is no page's origin. */
 const HOSTNAME_MAX = 253
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
-  /** The refused origins the log named, by the name it gave them. */
+  /** The refused origins the log named in this window, by the name it gave them. One past the bound stands for the
+   *  window's closing line, printed once. */
   named: new Set<string>(),
-  /** Past the bound: no refusal is logged any more. */
-  quiet: false,
+  /** When this window began, by `Date.now()`. */
+  windowStart: 0,
 })
 
 /** The answer to a WebSocket upgrade that a page of another origin, which the app didn't allow, makes; undefined where
@@ -49,20 +53,25 @@ function refused(): Response {
   return new Response(null, { status: 403 })
 }
 
-/** Once per name, for the first `REFUSED_ORIGINS_NAMED_MAX` names; the next one says that the rest are not logged.
- *  `noOrigin` says why the page has no origin `config.channel.allowedOrigins` could list, where it has none. */
+/** Once per name and window, for the first `REFUSED_ORIGINS_NAMED_MAX` names; the next one says that the rest of the
+ *  window's are not logged. `noOrigin` says why the page has no origin `config.channel.allowedOrigins` could list, where
+ *  it has none. */
 function warnRefusal(name: string, noOrigin?: string): void {
-  if (globalObject.quiet || globalObject.named.has(name)) return
-  if (globalObject.named.size === REFUSED_ORIGINS_NAMED_MAX) {
-    globalObject.quiet = true
+  const now = Date.now()
+  if (now - globalObject.windowStart >= REFUSED_ORIGINS_WINDOW_MS) {
+    globalObject.named.clear()
+    globalObject.windowStart = now
+  }
+  if (globalObject.named.size > REFUSED_ORIGINS_NAMED_MAX || globalObject.named.has(name)) return
+  globalObject.named.add(name)
+  if (globalObject.named.size > REFUSED_ORIGINS_NAMED_MAX) {
     assertWarning(
       false,
-      `WebSocket upgrades from more than ${REFUSED_ORIGINS_NAMED_MAX} origins were refused: the upgrades of further origins are refused without a warning.`,
+      `WebSocket upgrades from more than ${REFUSED_ORIGINS_NAMED_MAX} origins were refused within ${REFUSED_ORIGINS_WINDOW_MS / 60_000} minutes: the upgrades of further origins are refused without a warning until those ${REFUSED_ORIGINS_WINDOW_MS / 60_000} minutes have passed.`,
       { onlyOnce: false },
     )
     return
   }
-  globalObject.named.add(name)
   const pageAfter =
     "A page that also takes SSE stays on SSE; one with WebSocket alone can't connect, and its channels end as when the server is unreachable."
   assertWarning(
