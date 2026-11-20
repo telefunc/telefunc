@@ -33,8 +33,9 @@ import {
   HolderGrants,
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
-  LEASE_SCHEMA,
   grantHolder,
+  initLeaseSchema,
+  leaseRegistered,
   liveLeases,
   registerLease,
   removeLease,
@@ -177,10 +178,7 @@ class MemberAttempt extends DriverAttempt {
   }
 }
 
-const AUTHORITY_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-  ${LEASE_SCHEMA}
-`
+const AUTHORITY_SCHEMA = 'CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL)'
 
 /** The Broadcast state of a key authority DO, in its SQLite storage: each key's `seq` and each route's member presence.
  *  The tables are created on first use, so a DO in another role never has them. */
@@ -217,7 +215,7 @@ class CloudflareBroadcastAuthorityState {
     const held = this.transaction((sql) =>
       registerLease(sql, { scope, holder: member, lease, bucket }, order, Date.now()),
     )
-    return held === 'repeated' ? 'registered' : held
+    return leaseRegistered(held)
   }
 
   renew({ key, kind, member, lease }: BroadcastLeaseRequest): LeaseRenewed {
@@ -246,6 +244,7 @@ class CloudflareBroadcastAuthorityState {
   private sql(): SqlStorage {
     if (!this.schema) {
       this.storage.sql.exec(AUTHORITY_SCHEMA)
+      initLeaseSchema(this.storage.sql)
       this.schema = true
     }
     return this.storage.sql

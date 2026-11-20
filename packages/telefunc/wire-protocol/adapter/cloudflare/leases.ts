@@ -2,11 +2,12 @@
 export {
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
-  LEASE_SCHEMA,
   HolderGrants,
   dropLeaseScopes,
   grantHolder,
+  initLeaseSchema,
   leaseAnswer,
+  leaseRegistered,
   liveLeases,
   nextLeaseSweep,
   registerLease,
@@ -44,6 +45,12 @@ const LEASE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS telefunc_lease_by_holder ON telefunc_lease(holder);
 `
 
+/** Creates the lease tables in `sql`, if they aren't there: outside any transaction, which a refused write rolls
+ *  back. */
+function initLeaseSchema(sql: SqlStorage): void {
+  sql.exec(LEASE_SCHEMA)
+}
+
 /** Where a write stands among its holder's writes: the grant its authority issued to the holder, then the holder's
  *  sequence number. */
 type LeaseOrder = { grant: number; seq: number }
@@ -53,6 +60,11 @@ type Lease = { scope: string; holder: string; lease: string; bucket: string }
 type LeaseRegistered = 'registered' | 'stale' | 'regrant'
 /** `repeated`: this register reached the authority before, and is the row's latest write. */
 type LeaseWritten = LeaseRegistered | 'repeated'
+
+/** What a register's caller is answered: one that came before, as it was. */
+function leaseRegistered(written: LeaseWritten): LeaseRegistered {
+  return written === 'repeated' ? 'registered' : written
+}
 type LeaseRenewed = 'renewed' | 'lapsed'
 /** `regrant`: the holder's grant is not that one, so nothing was removed. */
 type LeaseRemoved = 'removed' | 'regrant'

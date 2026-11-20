@@ -47,7 +47,7 @@ import {
   type ExpiringCellsRead,
   type StaleIncarnation,
 } from '../backend/contract.js'
-import { LEASE_SCHEMA, dropLeaseScopes, nextLeaseSweep } from 'telefunc/__internal'
+import { dropLeaseScopes, initLeaseSchema, nextLeaseSweep } from 'telefunc/__internal'
 import { incarnationScopes } from './routes.js'
 import {
   countCell,
@@ -98,7 +98,6 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS rt_chunk
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
        PRIMARY KEY (inc, lane_key, i));
-    ${LEASE_SCHEMA}
     CREATE TABLE IF NOT EXISTS handoff
       (inc TEXT NOT NULL, seq INTEGER NOT NULL, lane_key TEXT NOT NULL, ts INTEGER NOT NULL, payload BLOB NOT NULL,
        resume_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, seq));
@@ -106,6 +105,7 @@ function initSchema(sql: SqlStorage): void {
       (id INTEGER PRIMARY KEY CHECK (id = 1), room_id TEXT NOT NULL, inc_tag TEXT, bucket TEXT NOT NULL,
        version INTEGER NOT NULL, due_at INTEGER);
   `)
+  initLeaseSchema(sql)
 }
 
 /** The room's listing, as its region's directory is to show it: the incarnation its head lists, or none. `version`

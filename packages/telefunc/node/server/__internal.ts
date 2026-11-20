@@ -89,10 +89,11 @@ export {
   HolderGrants,
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
-  LEASE_SCHEMA,
   dropLeaseScopes,
   grantHolder,
+  initLeaseSchema,
   leaseAnswer,
+  leaseRegistered,
   liveLeases,
   nextLeaseSweep,
   registerLease,
@@ -106,7 +107,6 @@ export type {
   LeaseRegistered,
   LeaseRemoved,
   LeaseWritten,
-  LeaseRenewed,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'

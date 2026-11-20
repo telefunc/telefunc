@@ -26,6 +26,7 @@ import {
   OrderedStubs,
   grantHolder,
   leaseAnswer,
+  leaseRegistered,
   liveLeases,
   registerLease,
   removeLease,
@@ -370,9 +371,7 @@ class RoomAuthority {
     const now = Date.now()
     const registration = this.transaction((sql): RegisterWire => {
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) return 'dropped'
-      const written = registerLease(sql, routeLease(route), order, now)
-      // A registration that came before is answered as it was.
-      return written === 'repeated' ? 'registered' : written
+      return leaseRegistered(registerLease(sql, routeLease(route), order, now))
     })
     if (registration === 'registered') await this.scheduleMaintenanceIfNeeded()
     return registration

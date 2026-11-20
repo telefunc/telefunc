@@ -37,26 +37,34 @@ function setup(
     if (next instanceof Promise) return next
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
   }
-  const authority = {
+  /** The authority's answer to each call the session makes, by method. */
+  const authority: Record<string, (args: unknown[]) => Promise<unknown>> = {
     grantHolder: () => answers.grant ?? Promise.resolve(1),
-    runOperationWithInbox: (_inc: string, request: unknown) => (carried.push(request), answer(answers.carry ?? [])),
+    runOperationWithInbox: (args) => (carried.push(args[1]), answer(answers.carry ?? [])),
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
-    unsubscribeRoute: async () => {},
+    unsubscribeRoute: () => Promise.resolve('removed'),
+  }
+  const namespace: TelefuncExtensionNamespace = {
+    idFromName: (name) => name,
+    idFromString: (id) => id,
+    get: () => {
+      const refusal = answers.open?.shift()
+      if (refusal) throw refusal
+      return {
+        telefuncDurableObjectCall: (_extension, method, args) =>
+          authority[method]?.(args) ?? Promise.reject(new Error(`The test's authority takes no ${method} call`)),
+      }
+    },
   }
   /** What the session hands Broadcast to take the lane's frames, by route key. */
   const takes = new Map<string, BackendReceiver>()
-  const member = {
+  const member: CloudflareMember = {
     bucket: 'weur',
-    subscribeLocal: (route: { key: string }, taker: BackendReceiver) => (takes.set(route.key, taker), () => {}),
-  } as unknown as CloudflareMember
-  const driver = {
-    stub: () => {
-      const refusal = answers.open?.shift()
-      if (refusal) throw refusal
-      return authority
-    },
-  } as unknown as CloudflareRoomDriver
+    hostKey: 'host',
+    subscribeLocal: (route, taker) => (takes.set(route.key, taker), () => {}),
+  }
+  const driver = new CloudflareRoomDriver({ getNamespace: () => namespace, locationFallback: 'weur' })
   const subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
   /** The seq of each frame the lane's receiver got. */
   const delivered: number[] = []
