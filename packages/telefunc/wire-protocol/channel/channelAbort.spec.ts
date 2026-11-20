@@ -7,7 +7,6 @@ import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { Abort } from '../../node/server/Abort.js'
-import { isAbort } from '../../shared/Abort.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -84,7 +83,7 @@ async function pair() {
 }
 
 /** An abort's value, or what else `err` is. */
-const endOf = (err: unknown) => (isAbort(err) ? { abortValue: err.abortValue } : { notAnAbort: err })
+const endOf = (err: unknown) => (err instanceof Abort ? { abortValue: err.abortValue } : { notAnAbort: err })
 
 /** What each end's `onClose()` callbacks got, by `endOf()`: `null` where they haven't run. */
 function closings(ends: Record<string, ServerChannel<unknown, unknown> | ClientChannel<unknown, unknown>>) {

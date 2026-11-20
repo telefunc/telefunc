@@ -36,7 +36,7 @@ import {
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400 | 409 | 422
@@ -309,7 +309,11 @@ class SseServerTransport {
       if (err instanceof OversizeFrameError && connId !== null) this.closeWireOf(connId)
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
-      if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) {
+      if (
+        err instanceof ProtocolViolationError ||
+        err instanceof OversizeFrameError ||
+        err instanceof StreamTruncatedError
+      ) {
         return badRequest()
       }
       throw err
@@ -573,7 +577,8 @@ function parseMetadata(raw: string): SseRequestMetadata {
 }
 
 function reportDispatchBug(err: unknown): void {
-  if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) return
+  if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError || err instanceof StreamTruncatedError)
+    return
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 

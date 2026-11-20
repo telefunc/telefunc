@@ -4,7 +4,7 @@ export type { ChannelLifecycleOwner }
 import type { ChannelCloseCallback, ChannelCloseResult } from './channel.js'
 import { ChannelClosedError } from './channelErrors.js'
 import { ChannelEnding, type EndingFrame, type EndingSide } from './ChannelEnding.js'
-import { isAbort, type AbortError } from '../../shared/Abort.js'
+import { Abort, type AbortError } from '../../shared/Abort.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { DeadlineTimer } from './DeadlineTimer.js'
@@ -158,7 +158,7 @@ class ChannelLifecycle {
   /** A callback's `Abort` aborts the channel: true where `err` is one. A send the callback made after the end raced
    *  the end, as a send it awaited does, so what that send threw isn't reported either. */
   handleCallbackError(err: unknown): boolean {
-    if (isAbort(err)) {
+    if (err instanceof Abort) {
       this.owner._abortFromCallback(err)
       return true
     }
@@ -288,7 +288,7 @@ class ChannelLifecycle {
   }
 
   private closeCallbackFailed(err: unknown): void {
-    if (isAbort(err) && !this.ending.ended) this.owner._abortFromCallback(err)
+    if (err instanceof Abort && !this.ending.ended) this.owner._abortFromCallback(err)
     else this.report(err)
   }
 }

@@ -23,7 +23,7 @@ import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
-import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
 import { ChannelPageLeftError, rejectedFrameError } from '../channelErrors.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
@@ -85,7 +85,7 @@ type ReconcileOutcome = {
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
-  if (!isProtocolViolationError(err) || err.target !== undefined) return err
+  if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
   return new ProtocolViolationError(err.message, probe)
 }
 
@@ -347,7 +347,7 @@ class ChannelMux implements UpgradeStagesOwner {
         if (frame[0] === TAG.RECONCILE) outcome = dispatched
       }
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
+      if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(wire)
     }
     return outcome
@@ -463,7 +463,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
-      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire)
+      if (err instanceof ProtocolViolationError) this.terminateWire(err.target ?? entry.wire)
       else handleTelefunctionBug(err)
       return null
     } finally {
@@ -810,7 +810,7 @@ class ChannelMux implements UpgradeStagesOwner {
       for (const { frame } of held) this.dispatchChannelFrame(sessionId, frame)
       return true
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
+      if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(entry.wire)
       return false
     }

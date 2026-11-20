@@ -44,7 +44,7 @@ import { LossyDelivery } from './LossyDelivery.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { isAbort } from '../../../node/server/Abort.js'
+import { Abort } from '../../../node/server/Abort.js'
 import type { EndingFrame } from '../ChannelEnding.js'
 assertIsNotBrowser()
 
@@ -863,7 +863,7 @@ function callStaticListener<D>(
 }
 
 function reportStaticListenerError(err: unknown): void {
-  if (!isAbort(err)) handleCallbackBug(err)
+  if (!(err instanceof Abort)) handleCallbackBug(err)
 }
 
 /** The subscription `subscribe` starts; where it throws and `orFailure`, one whose `opened` rejects with that. */

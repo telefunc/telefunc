@@ -15,7 +15,7 @@ import { ServerBroadcast } from './server/ServerBroadcast.js'
 import type { IndexedPeer } from './server/IndexedPeer.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { ClientBroadcast } from './client/ClientBroadcast.js'
-import { isAbort } from '../../shared/Abort.js'
+import { Abort } from '../../shared/Abort.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
 // The page's transport listens for `pagehide` on the global object, as in a browser.
@@ -185,7 +185,7 @@ test("an ended broadcast the app keeps lets go of its page's wire once the page 
   const otherPage = new ClientChannel<unknown, unknown>({ channelId: other.id, connection })
   await Promise.all([channel.opened, page.opened, other.opened, otherPage.opened])
   channel.abort('stop')
-  expect(isAbort(await page.closed)).toBe(true)
+  expect(await page.closed).toBeInstanceOf(Abort)
   // The page's next heartbeat confirms the abort, and the server releases the channel.
   await vi.waitFor(
     async () => {

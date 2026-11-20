@@ -1,13 +1,12 @@
-export { Abort, AbortError, isAbort, createAbortError }
+export { Abort, AbortError, createAbortError }
 
 import { assertUsage } from '../utils/assert.js'
+import { markErrorClass } from './markErrorClass.js'
 
-const abortBrand = Symbol.for('telefunc.Abort')
 const DEFAULT_ABORT_MESSAGE = 'Aborted'
 
 class AbortError extends Error {
   readonly abortValue: unknown
-  readonly [abortBrand] = true as const
   /**
    * @deprecated Use `instanceof Abort` instead.
    */
@@ -24,6 +23,7 @@ class AbortError extends Error {
 
 type AbortFactory = {
   (abortValue?: unknown): AbortError
+  prototype: AbortError
   [Symbol.hasInstance](thing: unknown): thing is AbortError
 }
 
@@ -36,16 +36,12 @@ const Abort = function Abort(abortValue?: unknown): AbortError {
   return createAbortError(abortValue)
 } as AbortFactory
 
-Object.defineProperty(Abort, Symbol.hasInstance, {
-  value: (thing: unknown) => isAbort(thing),
-})
+// `Abort` is the class of the errors it makes: the class an app tests with `instanceof`.
+Abort.prototype = AbortError.prototype
+markErrorClass(Abort, 'Abort')
 
 function createAbortError(abortValue?: unknown, message?: string): AbortError {
   return new AbortError(abortValue, message)
-}
-
-function isAbort(thing: unknown): thing is AbortError {
-  return thing instanceof AbortError || (typeof thing === 'object' && thing !== null && abortBrand in thing)
 }
 
 function getAbortMessage(abortValue: unknown): string {

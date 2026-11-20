@@ -8,6 +8,7 @@ export {
 }
 
 import { NetworkError } from '../../shared/NetworkError.js'
+import { markErrorClass } from '../../shared/markErrorClass.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
@@ -49,6 +50,11 @@ class ChannelPageLeftError extends NetworkError {
     this.name = 'ChannelPageLeftError'
   }
 }
+
+markErrorClass(ChannelClosedError, 'ChannelClosedError')
+markErrorClass(ChannelOverflowError, 'ChannelOverflowError')
+markErrorClass(ChannelCloseUnknownError, 'ChannelCloseUnknownError')
+markErrorClass(ChannelPageLeftError, 'ChannelPageLeftError')
 
 /** How a channel ends on both ends when the server refused its client's wire for a frame it couldn't read. */
 function rejectedFrameError(): ChannelClosedError {
