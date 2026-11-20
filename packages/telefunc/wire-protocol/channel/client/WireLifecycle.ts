@@ -1,5 +1,5 @@
 export { WireLifecycle }
-export type { TransportOwner, WireLifecycleOwner }
+export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -20,11 +20,12 @@ import {
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
 import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
+import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
+import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
-import { ChannelTable } from './ChannelTable.js'
+import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
@@ -37,12 +38,24 @@ import { SseTransport } from './SseTransport.js'
 
 import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from './ClientConnection.js'
 
+/** Why a transport's wire closed, where it knows more than that it was lost. */
+type TransportEnd = {
+  /** What the server answered the wire's opening with, which wasn't a wire. */
+  refusal?: string
+  /** The server runs another `WIRE_VERSION`. */
+  otherWireVersion?: boolean
+  /** A request carrying what the page sent was refused with `answer`, which asked to wait `retryAfterMs` before
+   *  another (see `onTransportRefused`). */
+  refused?: { answer: string; retryAfterMs: number }
+}
+
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
   onTransportOpen(transport: ClientChannelTransport): void
-  /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
-   *  another `WIRE_VERSION`. */
-  onTransportClosed(transport: ClientChannelTransport, options?: { refusal?: string; otherWireVersion?: boolean }): void
+  onTransportClosed(transport: ClientChannelTransport, end?: TransportEnd): void
+  /** A request carrying `frames` was refused with `answer`. Whether the connection is to be established again, so that
+   *  its RECONCILED says what the server has: false only where every channel whose data it refused ended. */
+  onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
@@ -356,7 +369,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { refusal, otherWireVersion = false }: { refusal?: string; otherWireVersion?: boolean } = {},
+    { refusal, otherWireVersion = false, refused }: TransportEnd = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -372,8 +385,44 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     this.upgrade.abortAttempt()
+    if (refused) {
+      const err = new NetworkError(`The server refused what the page sent with ${refused.answer}`, true)
+      this.handleTransportLoss(err, false, refused.retryAfterMs)
+      return
+    }
     const err = new NetworkError(refusal ?? 'Connection dropped', true)
     this.handleTransportLoss(err, refusal !== undefined)
+  }
+
+  /** Counts the refusal against the channels whose sequenced frames are among `frames`, through the highest seq
+   *  refused: one whose frames were refused on an earlier wire too, so after the connection was established again, ends.
+   *  A 200 for another request clears nothing: what counts is what the server has of each channel. */
+  onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean {
+    const refused = new Set<ChannelRecord>()
+    const refusedAgain = new Set<ChannelRecord>()
+    for (const frame of frames) {
+      const tag = frame[0]
+      if (tag === undefined || !isSequencedTag(tag)) continue
+      const record = this.channels.get(readU16(frame, 1))
+      if (record === undefined || refusedAgain.has(record)) continue
+      refused.add(record)
+      const seq = this.channels.sentThrough(record.ix, readU32(frame, SEQ_OFFSET))
+      const before = record.refused
+      if (before !== null && before.wire < this.wire && seq <= before.throughSeq) refusedAgain.add(record)
+      else record.refused = { wire: this.wire, throughSeq: Math.max(seq, before?.throughSeq ?? 0) }
+    }
+    // Released, which a RECONCILE tells the server, ending it there: one on this wire, or the next wire's.
+    if (refusedAgain.size > 0) this.exchange.scheduleRegisterReconcile()
+    for (const record of refusedAgain) {
+      this.gate.release(record)
+      record.channel._onEnded(
+        new NetworkError(
+          `Channel closed: what the page sent on it was refused with ${answer}, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.`,
+          true,
+        ),
+      )
+    }
+    return refusedAgain.size === 0 || refused.size > refusedAgain.size
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
@@ -508,7 +557,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
-  private handleTransportLoss(err: Error, rejected: boolean): void {
+  /** `retryAfterMs`: the least wait before the next attempt that the answer that ended the wire asked for. */
+  private handleTransportLoss(err: Error, rejected: boolean, retryAfterMs = 0): void {
     if (this.closed) return
     if (this.upgrade.flipped) {
       this.fallbackToSse(err)
@@ -541,7 +591,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     recovery.attempt = attempt + 1
     // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
     // deadline ends the channels.
-    const delay = reconnectDelay(attempt)
+    const delay = Math.max(reconnectDelay(attempt), retryAfterMs)
     this.enterReconnecting(performance.now() + delay + this.handshakeMs < recovery.deadline ? delay : null)
   }
 

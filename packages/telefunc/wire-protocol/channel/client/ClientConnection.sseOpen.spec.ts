@@ -1,6 +1,6 @@
-// What a page does with the answer to its SSE open. A REAL ClientChannel and its connection open over the page's own
-// `fetch` against a scripted HTTP server: each open the server gets is answered by the next answer a test lists, and
-// once those run out, with a wire.
+// What a page does with the answers to its SSE requests. A REAL ClientChannel and its connection open over the page's
+// own `fetch` against a scripted HTTP server: each open the server gets is answered by the next answer a test lists, and
+// once those run out, with a wire; a batch POST larger than `postLimit` is refused as a proxy's body limit refuses it.
 
 import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -13,8 +13,8 @@ import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
-/** An answer to an open of the channel `ix`. */
-type Answer = (res: ServerResponse, ix: number) => void
+/** An answer to an open of the channels `ixes`. */
+type Answer = (res: ServerResponse, ixes: number[]) => void
 
 let server: Server
 let url: string
@@ -24,6 +24,14 @@ let wires: ServerResponse[]
 let channels: ClientChannel[]
 /** The upload POST is held, neither acknowledged nor answered, as by a proxy that buffers a request's body. */
 let holdUploads: boolean
+/** The largest batch POST body taken: a larger one is answered 413, unread. */
+let postLimit: number
+/** Each batch POST's body size and status. */
+let posts: { bytes: number; status: number }[]
+/** The data frames batch POSTs carried, by tag and size. */
+let received: { tag: number; bytes: number }[]
+/** The channels the RECONCILEs that batch POSTs carried released. */
+let released: number[]
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -46,13 +54,13 @@ async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[]
   return frames
 }
 
-/** A wire: the event stream, with the RECONCILED for the channel the open's RECONCILE names. */
+/** A wire: the event stream, with the RECONCILED for the channels the open's RECONCILE names. */
 function wire({ pingInterval = 100_000, reconnectTimeout = 60_000 } = {}): Answer {
-  return (res, ix) => {
+  return (res, ixes) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' })
     const frame = encode.reconciled({
       sessionId: crypto.randomUUID(),
-      open: [{ ix, lastSeq: 0 }],
+      open: ixes.map((ix) => ({ ix, lastSeq: 0 })),
       reconnectTimeout,
       idleTimeout: 60_000,
       pingInterval,
@@ -77,22 +85,43 @@ beforeEach(async () => {
   wires = []
   channels = []
   holdUploads = false
+  postLimit = Infinity
+  posts = []
+  received = []
+  released = []
   server = createServer((req, res) => {
     // A page a redirect sent here.
     if (req.method === 'GET') return html(200)(res)
     // The upload POST that would stream: ended at once, its frames go in batch POSTs.
     if (req.headers['transfer-encoding'] === 'chunked') return holdUploads ? undefined : void res.end()
+    const bytes = Number(req.headers['content-length'])
+    if (bytes > postLimit) {
+      posts.push({ bytes, status: 413 })
+      req.resume()
+      req.on('end', () =>
+        res.writeHead(413, { 'Content-Type': 'text/html' }).end('<h1>413 Request Entity Too Large</h1>'),
+      )
+      return
+    }
     void framesOf(req).then((frames) => {
       if (frames === null) return
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
-      if (!metadata.streamResponse) return void res.end()
+      if (!metadata.streamResponse) {
+        posts.push({ bytes, status: 200 })
+        for (const raw of frames.slice(1)) {
+          if (raw[0] === TAG.TEXT || raw[0] === TAG.BINARY) received.push({ tag: raw[0], bytes: raw.byteLength })
+          const frame = decode(raw)
+          if (frame.tag === TAG.RECONCILE) released.push(...(frame.payload.released ?? []))
+        }
+        return void res.end()
+      }
       opens++
       const reconcile = frames
         .slice(1)
         .map((raw) => decode(raw))
         .find((frame) => frame.tag === TAG.RECONCILE)
-      const ix = reconcile?.tag === TAG.RECONCILE ? (reconcile.payload.open[0]?.ix ?? 0) : 0
-      ;(answers.shift() ?? wire())(res, ix)
+      const ixes = reconcile?.tag === TAG.RECONCILE ? reconcile.payload.open.map(({ ix }) => ix) : []
+      ;(answers.shift() ?? wire())(res, ixes)
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -107,10 +136,11 @@ afterEach(async () => {
   await new Promise((resolve) => server.close(resolve))
 })
 
-function openChannel() {
+/** `connectionKey`: channels given the same one share a connection. */
+function openChannel(connectionKey = crypto.randomUUID()) {
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
-    connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey: crypto.randomUUID() },
+    connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey },
   })
   channels.push(channel)
   return channel
@@ -264,5 +294,44 @@ test.each([
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
     expect(closing).toBeInstanceOf(Error)
     expect((closing as Error).message).toBe(message)
+  },
+)
+
+// The page's first POST is sized to 64 KiB, so two messages of 60 KiB go in one POST of about 120 KiB.
+test('a POST of several messages refused for its size goes again in smaller POSTs, on the same wire', async () => {
+  postLimit = 100 * 1024
+  const channel = openChannel()
+  expect(await openingOf(channel)).toBe('opened')
+  await Promise.all([0, 1, 2].map(() => channel.sendBinary(new Uint8Array(60 * 1024))))
+  while (received.length < 3) await delay(20)
+  expect(posts.filter(({ status }) => status === 413).length).toBe(1)
+  expect(posts.every(({ bytes, status }) => status === 413 || bytes <= postLimit)).toBe(true)
+  expect({ opens, closed: channel.isClosed }).toEqual({ opens: 1, closed: false })
+})
+
+// A first reconnect waits up to 0.5 s.
+test(
+  'a message refused for its size alone ends its channel after one reconnect, naming the answer',
+  { timeout: 15_000 },
+  async () => {
+    postLimit = 1024 * 1024
+    const connectionKey = crypto.randomUUID()
+    const channel = openChannel(connectionKey)
+    const other = openChannel(connectionKey)
+    expect(await Promise.all([openingOf(channel), openingOf(other)])).toEqual(['opened', 'opened'])
+    void channel.sendBinary(new Uint8Array(2 * 1024 * 1024)).catch(() => {})
+    const closing = await closingOf(channel)
+    expect((closing as Error).message).toBe(
+      "Channel closed: what the page sent on it was refused with 413 text/html, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.",
+    )
+    expect(posts.filter(({ status }) => status === 413).length).toBe(2)
+    // The server is told on the wire the reconnect opened, which the second refusal doesn't end.
+    while (released.length < 1) await delay(20)
+    expect(released).toEqual([0])
+    await delay(1500)
+    expect(opens).toBe(2)
+    await other.send('hello')
+    while (received.length < 1) await delay(20)
+    expect(other.isClosed).toBe(false)
   },
 )

@@ -33,6 +33,8 @@ type ChannelRecord = {
   lastSeq: number
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
+  /** The last time a request carrying what it sent was refused: on `wire`, through `throughSeq`. */
+  refused: { wire: number; throughSeq: number } | null
 }
 
 /** The channels a page's connection carries, one record per wire index. */
@@ -134,6 +136,7 @@ class ChannelTable {
       replay,
       lastSeq: 0,
       awaited: false,
+      refused: null,
     }
     this.records.set(ix, record)
     this.byChannel.set(channel, record)

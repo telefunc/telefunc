@@ -13,7 +13,6 @@ import {
   SSE_POST_MIN_BYTES_PER_S,
   SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
-  STATUS_CODE_WIRE_VERSION,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
@@ -34,10 +33,11 @@ import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
-import type { TransportOwner } from './WireLifecycle.js'
+import type { TransportEnd, TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { readAnswer, type HttpAnswer } from './readAnswer.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -50,11 +50,11 @@ type SseInitialBatchStage = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-/** A wire's streaming upload POST: its body, what aborts it alone, and its end. */
+/** A wire's streaming upload POST: its body, what aborts it alone, and its end: its answer, null where none came. */
 type StreamUpload = {
   body: PushReadableStream<Uint8Array<ArrayBuffer>>
   abort: AbortController
-  ended: Promise<'fetch-ended'>
+  ended: Promise<HttpAnswer | null>
 }
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
@@ -105,6 +105,8 @@ class SseTransport implements UpgradeSource {
   private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
+  /** The most a batch POST carries: half of what something in front refused with a 413. */
+  private postLimit = Infinity
   /** The body of the batch POST out, 0 with none. */
   private postOutBytes = 0
   /** The frames in `outbox`. */
@@ -313,24 +315,21 @@ class SseTransport implements UpgradeSource {
       abortController.abort()
       return null
     }
-    if (response.status === STATUS_CODE_WIRE_VERSION) {
+    const answer = readAnswer(response, 'event-stream')
+    if (answer.tag === 'otherWireVersion') {
       this.failOpen(stage, abortController, { otherWireVersion: true })
       return null
     }
-    if (!response.ok) {
+    // A login page or an app's HTML fallback, also behind a followed redirect, is no event stream.
+    if (answer.tag === 'refused') {
       this.failOpen(stage, abortController, {
-        refusal: `Server rejected SSE connection with ${describeAnswer(response)}`,
+        refusal: response.ok
+          ? `The server answered the SSE connection with ${answer.answer}, not an event stream`
+          : `Server rejected SSE connection with ${answer.answer}`,
       })
       return null
     }
-    // As a browser's EventSource requires (HTML, "the EventSource interface"): a 200 event stream. A login page or an
-    // app's HTML fallback, also behind a followed redirect, is not one.
-    if (response.status !== 200 || mediaTypeOf(response) !== 'text/event-stream' || !response.body) {
-      this.failOpen(stage, abortController, {
-        refusal: `The server answered the SSE connection with ${describeAnswer(response)}, not an event stream`,
-      })
-      return null
-    }
+    assert(response.body)
     return response.body
   }
 
@@ -365,11 +364,7 @@ class SseTransport implements UpgradeSource {
     const fetch = this.postAndRead(body.readable, abort.signal, { duplex: 'half' })
     this.streamRequest = { tag: 'active', body, unconfirmed: [] }
     // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
-    const ended = fetch.then(
-      () => 'fetch-ended' as const,
-      () => 'fetch-ended' as const,
-    )
-    return { body, abort, ended }
+    return { body, abort, ended: answerOf(fetch) }
   }
 
   /** The server acknowledged the upload: what it was written is confirmed. */
@@ -380,8 +375,14 @@ class SseTransport implements UpgradeSource {
 
   /** Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends. */
   private async endWireWithUpload({ body, ended }: StreamUpload, abortController: AbortController): Promise<void> {
-    await ended
-    if (this.streamRequest.tag === 'active' && this.streamRequest.body === body) abortController.abort()
+    const answer = await ended
+    if (this.streamRequest.tag !== 'active' || this.streamRequest.body !== body) return
+    // Something in front refuses a body that never ends (a limit on its size): the next wires send in batch POSTs.
+    if (answer?.tag === 'refused') {
+      this.closeStreamRequest()
+      this.streamRequest = { tag: 'failed' }
+    }
+    abortController.abort()
   }
 
   /** The upload went unacknowledged: frames go in batch POSTs from now on. */
@@ -489,6 +490,21 @@ class SseTransport implements UpgradeSource {
     return entries
   }
 
+  /** Takes what the next POST carries from the head of the outbox: entries while they come to less than `postBytes`, as
+   *  the headroom lets them in, and never past `postLimit`; one at least. A replay that refills the outbox goes so too. */
+  private takeOutboxHead(): OutboxEntry[] {
+    let count = 0
+    let bytes = 0
+    for (const { frame } of this.outbox) {
+      if (count > 0 && (bytes >= this.postBytes || bytes + frame.byteLength > this.postLimit)) break
+      bytes += frame.byteLength
+      count++
+    }
+    if (count === this.outbox.length) return this.takeOutbox()
+    this.outboxBytes -= bytes
+    return this.outbox.splice(0, count)
+  }
+
   /** Puts `entries` back at the head of the outbox. */
   private requeue(entries: OutboxEntry[]): void {
     this.outbox = entries.concat(this.outbox)
@@ -502,7 +518,7 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
-    const queued = this.takeOutbox()
+    const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
     this.lastPostStartedAt = now
@@ -514,19 +530,41 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
-      const response = await this.postWithDeadline(body, wire.signal)
-      if (!response.ok) throw new Error('POST failed')
-      this.sizePosts(body.size, performance.now() - now)
-      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
-    } catch {
+      const answer = await answerOf(this.postWithDeadline(body, wire.signal))
+      if (answer?.tag === 'expected') {
+        this.sizePosts(body.size, performance.now() - now)
+        this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
+        return
+      }
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
         this.requeue(queued.filter(isWindowRefresh))
         return
       }
+      if (answer?.tag === 'refused') {
+        if (answer.status === 413) {
+          this.postLimit = Math.floor(body.size / 2)
+          this.postBytes = Math.min(this.postBytes, this.postLimit)
+          // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
+          if (queued.length > 1) {
+            this.requeue(queued)
+            return
+          }
+        }
+        // Every channel whose data it refused ended: the wire goes on without that data.
+        if (
+          !this.owner.onTransportRefused(
+            queued.map(({ frame }) => frame),
+            answer.answer,
+          )
+        ) {
+          this.requeue(queued.filter((entry) => !isSequenced(entry)))
+          return
+        }
+      }
       this.requeue(queued)
       this.abandonActiveTransport()
-      this.owner.onTransportClosed(this)
+      this.owner.onTransportClosed(this, endOf(answer))
     } finally {
       this.flushing = false
       this.postOutBytes = 0
@@ -540,6 +578,7 @@ class SseTransport implements UpgradeSource {
   private sizePosts(bytes: number, ms: number): void {
     if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
     this.postBytes = Math.min(
+      this.postLimit,
       SSE_POST_MAX_BYTES,
       Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
     )
@@ -759,6 +798,11 @@ function bytesOf(entries: readonly OutboxEntry[]): number {
   return bytes
 }
 
+function isSequenced({ frame }: OutboxEntry): boolean {
+  const tag = frame[0]
+  return tag !== undefined && isSequencedTag(tag)
+}
+
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
@@ -801,16 +845,18 @@ function createSseEventStreamReader(
   return { cancel, readNextEntry }
 }
 
-/** The media type a response says it carries, without its parameters (`text/event-stream; charset=utf-8` is
- *  `text/event-stream`), as the Fetch standard extracts it; null without a `Content-Type`. */
-function mediaTypeOf(response: Response): string | null {
-  const contentType = response.headers.get('content-type')
-  return contentType === null ? null : (contentType.split(';', 1)[0] ?? '').trim().toLowerCase()
+/** The answer to `request`, read; null where none came. */
+async function answerOf(request: Promise<Response>): Promise<HttpAnswer | null> {
+  try {
+    return readAnswer(await request, 'ok')
+  } catch {
+    return null
+  }
 }
 
-/** A response's status and `Content-Type`, as an error message names them. */
-function describeAnswer(response: Response): string {
-  const contentType = response.headers.get('content-type')
-  const type = contentType === null ? ' and no Content-Type' : ` ${contentType}`
-  return `${response.status}${type}${response.body ? '' : ' and no body'}`
+/** Why a wire ends whose batch POST got `answer`: null where none came, a dropped connection. */
+function endOf(answer: HttpAnswer | null): TransportEnd {
+  if (answer === null || answer.tag === 'expected') return {}
+  if (answer.tag === 'otherWireVersion') return { otherWireVersion: true }
+  return { refused: { answer: answer.answer, retryAfterMs: answer.retryAfterMs } }
 }
