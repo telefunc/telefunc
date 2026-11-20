@@ -7,8 +7,8 @@ const SHAPES_031 = () => ({
   'client/remoteTelefunctionCall/serializeTelefunctionArguments.ts': { gcRegistry: { register() {} } },
 })
 
-// The head's module graph, transformed while the file is collected, outside any row's deadline: each row then evaluates
-// it fresh, after `vi.resetModules()`, at the cost of a cached import.
+// The head's module graph, transformed while the file is collected, outside any row's deadline: each row's set-up then
+// evaluates it fresh, after `vi.resetModules()`, at the cost of a cached import (seconds on a slow runner).
 await import('./telefunc.js')
 
 const FILE = '/twoVersions.telefunc.ts'
@@ -50,39 +50,54 @@ function load031() {
   return all
 }
 
+type Head = Awaited<ReturnType<typeof loadHead>>
+
 describe('two versions in one process: each keeps its own state', () => {
-  test("0.3.1 loaded first: the head's config takes an assignment, and a call with a function argument closes with no bug", async () => {
-    load031()
-    const { serve, config, bugs } = await loadHead()
-
-    config.telefuncUrl = '/_telefunc'
-    expect(config.telefuncUrl).toBe('/_telefunc')
-
-    const channelId = crypto.randomUUID()
-    const response = await serve({
-      request: new Request('https://example.test/_telefunc', {
-        method: 'POST',
-        headers: { 'x-telefunc-request': 'txt' },
-        body: JSON.stringify({
-          file: FILE,
-          name: 'onCallback',
-          args: [`!TelefuncFunction:${JSON.stringify({ channelId })}`],
-        }),
-      }),
+  describe('0.3.1 loaded first', () => {
+    let head: Head
+    beforeEach(async () => {
+      load031()
+      head = await loadHead()
     })
-    expect(response.statusCode).toBe(200)
-    // The request closes once that channel did, and runs its `onClose()` callbacks, the registry's among them.
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(bugs).toEqual([])
+
+    test("the head's config takes an assignment, and a call with a function argument closes with no bug", async () => {
+      const { serve, config, bugs } = head
+      config.telefuncUrl = '/_telefunc'
+      expect(config.telefuncUrl).toBe('/_telefunc')
+
+      const channelId = crypto.randomUUID()
+      const response = await serve({
+        request: new Request('https://example.test/_telefunc', {
+          method: 'POST',
+          headers: { 'x-telefunc-request': 'txt' },
+          body: JSON.stringify({
+            file: FILE,
+            name: 'onCallback',
+            args: [`!TelefuncFunction:${JSON.stringify({ channelId })}`],
+          }),
+        }),
+      })
+      expect(response.statusCode).toBe(200)
+      // The request closes once that channel did, and runs its `onClose()` callbacks, the registry's among them.
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(bugs).toEqual([])
+    })
   })
 
-  test("the head loaded first: 0.3.1 finds none of the head's objects under its keys", async () => {
-    const { config } = await loadHead()
-    config.telefuncUrl = '/rpc'
-    const all = load031()
+  describe('the head loaded first', () => {
+    let head: Head
+    beforeEach(async () => {
+      head = await loadHead()
+    })
 
-    for (const [key, shape] of Object.entries(SHAPES_031()))
-      expect(Object.keys(all[key] as object)).toEqual(Object.keys(shape))
-    expect(config.telefuncUrl).toBe('/rpc')
+    test("0.3.1 finds none of the head's objects under its keys", () => {
+      const { config } = head
+      config.telefuncUrl = '/rpc'
+      const all = load031()
+
+      for (const [key, shape] of Object.entries(SHAPES_031()))
+        expect(Object.keys(all[key] as object)).toEqual(Object.keys(shape))
+      expect(config.telefuncUrl).toBe('/rpc')
+    })
   })
 })
