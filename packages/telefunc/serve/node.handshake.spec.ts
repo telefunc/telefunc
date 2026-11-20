@@ -97,14 +97,25 @@ test.each([
     const { crashes, crashed } = recordCrashes()
     const printed = vi.spyOn(console, 'error').mockImplementation(() => {})
     onTestFinished(() => printed.mockRestore())
-    const mux = getChannelMux()
     const failure = new Error(`a failure in ${method}`)
-    const handling = vi.spyOn(mux, method)
-    onTestFinished(() => handling.mockRestore())
-    handling.mockImplementationOnce(() => {
-      if (method === 'onWireOpen') throw failure
-      return Promise.reject(failure)
-    })
+    // Replaced, not spied on: a spy handles the promise its mock returns, which would hide the rejection.
+    const mux = getChannelMux()
+    const { onWireOpen, onWireMessage } = mux
+    const restore = () => {
+      mux.onWireOpen = onWireOpen
+      mux.onWireMessage = onWireMessage
+    }
+    onTestFinished(restore)
+    if (method === 'onWireOpen')
+      mux.onWireOpen = () => {
+        restore()
+        throw failure
+      }
+    else
+      mux.onWireMessage = () => {
+        restore()
+        return Promise.reject(failure)
+      }
     const ws = await openWire()
     act(ws)
     // Without a catch, the throw ends the process instead of the wire.
