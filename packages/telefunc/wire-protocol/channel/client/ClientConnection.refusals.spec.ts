@@ -125,6 +125,25 @@ test('a PING that goes past a data POST the gateway holds, refused again after a
   expect(world.streams.length).toBeLessThanOrEqual(3)
 })
 
+test("a 409 that isn't Telefunc's, answered to a batch POST, doesn't tell the page that the server was updated", async () => {
+  const opened = await openOverSse(2)
+  const conflicted = opened(0)
+  const other = opened(1)
+  // An app's or a proxy's 409 Conflict, an HTML page: on this wire and on the next.
+  world.postAnswers = [
+    { tag: 'refused', status: 409 },
+    { tag: 'refused', status: 409 },
+  ]
+  void conflicted.channel.send('in conflict').catch(() => {})
+  await advance(5_000)
+  expect(conflicted.ended).toHaveLength(1)
+  expect(conflicted.ended[0]?.err?.message).toMatch(/refused with 409 text\/html, again after a reconnect/)
+  void other.channel.send('the connection goes on')
+  await advance(2_000)
+  expect(other.ended).toEqual([])
+  expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(1)
+})
+
 test("a late answer to a POST of a wire the page left doesn't size the POSTs of the wire after it", async () => {
   const page = (await openOverSse(1))(0)
   // Fast and full POSTs: the page sizes its next ones larger.

@@ -213,13 +213,22 @@ async function postFrames(body: Blob): Promise<{ metadata: SseRequestMetadata; f
 }
 
 /** How the server's side answers a batch POST: at once with a 200 (`taken`), after `ms` with a 200 (`slow`), with no
- *  answer once it took the frames (`lost`), or with `status` and an HTML page before taking them (`refused`); a
+ *  answer once it took the frames (`lost`), with `status` and an HTML page before taking them (`refused`), or with
+ *  `status` and the `Content-Type` values `contentType` before taking them (`typed`, as Telefunc's own refusals are); a
  *  refusal's `pongAfterMs` has the wire the POST went on carry a PONG that long after it, as one already on its way. */
 type PostAnswer =
   | { tag: 'taken' }
   | { tag: 'slow'; ms: number }
   | { tag: 'lost' }
   | { tag: 'refused'; status: number; pongAfterMs?: number }
+  | { tag: 'typed'; status: number; contentType: string[] }
+
+/** An answer with `status` and each of `contentType` as a `Content-Type` value of its own. */
+function typedResponse({ status, contentType }: { status: number; contentType: string[] }): Response {
+  const headers = new Headers()
+  for (const value of contentType) headers.append('Content-Type', value)
+  return new Response('Refused', { status, headers })
+}
 
 /** The test's server and what it saw; `useScriptedServer` makes a new one for each test. */
 type World = {
@@ -228,12 +237,16 @@ type World = {
   streams: ReturnType<typeof eventStream>[]
   postAnswers: PostAnswer[]
   controlAnswers: PostAnswer[]
+  /** How each open is answered before it opens, in order; an event stream once none is left. */
+  openAnswers: { status: number; contentType: string[] }[]
   postLimit: number
   holdOpens: boolean
   heldOpens: (() => void)[]
   holdReady: boolean
   heldReady: (() => void)[]
   posts: { bytes: number; status: number; data: boolean; wire: number }[]
+  /** How many opens the page sent. */
+  opens: number
 }
 
 const world: World = {
@@ -245,6 +258,7 @@ const world: World = {
   postAnswers: [],
   /** How the next batch POSTs that carry no data are answered, one each; once they run out, `taken`. */
   controlAnswers: [],
+  openAnswers: [],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
   /** While set, the server answers no open, and writes nothing on its stream: each waits in `heldOpens`, which a test
@@ -257,6 +271,7 @@ const world: World = {
   heldReady: [],
   /** Each batch POST: its body's size, its status (0 for none), whether it carried data, and the wire it went on. */
   posts: [],
+  opens: 0,
 }
 
 /** The page's `fetch` against the server over SSE: an open gets an event stream, any other POST its frames' answer. */
@@ -269,6 +284,9 @@ function serveSse(): void {
     const { metadata, frames } = await postFrames(init.body)
     const { server } = world
     if (metadata.kind === 'streamResponse') {
+      world.opens++
+      const refusal = world.openAnswers.shift()
+      if (refusal !== undefined) return typedResponse(refusal)
       const stream = eventStream()
       world.streams.push(stream)
       const answer = () => {
@@ -308,6 +326,10 @@ function serveSse(): void {
       const { pongAfterMs } = answer
       if (pongAfterMs !== undefined) setTimeout(() => stream?.frame(encode.pong()), pongAfterMs)
       return new Response('<h1>Refused</h1>', { status: answer.status, headers: { 'Content-Type': 'text/html' } })
+    }
+    if (answer.tag === 'typed') {
+      post.status = answer.status
+      return typedResponse(answer)
     }
     for (const frame of frames) {
       if (frame.tag !== TAG.BARRIER) continue
@@ -370,6 +392,8 @@ function useScriptedServer(): void {
     world.controlAnswers = []
     world.postLimit = Infinity
     world.posts = []
+    world.openAnswers = []
+    world.opens = 0
     world.holdOpens = false
     world.heldOpens = []
     world.holdReady = false

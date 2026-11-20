@@ -1,13 +1,18 @@
 export { readAnswer, asksLater }
 export type { HttpAnswer }
 
-import { STATUS_CODE_WIRE_VERSION } from '../../constants.js'
+import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
 
 /** What the answer to a request of the page's SSE transport means. */
 type HttpAnswer =
   | { tag: 'expected' }
-  /** The server runs another `WIRE_VERSION`. */
+  /** The server runs another `WIRE_VERSION`, as Telefunc's own refusal of kind `reload` says. */
   | { tag: 'otherWireVersion' }
+  /** Telefunc's own refusals (`refusal.ts`), read at the headers: the server no longer has the request's wire, a loss;
+   *  it can't take a frame, of `channel` where it names one; it doesn't serve the page's SSE requests so. */
+  | { tag: 'retry'; reason: string }
+  | { tag: 'frames'; channel: number | null; reason: string }
+  | { tag: 'route'; reason: string }
   /** A 413: something in front refused the request for its size (a proxy's limit on a request's body), so a smaller one
    *  may pass. `answer` and `retryAfterMs` as for `refused` (RFC 9110, section 15.5.14: a 413 may ask to wait). */
   | { tag: 'tooLarge'; answer: string; retryAfterMs: number }
@@ -18,12 +23,13 @@ type HttpAnswer =
  *  open expects a 200 event stream, as a browser's EventSource does (HTML, "the EventSource interface"), and a POST an
  *  answer that is ok. */
 function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAnswer {
-  if (response.status === STATUS_CODE_WIRE_VERSION) return { tag: 'otherWireVersion' }
+  const type = mimeTypeOf(response)
   const expected =
     expects === 'ok'
       ? response.ok
-      : response.status === 200 && mediaTypeOf(response) === 'text/event-stream' && response.body !== null
+      : response.status === 200 && type?.essence === 'text/event-stream' && response.body !== null
   if (expected) return { tag: 'expected' }
+  if (type?.essence === REFUSAL_MEDIA_TYPE) return readRefusal(response.status, type.parameters)
   if (response.status === 413) {
     return { tag: 'tooLarge', answer: describeAnswer(response), retryAfterMs: retryAfterMsOf(response) }
   }
@@ -42,18 +48,76 @@ function asksLater(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
 }
 
-/** The media type a response carries, without its parameters (`text/event-stream; charset=utf-8` is
- *  `text/event-stream`), as Fetch extracts it from its `Content-Type` values
- *  (https://fetch.spec.whatwg.org/#concept-header-extract-mime-type): the last that parses and isn't `*\/*` wins. Empty
+/** What Telefunc's own refusal says, by its `kind` (`refusal.ts`). A kind the page doesn't know, or none, ends SSE for
+ *  this connection rather than loops, naming the status. */
+function readRefusal(status: number, parameters: ReadonlyMap<string, string>): HttpAnswer {
+  const kind = parameters.get('kind')
+  const reason = parameters.get('reason') ?? `The server refused the request with ${status}.`
+  if (kind === 'reload') return { tag: 'otherWireVersion' }
+  if (kind === 'retry') return { tag: 'retry', reason }
+  if (kind === 'frames') {
+    const named = parameters.get('channel')
+    return { tag: 'frames', channel: named !== undefined && /^\d+$/.test(named) ? Number(named) : null, reason }
+  }
+  if (kind === 'route') return { tag: 'route', reason }
+  return { tag: 'route', reason: `${reason} (refused with ${status}, of a kind this page doesn't know)` }
+}
+
+/** The MIME type a response carries, as Fetch extracts it from its `Content-Type` values
+ *  (https://fetch.spec.whatwg.org/#concept-header-extract-mime-type): the last that parses and isn't `*\/*` wins. Null
  *  where none does. Written out, since a page can't ask the platform: Fetch types a body's `blob()` by this extraction,
  *  but Chromium 158 types it with the header as it came. */
-function mediaTypeOf(response: Response): string {
-  let essence = ''
+function mimeTypeOf(response: Response): MimeType | null {
+  let type: MimeType | null = null
   for (const value of splitHeaderValue(response.headers.get('content-type') ?? '')) {
-    const parsed = essenceOf(value)
-    if (parsed !== null && parsed !== '*/*') essence = parsed
+    const parsed = parseMimeType(value)
+    if (parsed !== null && parsed.essence !== '*/*') type = parsed
   }
-  return essence
+  return type
+}
+
+/** `essence`: `type/subtype`, lowercased (`text/event-stream; charset=utf-8` is `text/event-stream`). `parameters`: by
+ *  name, lowercased, each the first of its name. */
+type MimeType = { essence: string; parameters: ReadonlyMap<string, string> }
+
+/** A MIME type, as MIME Sniffing parses one (https://mimesniff.spec.whatwg.org/#parse-a-mime-type); null where its
+ *  type or subtype is empty or holds more than HTTP token code points. A parameter that doesn't parse is skipped, never
+ *  failing the type. */
+function parseMimeType(value: string): MimeType | null {
+  const match = /^[\t\n\r ]*([-!#$%&'*+.^_`|~0-9A-Za-z]+)\/([-!#$%&'*+.^_`|~0-9A-Za-z]+)[\t\n\r ]*(?:;|$)/.exec(value)
+  if (match === null) return null
+  const parameters = new Map<string, string>()
+  let i = match[0].length
+  while (i < value.length) {
+    while (i < value.length && /[\t\n\r ]/.test(value.charAt(i))) i++
+    let name = ''
+    while (i < value.length && value.charAt(i) !== ';' && value.charAt(i) !== '=') name += value.charAt(i++)
+    name = name.toLowerCase()
+    if (value.charAt(i) === ';') {
+      i++
+      continue
+    }
+    i++
+    let parameterValue = ''
+    if (value.charAt(i) === '"') {
+      i++
+      while (i < value.length && value.charAt(i) !== '"') {
+        if (value.charAt(i) === '\\' && i + 1 < value.length) i++
+        parameterValue += value.charAt(i++)
+      }
+      while (i < value.length && value.charAt(i) !== ';') i++
+    } else {
+      while (i < value.length && value.charAt(i) !== ';') parameterValue += value.charAt(i++)
+      parameterValue = parameterValue.replace(/[\t\n\r ]+$/, '')
+      if (parameterValue === '') {
+        i++
+        continue
+      }
+    }
+    i++
+    if (/^[-!#$%&'*+.^_`|~0-9A-Za-z]+$/.test(name) && !parameters.has(name)) parameters.set(name, parameterValue)
+  }
+  return { essence: `${match[1]}/${match[2]}`.toLowerCase(), parameters }
 }
 
 /** A header's values: split at each comma outside a quoted string, each without the spaces and tabs around it
@@ -76,13 +140,6 @@ function splitHeaderValue(value: string): string[] {
   }
   values.push(current.replace(/^[\t ]+|[\t ]+$/g, ''))
   return values
-}
-
-/** A MIME type's `type/subtype`, lowercased; null where it doesn't parse: either is empty or holds more than HTTP token
- *  code points (https://mimesniff.spec.whatwg.org/#parse-a-mime-type, whose parameters never make it fail). */
-function essenceOf(value: string): string | null {
-  const match = /^[\t\n\r ]*([-!#$%&'*+.^_`|~0-9A-Za-z]+)\/([-!#$%&'*+.^_`|~0-9A-Za-z]+)[\t\n\r ]*(?:;|$)/.exec(value)
-  return match === null ? null : `${match[1]}/${match[2]}`.toLowerCase()
 }
 
 /** A response's status and `Content-Type`, as an error message names them. */

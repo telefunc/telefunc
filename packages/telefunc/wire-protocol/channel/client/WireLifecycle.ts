@@ -47,6 +47,14 @@ type TransportEnd = {
   /** A request carrying what the page sent was refused with `answer`, which asked to wait `retryAfterMs` before
    *  another (see `onTransportRefused`). */
   refused?: { answer: string; retryAfterMs: number }
+  /** Telefunc said it no longer had the wire (`retry`): a loss, with that cause. */
+  lost?: string
+  /** Telefunc doesn't serve the page's SSE requests so (`route`): the page leaves SSE for this connection. */
+  route?: string
+  /** Telefunc couldn't take a frame of `channel` (`frames`): that channel ends with `reason`, the connection goes on. */
+  framesRefused?: { channel: number; reason: string }
+  /** Telefunc couldn't take the connection's own frames: the connection ends with it. */
+  final?: string
 }
 
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
@@ -409,7 +417,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { refusal, otherWireVersion = false, refused }: TransportEnd = {},
+    { refusal, otherWireVersion = false, refused, lost, route, framesRefused, final }: TransportEnd = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -418,6 +426,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.closeAll(new NetworkError('The server was updated since this page loaded: reload the page.', true))
       return
     }
+    if (final !== undefined) {
+      this.closeAll(new NetworkError(`Connection closed: the server refused the page's own frames: ${final}`, true))
+      return
+    }
+    if (route !== undefined && transport === this.transport) {
+      this.leaveSse(new NetworkError(`The server refused the page's SSE requests: ${route}`, true))
+      return
+    }
+    if (framesRefused !== undefined) this.endRefusedChannel(framesRefused)
     if (transport !== this.transport) {
       if (this.upgrade.isLeftWire(transport)) {
         this.fallbackToSse(new NetworkError('Connection dropped', true))
@@ -430,8 +447,35 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.handleTransportLoss(err, false, refused.retryAfterMs)
       return
     }
-    const err = new NetworkError(refusal ?? 'Connection dropped', true)
+    const err = new NetworkError(lost ?? refusal ?? 'Connection dropped', true)
     this.handleTransportLoss(err, refusal !== undefined)
+  }
+
+  /** The server couldn't take a frame of the channel, which ends at once with the server's reason: nothing of it goes
+   *  again. A RECONCILE tells the server, ending it there. */
+  private endRefusedChannel({ channel, reason }: { channel: number; reason: string }): void {
+    const record = this.channels.get(channel)
+    if (record === undefined) return
+    this.gate.release(record)
+    this.exchange.scheduleRegisterReconcile()
+    record.channel._onEnded(
+      new NetworkError(`Channel closed: the server refused what the page sent on it: ${reason}`, true),
+    )
+  }
+
+  /** The server doesn't serve the page's SSE requests: with WebSocket next in the page's order, the connection goes on
+   *  over one, as a page whose order starts with it does; else every channel ends with `err`. A new connection tries the
+   *  order again. */
+  private leaveSse(err: Error): void {
+    const order = this.connectionOptions.transports
+    if (order.indexOf(CHANNEL_TRANSPORT.WS) <= order.indexOf(CHANNEL_TRANSPORT.SSE)) {
+      this.closeAll(err)
+      return
+    }
+    this.transport.abandonActiveTransport()
+    this.transport.dispose()
+    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.WS](this.telefuncUrl, this.connectionOptions, this)
+    this.handleTransportLoss(err, false)
   }
 
   /** Counts the refusal against the channels whose sequenced frames are among `frames`, through the highest seq
