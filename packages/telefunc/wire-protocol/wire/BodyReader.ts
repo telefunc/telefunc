@@ -7,12 +7,12 @@ import { concatAll, decodeU32 } from './envelope.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
-const DISCONNECT_MSG = 'Client disconnected during file upload'
+const DISCONNECT_MSG = 'The client disconnected before the end of the request body'
 
 class OversizeFrameError extends Error {}
 
-/** The request body ended mid-frame — the client disconnected or truncated the upload. Typed so error
- *  sinks discriminate an expected client truncation from a real server bug by class, not message text. */
+/** The request body ended early: mid-frame, or a read of it failed, as when the client disconnects. Typed so error sinks
+ *  discriminate an expected client truncation from a real server bug by class, not message text. */
 class StreamTruncatedError extends Error {}
 
 /**
@@ -40,6 +40,8 @@ class BodyReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
+  /** A read of the source failed, rather than reaching its end. */
+  private failed = false
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
@@ -57,6 +59,14 @@ class BodyReader {
     const length = await this.readU32()
     if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
+  }
+
+  /** Read the whole body as UTF-8 text. */
+  async readText() {
+    const parts: Uint8Array<ArrayBuffer>[] = []
+    for (let chunk = await this.pullChunk(); chunk; chunk = await this.pullChunk()) parts.push(chunk)
+    if (this.failed) throw new StreamTruncatedError(DISCONNECT_MSG)
+    return new TextDecoder().decode(concatAll(parts))
   }
 
   /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
@@ -165,6 +175,7 @@ class BodyReader {
       return value
     } catch {
       this.disconnected = true
+      this.failed = true
       return null
     }
   }

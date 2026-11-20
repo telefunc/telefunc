@@ -175,10 +175,11 @@ async function readBody(
   registerFile: ServerReviverContext['registerFile']
   consumeFile: ServerReviverContext['consumeFile']
 }> {
+  const source = readable ?? request.body
+  // A failed read, as when the client leaves mid-body, is the reader's `StreamTruncatedError`, which isn't printed.
+  const reader = source && new BodyReader(source)
   if (requestKind === REQUEST_KIND.BINARY) {
-    const source = readable ?? request.body
-    assert(source)
-    const reader = new BodyReader(source)
+    assert(reader)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
@@ -186,7 +187,7 @@ async function readBody(
     }
   }
   return {
-    text: await request.text(),
+    text: reader ? await reader.readText() : '',
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
