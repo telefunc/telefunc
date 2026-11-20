@@ -106,6 +106,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   owesReconciled(): void {
     assertProtocol(!this.owed, 'RECONCILE while its wire owes a RECONCILED')
     this.owed = true
+    // What is held is measured from its first frame, on every host.
+    this.headroom = 0
   }
 
   /** An attach probe's answer, which says no credit ran out and names no round trip: written ahead of what is held, since
@@ -233,11 +235,12 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   /** What the wire may hold, less what it holds, in its socket and for a RECONCILED; `Infinity` if the runtime can't tell
-   *  the socket's while nothing is held. Its data is what its channels hold, so what passes this is what nothing else
-   *  bounds: a page flooding it with what it answers at once. */
+   *  the socket's while no RECONCILED is owed: what is held counts on every host, the socket's as nothing where unknown.
+   *  Its data is what its channels hold, so what passes this is what nothing else bounds: a page flooding it with what
+   *  it answers at once. */
   private measureHeadroom(): number {
     const socket = this.bufferedAmount()
-    if (socket === undefined && this.heldBytes === 0) return Infinity
+    if (socket === undefined && !this.owed) return Infinity
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
     for (const channel of this.channels()) allowed += channel.heldBytes
     return allowed - (socket ?? 0) - this.heldBytes

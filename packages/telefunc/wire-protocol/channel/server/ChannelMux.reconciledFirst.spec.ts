@@ -126,8 +126,9 @@ test.each(['web', 'node'] as const)(
 type FakeWire = { sessionId: string | undefined }
 
 /** A WebSocket the real mux sends on: the frames it was handed, in order, and whether the mux ended it. Its socket keeps
- *  all it is handed, unread, unless `reads`. */
-function openWebSocket({ reads = false } = {}) {
+ *  all it is handed, unread, unless `reads`; `knowsBacklog: false` is a runtime that can't tell the socket's backlog
+ *  (workerd). */
+function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
   const mux = getChannelMux()
   const wire: FakeWire = { sessionId: undefined }
   const frames: Uint8Array[] = []
@@ -144,7 +145,7 @@ function openWebSocket({ reads = false } = {}) {
     },
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
-    bufferedAmount: () => state.buffered,
+    bufferedAmount: () => (knowsBacklog ? state.buffered : undefined),
     terminateWire: () => {
       state.terminated = true
     },
@@ -223,18 +224,26 @@ test('a reconcile that throws a bug ends its wire, transiently: nothing stays he
   page.close()
 })
 
-test('on a WebSocket, what a hold kept on by anything else holds ends its wire past the backlog limit', async () => {
-  const page = openWebSocket()
-  vi.spyOn(page.mux, 'sendReconciled').mockImplementation(() => {})
-  await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
-  let pings = 0
-  for (; pings < PINGS_PAST_THE_LIMIT && !page.state.terminated; pings++)
-    await page.mux.onWireMessage(page.wire, widePing())
-  expect(page.state.terminated).toBe(true)
-  expect(page.frames.filter((frame) => frame[0] === TAG.PONG)).toEqual([])
-  vi.restoreAllMocks()
-  page.close()
-})
+test.each([
+  ['tells', true],
+  ["can't tell", false],
+])(
+  "on a WebSocket whose runtime %s its socket's backlog, what a hold kept on by anything else holds ends its wire past the backlog limit",
+  async (_runtime, knowsBacklog) => {
+    const page = openWebSocket({ knowsBacklog })
+    vi.spyOn(page.mux, 'sendReconciled').mockImplementation(() => {})
+    // Its PONG is measured before the hold begins.
+    await page.mux.onWireMessage(page.wire, encode.ping([]))
+    await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
+    let pings = 0
+    for (; pings < PINGS_PAST_THE_LIMIT && !page.state.terminated; pings++)
+      await page.mux.onWireMessage(page.wire, widePing())
+    expect(page.state.terminated).toBe(true)
+    expect(page.frames.filter((frame) => frame[0] === TAG.PONG)).toHaveLength(1)
+    vi.restoreAllMocks()
+    page.close()
+  },
+)
 
 test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end the wire past the backlog limit', async () => {
   const mux = getChannelMux()
