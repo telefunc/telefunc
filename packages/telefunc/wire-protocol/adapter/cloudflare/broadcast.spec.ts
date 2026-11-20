@@ -61,14 +61,14 @@ function applyPresence(authority: CloudflareBroadcastAuthorityState, call: Prese
 }
 
 /** `member`'s presence on the text route of `key`, recorded at `authority` in `bucket`. */
-function recordPresence(
+async function recordPresence(
   authority: CloudflareBroadcastAuthorityState,
   key: string,
   member: string,
   bucket: BroadcastHoldRequest['bucket'],
 ) {
-  const grant = authority.grant(member)
-  authority.hold({ key, kind: 'text', member, lease: crypto.randomUUID(), bucket, order: { grant, seq: 1 } })
+  const grant = await authority.grant(member)
+  await authority.hold({ key, kind: 'text', member, lease: crypto.randomUUID(), bucket, order: { grant, seq: 1 } })
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -278,7 +278,7 @@ describe('cloudflare broadcast routing', () => {
       }),
     )
     for (const bucket of ['weur', 'apac', 'eeur'] as const) {
-      recordPresence(authorityState, 'room:test', `telefunc-shard-${bucket}-0`, bucket)
+      await recordPresence(authorityState, 'room:test', `telefunc-shard-${bucket}-0`, bucket)
     }
     await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
@@ -356,7 +356,7 @@ describe('cloudflare broadcast routing', () => {
       }),
     )
     for (const bucket of ['weur', 'apac'] as const) {
-      recordPresence(authorityState, 'room:test', `telefunc-shard-${bucket}-0`, bucket)
+      await recordPresence(authorityState, 'room:test', `telefunc-shard-${bucket}-0`, bucket)
     }
     const firstPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
