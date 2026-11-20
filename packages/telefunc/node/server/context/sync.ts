@@ -1,5 +1,6 @@
 export { restoreContext_sync }
 export { provideTelefuncContext_sync }
+export { getContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
@@ -29,7 +30,6 @@ function provideTelefuncContext_sync(context: Telefunc.Context) {
   }, 0)
 }
 
-/** @internal — Read sync context. Used by context.ts as the default getter. */
-export function getContext_sync(): Context | null {
+function getContext_sync(): Context | null {
   return syncState.context
 }
