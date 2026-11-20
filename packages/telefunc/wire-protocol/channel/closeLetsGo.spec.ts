@@ -1,5 +1,6 @@
-// A close the server decides ends with its verdict, which it keeps until the page says it has it: the RECONCILE that
-// declares the next channel does. Over a real server and page, with no PING due for a minute.
+// What a close keeps for its page, its last frames, goes once the page says it has them: the RECONCILE that declares the
+// next channel does, and in a close the page decides, its verdict. Over a real server and page, with no PING due for a
+// minute.
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'
@@ -8,6 +9,8 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
+import { decode, encode } from '../wire/frame.js'
+import { TAG } from '../wire/tags.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000, maxMemory: '2m' }
 
@@ -71,5 +74,45 @@ for (const transport of ['sse', 'ws'] as const) {
         expect(await outcome).toBe(expected)
       })
     }
+  })
+}
+
+for (const transport of ['sse', 'ws'] as const) {
+  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after a close the page decided, with no frame from the page since`, () => {
+    for (const [text, sent, expected] of [
+      [FITS, 'maxMemory to the byte', 'answered'],
+      [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
+    ] as const) {
+      test(`a send of ${sent} on another channel of its connection is ${expected === 'answered' ? 'answered' : 'refused with ChannelOverflowError'}`, async () => {
+        const [first, firstPage] = pair(transport)
+        const [other, otherPage] = pair(transport)
+        await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
+        otherPage.listen(() => 'answered')
+        await firstPage.close()
+        await first.closed
+
+        expect(await other.send(text, { ack: true }).then(String, (err: Error) => err.name)).toBe(expected)
+        // The RECONCILE that declares one more lets go of what the close kept, so the next row has all of `maxMemory`.
+        const [last, lastPage] = pair(transport)
+        await Promise.all([last.opened, lastPage.opened])
+      })
+    }
+
+    test('its verdict again, as a replay after a reconnect would bring it, changes nothing: the close stays clean, and a send of maxMemory to the byte on another channel is answered', async () => {
+      const [first, firstPage] = pair(transport)
+      const [other, otherPage] = pair(transport)
+      await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
+      otherPage.listen(() => 'answered')
+      await firstPage.close()
+      await first.closed
+
+      const verdict = decode(encode.closeDone(0, first._lastClientSeq))
+      if (verdict.tag !== TAG.CLOSE_DONE) throw new Error('Expected CLOSE_DONE frame')
+      first._dispatchFrame(verdict)
+      expect(await first.closed).toBe(null)
+      expect(await other.send(FITS, { ack: true }).then(String, (err: Error) => err.name)).toBe('answered')
+      const [last, lastPage] = pair(transport)
+      await Promise.all([last.opened, lastPage.opened])
+    })
   })
 }

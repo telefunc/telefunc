@@ -176,6 +176,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** The frames that end it, made while no page was attached, in order: the next attach sends them. */
   private pendingEnd: Array<(peer: IndexedPeer) => void> = []
   private closeRequestSeq = 0
+  /** Its CLOSE_DONE, the last it sends: the page decides only once it has it. */
+  private closeDoneSeq = 0
   /** The highest seq the page is known to have received from this channel. */
   private pageLastSeq = 0
   /** The page closed its end, so it takes nothing more from this channel. */
@@ -523,7 +525,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case 'closeAck':
         return this.sendEnd((peer) => peer.sendCloseAck())
       case 'closeDone':
-        return this.sendEnd((peer) => peer.sendCloseDone())
+        return this.sendEnd((peer) => {
+          this.closeDoneSeq = peer.sendCloseDone()
+        })
       case 'timedOut':
         return this.sendEnd((peer) => peer.sendSequenced(encode.error, ERROR_REASON.CLOSE_TIMED_OUT))
     }
@@ -649,6 +653,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.lifecycle.peerCloseAck()
         return
       case TAG.CLOSE_DONE:
+        // After its own, the page's CLOSE_DONE is the verdict, sent once the page had all the server sent.
+        if (this.closeDoneSeq !== 0) this.onPageHas(this.closeDoneSeq)
         this.lifecycle.peerCloseDone()
         return
       case TAG.ABORT:
