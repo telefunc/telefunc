@@ -26,8 +26,8 @@ let channels: ClientChannel[]
 let holdUploads: boolean
 /** The largest batch POST body taken: a larger one is answered 413, unread. */
 let postLimit: number
-/** Each batch POST's body size and status. */
-let posts: { bytes: number; status: number }[]
+/** Each batch POST's body size and status, and the number of opens before it: the wire it went on. */
+let posts: { bytes: number; status: number; wire: number }[]
 /** The data frames batch POSTs carried, by tag and size. */
 let received: { tag: number; bytes: number }[]
 /** The channels the RECONCILEs that batch POSTs carried released. */
@@ -96,7 +96,7 @@ beforeEach(async () => {
     if (req.headers['transfer-encoding'] === 'chunked') return holdUploads ? undefined : void res.end()
     const bytes = Number(req.headers['content-length'])
     if (bytes > postLimit) {
-      posts.push({ bytes, status: 413 })
+      posts.push({ bytes, status: 413, wire: opens })
       req.resume()
       req.on('end', () =>
         res.writeHead(413, { 'Content-Type': 'text/html' }).end('<h1>413 Request Entity Too Large</h1>'),
@@ -107,7 +107,7 @@ beforeEach(async () => {
       if (frames === null) return
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
       if (!metadata.streamResponse) {
-        posts.push({ bytes, status: 200 })
+        posts.push({ bytes, status: 200, wire: opens })
         for (const raw of frames.slice(1)) {
           if (raw[0] === TAG.TEXT || raw[0] === TAG.BINARY) received.push({ tag: raw[0], bytes: raw.byteLength })
           const frame = decode(raw)
@@ -324,7 +324,13 @@ test(
     expect((closing as Error).message).toBe(
       "Channel closed: what the page sent on it was refused with 413 text/html, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.",
     )
-    expect(posts.filter(({ status }) => status === 413).length).toBe(2)
+    // The message alone is refused once on each wire; a POST that carried it with another frame was refused before
+    // that, uncounted, and split.
+    const refused = posts.filter(({ status }) => status === 413)
+    const lone = Math.min(...refused.map(({ bytes }) => bytes))
+    const alone = refused.filter(({ bytes }) => bytes === lone)
+    expect(alone.map(({ wire }) => wire)).toEqual([1, 2])
+    expect(refused.length - alone.length).toBeLessThanOrEqual(1)
     // The server is told on the wire the reconnect opened, which the second refusal doesn't end.
     while (released.length < 1) await delay(20)
     expect(released).toEqual([0])
