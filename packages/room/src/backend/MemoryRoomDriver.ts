@@ -23,6 +23,7 @@ import type {
   CommitAccepted,
   CommitOptions,
   CommitTarget,
+  OperationOptions,
   OperationResult,
   RetainedFrame,
   RetainedOf,
@@ -31,7 +32,7 @@ import type {
 } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { encodeLaneKey } from './laneKey.js'
-import { OPERATION_COMMIT_LANE, recordOperation } from './operation.js'
+import { OPERATION_COMMIT_LANE, beforeOperation, recordOperation } from './operation.js'
 import {
   commitPreconditionHolds,
   countCell,
@@ -363,7 +364,9 @@ class MemoryRoomDriver implements RoomDriver {
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
+    options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
+    await beforeOperation(options)
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)

@@ -18,6 +18,7 @@ import type {
   HeadExpectation,
   HeadNext,
   LaneId,
+  OperationOptions,
   OperationResult,
   RetainedFrame,
   RoomDriver,
@@ -62,8 +63,9 @@ class RoomPlane {
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
+    options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
-    const result = await this.driver.runOperation(roomId, inc, operation, args)
+    const result = await this.driver.runOperation(roomId, inc, operation, args, options)
     if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
     return result
   }

@@ -7,7 +7,7 @@ import type { RoomDriver, RoomPlaneKey, RoomPlaneKit } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
 import { decodeLaneKey, encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from './laneKey.js'
 import { MemoryRoomDriver } from './MemoryRoomDriver.js'
-import { OPERATION_COMMIT_LANE, recordOperation } from './operation.js'
+import { OPERATION_COMMIT_LANE, beforeOperation, recordOperation } from './operation.js'
 import { RoomPlane } from './RoomPlane.js'
 
 const ROOM_PLANE = planeKey<RoomPlaneKey>('telefunc.room.plane')
@@ -22,6 +22,7 @@ const kit: RoomPlaneKit = {
   CELL_PAGE_SIZE,
   DIRECTORY_PAGE_SIZE,
   recordOperation,
+  beforeOperation,
   OPERATION_COMMIT_LANE,
   reportLaneLost,
   publishedBytes,

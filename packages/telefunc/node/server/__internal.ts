@@ -92,17 +92,20 @@ export {
   LEASE_SCHEMA,
   dropLeaseScopes,
   grantHolder,
+  leaseAnswer,
   liveLeases,
   nextLeaseSweep,
   registerLease,
   removeLease,
   renewLease,
+  setLeaseAnswer,
   sweepLeases,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
 export type {
   LeaseOrder,
   LeaseRegistered,
   LeaseRemoved,
+  LeaseWritten,
   LeaseRenewed,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
 

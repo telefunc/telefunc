@@ -92,8 +92,8 @@ class Admissions {
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
   }
 
-  /** The member's inbox is ready before its record is durable, and the join is announced after,
-   *  so no DM or event is lost. */
+  /** The member's inbox delivers before its record is durable, and the join is announced after, so no DM or event is
+   *  lost. */
   private async commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
@@ -104,11 +104,23 @@ class Admissions {
     // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
     if (!this.owner.holds(id) || this.model.closed) admission.abandon()
     try {
-      // The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds.
-      await this.replica.openInbox(id)
+      // The member's inbox delivers (within the horizon) before its join applies, which the driver sees to.
+      const inbox = { member: id, ready: this.replica.openInbox(id) }
+      // Awaited once the join applied; where the join fails, that failure is the admission's.
+      inbox.ready.catch(() => {})
       admission.assertLive(this.model)
-      // The member's record and its join event are one write, so its leave always follows its join.
-      await joinMember(this.replica.incarnation, this.hosting.lease, { id, record, meta, join })
+      // The member's record and its join event are one write, so its leave always follows its join. Not sent once the
+      // admission was abandoned, whose own error it then rejects with.
+      await joinMember(
+        this.replica.incarnation,
+        this.hosting.lease,
+        { id, record, meta, join },
+        { inbox, wanted: () => !admission.abandoned },
+      ).catch((error: unknown) => {
+        admission.assertLive(this.model)
+        throw error
+      })
+      await inbox.ready
       admission.assertLive(this.model)
       admission.commit()
       this.underWay.delete(id)

@@ -25,6 +25,7 @@ export type {
   HeadExchangeResult,
   HeadNext,
   LaneId,
+  OperationOptions,
   OperationResult,
   OperationTx,
   RoomDriver,
@@ -37,7 +38,7 @@ export type {
 
 import type { reportLaneLost } from '../server/config.js'
 import type { BackendReceiver, DriverAttempt, OrderingInfo, PlaneKey, SubscriptionDriver } from 'telefunc/__internal'
-import type { recordOperation } from './operation.js'
+import type { beforeOperation, recordOperation } from './operation.js'
 import type { publishedBytes } from '../server/lanes/lanes.js'
 
 /** The cells a prefix read's page holds. */
@@ -59,6 +60,7 @@ type RoomPlaneKit = {
   CELL_PAGE_SIZE: number
   DIRECTORY_PAGE_SIZE: number
   recordOperation: typeof recordOperation
+  beforeOperation: typeof beforeOperation
   OPERATION_COMMIT_LANE: LaneId
   reportLaneLost: typeof reportLaneLost
   publishedBytes: typeof publishedBytes
@@ -202,6 +204,15 @@ type ExpiringCellsRead = { kind: 'read'; cells: Map<string, Uint8Array> } | Stal
 type RoomOperation<Args, Value> = { readonly name: string; plan(tx: OperationTx, args: Args): Value }
 
 /** An operation that ran: its plan's value, each counted counter as it left it, and its commit. */
+/** What an operation waits for before it applies. */
+type OperationOptions = {
+  /** A member's inbox, which delivers before the operation applies: a member's join is visible only once its private
+   *  messages reach it. Cloudflare registers the inbox in the operation's own transaction. */
+  inbox?: { member: string; ready: Promise<void> }
+  /** Checked before the operation is sent: one no longer wanted isn't, and rejects. */
+  wanted?: () => boolean
+}
+
 type OperationResult<Value> =
   | { kind: 'done'; value: Value; counters: Map<string, CellCounter>; commit?: CommitAccepted }
   | StaleIncarnation
@@ -238,12 +249,14 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  - In a run, a cell the executor hasn't read yet reads as absent.
    *  - `tx.cell()` reads the state the operation found, never the run's own writes.
    *  - Only the validated run's writes are applied, all at once; none if the plan throws.
-   *  - The commit's delivery comes after the writes, separately (`CommitAccepted.delivery`). */
+   *  - The commit's delivery comes after the writes, separately (`CommitAccepted.delivery`).
+   *  - With `options.inbox`, the writes apply once the inbox delivers, and not at all if it never does. */
   runOperation<Args, Value>(
     roomId: string,
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
+    options?: OperationOptions,
   ): Promise<OperationResult<Value>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>

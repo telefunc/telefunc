@@ -1,7 +1,7 @@
 export { JOIN, LEAVE, joinMember, evictMember }
 
 import { getRoomPlane } from '../../backend/plane.js'
-import type { RoomOperation } from '../../backend/contract.js'
+import type { OperationOptions, RoomOperation } from '../../backend/contract.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
 import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
@@ -83,13 +83,14 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
 
 const identityTextEncoder = new TextEncoder()
 
-/** Joins a member under the lease. */
+/** Joins a member under the lease, once its inbox delivers (`options.inbox`). */
 async function joinMember(
   room: RoomIncarnation,
   lease: RoomLease,
   member: Omit<JoinArgs, 'lease' | 'hold'>,
+  options: OperationOptions,
 ): Promise<void> {
-  const joined = await runHosted(room, lease, JOIN, { ...member, hold: room.hold })
+  const joined = await runHosted(room, lease, JOIN, { ...member, hold: room.hold }, options)
   afterHoldChange(room, holdDelta(member.record.hidden ? null : room.hold, 1, { joining: true }).after(joined.counters))
 }
 

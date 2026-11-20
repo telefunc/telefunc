@@ -17,11 +17,12 @@ import {
   type Invoke,
   type LeaseOrder,
 } from 'telefunc/__internal'
-import type { RoomSubscriptionSource } from '../backend/contract.js'
+import type { LaneId, RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { assert } from '../utils/assert.js'
-import { laneRoute, type RouteInstallation } from './routes.js'
-import type { RegisterWire, RenewWire } from './RoomAuthority.js'
+import { laneRoute, routeScope, type RouteInstallation } from './routes.js'
+import type { OperationWire, RegisterWire, RenewWire } from './RoomAuthority.js'
+import type { RoomOperationRequest } from '../server/store/roomOperations.js'
 import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
@@ -57,6 +58,8 @@ class RoomSessionSubscriptions {
   private readonly grants = new HolderGrants()
   /** By room: a session's lanes of a room renew in one call, which the first of them to register times. */
   private readonly renewals = new Map<string, RoomRenewal>()
+  /** Its attempts by their route's scope, each until it closes. */
+  private readonly attempts = new Map<string, CloudflareRoomAttempt>()
   private readonly id: string
   private readonly member: CloudflareMember
   private readonly driver: CloudflareRoomDriver
@@ -74,10 +77,43 @@ class RoomSessionSubscriptions {
     assert(bucket !== null, 'A Room subscription registers from a session that knows its bucket')
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
-    const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
+    const stopTaking = this.member.subscribeLocal(laneRoute(inc, laneKey), takeOnce(lane, receiver))
+    const scope = routeScope(inc, laneKey)
+    const attempt = new CloudflareRoomAttempt({
+      owner: this,
+      route,
+      stopDeliveries: () => {
+        stopTaking()
+        if (this.attempts.get(scope) === attempt) this.attempts.delete(scope)
+      },
+    })
+    this.attempts.set(scope, attempt)
     void attempt.register()
     return attempt
+  }
+
+  /** This session's open attempt on the lane, if any. */
+  attemptOf(roomId: string, inc: string, lane: LaneId): CloudflareRoomAttempt | undefined {
+    const attempt = this.attempts.get(routeScope(inc, encodeLaneKey(lane)))
+    return attempt?.route.roomId === roomId ? attempt : undefined
+  }
+
+  /** Runs `request` at the room's authority with `attempt`'s exact route registered in the same transaction, under
+   *  this session's next order there, behind what it sent the room before; `attempt` is then ready, as if its own
+   *  registration had been answered. Obeys the room's overload pause, as a first registration does. */
+  async runCarrying(
+    attempt: CloudflareRoomAttempt,
+    request: RoomOperationRequest,
+    options: Pick<CallOptions, 'deadline' | 'wanted'>,
+  ): Promise<OperationWire> {
+    const { roomId, inc } = attempt.route
+    const wire = await this.writeRoute(
+      roomId,
+      (authority, order) => authority.runOperationWithInbox(inc, request, { route: attempt.route, order }),
+      { ...options, paused: true },
+    )
+    if (wire.kind === 'done' && wire.registered === true) attempt.registeredBy()
+    return wire
   }
 
   /** Calls the room's authority through the ordered stub this session keeps for it, so a room's commits and route calls
@@ -180,6 +216,9 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private sent = false
   /** How its first registration is made again, until its route was registered. */
   private firstRegistration: TransientRetry | null = new TransientRetry()
+  /** Whether an operation that carried its route registered it, after its own registration was sent: what that one
+   *  answers then is moot, until the route is lost. */
+  private carried = false
 
   constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
     super()
@@ -194,14 +233,31 @@ class CloudflareRoomAttempt extends DriverAttempt {
       registration = await this.sendRegistration()
     } catch (error) {
       if (!(error instanceof CallNotSent)) this.sent = true
+      if (this.carried) return
       return this.firstRegistration === null ? this.lose(error) : this.failFirst(this.firstRegistration, error)
     }
     this.sent = true
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
-    // A write of this session's on the lane, sent later, came first: registered again, behind it.
+    // A write of this session's on the lane, sent later, came first: registered again, behind it, unless that write
+    // was an operation that carried this route.
+    if (registration === 'stale' && this.carried) return
     if (registration === 'stale') return this.lose(new Error(`Cloudflare route '${this.route.laneKey}' was overtaken`))
+    this.firstRegistration = null
+    this.retryDelay = REGISTER_RETRY_MIN_MS
+    this.transition('ready')
+    this.owner.renewWithRoom(this)
+  }
+
+  /** Its route was registered by an operation that carried it (a member's join): ready, as if its own registration
+   *  had been answered. */
+  registeredBy(): void {
+    if (this.state() === 'closed') return
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = null
+    this.carried = true
+    this.sent = true
     this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
@@ -227,6 +283,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
    *  a run is reported. */
   lose(error: unknown): void {
     if (this.state() === 'closed') return
+    this.carried = false
     this.owner.stopRenewing(this)
     if (this.state() === 'ready') this.transition('lost')
     if (this.retryDelay === REGISTER_RETRY_MIN_MS) console.error(error)
@@ -287,5 +344,19 @@ class CloudflareRoomAttempt extends DriverAttempt {
           : first.attempt(() => authority.registerRoute(this.route, order)),
       options,
     )
+  }
+}
+
+/** Its receiver takes a control frame once: the room's authority hands a stored commit on again after a restart, which
+ *  may have been handed on before. A control lane's frames come in its own seq order. */
+function takeOnce(lane: RoomSubscriptionSource['lane'], receiver: BackendReceiver): BackendReceiver {
+  if (lane.kind !== 'control') return receiver
+  let last = 0
+  return {
+    deliver(payload, info) {
+      if (info.seq <= last) return
+      last = info.seq
+      receiver.deliver(payload, info)
+    },
   }
 }

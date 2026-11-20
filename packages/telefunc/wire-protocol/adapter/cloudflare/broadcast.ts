@@ -210,10 +210,13 @@ class CloudflareBroadcastAuthorityState {
     })
   }
 
-  /** The RPC reply waits for the write. */
+  /** The RPC reply waits for the write. A hold that came before is answered as it was. */
   hold({ key, kind, member, lease, bucket, order }: BroadcastHoldRequest): LeaseRegistered {
     const scope = broadcastRouteKey({ key, kind })
-    return this.transaction((sql) => registerLease(sql, { scope, holder: member, lease, bucket }, order, Date.now()))
+    const held = this.transaction((sql) =>
+      registerLease(sql, { scope, holder: member, lease, bucket }, order, Date.now()),
+    )
+    return held === 'repeated' ? 'registered' : held
   }
 
   renew({ key, kind, member, lease }: BroadcastLeaseRequest): LeaseRenewed {

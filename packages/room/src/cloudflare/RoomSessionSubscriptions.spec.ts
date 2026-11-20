@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS,
+  type BackendReceiver,
   type CloudflareMember,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
 import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
-import type { RegisterWire, RenewWire } from './RoomAuthority.js'
+import type { OperationWire, RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { LaneId } from '../backend/contract.js'
+import type { RoomOperationRequest } from '../server/store/roomOperations.js'
 
 /** A session's Room subscriptions against an authority that answers each call from `answers`, in order; opening a stub
  *  to it throws the next of `answers.open`, while one is left. */
@@ -16,25 +18,38 @@ function setup(
     register: Array<RegisterWire | Error | Promise<RegisterWire>>
     renew: Array<RenewWire | Error>
     open?: Array<Error | undefined>
+    /** The answers to operations that carry an inbox's route. */
+    carry?: Array<OperationWire | Error | Promise<OperationWire>>
+    /** The grant's answer, where it isn't at once. */
+    grant?: Promise<number>
   },
   lane: LaneId = { kind: 'semantic' },
 ) {
   const calls = { register: 0, renew: 0 }
+  /** The operations that carried an inbox's route, as the authority got them. */
+  const carried: unknown[] = []
   const startedAt = Date.now()
   /** When each registration was made, in ms after the lane subscribed. */
   const registeredAt: number[] = []
   const answer = <T>(queue: Array<T | Error | Promise<T>>): Promise<T> => {
-    const next = queue.shift()!
+    const next = queue.shift()
+    if (next === undefined) throw new Error('The test gave the authority no answer for this call')
     if (next instanceof Promise) return next
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
   }
   const authority = {
-    grantHolder: async () => 1,
+    grantHolder: () => answers.grant ?? Promise.resolve(1),
+    runOperationWithInbox: (_inc: string, request: unknown) => (carried.push(request), answer(answers.carry ?? [])),
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
     unsubscribeRoute: async () => {},
   }
-  const member = { bucket: 'weur', subscribeLocal: () => () => {} } as unknown as CloudflareMember
+  /** What the session hands Broadcast to take the lane's frames, by route key. */
+  const takes = new Map<string, BackendReceiver>()
+  const member = {
+    bucket: 'weur',
+    subscribeLocal: (route: { key: string }, taker: BackendReceiver) => (takes.set(route.key, taker), () => {}),
+  } as unknown as CloudflareMember
   const driver = {
     stub: () => {
       const refusal = answers.open?.shift()
@@ -43,7 +58,9 @@ function setup(
     },
   } as unknown as CloudflareRoomDriver
   const subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
-  const receiver = { deliver() {} }
+  /** The seq of each frame the lane's receiver got. */
+  const delivered: number[] = []
+  const receiver: BackendReceiver = { deliver: (_payload, info) => void delivered.push(info.seq) }
   const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane }, receiver)
   const states: string[] = []
   const reasons: unknown[] = []
@@ -53,7 +70,29 @@ function setup(
   })
   /** Another lane of the room, on the same ordered stub. */
   const subscribe = (other: LaneId) => subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane: other }, receiver)
-  return { attempt, calls, registeredAt, states, reasons, subscribe }
+  /** The room's authority hands the lane's frame `seq` to this session. */
+  const handOn = (seq: number) => {
+    for (const taker of takes.values()) taker.deliver(new Uint8Array(), { seq, timestamp: seq })
+  }
+  /** The session's attempt on `lane`, as its driver finds it. */
+  const attemptOn = () => {
+    const found = subscriptions.attemptOf('room', 'inc', lane)
+    if (found === undefined) throw new Error('The lane has no attempt')
+    return found
+  }
+  return {
+    attempt,
+    calls,
+    carried,
+    registeredAt,
+    states,
+    reasons,
+    subscribe,
+    delivered,
+    handOn,
+    subscriptions,
+    attemptOn,
+  }
 }
 
 /** Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. */
@@ -207,6 +246,18 @@ describe('a Cloudflare Room lane', () => {
     })
   }
 
+  // The room's authority hands a stored commit on again after a restart, where it may have been handed on before.
+  it('that is handed one frame twice delivers it once', async () => {
+    const { delivered, handOn } = setup({ register: ['registered'], renew: [] }, { kind: 'control' })
+    await vi.advanceTimersByTimeAsync(0)
+    handOn(1)
+    handOn(2)
+    handOn(1)
+    handOn(2)
+    handOn(3)
+    expect(delivered).toEqual([1, 2, 3])
+  })
+
   it('whose incarnation was dropped ends on purpose, with no reason', async () => {
     const { attempt, calls } = setup({ register: ['registered'], renew: ['dropped'] })
     const reasons: unknown[] = []
@@ -260,6 +311,48 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     )
     await vi.advanceTimersByTimeAsync(1_000)
     expect(got.filter((call) => call === 'register' || call === 'commit')).toEqual(['register', 'commit'])
+  })
+
+  const join: RoomOperationRequest = {
+    name: 'join',
+    args: {
+      lease: { id: 'server', created: false },
+      hold: null,
+      id: 'm',
+      record: { joinedAt: 0, metaSeq: 0, metaGen: 0 },
+      meta: {},
+      join: { __r: 'join', id: 'm', meta: {}, joinedAt: 0 },
+    },
+  }
+  const joined: OperationWire = { kind: 'done', value: 'joined', counters: new Map(), registered: true }
+
+  // A member's join carries its inbox's route: the join applies with the inbox's lease, or not at all.
+  it("that carries an inbox's route makes the inbox ready, whatever the inbox's own registration answers after", async () => {
+    const own = Promise.withResolvers<RegisterWire>()
+    const { attempt, calls, carried, subscriptions, states, attemptOn } = setup(
+      { register: [own.promise], renew: ['renewed', 'renewed'], carry: [joined] },
+      { kind: 'inbox', member: 'm' },
+    )
+    expect(await subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).toBe(joined)
+    expect(attempt.state()).toBe('ready')
+    own.resolve('stale')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(states).toEqual(['ready'])
+    expect({ ...calls, carried }).toEqual({ register: 1, renew: 2, carried: [join] })
+  })
+
+  it("that carries an inbox's route is not sent once the join it makes was given up while it waited", async () => {
+    const grant = Promise.withResolvers<number>()
+    const { carried, subscriptions, attemptOn } = setup(
+      { register: ['registered'], renew: [], carry: [joined], grant: grant.promise },
+      { kind: 'inbox', member: 'm' },
+    )
+    let wanted = true
+    const sent = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000, wanted: () => wanted })
+    wanted = false
+    grant.resolve(1)
+    await expect(sent).rejects.toThrow('not sent: unwanted')
+    expect(carried).toEqual([])
   })
 
   it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {

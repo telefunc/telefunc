@@ -11,6 +11,7 @@ import type {
   HeadExpectation,
   HeadNext,
   LaneId,
+  OperationOptions,
   OperationResult,
   OperationWrites,
   RoomDriver,
@@ -131,7 +132,9 @@ class RedisRoomDriver implements RoomDriver {
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
+    options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
+    await this.kit.beforeOperation(options)
     for (;;) {
       const planned = await this.planOperation(roomId, inc, operation, args)
       if (planned === null) return { kind: 'stale-incarnation' }

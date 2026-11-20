@@ -19,7 +19,7 @@ export type { LeaseState }
 // name it, its server renews it, and once it lapses one other server claims it and removes them.
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import type { CellCounter, CellMutation, RoomOperation } from '../../backend/contract.js'
+import type { CellCounter, CellMutation, OperationOptions, RoomOperation } from '../../backend/contract.js'
 import { ROOM_LEASE_TTL_MS } from '../constants.js'
 import { decodeRoomText } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
@@ -98,10 +98,12 @@ async function runHosted<Args, Value>(
   lease: RoomLease,
   operation: RoomOperation<Args & { lease: LeaseState }, Value | 'lease-lost'>,
   args: Args,
+  options?: OperationOptions,
 ): Promise<{ value: Value; counters: Map<string, CellCounter> }> {
   for (;;) {
     const id = lease.id
-    const { value, counters } = await runOperation(room, operation, { ...args, lease: { id, created: lease.created } })
+    const hosted = { ...args, lease: { id, created: lease.created } }
+    const { value, counters } = await runOperation(room, operation, hosted, options)
     if (value !== 'lease-lost') {
       lease.hosted(id)
       return { value: value as Value, counters }

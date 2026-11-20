@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { AcceptedCommitWire, CommitWire, OperationWire, RegisterWire, RenewWire }
+export type { AcceptedCommitWire, CommitWire, InboxLease, OperationWire, RegisterWire, RenewWire }
 
 // A room's authority owns its time, state and fanout.
 
@@ -25,22 +25,25 @@ import type {
 import {
   OrderedStubs,
   grantHolder,
+  leaseAnswer,
   liveLeases,
   registerLease,
   removeLease,
   renewLease,
+  setLeaseAnswer,
   sweepLeases,
   type CloudflareExtensionKit,
   type LeaseOrder,
   type LeaseRegistered,
   type LeaseRemoved,
+  type LeaseWritten,
   type OrderingInfo,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
-import { OPERATION_COMMIT_LANE } from '../backend/operation.js'
+import { OPERATION_COMMIT_LANE, type OperationWrites } from '../backend/operation.js'
 import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
-import { lostReason } from '../server/lanes/lanes.js'
+import { decodeRoomRecord, encodeRoomRecord, lostReason } from '../server/lanes/lanes.js'
 import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
@@ -74,6 +77,10 @@ import {
   readExpiringCells,
   writeExpiringCell,
   deleteExpiredCells,
+  storeHandoff,
+  listHandoffs,
+  deleteHandoff,
+  type Handoff,
 } from './storage.js'
 
 /** An inbox or control commit replies once its delivery was handed off, with why it was lost, if it was. */
@@ -88,10 +95,24 @@ type RouteHolder = { holder: string; bucket: string }
 /** A commit the transaction accepted: its order, the lanes it reaches, and the session DOs subscribed to them then. */
 type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteHolder[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
-/** An operation that ran, with its commit's receipt, or its incarnation stale. */
+/** An operation that ran, with its commit's receipt, or its incarnation stale, or the inbox lease it carried overtaken
+ *  by a later write of its session's on that inbox. */
 type OperationWire =
-  | { kind: 'done'; value: unknown; counters: Map<string, CellCounter>; commit?: AcceptedCommitWire }
+  | {
+      kind: 'done'
+      value: unknown
+      counters: Map<string, CellCounter>
+      commit?: AcceptedCommitWire
+      /** Set where it registered the inbox lease it carried, now or when it came before. */
+      registered?: true
+    }
   | { kind: 'stale-incarnation' }
+  | { kind: 'overtaken' }
+/** A member's exact inbox lease, which an operation registers in its own transaction, under the session's `order`. */
+type InboxLease = { route: RouteInstallation; order: LeaseOrder }
+/** What an operation that registered its inbox lease answered, kept with that lease for a copy of it that comes
+ *  again. */
+type StoredAnswer = { value: unknown; counters: Map<string, CellCounter>; commit?: { seq: number; timestamp: number } }
 
 /** A route registered, refused because its incarnation is dropped or closing, or not, as `registerLease()` says. */
 type RegisterWire = LeaseRegistered | 'dropped'
@@ -99,6 +120,8 @@ type RegisterWire = LeaseRegistered | 'dropped'
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
+/** When the alarm hands on a stored commit whose hand-on this run of the object hasn't settled. */
+const ROOM_HANDOFF_RESUME_MS = 10_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 
 /** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
@@ -109,6 +132,10 @@ class RoomAuthority {
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
   private readonly directoryCalls = new OrderedStubs<RegionDirectoryStub>()
+  /** The stored commits this run of the object is handing on, each to why its hand-on lost it, or null. */
+  private readonly handingOn = new Map<string, Promise<string | null>>()
+  /** Whether this run handed on what an earlier one stored and didn't. */
+  private resumed = false
   private schema = false
 
   constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
@@ -172,39 +199,111 @@ class RoomAuthority {
     return await this.deliver(roomId, inc, lane, payload, outcome)
   }
 
-  /** Runs the operation `request` names in one transaction, which a plan that throws rolls back, then fans its commit
-   *  out. */
-  async runOperation(roomId: string, inc: string, request: RoomOperationRequest): Promise<OperationWire> {
+  /** Runs the operation `request` names in one transaction, which a plan that throws rolls back, then hands its commit
+   *  on. */
+  async runOperation(inc: string, request: RoomOperationRequest): Promise<OperationWire> {
+    const wire = await this.operate(inc, request, undefined)
+    assert(wire !== 'regrant') // only an inbox lease's write is under a grant
+    return wire
+  }
+
+  /** As `runOperation()`, and the same transaction registers the member's exact inbox lease, and keeps the answer
+   *  with it: a copy of the call that comes again answers it and changes nothing. A plan that writes nothing registers
+   *  nothing. */
+  async runOperationWithInbox(
+    inc: string,
+    request: RoomOperationRequest,
+    inbox: InboxLease,
+  ): Promise<OperationWire | 'regrant'> {
+    return this.operate(inc, request, inbox)
+  }
+
+  private async operate(
+    inc: string,
+    request: RoomOperationRequest,
+    inbox: InboxLease | undefined,
+  ): Promise<OperationWire | 'regrant'> {
     assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
-    const outcome = this.transaction((sql) => {
-      if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' } as const
-      const { value, writes } = recordRequest(request, { now, cell: (key) => selectCell(sql, inc, key, now) })
-      for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
-      const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
-      const exchanged = compareExchangeCells(sql, inc, exchange, now)
-      assert(exchanged.kind === 'committed') // nothing expected, in an incarnation found open
-      for (const member of writes.members) {
-        dropLaneOrderRows(sql, inc, member)
-        for (const lane of listRetained(sql, inc, { member })) deleteRetained(sql, inc, lane)
-        if (retainedOwner(sql, inc, SEMANTIC_LANE) === member) deleteRetained(sql, inc, SEMANTIC_LANE)
-      }
-      for (const cell of writes.expiring) writeExpiringCell(sql, inc, cell, now)
-      const commit = writes.commit === null ? null : commitIn(sql, inc, OPERATION_COMMIT_LANE, writes.commit, {}, now)
-      const expiring = writes.expiring.length > 0
-      return { kind: 'done', value, counters: exchanged.counters, commit, payload: writes.commit, expiring } as const
-    })
-    if (outcome.kind !== 'done') return outcome
-    // The alarm deletes the expiring cells, as no server may be on the room by then.
-    if (outcome.expiring) await this.scheduleMaintenanceIfNeeded()
-    const { value, counters, commit, payload } = outcome
-    if (commit === null || payload === null) return { kind: 'done', value, counters }
-    return {
-      kind: 'done',
-      value,
-      counters,
-      commit: await this.deliver(roomId, inc, OPERATION_COMMIT_LANE, payload, commit),
+    const lease = inbox === undefined ? null : routeLease(inbox.route)
+    let outcome: OperationOutcome
+    try {
+      outcome = this.transaction((sql): OperationOutcome => {
+        if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' }
+        if (inbox !== undefined && lease !== null) {
+          const written: LeaseWritten = registerLease(sql, lease, inbox.order, now)
+          if (written === 'regrant') return { kind: 'regrant' }
+          if (written === 'stale') return { kind: 'overtaken' }
+          if (written === 'repeated') {
+            const answer = leaseAnswer(sql, lease.scope, lease.holder)
+            assert(answer !== null) // only an operation registers under its own order, and stores its answer with it
+            return { kind: 'repeated', answer: decodeRoomRecord<StoredAnswer>(answer) }
+          }
+        }
+        const { value, writes } = recordRequest(request, { now, cell: (key) => selectCell(sql, inc, key, now) })
+        if (lease !== null && writesNothing(writes)) throw new NothingWritten(value)
+        const done = applyOperation(sql, inc, value, writes, now)
+        if (inbox !== undefined && lease !== null) {
+          const answer: StoredAnswer = { value, counters: done.counters }
+          if (done.handoff !== null) answer.commit = { seq: done.handoff.seq, timestamp: done.handoff.timestamp }
+          setLeaseAnswer(sql, lease.scope, lease.holder, inbox.order, encodeRoomRecord(answer))
+        }
+        return done
+      })
+    } catch (error) {
+      if (!(error instanceof NothingWritten)) throw error
+      return { kind: 'done', value: error.value, counters: new Map() }
     }
+    if (outcome.kind === 'regrant') return 'regrant'
+    if (outcome.kind !== 'done' && outcome.kind !== 'repeated') return outcome
+    if (outcome.kind === 'repeated') {
+      const { value, counters, commit } = outcome.answer
+      if (commit === undefined) return { kind: 'done', value, counters, registered: true }
+      this.resumeHandoffs()
+      const handing = this.handingOn.get(
+        handoffKey({ inc, laneKey: encodeLaneKey(OPERATION_COMMIT_LANE), seq: commit.seq }),
+      )
+      // One this run isn't handing on was handed on before.
+      const receipt = await receiptOf(commit, handing ?? Promise.resolve(null))
+      return { kind: 'done', value, counters, commit: receipt, registered: true }
+    }
+    const { value, counters, handoff } = outcome
+    // In this turn, so it leaves before anything committed after it.
+    const handing = handoff === null ? null : this.handOn(handoff)
+    // The alarm deletes the expiring cells, as no server may be on the room by then, and hands on a commit whose
+    // hand-on didn't settle.
+    if (outcome.expiring || handoff !== null) await this.scheduleMaintenanceIfNeeded()
+    const done: OperationWire = { kind: 'done', value, counters }
+    if (inbox !== undefined) done.registered = true
+    if (handoff !== null && handing !== null) done.commit = await receiptOf(handoff, handing)
+    return done
+  }
+
+  /** Hands every commit an earlier run of the object stored and didn't hand on, in commit order, before anything this
+   *  run commits; once per run, and again on the alarm. */
+  private resumeHandoffs(again = false): void {
+    if (this.resumed && !again) return
+    this.resumed = true
+    for (const handoff of listHandoffs(this.sql())) this.handOn(handoff)
+  }
+
+  /** Hands a stored commit on to the session DOs subscribed to its lane now, once per run of the object; its row goes
+   *  once the hand-on settled, lost or not. */
+  private handOn(handoff: Handoff): Promise<string | null> {
+    this.resumeHandoffs()
+    const key = handoffKey(handoff)
+    const handing = this.handingOn.get(key)
+    if (handing !== undefined) return handing
+    const { inc, laneKey, seq, timestamp, payload } = handoff
+    const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now())
+    const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp })
+    const handed = lostReason(delivery).then((lost) => {
+      this.transaction((sql) => deleteHandoff(sql, handoff))
+      this.handingOn.delete(key)
+      return lost
+    })
+    this.handingOn.set(key, handed)
+    return handed
   }
 
   /** Fans a commit out; an inbox or control commit's receipt waits for its handoff. */
@@ -215,6 +314,7 @@ class RoomAuthority {
     payload: Uint8Array,
     { mark, laneKeys, routes }: AcceptedCommit,
   ): Promise<AcceptedCommitWire> {
+    this.resumeHandoffs()
     const delivery = this.fanout.send(inc, laneKeys, routes, payload, mark)
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
@@ -250,7 +350,9 @@ class RoomAuthority {
     const now = Date.now()
     const registration = this.transaction((sql): RegisterWire => {
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) return 'dropped'
-      return registerLease(sql, routeLease(route), order, now)
+      const written = registerLease(sql, routeLease(route), order, now)
+      // A registration that came before is answered as it was.
+      return written === 'repeated' ? 'registered' : written
     })
     if (registration === 'registered') await this.scheduleMaintenanceIfNeeded()
     return registration
@@ -318,6 +420,7 @@ class RoomAuthority {
 
   async alarm(): Promise<void> {
     try {
+      this.resumeHandoffs(true)
       const unlisted = this.runSweep(Date.now())
       if (unlisted) await this.unlistInItsRegion(unlisted.roomId, unlisted.incTag)
     } finally {
@@ -399,6 +502,78 @@ function commitIn(
     now,
   )
   return { kind: 'accepted', mark, laneKeys, routes }
+}
+
+/** An operation's outcome in its transaction. */
+type OperationOutcome =
+  | OperationApplied
+  | { kind: 'stale-incarnation' }
+  | { kind: 'overtaken' }
+  | { kind: 'regrant' }
+  | { kind: 'repeated'; answer: StoredAnswer }
+type OperationApplied = {
+  kind: 'done'
+  value: unknown
+  counters: Map<string, CellCounter>
+  /** Its commit, stored until handed on, or null where it committed nothing. */
+  handoff: Handoff | null
+  expiring: boolean
+}
+
+/** A plan that wrote nothing, whose transaction rolls back the inbox lease it registered. */
+class NothingWritten {
+  readonly value: unknown
+  constructor(value: unknown) {
+    this.value = value
+  }
+}
+
+function writesNothing({ prefixes, members, mutations, counts, expiring, commit }: OperationWrites): boolean {
+  return [prefixes, members, mutations, counts, expiring].every((writes) => writes.length === 0) && commit === null
+}
+
+/** Applies a plan's writes in a transaction that found `inc` open; its commit is stored until handed on. */
+function applyOperation(sql: SqlStorage, inc: string, value: unknown, writes: OperationWrites, now: number) {
+  for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
+  const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
+  const exchanged = compareExchangeCells(sql, inc, exchange, now)
+  assert(exchanged.kind === 'committed') // nothing expected, in an incarnation found open
+  for (const member of writes.members) {
+    dropLaneOrderRows(sql, inc, member)
+    for (const lane of listRetained(sql, inc, { member })) deleteRetained(sql, inc, lane)
+    if (retainedOwner(sql, inc, SEMANTIC_LANE) === member) deleteRetained(sql, inc, SEMANTIC_LANE)
+  }
+  for (const cell of writes.expiring) writeExpiringCell(sql, inc, cell, now)
+  let handoff: Handoff | null = null
+  if (writes.commit !== null) {
+    const laneKey = encodeLaneKey(OPERATION_COMMIT_LANE)
+    const { seq, timestamp } = advanceOrder(sql, inc, laneKey, now)
+    handoff = { inc, laneKey, seq, timestamp, payload: writes.commit }
+    storeHandoff(sql, handoff, now + ROOM_HANDOFF_RESUME_MS)
+  }
+  const applied: OperationApplied = {
+    kind: 'done',
+    value,
+    counters: exchanged.counters,
+    handoff,
+    expiring: writes.expiring.length > 0,
+  }
+  return applied
+}
+
+/** A stored commit's receipt, once its hand-on settled. */
+async function receiptOf(
+  { seq, timestamp }: { seq: number; timestamp: number },
+  handing: Promise<string | null>,
+): Promise<AcceptedCommitWire> {
+  const receipt: AcceptedCommitWire = { kind: 'accepted', seq, timestamp }
+  const lost = await handing
+  if (lost !== null) receipt.lost = lost
+  return receipt
+}
+
+function handoffKey({ inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): string {
+  return JSON.stringify([inc, laneKey, seq])
 }
 
 function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uint8Array | undefined {

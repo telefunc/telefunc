@@ -25,9 +25,12 @@ export {
   dropLaneOrderRows,
   dropIncarnationRows,
   keyRange,
+  storeHandoff,
+  listHandoffs,
+  deleteHandoff,
 }
 
-export type { CellPage }
+export type { CellPage, Handoff }
 
 // Room-DO `transactionSync` makes head exchanges, cell batches, and order advance atomic under authority time.
 
@@ -97,6 +100,9 @@ function initSchema(sql: SqlStorage): void {
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
        PRIMARY KEY (inc, lane_key, i));
     ${LEASE_SCHEMA}
+    CREATE TABLE IF NOT EXISTS handoff
+      (inc TEXT NOT NULL, seq INTEGER NOT NULL, lane_key TEXT NOT NULL, ts INTEGER NOT NULL, payload BLOB NOT NULL,
+       resume_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, seq));
     CREATE TABLE IF NOT EXISTS listing (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
     CREATE TABLE IF NOT EXISTS listing_bucket (id INTEGER PRIMARY KEY CHECK (id = 1), bucket TEXT NOT NULL);
   `)
@@ -214,7 +220,8 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
       deadline: number | null
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(check_at) FROM listing)',
+        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(check_at) FROM listing ' +
+        'UNION ALL SELECT MIN(resume_at) FROM handoff)',
     )
     .one().deadline
   const sweep = nextLeaseSweep(sql)
@@ -417,8 +424,43 @@ function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
 }
 
 function dropIncarnationRows(sql: SqlStorage, inc: string): void {
-  for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'gen']) {
+  for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'gen', 'handoff']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }
   dropLeaseScopes(sql, incarnationScopes(inc))
+}
+
+/** A commit stored with its transaction until it was handed on, so a restart in between hands it on still. */
+type Handoff = { inc: string; laneKey: string; seq: number; timestamp: number; payload: Uint8Array }
+
+function storeHandoff(sql: SqlStorage, { inc, laneKey, seq, timestamp, payload }: Handoff, resumeAt: number): void {
+  sql.exec(
+    'INSERT INTO handoff (inc, seq, lane_key, ts, payload, resume_at) VALUES (?, ?, ?, ?, ?, ?)',
+    inc,
+    seq,
+    laneKey,
+    timestamp,
+    payload,
+    resumeAt,
+  )
+}
+
+/** Every commit not yet handed on, in the order it was committed. */
+function listHandoffs(sql: SqlStorage): Handoff[] {
+  return sql
+    .exec<{ inc: string; seq: number; lane_key: string; ts: number; payload: ArrayBuffer }>(
+      'SELECT inc, seq, lane_key, ts, payload FROM handoff ORDER BY inc, lane_key, seq',
+    )
+    .toArray()
+    .map(({ inc, seq, lane_key, ts, payload }) => ({
+      inc,
+      laneKey: lane_key,
+      seq,
+      timestamp: ts,
+      payload: new Uint8Array(payload),
+    }))
+}
+
+function deleteHandoff(sql: SqlStorage, { inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): void {
+  sql.exec('DELETE FROM handoff WHERE inc = ? AND lane_key = ? AND seq = ?', inc, laneKey, seq)
 }

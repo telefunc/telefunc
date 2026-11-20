@@ -1,7 +1,15 @@
-export { OPERATION_COMMIT_LANE, recordOperation }
+export { OPERATION_COMMIT_LANE, recordOperation, beforeOperation }
 export type { OperationReads, OperationWrites }
 
-import type { CellCount, CellMutation, ExpiringCell, LaneId, OperationTx, RoomOperation } from './contract.js'
+import type {
+  CellCount,
+  CellMutation,
+  ExpiringCell,
+  LaneId,
+  OperationOptions,
+  OperationTx,
+  RoomOperation,
+} from './contract.js'
 import { assert } from '../utils/assert.js'
 
 // An executor may run an operation's plan more than once, each run pure over the cells it read, and applies the writes
@@ -22,6 +30,13 @@ type OperationWrites = {
   counts: CellCount[]
   expiring: ExpiringCell[]
   commit: Uint8Array | null
+}
+
+/** Waits for what `options` names, then throws if the operation is no longer wanted: an executor that sends an
+ *  operation as soon as it is called runs this first. */
+async function beforeOperation(options: OperationOptions | undefined): Promise<void> {
+  if (options?.inbox !== undefined) await options.inbox.ready
+  if (options?.wanted?.() === false) throw new Error('A Room operation was not sent: it was no longer wanted')
 }
 
 function recordOperation<Args, Value>(

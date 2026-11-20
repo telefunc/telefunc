@@ -1,7 +1,7 @@
 export { runOperation }
 
 import { getRoomPlane } from '../../backend/plane.js'
-import type { CellCounter, RoomOperation } from '../../backend/contract.js'
+import type { CellCounter, OperationOptions, RoomOperation } from '../../backend/contract.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { handoffLost } from '../lanes/lanes.js'
 import type { RoomIncarnation } from '../protocol.js'
@@ -12,8 +12,9 @@ async function runOperation<Args, Value>(
   room: Pick<RoomIncarnation, 'id' | 'inc'>,
   operation: RoomOperation<Args, Value>,
   args: Args,
+  options?: OperationOptions,
 ): Promise<{ value: Value; counters: Map<string, CellCounter> }> {
-  const result = await getRoomPlane().runOperation(room.id, room.inc, operation, args)
+  const result = await getRoomPlane().runOperation(room.id, room.inc, operation, args, options)
   if (result.kind === 'stale-incarnation') throw roomClosedError(room.id)
   if (result.commit?.delivery !== undefined) await handoffLost(room.id, result.commit.delivery)
   return result
