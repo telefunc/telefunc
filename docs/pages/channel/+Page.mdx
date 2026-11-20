@@ -400,7 +400,7 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > `Broadcast.subscribe()` returns a function that unsubscribes. Its `ready` promise resolves once the subscription is in effect, or once you unsubscribe. While the server can't reach Redis, a new subscription's `ready` waits. A subscription already in effect stays: its callback receives what is published once Redis is back, and <Link href="#delivery">Delivery</Link> says what it missed.
 
-> A subscription fails when Redis, Cloudflare or your <Link href="/broadcast-config">`BroadcastTransport`</Link> refuses it (see <Link href="/redis#errors">Redis errors</Link>). Telefunc then removes it, and your callback receives nothing more. If `ready` hadn't resolved yet, it rejects with an error whose `cause` is the refusal. The server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. To receive again, call `Broadcast.subscribe()` again.
+> A subscription fails when Redis, Cloudflare or your <Link href="/broadcast-config">`BroadcastTransport`</Link> refuses it (see <Link href="/redis#errors">Redis errors</Link>). Telefunc then removes it, and your callback receives nothing more. If `ready` hadn't resolved yet, it rejects: with Redis, with the refusal itself, a `BackendError`; with Cloudflare or your `BroadcastTransport`, with an error whose `cause` is the refusal. The server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. To receive again, call `Broadcast.subscribe()` again.
 
 ### Delivery
 
