@@ -1,5 +1,12 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering }
-export type { CommitInput, OperationOutcome, RedisCommand }
+export {
+  REDIS_DELIVERY_FENCE_BYTE,
+  REDIS_DELIVERY_FENCE_TOKEN_LENGTH,
+  LANE_PAGE_SIZE,
+  REDIS_COMMANDS,
+  holdsLua,
+  parseOrdering,
+}
+export type { CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
@@ -71,6 +78,77 @@ local function tf_allowed(...)
 end
 `
 
+/** What a write script expects a key of its call to hold: the types Telefunc keeps there, `|`-separated, or `channel`
+ *  for a Pub/Sub channel, which no key stands for. `repeats` is the index of an earlier key of the call that this one
+ *  repeats when the call has none of its own (`COMMIT_KEYS`): it then stands for nothing. */
+type Hold = { readonly holds: string; readonly repeats?: number }
+
+/** The guard's check of `holds` on the Lua table `keys` names: the KEYS of a call, or a table of them. */
+function holdsLua(keys: string, holds: readonly Hold[]): string {
+  const entries = holds.flatMap(({ holds, repeats }, index) =>
+    holds === 'channel' ? [] : [`{${index + 1}, '${holds}'${repeats === undefined ? '' : `, ${repeats + 1}`}}`],
+  )
+  return `tf_holds(${keys}, {${entries.join(', ')}})`
+}
+
+// A write script can't undo a write, so before its first one it checks what a later call of it could fail on: that
+// each key holds the type Telefunc keeps there, and that each value it decodes or adds to is one Telefunc writes. A
+// refusal there starts its reply with TFNOTRUN, which nothing else puts at the start of one (a Lua error's text comes
+// after `ERR`), and the backend tells it 'not-run'.
+const GUARD_LUA = `
+local TF_MAX_INTEGER = 9007199254740991
+local function tf_refuse(word, detail)
+  error({ err = 'TFNOTRUN ' .. word .. ' ' .. detail })
+end
+-- Each entry {index, types[, repeated]} of holds: keys[index] holds one of types, or nothing, unless it repeats
+-- keys[repeated].
+local function tf_holds(keys, holds)
+  for _, entry in ipairs(holds) do
+    local key = keys[entry[1]]
+    if key ~= nil and (entry[3] == nil or key ~= keys[entry[3]]) then
+      local held = redis.call('TYPE', key).ok
+      if held ~= 'none' and not string.find('|' .. entry[2] .. '|', '|' .. held .. '|', 1, true) then
+        local kept = string.gsub(entry[2], '|', ' or ')
+        tf_refuse('WRONGTYPE', key .. ' holds a ' .. held .. ' where Telefunc keeps a ' .. kept)
+      end
+    end
+  end
+end
+local function tf_json(raw, what)
+  local ok, value = pcall(cjson.decode, raw)
+  if not ok or type(value) ~= 'table' then tf_refuse('ERR', what .. " isn't the JSON Telefunc writes") end
+  return value
+end
+local function tf_number(value, what)
+  if type(value) ~= 'number' or value ~= value or value == math.huge or value == -math.huge then
+    tf_refuse('ERR', what .. " isn't a number Telefunc writes")
+  end
+  return value
+end
+local function tf_integer(value, what)
+  if type(value) ~= 'number' or value ~= math.floor(value) or value < -TF_MAX_INTEGER or value > TF_MAX_INTEGER then
+    tf_refuse('ERR', what .. " isn't an integer Telefunc writes")
+  end
+  return value
+end
+-- A key INCR counts in holds a count it can add one to.
+local function tf_incrementable(key)
+  local raw = redis.call('GET', key)
+  if raw and not (string.match(raw, '^%-?%d+$') and tonumber(raw) < TF_MAX_INTEGER) then
+    tf_refuse('ERR', key .. " holds no count Telefunc writes")
+  end
+end
+-- A counter cell tf_count changes by delta holds a count that stays an integer.
+local function tf_countable(values_key, key, delta)
+  tf_integer(delta, 'the change of counter ' .. key)
+  local raw = redis.call('HGET', values_key, key)
+  if raw then
+    local counter = tf_json(raw, 'counter ' .. key)
+    tf_integer(tf_integer(counter.value, 'counter ' .. key) + delta, 'counter ' .. key .. ' changed by ' .. delta)
+  end
+end
+`
+
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
 local function tf_now()
@@ -79,14 +157,14 @@ local function tf_now()
 end
 `
 
-const HEAD_PRELUDE = `${NOW_LUA}
+const HEAD_PRELUDE = `${GUARD_LUA}${NOW_LUA}
 -- read the head, treating a logically-lapsed head as absent (a lapsed tombstone reopens the
 -- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
 local function tf_live_head(key, now)
   local raw = redis.call('GET', key)
   if not raw then return nil end
-  local h = cjson.decode(raw)
-  if h.exp and h.exp <= now then return nil end
+  local h = tf_json(raw, key)
+  if h.exp ~= nil and tf_number(h.exp, key .. "'s expiry") <= now then return nil end
   return h
 end
 `
@@ -106,15 +184,17 @@ end
 // place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
 //   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary')
-const PUBLISH_LUA = `${ALLOWED_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
+const PUBLISH_HOLDS: readonly Hold[] = [{ holds: 'string' }, { holds: 'channel' }]
+const PUBLISH_LUA = `${ALLOWED_LUA}${GUARD_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
+${holdsLua('KEYS', PUBLISH_HOLDS)}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
 local text, binary = 0, 0
 if prev then
   local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
-  if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
-  seq = tonumber(pseq) + 1
+  if not pseq then tf_refuse('ERR', KEYS[1] .. " holds no order Telefunc writes") end
+  seq = tf_integer(tonumber(pseq) + 1, KEYS[1] .. "'s next publish")
   if tonumber(pts) > ts then ts = tonumber(pts) end
   text, binary = tonumber(ptext), tonumber(pbinary)
 else
@@ -130,6 +210,7 @@ else
   binary = binary + 1
   place = binary
 end
+tf_integer(place, KEYS[1] .. "'s next publish of its kind")
 tf_allowed('PUBLISH', KEYS[2], '')
 redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
 local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
@@ -183,11 +264,20 @@ end
 //         head's incarnation
 //   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
 //         cell its key, delta and create ('1' or '')
+const CELL_HOLDS: readonly Hold[] = [
+  { holds: 'string' },
+  { holds: 'string' },
+  { holds: 'set' },
+  { holds: 'zset' },
+  { holds: 'hash' },
+  { holds: 'hash' },
+]
 const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
+${holdsLua('KEYS', CELL_HOLDS)}
 local head_key = KEYS[1]
 local now = tf_now()
-local expected = cjson.decode(ARGV[1])
-local nx = cjson.decode(ARGV[2])
+local expected = tf_json(ARGV[1], 'the expected head')
+local nx = tf_json(ARGV[2], 'the next head')
 local cur = tf_live_head(head_key, now)
 
 local matches = false
@@ -208,7 +298,7 @@ if not matches then
 end
 
 -- The count lapses with a tombstone; salted with authority time, a rev still never repeats.
-local n = (cur and cur.n or 0) + 1
+local n = tf_integer((cur and cur.n or 0) + 1, head_key .. "'s next count")
 local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. n, n = n, state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
@@ -219,6 +309,8 @@ if #KEYS > 1 then
   tf_allowed('INCR', KEYS[2])
   tf_cell_writes_allowed()
   tf_allowed('SADD', KEYS[3], '')
+  tf_incrementable(KEYS[2])
+  for at = 3, #ARGV, 3 do tf_countable(KEYS[5], ARGV[at], tonumber(ARGV[at + 1])) end
 end
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
@@ -350,7 +442,9 @@ return marks
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
 //   KEYS: [1]=order ('seq:ts:text publishes:binary publishes')
-const BROADCAST_START_LUA = `
+const BROADCAST_START_HOLDS: readonly Hold[] = [{ holds: 'string' }]
+const BROADCAST_START_LUA = `${GUARD_LUA}
+${holdsLua('KEYS', BROADCAST_START_HOLDS)}
 local mark = redis.call('GET', KEYS[1])
 if mark then return mark end
 local t = redis.call('TIME')
@@ -362,7 +456,9 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-const DROP_INCARNATION_LUA = `${ALLOWED_LUA}
+const DROP_INCARNATION_HOLDS: readonly Hold[] = [{ holds: 'channel' }, { holds: 'set' }]
+const DROP_INCARNATION_LUA = `${ALLOWED_LUA}${GUARD_LUA}
+${holdsLua('KEYS', DROP_INCARNATION_HOLDS)}
 tf_allowed('PUBLISH', KEYS[1], '')
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
@@ -375,12 +471,15 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
 const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
+${holdsLua('KEYS', CELL_HOLDS)}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-incarnation'} end
-local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local mutated = tf_integer(tonumber(ARGV[2]), 'the count of mutated cells')
+local expected = tf_integer(tonumber(ARGV[3]), 'the count of expected cells')
+local counted = tf_integer(tonumber(ARGV[4]), 'the count of counted cells')
 local first_expected = 5 + 3 * mutated
 local first_counted = first_expected + 2 * expected
 for at = first_expected, first_counted - 1, 2 do
@@ -388,6 +487,10 @@ for at = first_expected, first_counted - 1, 2 do
 end
 tf_cell_writes_allowed()
 tf_allowed('SADD', incarnation_keys_key, '')
+tf_incrementable(rev_key)
+for at = first_counted, first_counted + 3 * counted - 1, 3 do
+  tf_countable(values_key, ARGV[at], tonumber(ARGV[at + 1]))
+end
 local version = redis.call('INCR', rev_key)
 for at = 5, first_expected - 1, 3 do
   tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
@@ -462,6 +565,48 @@ function luaRefs<Name extends string>(array: string, table: Record<Name, number>
 const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
 const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
 
+/** What each of COMMIT's KEYS holds, by `COMMIT_KEYS`' names: an order is a string, or a member lane's order hash. */
+const COMMIT_HOLDS = holdList(COMMIT_KEYS, {
+  head: { holds: 'string' },
+  order: { holds: 'string|hash' },
+  retained: { holds: 'string' },
+  channel: { holds: 'channel' },
+  incarnationKeys: { holds: 'set' },
+  cellValues: { holds: 'hash' },
+  everyTrackChannel: { holds: 'channel' },
+  memberRetained: { holds: 'set', repeats: COMMIT_KEYS.retained },
+  trackRetained: { holds: 'set', repeats: COMMIT_KEYS.retained },
+  everyMemberChannel: { holds: 'channel' },
+  trackLanes: { holds: 'set', repeats: COMMIT_KEYS.order },
+  retainedLanes: { holds: 'set' },
+  retainedOwners: { holds: 'hash' },
+})
+
+/** `holds` by the index `table` gives each name. */
+function holdList<Name extends string>(table: Record<Name, number>, holds: Record<Name, Hold>): Hold[] {
+  const list: Hold[] = []
+  for (const name in table) list[table[name]] = holds[name]
+  return list
+}
+
+// A lane's last commit, as its order's watermark 'seq:ts' gives it (a member lane's under its lane key in the order
+// hash): its seq and time, 0 and 0 with none yet. An order a later commit couldn't add to is refused.
+const LANE_ORDER_LUA = `
+local function tf_lane_order(order_key, member_lane, lane_key)
+  local prev
+  if member_lane then prev = redis.pcall('HGET', order_key, lane_key) else prev = redis.pcall('GET', order_key) end
+  if type(prev) == 'table' and prev.err then
+    if string.sub(prev.err, 1, 10) ~= 'WRONGTYPE ' then error(prev) end
+    tf_refuse('WRONGTYPE', order_key .. " holds no order Telefunc writes for its lane")
+  end
+  if not prev then return 0, 0, false end
+  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
+  if not pseq then tf_refuse('ERR', order_key .. " holds no order Telefunc writes") end
+  tf_integer(tonumber(pseq) + 1, order_key .. "'s next commit")
+  return tonumber(pseq), tonumber(pts), true
+end
+`
+
 /** The checks of what COMMIT writes after its lane's order (`ALLOWED_LUA`). Run from OPERATION, past OPERATION's own
  *  writes, its reads and its order's write are checked too. */
 function commitAllowedLua(
@@ -530,15 +675,7 @@ for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
 end
 
 local member_lane = ${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary'
-local base_seq, base_ts = 0, 0
-local prev
-if member_lane then prev = redis.call('HGET', order_key, ${A.laneKey}) else prev = redis.call('GET', order_key) end
-if prev then
-  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
-  if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
-  base_seq = tonumber(pseq)
-  base_ts = tonumber(pts)
-end
+local base_seq, base_ts, prev = tf_lane_order(order_key, member_lane, ${A.laneKey})
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
@@ -596,8 +733,9 @@ return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. 
 `
 }
 
-const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}
+const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${LANE_ORDER_LUA}
 ${REDIS_ORDERING_FRAME_LUA}
+${holdsLua('KEYS', COMMIT_HOLDS)}
 ${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV')}`
 
 // Deletes one lane's retained frame. `member` and `track` are the retained lanes of a binary lane's member and its
@@ -640,18 +778,50 @@ const OPERATION_KEYS = {
   retainedOwners: 8,
 } as const
 const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
+const OPERATION_HOLDS = holdList(OPERATION_KEYS, {
+  head: { holds: 'string' },
+  rev: { holds: 'string' },
+  incarnationKeys: { holds: 'set' },
+  cellIndex: { holds: 'zset' },
+  cellValues: { holds: 'hash' },
+  cellVersions: { holds: 'hash' },
+  retainedLanes: { holds: 'set' },
+  semanticRetained: { holds: 'string' },
+  retainedOwners: { holds: 'hash' },
+})
+/** What each key the plan gives the index of holds, by the plan's field and the key's place in its entry. */
+const OPERATION_PLAN_HOLDS = {
+  members: [{ holds: 'hash' }, { holds: 'set' }],
+  retained: [{ holds: 'string' }, { holds: 'set' }, { holds: 'set' }],
+  trackLanes: [{ holds: 'set' }],
+  expiring: [{ holds: 'string' }],
+} satisfies Record<string, readonly Hold[]>
+/** The plan's entries' keys, each entry's first at the entry's field `at` (a Lua index), checked as tf_holds checks. */
+function planHoldsLua(field: keyof typeof OPERATION_PLAN_HOLDS, at: number): string {
+  const holds = OPERATION_PLAN_HOLDS[field]
+    .map(({ holds }, place) => `planned[#planned + 1] = {entry[${at}] + ${place}, '${holds}'}`)
+    .join('\n  ')
+  return `for _, entry in ipairs(plan.${field}) do\n  ${holds}\nend`
+}
 
-const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
+const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${LANE_ORDER_LUA}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
 end
+local plan = tf_json(ARGV[2], 'the operation')
+${holdsLua('KEYS', OPERATION_HOLDS)}
+local planned = {}
+${planHoldsLua('members', 4)}
+${planHoldsLua('retained', 2)}
+${planHoldsLua('trackLanes', 2)}
+${planHoldsLua('expiring', 3)}
+tf_holds(KEYS, planned)
 local rev_key, incarnation_keys_key = ${OPERATION_KEY.rev}, ${OPERATION_KEY.incarnationKeys}
 local cell_index_key, retained_lanes_key = ${OPERATION_KEY.cellIndex}, ${OPERATION_KEY.retainedLanes}
 local semantic_key, owners_key = ${OPERATION_KEY.semanticRetained}, ${OPERATION_KEY.retainedOwners}
 local now = tf_now()
 local head = tf_live_head(${OPERATION_KEY.head}, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
-local plan = cjson.decode(ARGV[2])
 for _, read in ipairs(plan.expect) do
   if (redis.call('HGET', ${OPERATION_KEY.cellVersions}, read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
@@ -690,6 +860,19 @@ end
 for _, cell in ipairs(plan.expiring) do tf_allowed('SET', KEYS[cell[3]], '', 'PX', '1') end
 if plan.commit[1] then
 ${commitAllowedLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), true)}
+end
+-- What a later write could fail on, checked before the first.
+for _, cell in ipairs(plan.expiring) do
+  local ttl_of = 'the TTL of ' .. KEYS[cell[3]]
+  if tf_integer(cell[2], ttl_of) <= 0 then tf_refuse('ERR', ttl_of .. ' is not positive') end
+end
+if #plan.mutations > 0 or #plan.counts > 0 then tf_incrementable(rev_key) end
+for _, count in ipairs(plan.counts) do tf_countable(${OPERATION_KEY.cellValues}, count[1], count[2]) end
+if plan.commit[1] then
+  ${holdsLua('CK', COMMIT_HOLDS)}
+  local commit_kind = ${luaRefs('CA', COMMIT_ARGS).laneKind}
+  local commit_member_lane = commit_kind == 'inbox' or commit_kind == 'binary'
+  tf_lane_order(${luaRefs('CK', COMMIT_KEYS).order}, commit_member_lane, ${luaRefs('CA', COMMIT_ARGS).laneKey})
 end
 for _, prefix in ipairs(plan.prefixes) do
   for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
@@ -736,7 +919,9 @@ return {commit, unpack(counters)}
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
 //   KEYS: [1]=index [2]=tags [3]=checks
 //   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
-const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${NOW_LUA}
+const DIRECTORY_HOLDS: readonly Hold[] = [{ holds: 'zset' }, { holds: 'hash' }, { holds: 'zset' }]
+const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${GUARD_LUA}${NOW_LUA}
+${holdsLua('KEYS', DIRECTORY_HOLDS)}
 tf_allowed('HSET', KEYS[2], '', '')
 -- The check's time is read before the first write, as TIME is a call the user's ACL can refuse too.
 local at
@@ -744,7 +929,8 @@ if ARGV[3] == '' then
   tf_allowed('ZREM', KEYS[3], '')
 else
   tf_allowed('ZADD', KEYS[3], '0', '')
-  at = math.max(tonumber(ARGV[3]), tf_now() + tonumber(ARGV[4]))
+  local due, delay = tf_number(tonumber(ARGV[3]), 'the due time'), tf_number(tonumber(ARGV[4]), 'the least delay')
+  at = math.max(due, tf_now() + delay)
 end
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
@@ -756,7 +942,8 @@ end
 return 1
 `
 
-const DIRECTORY_DELETE_LUA = `${ALLOWED_LUA}
+const DIRECTORY_DELETE_LUA = `${ALLOWED_LUA}${GUARD_LUA}
+${holdsLua('KEYS', DIRECTORY_HOLDS)}
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 tf_allowed('ZREM', KEYS[1], '')
 tf_allowed('ZREM', KEYS[3], '')
@@ -787,6 +974,8 @@ type RedisCommand<Input, Output> = {
   readonly lua: string
   /** It may write: a failure that Redis doesn't prove came before it ran may have taken effect. */
   readonly writes: boolean
+  /** A write script's guard's table of what each of its KEYS holds, by index (`GUARD_LUA`). */
+  readonly holds?: readonly Hold[]
   readonly numberOfKeys: number | null
   readonly binaryReply?: true
   invoke(prefix: string, input: Input): Invocation
@@ -866,6 +1055,7 @@ const REDIS_COMMANDS = {
   publish: command({
     name: 'tfPublish',
     writes: true,
+    holds: PUBLISH_HOLDS,
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
@@ -888,6 +1078,7 @@ const REDIS_COMMANDS = {
   headExchange: command({
     name: 'tfRoomHeadExchange',
     writes: true,
+    holds: CELL_HOLDS,
     lua: HEAD_EXCHANGE_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => {
@@ -1061,6 +1252,7 @@ const REDIS_COMMANDS = {
     name: 'tfBroadcastStart',
     // It sets the key's mark where none is.
     writes: true,
+    holds: BROADCAST_START_HOLDS,
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
@@ -1073,6 +1265,7 @@ const REDIS_COMMANDS = {
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',
     writes: true,
+    holds: DROP_INCARNATION_HOLDS,
     lua: DROP_INCARNATION_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
@@ -1084,6 +1277,7 @@ const REDIS_COMMANDS = {
   cellsExchange: command({
     name: 'tfRoomCellsExchange',
     writes: true,
+    holds: CELL_HOLDS,
     lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 6,
     invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
@@ -1123,6 +1317,7 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     writes: true,
+    holds: COMMIT_HOLDS,
     lua: COMMIT_LUA,
     numberOfKeys: Object.keys(COMMIT_KEYS).length,
     invoke: commitInvocation,
@@ -1137,6 +1332,7 @@ const REDIS_COMMANDS = {
   operation: command({
     name: 'tfRoomOperation',
     writes: true,
+    holds: OPERATION_HOLDS,
     lua: OPERATION_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
@@ -1218,6 +1414,7 @@ const REDIS_COMMANDS = {
   directoryPut: command({
     name: 'tfRoomDirectoryPut',
     writes: true,
+    holds: DIRECTORY_HOLDS,
     lua: DIRECTORY_PUT_LUA,
     numberOfKeys: 3,
     invoke: (prefix, { roomId, incTag, checkAt, minDelayMs }: DirectoryPutInput) => ({
@@ -1229,6 +1426,7 @@ const REDIS_COMMANDS = {
   directoryDelete: command({
     name: 'tfRoomDirectoryDelete',
     writes: true,
+    holds: DIRECTORY_HOLDS,
     lua: DIRECTORY_DELETE_LUA,
     numberOfKeys: 3,
     invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({

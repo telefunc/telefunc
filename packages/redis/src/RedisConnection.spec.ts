@@ -219,3 +219,40 @@ describe('a state of Redis that a later call may get past', () => {
     })
   })
 })
+
+describe("a write script's refusal before its first write", () => {
+  it("TFNOTRUN at the start of Redis's reply: it didn't run, in Telefunc's words, without the reply's", () => {
+    const refused = replyError(
+      'TFNOTRUN WRONGTYPE tf:0:seq:{k} holds a hash where Telefunc keeps a string script: 06f79f6ab4, on @user_script:9.',
+    )
+    expect(redisFailure(refused, client(), 'write')).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing (WRONGTYPE): keep that prefix to Telefunc",
+      code: 'failed',
+      outcome: 'not-run',
+    })
+    expect(inspect(redisFailure(refused, client(), 'write'), { depth: 8 })).not.toContain('tf:0:seq:{k}')
+  })
+
+  it("a refused value: ERR, in Telefunc's words", () => {
+    const refused = replyError(
+      "TFNOTRUN ERR counter n isn't the JSON Telefunc writes script: 06f79f6ab4, on @user_script:9.",
+    )
+    expect(redisFailure(refused, client(), 'write')).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a value Telefunc didn't write, so Telefunc's Redis backend changed nothing (ERR): keep that prefix to Telefunc",
+      outcome: 'not-run',
+    })
+  })
+
+  it.each([
+    // A Lua error's text, a key name or a payload in it, comes after ERR: an app's TFNOTRUN can't lead a reply.
+    'ERR user_script:1: TFNOTRUN WRONGTYPE forged script: 06f79f6ab4, on @user_script:1.',
+    'WRONGTYPE Operation against a key holding the wrong kind of value TFNOTRUN',
+    ' TFNOTRUN WRONGTYPE forged',
+    'TFNOTRUNWRONGTYPE forged',
+  ])('TFNOTRUN anywhere else, as in %j: it may have run', (message) => {
+    expect(redisFailure(replyError(message), client(), 'write')).toMatchObject({ outcome: 'may-have-run' })
+  })
+})

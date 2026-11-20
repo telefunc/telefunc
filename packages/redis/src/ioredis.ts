@@ -147,6 +147,10 @@ const UNKNOWN_COMMAND = /^ERR unknown (?:sub)?command /
 const REFUSED_BEFORE_RUNNING =
   /^(?:(?:NOPERM|WRONGPASS|NOAUTH|LOADING|BUSY|READONLY|OOM|MISCONF|NOREPLICAS) |ERR unknown command |ERR ACL failure in script: |ERR The user executing the script )/
 
+/** A write script's guard's refusal before its first write (`GUARD_LUA`, commands.ts), by its word: WRONGTYPE for a
+ *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
+const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
+
 /** ioredis's rejection of a command it didn't write, as the backend's command client keeps no offline queue. */
 const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQueue options is false$/
 
@@ -155,6 +159,7 @@ const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQ
 function outcomeOf(error: unknown, dispatch: Dispatch): BackendError['outcome'] {
   if (dispatch === 'read') return 'not-run'
   if (!(error instanceof Error)) return 'may-have-run'
+  if (isReplyError(error) && GUARD_REFUSAL.test(error.message)) return 'not-run'
   const proof = isReplyError(error) ? REFUSED_BEFORE_RUNNING : UNSENT
   return proof.test(error.message) ? 'not-run' : 'may-have-run'
 }
@@ -177,6 +182,21 @@ function redisFailure(error: unknown, redis: RedisClient, dispatch: Dispatch): u
     })
   }
   const { message } = error
+  const guarded = GUARD_REFUSAL.exec(message)
+  if (guarded !== null) {
+    // In Telefunc's own words, as for every reply: the reply's text names the key.
+    const [word, held] =
+      guarded[1] === 'WRONGTYPE'
+        ? ['WRONGTYPE', 'a key of another type than Telefunc keeps there']
+        : ['ERR', "a value Telefunc didn't write"]
+    return new BackendError({
+      code: 'failed',
+      outcome,
+      message:
+        `Redis at ${where} holds, under Telefunc's prefix, ${held}, so Telefunc's Redis backend changed nothing ` +
+        `(${word}): keep that prefix to Telefunc`,
+    })
+  }
   const code = replyCode(message)
   const tagged = code === undefined ? '' : ` (${code})`
   if (READ_ONLY.test(message)) {
