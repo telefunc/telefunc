@@ -645,7 +645,7 @@ class SseTransport implements UpgradeSource {
         if (!this.flushing || at === -1) return
         this.outbox.splice(at, 1)
         this.outboxBytes -= entry.frame.byteLength
-        void this.sendStandalonePost([entry.frame])
+        void this.sendPingAlone(entry.frame)
       },
       Math.max(0, entry.deadline - performance.now()),
     )
@@ -682,9 +682,22 @@ class SseTransport implements UpgradeSource {
     return response
   }
 
-  /** For frames that cannot wait for the next flush. Failure is swallowed, a refusal too, and neither is split nor sent
-   *  again: its two senders are a heartbeat ping passing a POST out (its own deadline notices a wire whose PINGs don't
-   *  arrive) and the barrier (delivered either way). */
+  /** A PING that passes the POST out, alone. Its answer goes to the decision every POST's goes to: a refusal is counted
+   *  (`onTransportRefused`), and ends the wire as a refused POST does. Only for the wire it went on; a network failure
+   *  is the heartbeat's deadline to notice. */
+  private async sendPingAlone(frame: Uint8Array<ArrayBuffer>): Promise<void> {
+    if (!this.hasWire()) return
+    const wire = this.transportAbort
+    assert(wire)
+    const answer = await answerOf(this.postAndRead(encodeSseRequest({ connId: this.connId }, [frame]), wire.signal))
+    if (wire !== this.transportAbort || answer === null || answer.tag === 'expected') return
+    if (answer.tag !== 'otherWireVersion' && !this.owner.onTransportRefused([frame], answer.answer)) return
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, endOf(answer))
+  }
+
+  /** For the barrier, which cannot wait for the next flush and is delivered either way: failure is swallowed, a
+   *  refusal too, and neither is split nor sent again. */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
     assert(this.transportAbort)

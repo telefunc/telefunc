@@ -108,6 +108,19 @@ test("a PONG the wire left behind carried after its own frames' refusal doesn't 
   expect(world.streams.length).toBeLessThanOrEqual(3)
 })
 
+test('a PING that goes past a data POST the gateway holds, refused again after a reconnect, ends the connection', async () => {
+  const page = (await openOverSse(1))(0)
+  // The gateway holds the one data POST for 12 s and refuses every POST of the connection's own frames (msg16 R1.7).
+  world.postAnswers = [{ tag: 'slow', ms: 12_000 }]
+  world.controlAnswers = Array.from({ length: 30 }, (): PostAnswer => ({ tag: 'refused', status: 403 }))
+  void page.channel.send('data held by the gateway').catch(() => {})
+  await advance(8_500)
+  expect(world.posts.filter(({ status, data }) => status === 403 && !data).length).toBeGreaterThan(1)
+  expect(page.ended).toHaveLength(1)
+  expect(defined(page.ended[0], 'the connection ending').err?.message).toMatch(/refused with 403 text\/html/)
+  expect(world.streams.length).toBeLessThanOrEqual(3)
+})
+
 test("a late answer to a POST of a wire the page left doesn't size the POSTs of the wire after it", async () => {
   const page = (await openOverSse(1))(0)
   // Fast and full POSTs: the page sizes its next ones larger.
