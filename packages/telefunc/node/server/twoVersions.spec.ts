@@ -7,6 +7,10 @@ const SHAPES_031 = () => ({
   'client/remoteTelefunctionCall/serializeTelefunctionArguments.ts': { gcRegistry: { register() {} } },
 })
 
+// The head's module graph, transformed while the file is collected, outside any row's deadline: each row then evaluates
+// it fresh, after `vi.resetModules()`, at the cost of a cached import.
+await import('./telefunc.js')
+
 const FILE = '/twoVersions.telefunc.ts'
 const globals = globalThis as { _telefunc?: Record<string, unknown> }
 let before: Record<string, unknown> | undefined
