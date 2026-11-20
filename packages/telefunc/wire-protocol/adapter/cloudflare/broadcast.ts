@@ -12,7 +12,7 @@ export type {
 }
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
-import type { Invoke, OrderedStubs } from './OrderedStubs.js'
+import { CallNotSent, type CallOptions, type Invoke, type OrderedStubs } from './OrderedStubs.js'
 import { TransientRetry } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
 import {
@@ -31,6 +31,7 @@ import { currentCloudflareSession } from './session.js'
 import type { BroadcastDelivery } from './extensions.js'
 import {
   HolderGrants,
+  LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   LEASE_SCHEMA,
   grantHolder,
@@ -281,16 +282,15 @@ class CloudflareBroadcastMember {
 
   openSubscription(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const routeKey = broadcastRouteKey(route)
-    let memberRoute = this.routes.get(routeKey)
-    if (memberRoute === undefined) {
-      memberRoute = new MemberRoute({ route })
-      this.routes.set(routeKey, memberRoute)
-      // Nobody awaits a deferred teardown; a failed withdrawal lapses with the presence TTL.
-      void this.recordFirstPresence(routeKey, memberRoute).catch(() => {})
-    }
+    const existing = this.routes.get(routeKey)
     // Else it was unsubscribed while establishing, and is subscribed again before its presence was recorded.
+    const memberRoute = existing ?? new MemberRoute({ route })
     const attempt = new MemberAttempt({ member: this, memberRoute, receiver })
     memberRoute.attempt = attempt
+    if (existing === undefined) {
+      this.routes.set(routeKey, memberRoute)
+      void this.recordFirstPresence(routeKey, memberRoute)
+    }
     return attempt
   }
 
@@ -326,25 +326,30 @@ class CloudflareBroadcastMember {
   }
 
   /** Written again after a failure Cloudflare calls transient, a few times (`TransientRetry`), unless nobody wants the
-   *  route by then; after any other failure, or the last, its attempt closes with the error. */
+   *  route by then; after any other failure, or the last, its attempt closes with the error, or with the overload that
+   *  kept it from being sent. A write that may have been stored is then released. */
   private async recordFirstPresence(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     const retry = new TransientRetry()
+    let sent = false
     for (;;) {
       try {
         const held = await this.hold(memberRoute, retry)
+        sent = true
         // A write of this DO's on the route that was sent later came first.
         if (held === 'stale')
           throw new Error(`Cloudflare Broadcast presence for '${memberRoute.route.key}' was overtaken`)
         break
       } catch (error) {
-        const delay = retry.delayAfter(error)
+        if (!(error instanceof CallNotSent)) sent = true
+        const reason = retry.reasonFor(error)
+        const delay = memberRoute.attempt === null ? null : retry.delayAfter(error)
         if (delay === null) {
           this.routes.delete(routeKey)
-          memberRoute.attempt?.presence('closed', error)
+          if (sent) void this.removeUntilDone(memberRoute)
+          memberRoute.attempt?.presence('closed', reason)
           return
         }
         await new Promise((resolve) => setTimeout(resolve, delay))
-        if (memberRoute.attempt === null) return void this.routes.delete(routeKey)
       }
     }
     memberRoute.presenceRecorded()
@@ -355,28 +360,55 @@ class CloudflareBroadcastMember {
     )
   }
 
-  private async release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
+  private release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     memberRoute.stopRefresh()
     this.routes.delete(routeKey)
-    const request = this.leaseRequest(memberRoute)
-    await this.write(memberRoute.route, (authority, order) => authority.telefuncBroadcastRelease({ ...request, order }))
+    return this.removeUntilDone(memberRoute)
   }
 
-  /** A first one's attempt is made through `retry`, with the grant it may ask for first. */
+  /** Releases the route's presence as many times as it takes, whoever waits for it. */
+  private removeUntilDone(memberRoute: MemberRoute): Promise<void> {
+    const request = this.leaseRequest(memberRoute)
+    const release = () =>
+      this.write(memberRoute.route, (authority, order) => authority.telefuncBroadcastRelease({ ...request, order }), {
+        deadline: Date.now() + LEASE_CALL_DEADLINE_MS,
+        paused: true,
+      })
+    const name = this.broadcast.authorityName(memberRoute.route.key)
+    return this.grants.removeUntilDone(release, () => this.calls.pausedFor(name))
+  }
+
+  /** While the route is wanted, in its time, and its key's authority isn't paused: a first one's attempt is made
+   *  through `retry`, within its window, with the grant it may ask for first. */
   private hold(memberRoute: MemberRoute, retry?: TransientRetry): Promise<LeaseRegistered> {
     assert(this.locatedBucket, 'A Broadcast member registers from a session that knows its bucket')
     const request = { ...this.leaseRequest(memberRoute), bucket: this.locatedBucket }
-    return this.write(memberRoute.route, (authority, order) =>
-      retry === undefined
-        ? authority.telefuncBroadcastHold({ ...request, order })
-        : retry.attempt(() => authority.telefuncBroadcastHold({ ...request, order })),
+    const options = {
+      wanted: () =>
+        retry === undefined
+          ? this.routes.get(broadcastRouteKey(memberRoute.route)) === memberRoute
+          : memberRoute.attempt !== null,
+      deadline: retry === undefined ? Date.now() + LEASE_CALL_DEADLINE_MS : retry.deadline,
+      paused: true,
+    }
+    return this.write(
+      memberRoute.route,
+      (authority, order) =>
+        retry === undefined
+          ? authority.telefuncBroadcastHold({ ...request, order })
+          : retry.attempt(() => authority.telefuncBroadcastHold({ ...request, order })),
+      options,
     )
   }
 
   private renew(memberRoute: MemberRoute): Promise<LeaseRenewed> {
     const request = this.leaseRequest(memberRoute)
-    return this.broadcast.callAuthority(this.calls, memberRoute.route.key, this.locatedBucket, (authority) =>
-      authority.telefuncBroadcastRenew(request),
+    return this.broadcast.callAuthority(
+      this.calls,
+      memberRoute.route.key,
+      this.locatedBucket,
+      (authority) => authority.telefuncBroadcastRenew(request),
+      { deadline: Date.now() + LEASE_RENEW_EVERY_MS, paused: true },
     )
   }
 
@@ -384,9 +416,10 @@ class CloudflareBroadcastMember {
   private write<T>(
     route: BroadcastRoute,
     write: (authority: TelefuncBroadcastStub, order: LeaseOrder) => Promise<T | 'regrant'>,
+    options: CallOptions,
   ): Promise<T> {
     const call = <R>(invoke: Invoke<TelefuncBroadcastStub, R> | Promise<Invoke<TelefuncBroadcastStub, R>>) =>
-      this.broadcast.callAuthority(this.calls, route.key, this.locatedBucket, invoke)
+      this.broadcast.callAuthority(this.calls, route.key, this.locatedBucket, invoke, options)
     return this.grants.send(
       this.broadcast.authorityName(route.key),
       () => call((authority) => authority.telefuncBroadcastGrant(this.id)),
@@ -447,8 +480,14 @@ class CloudflareBroadcast {
     key: string,
     locationHint: LocationBucket | null,
     invoke: Invoke<TelefuncBroadcastStub, T> | Promise<Invoke<TelefuncBroadcastStub, T>>,
+    options?: CallOptions,
   ): Promise<T> {
-    return calls.call(this.authorityName(key), () => this.stubByName(this.authorityName(key), locationHint), invoke)
+    return calls.call(
+      this.authorityName(key),
+      () => this.stubByName(this.authorityName(key), locationHint),
+      invoke,
+      options,
+    )
   }
 
   /** At the key's authority: sequences the publish, reads its presence and forwards it, all in one synchronous turn,

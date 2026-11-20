@@ -134,7 +134,7 @@ describe('a Cloudflare Room lane', () => {
   // The runtime retries a call itself for up to 10 s; a failure that reaches the code that late isn't made again.
   it('whose first route registration fails as retryable 10 seconds in closes with that error, and is not registered again', async () => {
     const failed = transient(false)
-    const late = new Promise<never>((_, reject) => setTimeout(() => reject(failed), 10_000))
+    const late = new Promise<never>((_, reject) => setTimeout(() => reject(failed), 9_999))
     const { calls, reasons } = setup({ register: [late, 'registered'], renew: [] })
     await vi.advanceTimersByTimeAsync(12_000)
     expect(calls.register).toBe(1)
@@ -206,6 +206,64 @@ describe('a Cloudflare Room lane', () => {
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS + 5_000)
     expect(attempt.state()).toBe('closed')
     expect(reasons.at(-1)).toEqual(['closed', undefined])
+    expect(calls.register).toBe(1)
+  })
+})
+
+describe('a call of a Cloudflare Room lane to its room', () => {
+  it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {
+    const held = Promise.withResolvers<RegisterWire>()
+    // The first lane's registration fails while the second's is on the same stub; the first's next try waits for it.
+    const { attempt, calls, subscribe } = setup({ register: [transient(false), held.promise, 'registered'], renew: [] })
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(150)
+    expect(calls.register).toBe(2)
+    // Its removal goes behind the second lane's registration too.
+    void attempt.unsubscribe()
+    held.resolve('registered')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(calls.register).toBe(2)
+  })
+
+  it('that waited in its line behind a failed call another lane waits on forever settles within its own time', async () => {
+    // The first lane's registration fails while the second's is on the same stub and never answered.
+    const failed = transient(false)
+    const { attempt, reasons, subscribe } = setup({
+      register: [failed, new Promise<never>(() => {}), 'registered'],
+      renew: [],
+    })
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(attempt.state()).toBe('closed')
+    expect(reasons).toEqual([['closed', failed]])
+  })
+
+  it('that the room never answers closes a first registration within 10 s of its first try', async () => {
+    const { attempt, reasons } = setup({ register: [new Promise<never>(() => {})], renew: [] })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(attempt.state()).toBe('closed')
+    expect(reasons).toHaveLength(1)
+  })
+
+  it('that the room answered overloaded is followed by no other call to the room at once, a first registration neither', async () => {
+    const { calls, subscribe } = setup({
+      register: ['registered', 'registered', 'registered'],
+      renew: [transient(true)],
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    expect(calls).toEqual({ register: 1, renew: 1 })
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(calls).toEqual({ register: 1, renew: 1 })
+  })
+
+  it('whose first registration the room refused as overloaded is followed by no other call to it at once', async () => {
+    const { attempt, calls, subscribe } = setup({ register: [transient(true), 'registered'], renew: [] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(attempt.state()).toBe('closed')
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(500)
     expect(calls.register).toBe(1)
   })
 })

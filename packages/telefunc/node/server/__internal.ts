@@ -82,11 +82,12 @@ export type {
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
-export { OrderedStubs } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
-export type { Invoke } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
+export { OrderedStubs, CallNotSent, CallTimedOut } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
+export type { CallOptions, Invoke } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 export { TransientRetry } from '../../wire-protocol/adapter/cloudflare/transientRetry.js'
 export {
   HolderGrants,
+  LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   LEASE_SCHEMA,
   dropLeaseScopes,

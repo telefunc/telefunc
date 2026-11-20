@@ -8,9 +8,12 @@ import {
   currentCloudflareMember,
   getOrCreate,
   hostLocal,
+  CallNotSent,
   HolderGrants,
+  LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   TransientRetry,
+  type CallOptions,
   type Invoke,
   type LeaseOrder,
 } from 'telefunc/__internal'
@@ -82,8 +85,14 @@ class RoomSessionSubscriptions {
   callAuthority<T>(
     roomId: string,
     invoke: Invoke<CloudflareRoomAuthorityStub, T> | Promise<Invoke<CloudflareRoomAuthorityStub, T>>,
+    options?: CallOptions,
   ): Promise<T> {
-    return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
+    return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke, options)
+  }
+
+  /** How long the room's authority gets no registration of this session's, after it answered overloaded. */
+  pausedFor(roomId: string): number {
+    return this.authorityCalls.pausedFor(roomId)
   }
 
   /** A registration or removal of a route at the room's authority, through its ordered stub, with this session's grant
@@ -91,16 +100,28 @@ class RoomSessionSubscriptions {
   writeRoute<T>(
     roomId: string,
     write: (authority: CloudflareRoomAuthorityStub, order: LeaseOrder) => Promise<T | 'regrant'>,
+    options: CallOptions,
   ): Promise<T> {
     return this.grants.send(
       roomId,
-      () => this.callAuthority(roomId, (authority) => authority.grantHolder(this.id)),
+      () => this.callAuthority(roomId, (authority) => authority.grantHolder(this.id), options),
       (order) =>
         this.callAuthority(
           roomId,
           order.then((order) => (authority: CloudflareRoomAuthorityStub) => write(authority, order)),
+          options,
         ),
     )
+  }
+
+  /** Removes `route` at its room's authority, as many times as it takes, whoever waits for it. */
+  removeRoute(route: RouteInstallation): Promise<void> {
+    const remove = () =>
+      this.writeRoute(route.roomId, (authority, order) => authority.unsubscribeRoute(route, order), {
+        deadline: Date.now() + LEASE_CALL_DEADLINE_MS,
+        paused: true,
+      })
+    return this.grants.removeUntilDone(remove, () => this.pausedFor(route.roomId))
   }
 
   renewWithRoom(attempt: CloudflareRoomAttempt): void {
@@ -125,7 +146,10 @@ class RoomSessionSubscriptions {
     this.renewals.delete(roomId)
     let results: RenewWire[]
     try {
-      results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)))
+      results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)), {
+        deadline: Date.now() + LEASE_RENEW_EVERY_MS,
+        paused: true,
+      })
     } catch (error) {
       for (const attempt of attempts) attempt.lose(error)
       return
@@ -152,6 +176,8 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private readonly stopDeliveries: () => void
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
+  /** Whether a registration of its route may have reached the authority, which then removes it should it close. */
+  private sent = false
   /** How its first registration is made again, until its route was registered. */
   private firstRegistration: TransientRetry | null = new TransientRetry()
 
@@ -167,8 +193,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
     try {
       registration = await this.sendRegistration()
     } catch (error) {
+      if (!(error instanceof CallNotSent)) this.sent = true
       return this.firstRegistration === null ? this.lose(error) : this.failFirst(this.firstRegistration, error)
     }
+    this.sent = true
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
@@ -180,10 +208,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.owner.renewWithRoom(this)
   }
 
-  async unsubscribe(): Promise<void> {
+  unsubscribe(): Promise<void> {
     this.stop()
     this.transition('closed')
-    await this.owner.writeRoute(this.route.roomId, (authority, order) => authority.unsubscribeRoute(this.route, order))
+    return this.owner.removeRoute(this.route)
   }
 
   onRenewal(renewal: RenewWire): void {
@@ -195,27 +223,33 @@ class CloudflareRoomAttempt extends DriverAttempt {
   }
 
   /** What is committed until its route is registered again may miss it: lost if it was ready, then registered again
-   *  after a wait that doubles while the authority fails. The first failure of a run is reported. */
+   *  after a wait that doubles while the authority fails, and lasts its overload's pause at least. The first failure of
+   *  a run is reported. */
   lose(error: unknown): void {
     if (this.state() === 'closed') return
     this.owner.stopRenewing(this)
     if (this.state() === 'ready') this.transition('lost')
     if (this.retryDelay === REGISTER_RETRY_MIN_MS) console.error(error)
-    this.retry = setTimeout(() => {
-      this.retry = null
-      void this.register()
-    }, this.retryDelay)
+    this.retry = setTimeout(
+      () => {
+        this.retry = null
+        void this.register()
+      },
+      Math.max(this.retryDelay, this.owner.pausedFor(this.route.roomId)),
+    )
     this.retryDelay = Math.min(this.retryDelay * 2, REGISTER_RETRY_MAX_MS)
   }
 
-  /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, which
-   *  core reports. */
+  /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, or the
+   *  overload that kept it from being sent, which core reports; a registration that may have been stored is removed. */
   private failFirst(retry: TransientRetry, error: unknown): void {
     if (this.state() === 'closed') return
+    const reason = retry.reasonFor(error)
     const delay = retry.delayAfter(error)
     if (delay === null) {
       this.stop()
-      return this.transition('closed', error)
+      if (this.sent) void this.owner.removeRoute(this.route)
+      return this.transition('closed', reason)
     }
     this.retry = setTimeout(() => {
       this.retry = null
@@ -236,13 +270,22 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.stopDeliveries()
   }
 
-  /** Sent behind what this session sent the room before, with the grant it may ask for first. */
+  /** Sent behind what this session sent the room before, with the grant it may ask for first, while it is wanted and
+   *  in its time: a first registration's is its retries' window. */
   private sendRegistration(): Promise<Exclude<RegisterWire, 'regrant'>> {
     const first = this.firstRegistration
-    return this.owner.writeRoute(this.route.roomId, (authority, order) =>
-      first === null
-        ? authority.registerRoute(this.route, order)
-        : first.attempt(() => authority.registerRoute(this.route, order)),
+    const options = {
+      wanted: () => this.state() !== 'closed',
+      deadline: first === null ? Date.now() + LEASE_CALL_DEADLINE_MS : first.deadline,
+      paused: true,
+    }
+    return this.owner.writeRoute(
+      this.route.roomId,
+      (authority, order) =>
+        first === null
+          ? authority.registerRoute(this.route, order)
+          : first.attempt(() => authority.registerRoute(this.route, order)),
+      options,
     )
   }
 }

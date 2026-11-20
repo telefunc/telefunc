@@ -1,5 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export {
+  LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   LEASE_SCHEMA,
   HolderGrants,
@@ -14,6 +15,8 @@ export {
 }
 export type { Lease, LeaseOrder, LeaseRegistered, LeaseRemoved, LeaseRenewed }
 
+import { createDeferred } from '../../../utils/createDeferred.js'
+
 // A Durable Object's leases at an authority (a Room route, a Broadcast presence): one row per scope and holder DO. A
 // call can reach the authority any time after it was sent, so the authority tells a late write from a current one by
 // a grant it issued to the holder, never by a time. Each register and removal carries the holder's grant and its own
@@ -23,6 +26,8 @@ export type { Lease, LeaseOrder, LeaseRegistered, LeaseRemoved, LeaseRenewed }
 
 const LEASE_TTL_MS = 90_000
 const LEASE_RENEW_EVERY_MS = LEASE_TTL_MS / 3
+/** How long a registration's or removal's call is waited for, as long as Cloudflare's runtime retries one itself. */
+const LEASE_CALL_DEADLINE_MS = 10_000
 
 const LEASE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS telefunc_lease_grant (id INTEGER PRIMARY KEY CHECK (id = 0), last INTEGER NOT NULL);
@@ -204,6 +209,8 @@ function isAfter(order: LeaseOrder, fence: Fence): boolean {
 }
 
 const REGRANTS = 2
+const REMOVE_RETRY_MIN_MS = 100
+const REMOVE_RETRY_MAX_MS = 5_000
 
 /** A Durable Object's grants at the authorities it holds leases at, and the order of its writes there. */
 class HolderGrants {
@@ -226,6 +233,26 @@ class HolderGrants {
       if (this.grants.get(target) === granted) this.grants.delete(target)
       if (regrants === REGRANTS) throw new Error(`The Durable Object at '${target}' refused each grant it issued`)
     }
+  }
+
+  /** Sends a removal through `send` until the target answers it, waiting between tries a time that doubles, and at least
+   *  `pausedFor()`: what a write that failed or wasn't waited for may have stored goes, however long its target fails.
+   *  Settles once its first try did; the tries after it go on without a caller. Its first failure is reported. */
+  removeUntilDone(send: () => Promise<unknown>, pausedFor: () => number): Promise<void> {
+    const first = createDeferred<void>()
+    void (async () => {
+      for (let wait = REMOVE_RETRY_MIN_MS; ; wait = Math.min(wait * 2, REMOVE_RETRY_MAX_MS)) {
+        try {
+          await send()
+          return first.resolve()
+        } catch (error) {
+          if (wait === REMOVE_RETRY_MIN_MS) console.error(error)
+          first.resolve()
+          await new Promise((resolve) => setTimeout(resolve, Math.max(wait, pausedFor())))
+        }
+      }
+    })()
+    return first.promise
   }
 
   private grantAt(target: string, grant: () => Promise<number>): Promise<number> {

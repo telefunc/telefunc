@@ -582,10 +582,12 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(first.ready)).toBe(REFUSAL)
         await new Promise((resolve) => setTimeout(resolve, 0))
-        expect(presences).toHaveLength(1)
+        // Each refused first write is released after, which the authority refuses too until it takes it.
+        const holds = () => presences.filter(({ op }) => op === 'hold')
+        expect(holds()).toHaveLength(1)
         const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
         expect(await outcome(second.ready)).toBe(REFUSAL)
-        expect(presences).toHaveLength(2)
+        expect(holds()).toHaveLength(2)
         first()
         second()
         state.refuse = false
@@ -612,9 +614,11 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, presences, inObject } = worker()
         const startedAt = Date.now()
         const writtenAt: number[] = []
+        // A first write that failed is released after; only the first writes count here.
+        const holds = () => presences.filter(({ op }) => op === 'hold')
         const written = () => {
-          while (writtenAt.length < presences.length) writtenAt.push(Date.now() - startedAt)
-          state.fail = failures[presences.length]
+          while (writtenAt.length < holds().length) writtenAt.push(Date.now() - startedAt)
+          state.fail = failures[holds().length]
         }
         state.fail = failures[0]
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
@@ -678,7 +682,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         vi.spyOn(console, 'error').mockImplementation(() => {})
         const { state, presences, inObject } = worker()
         const failed = transient(false)
-        state.held = new Promise((resolve) => setTimeout(resolve, 10_000))
+        state.held = new Promise((resolve) => setTimeout(resolve, 9_999))
         state.fail = failed
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         let ready: unknown = 'pending'
@@ -687,12 +691,12 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await vi.advanceTimersByTimeAsync(0)
         state.held = undefined
         await vi.advanceTimersByTimeAsync(12_000)
-        expect(presences).toHaveLength(1)
+        expect(presences.filter(({ op }) => op === 'hold')).toHaveLength(1)
         expect(ready).toBe(failed)
         subscriber()
       })
 
-      it('a subscriber removed while its retryable first presence write waits 50 ms to be written again leaves no other write', async () => {
+      it('a subscriber removed while its retryable first presence write waits 50 ms to be written again is not written again', async () => {
         const waiting = await firstRegistration([transient(false)], { ms: 60, random: 0.5 })
         const removed = await firstRegistration([transient(false)], { random: 0.5, removeAt: 25 })
         expect({ waiting: waiting.writtenAt, removed: removed.writtenAt }).toEqual({ waiting: [0, 50], removed: [0] })
@@ -714,6 +718,24 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await inObject(() => Broadcast.publish('room:test', 'after'), sessions.second)
         await vi.advanceTimersByTimeAsync(0)
         expect(heard).toEqual(['after'])
+        subscriber()
+      })
+
+      it("a first presence write the key's authority never answers rejects the subscriber's `ready` within 10 s", async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { state, inObject } = worker()
+        state.held = new Promise<void>(() => {})
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        let ready = 'pending'
+        subscriber.ready.then(
+          () => (ready = 'resolved'),
+          () => (ready = 'rejected'),
+        )
+        await vi.advanceTimersByTimeAsync(0)
+        state.held = undefined
+        await vi.advanceTimersByTimeAsync(10_000)
+        expect(ready).toBe('rejected')
         subscriber()
       })
 

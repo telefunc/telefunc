@@ -1,4 +1,6 @@
-export { TransientRetry }
+export { TransientRetry, isOverloaded }
+
+import { CallNotSent } from './OrderedStubs.js'
 
 /** As Cloudflare's error-handling page shows: 3 attempts, the waits between them drawn as `100 ms × random × 2^n`. */
 const TRANSIENT_ATTEMPTS = 3
@@ -10,6 +12,8 @@ const TRANSIENT_WINDOW_MS = 10_000
 /** A Durable Object call that is made again where it failed as Cloudflare says to retry, from its first attempt on. */
 class TransientRetry {
   private readonly startedAt = Date.now()
+  /** When an attempt's call stops being waited for: the window's end. */
+  readonly deadline = this.startedAt + TRANSIENT_WINDOW_MS
   private failures = 0
   private lastError: unknown = undefined
   private expired = false
@@ -20,6 +24,13 @@ class TransientRetry {
     if (this.failures === 0 || Date.now() - this.startedAt < TRANSIENT_WINDOW_MS) return call()
     this.expired = true
     return Promise.reject(this.lastError)
+  }
+
+  /** What a first attempt that ends with `error` reports: the overload that kept its call from being sent, or the
+   *  failure of the attempt before one sent past its window, else `error`. Read before `delayAfter(error)`. */
+  reasonFor(error: unknown): unknown {
+    if (!(error instanceof CallNotSent)) return error
+    return error.cause ?? this.lastError ?? error
   }
 
   /** How long to wait before the next attempt after an attempt failed with `error`; `null` where none is made: a failure
@@ -35,5 +46,10 @@ class TransientRetry {
 /** A failure Cloudflare marks as transient: `.retryable`, unless `.overloaded`, which it says not to retry. */
 function isRetryable(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
-  return 'retryable' in error && error.retryable === true && !('overloaded' in error && error.overloaded === true)
+  return 'retryable' in error && error.retryable === true && !isOverloaded(error)
+}
+
+/** A failure Cloudflare marks `.overloaded`, which it says not to retry. */
+function isOverloaded(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'overloaded' in error && error.overloaded === true
 }
