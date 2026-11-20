@@ -13,11 +13,11 @@ const { todoItems } = await provideTelefuncContext({ user }, () => onLoad())
 // getContext() inside onLoad() returns { user }
 ```
 
-`provideTelefuncContext(context, fn)` calls `fn` and returns what `fn` returns: call your telefunction inside `fn` (e.g. in your test or your SSR request handler).
+Call your telefunction inside `fn` (e.g. in your test or your SSR request handler). `provideTelefuncContext(context, fn)` returns what `fn` returns.
 
 > If the telefunction calls `getContext()` after an `await`, add `import 'telefunc/async_hooks'`, see <Link href="/getContext#access" />.
 
-> With `import 'telefunc/async_hooks'`, you can also call `provideTelefuncContext(context)` without `fn`: it provides `context` to the code that runs after it.
+> With `import 'telefunc/async_hooks'`, you can also call `provideTelefuncContext(context)` without `fn`: `getContext()` returns `context` in the code that runs after that call.
 
 > With <Link href="/serve">`serve()`</Link> / <Link href="/Telefunc">`new Telefunc()`</Link>, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 

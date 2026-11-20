@@ -24,17 +24,17 @@ If a telefunction reads <Link href="/getContext">`getContext()`</Link> (e.g. to 
 // Team.telefunc.test.ts
 // Environment: server
 
-import { provideTelefuncContext } from 'telefunc'
+import { Abort, provideTelefuncContext } from 'telefunc'
 import { onJoinTeam } from './Team.telefunc'
 
 test('rejects a non-member of the team', async () => {
   const context = { user: { id: 1, teams: [] } }
   const joining = provideTelefuncContext(context, () => onJoinTeam('acme'))
-  await expect(joining).rejects.toThrow() // throws Abort()
+  await expect(joining).rejects.toBeInstanceOf(Abort)
 })
 ```
 
-> If your server imports `telefunc/async_hooks`, import it in your test as well: `getContext()` then also works after an `await`. Otherwise, call `getContext()` before any `await`, see <Link href="/getContext#access" />.
+> If the telefunction calls `getContext()` after an `await`, add `import 'telefunc/async_hooks'` to your test, as on your server, see <Link href="/getContext#access" />.
 
 This is also how you test <Link href="/permissions">permissions</Link> — set up a context that should (or shouldn't) pass, then assert the telefunction returns or throws `Abort()` accordingly.
 
