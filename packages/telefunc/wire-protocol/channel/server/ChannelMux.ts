@@ -643,8 +643,9 @@ class ChannelMux implements UpgradeStagesOwner {
     try {
       return this.settleReconcile(entry, ctrl, isBarrier)
     } catch (err) {
-      // No RECONCILED will go: what the wire holds for it would stay held on a wire that is up.
-      this.terminateWire(entry.wire)
+      // A bug: no RECONCILED will go, and what the wire holds for it would stay held on a wire that is up. It ends as a
+      // lost wire does, its channels keeping their grace; a protocol violation ends it for good where it is caught.
+      if (!isProtocolViolationError(err)) entry.transport.terminateWire(entry.wire)
       throw err
     }
   }

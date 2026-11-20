@@ -208,7 +208,7 @@ test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONC
   page.close()
 })
 
-test('a reconcile that throws a bug ends its wire: nothing stays held on a wire that is up', async () => {
+test('a reconcile that throws a bug ends its wire, transiently: nothing stays held on a wire that is up', async () => {
   const page = openWebSocket()
   vi.spyOn(SessionRegistry.prototype, 'setSession').mockImplementationOnce(() => {
     throw new Error('a bug in reconcile')
@@ -217,6 +217,8 @@ test('a reconcile that throws a bug ends its wire: nothing stays held on a wire 
   await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
   await Promise.resolve()
   expect(page.state.terminated).toBe(true)
+  // The server's bug, not the page's fault: the page's channels keep their reconnect grace.
+  expect(page.mux.readPermanentTermination(page.wire)).toBe(false)
   vi.restoreAllMocks()
   page.close()
 })
