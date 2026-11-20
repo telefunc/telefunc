@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
-import { createServer, request, type Server } from 'node:http'
+import { createServer, request, type OutgoingHttpHeaders, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
@@ -31,7 +31,7 @@ beforeAll(async () => {
 afterAll(() => server.close())
 
 /** The status a WebSocket handshake to `/_telefunc` with `headers` is answered with. */
-function upgradeStatus(headers: Record<string, string>): Promise<number | undefined> {
+function upgradeStatus(headers: OutgoingHttpHeaders): Promise<number | undefined> {
   return new Promise((resolve, reject) => {
     const [hostname, port] = host.split(':')
     const req = request({
@@ -63,13 +63,64 @@ function upgradeStatus(headers: Record<string, string>): Promise<number | undefi
 const OPENS = 101
 const REFUSED = 403
 
-test.each<[string, number, () => Record<string, string>]>([
+test.each<[string, number, () => OutgoingHttpHeaders]>([
   ['a client that is no browser, with neither Origin nor Sec-Fetch-Site', OPENS, () => ({ Host: host })],
   ['a page of the same origin', OPENS, () => ({ Host: host, Origin: `http://${host}` })],
+  // `Sec-Fetch-Site` can only refuse: `same-origin` and `none` open nothing by themselves, any other value is believed.
   [
-    'a page the browser says is of the same origin',
-    OPENS,
+    'a page of another host the browser says is of the same origin',
+    REFUSED,
     () => ({ Host: host, Origin: 'https://public.example.net', 'Sec-Fetch-Site': 'same-origin' }),
+  ],
+  [
+    'a page of the same origin the browser says is of the same origin',
+    OPENS,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': 'same-origin' }),
+  ],
+  [
+    'a page of the same origin with Sec-Fetch-Site: none',
+    OPENS,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': 'none' }),
+  ],
+  [
+    'a page of another site with Sec-Fetch-Site: none',
+    REFUSED,
+    () => ({ Host: host, Origin: 'https://another-site.example', 'Sec-Fetch-Site': 'none' }),
+  ],
+  [
+    "a page of the server's host the browser says is cross-site, as for an http page opening wss",
+    REFUSED,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': 'cross-site' }),
+  ],
+  [
+    "a page of the server's host the browser says is same-site",
+    REFUSED,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': 'same-site' }),
+  ],
+  [
+    "a page of the server's host with a Sec-Fetch-Site that is no value the standard has",
+    REFUSED,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': 'same origin' }),
+  ],
+  [
+    "a page of the server's host with Sec-Fetch-Site: same-origin sent twice",
+    REFUSED,
+    () => ({ Host: host, Origin: `http://${host}`, 'Sec-Fetch-Site': ['same-origin', 'same-origin'] }),
+  ],
+  [
+    'a page of an allowed origin the browser says is cross-site',
+    OPENS,
+    () => ({ Host: host, Origin: 'https://app.example.com', 'Sec-Fetch-Site': 'cross-site' }),
+  ],
+  [
+    'a page that sent Sec-Fetch-Site: same-origin and no Origin',
+    OPENS,
+    () => ({ Host: host, 'Sec-Fetch-Site': 'same-origin' }),
+  ],
+  [
+    'a page that sent Sec-Fetch-Site: cross-site and no Origin',
+    REFUSED,
+    () => ({ Host: host, 'Sec-Fetch-Site': 'cross-site' }),
   ],
   [
     'a page behind a proxy that forwards the public host',
@@ -174,6 +225,14 @@ test("the WebSocket upgrade of a page of an app shell origin the app does not al
   expect(lines[0]).not.toContain('X-Forwarded-Host')
 })
 
+test("a refused page of the server's host that its browser says is of another origin is named, with only the advice to list it", async () => {
+  const { lines } = await refuseAll([`http://${host}`], { 'Sec-Fetch-Site': 'cross-site' })
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain(`A WebSocket upgrade from http://${host} was refused`)
+  expect(lines[0]).toContain('add that origin to `config.channel.allowedOrigins`')
+  expect(lines[0]).not.toContain('X-Forwarded-Host')
+})
+
 test.each([
   'app.example.com',
   'https://app.*.example.com',
@@ -253,8 +312,11 @@ test("a later change of the app's array doesn't change `allowedOrigins`, and rea
 })
 
 /** What refused handshakes leave behind, from a process that has logged no refusal yet: the lines printed and the names
- *  the refusal record keeps. */
-async function refuseAll(origins: string[]): Promise<{ lines: string[]; namesKept: string[] }> {
+ *  the refusal record keeps. Each handshake sends `Origin` and `headers`. */
+async function refuseAll(
+  origins: string[],
+  headers: OutgoingHttpHeaders = {},
+): Promise<{ lines: string[]; namesKept: string[] }> {
   const refusals = getGlobalObject('wire-protocol/channel/server/upgradeOrigin.ts', {
     named: new Set<string>(),
     windowStart: 0,
@@ -263,7 +325,7 @@ async function refuseAll(origins: string[]): Promise<{ lines: string[]; namesKep
   refusals.windowStart = 0
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
-    for (const origin of origins) expect(await upgradeStatus({ Host: host, Origin: origin })).toBe(REFUSED)
+    for (const origin of origins) expect(await upgradeStatus({ Host: host, Origin: origin, ...headers })).toBe(REFUSED)
     return {
       lines: warn.mock.calls.map((call) => String(call[0])),
       namesKept: [...refusals.named],

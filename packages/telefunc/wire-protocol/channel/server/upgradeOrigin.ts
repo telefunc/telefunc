@@ -21,15 +21,18 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin
 })
 
 /** The answer to a WebSocket upgrade that a page of another origin, which the app didn't allow, makes; undefined where
- *  it may open. A request with neither `Origin` nor `Sec-Fetch-Site` comes from no browser, and goes on. `host` is the
- *  handshake's `Host`, which the caller validated. Never throws: the upgrade hook that calls it has no catch, and on Node
- *  a throw there would end the process. */
+ *  it may open. `Sec-Fetch-Site` can only refuse. `same-origin` and `none` open nothing by themselves, so the checks
+ *  decide as in Chromium, which sends no Fetch Metadata on a WebSocket handshake. Any other value, the header sent twice
+ *  too, keeps the server's own host from opening the page, as for an `http://` page of that host opening `wss://`: only
+ *  a listed origin does. A request with no `Origin` comes from no browser and goes on, unless its `Sec-Fetch-Site` says
+ *  another origin. `host` is the handshake's `Host`, which the caller validated. Never throws: the upgrade hook that
+ *  calls it has no catch, and on Node a throw there would end the process. */
 function upgradeRefusal(request: Request, host: string): Response | undefined {
   const origin = request.headers.get('origin')
   const site = request.headers.get('sec-fetch-site')
-  if (site === 'same-origin') return undefined
+  const otherOrigin = site !== null && site !== 'same-origin' && site !== 'none'
   if (origin === null) {
-    if (site === null) return undefined
+    if (!otherOrigin) return undefined
     warnRefusal(
       'a page that sent no Origin',
       'it sent no Origin header, so no entry of `config.channel.allowedOrigins` can let it open',
@@ -37,7 +40,7 @@ function upgradeRefusal(request: Request, host: string): Response | undefined {
     return new Response(null, { status: 403 })
   }
   const url = URL.canParse(origin) ? new URL(origin) : null
-  if (url !== null && isServersHost(origin, url.protocol, request, host)) return undefined
+  if (url !== null && !otherOrigin && isServersHost(origin, url.protocol, request, host)) return undefined
   // A browser writes a page's origin in one form (`originOf()`): a header written any other way names none.
   const page = url !== null && originOf(url) === origin ? url : null
   if (page !== null && isAllowed(page, origin)) return undefined
@@ -51,6 +54,12 @@ function upgradeRefusal(request: Request, host: string): Response | undefined {
     warnRefusal(
       origin,
       "`config.channel.allowedOrigins` doesn't list it: add that origin to `config.channel.allowedOrigins`",
+    )
+  // Neither can a proxy's host help where the browser says the page is of another origin.
+  else if (otherOrigin)
+    warnRefusal(
+      origin,
+      "its browser says it is a page of another origin, and `config.channel.allowedOrigins` doesn't list it: add that origin to `config.channel.allowedOrigins`",
     )
   else
     warnRefusal(
