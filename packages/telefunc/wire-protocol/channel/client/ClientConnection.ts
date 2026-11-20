@@ -79,6 +79,8 @@ interface MuxConnection {
   replaceWaiting<T>(channel: MuxChannel, seq: number, encodeFrame: SequencedEncoder<T>, data: T): number | null
   /** Throws where `data`, encoded by `encodeFrame`, is larger than the server accepts, as its send would. */
   assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void
+  /** Throws where an ABORT of `abortValue` is larger than the server accepts, giving its size and the limit. */
+  assertAbortFits(channel: MuxChannel, abortValue: string): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   /** `inPlaceOf`: a lossy send's seq, which the ABORT takes the place of where that still waits and is the channel's
    *  last, so it never goes. */
@@ -241,7 +243,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     if (record === undefined) return 0
     const { replay } = record
-    const frame = this.fitting(channel, encodeFrame(record.ix, data, replay.seq + 1))
+    const frame = this.fitting(channel, encodeFrame(record.ix, data, replay.seq + 1), 'message')
     const seq = replay.nextSeq()
     onQueued?.(seq)
     // A data frame after which its channel is out of the server's credit goes at once: nothing the channel sends next
@@ -255,22 +257,32 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     // A frame sent after it must not arrive ahead of what takes its place.
     if (record === undefined || seq !== record.replay.seq) return null
-    return this.gate.replaceWaiting(record.ix, seq, this.fitting(channel, encodeFrame(record.ix, data, seq)))
+    return this.gate.replaceWaiting(record.ix, seq, this.fitting(channel, encodeFrame(record.ix, data, seq), 'message'))
   }
 
   /** For a send held before it takes a seq: a frame's header has the same size at any seq. */
   assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void {
     const record = this.channels.of(channel)
-    if (record !== undefined) this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+    if (record !== undefined) this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1), 'message')
+  }
+
+  assertAbortFits(channel: MuxChannel, abortValue: string): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined)
+      this.fitting(channel, encode.abort(record.ix, abortValue, record.replay.seq + 1), 'abort reason')
   }
 
   /** `frame`, where it is no larger than the server accepts from `channel`: the server ends any wire a larger frame
    *  arrives on, and the replay would send it again on the next one. */
-  private fitting(channel: MuxChannel, frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  private fitting(
+    channel: MuxChannel,
+    frame: Uint8Array<ArrayBuffer>,
+    what: 'message' | 'abort reason',
+  ): Uint8Array<ArrayBuffer> {
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     assertUsage(
       frame.byteLength <= maxFrameBytes,
-      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
+      `Channel ${what} too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
     )
     return frame
   }

@@ -267,7 +267,7 @@ const ack = await channel.sendBinary(frame, { ack: true })
 
 > `send()`, `publish()`, a listener's answer and an abort reason are serialized as JSON by Telefunc's serializer, which also carries values such as a `Date`, a `Map` or a `BigInt`. Bytes in them, a `Uint8Array`, another typed array, an `ArrayBuffer` or a `SharedArrayBuffer`, also inside an object or an array, are refused: bytes go through `sendBinary()` and `publishBinary()`, and an abort reason is a plain value, such as a string or a code. `send()` and `publish()` throw at the call. A listener's answer fails as a listener that throws: its error is logged where it runs, and the acknowledged send rejects. An abort whose reason JSON can't hold still ends the channel, on both ends, without the reason: `abort()` then throws, and a callback that threw `Abort` has the error logged where it ran.
 
-A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open.
+A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open. A client's abort reason is held to the same limit: over it, the abort still ends the channel, on both ends, without the reason, and `abort()` throws, giving the reason's encoded size and the limit.
 
 ### Backpressure
 

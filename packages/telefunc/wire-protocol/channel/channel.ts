@@ -1,6 +1,7 @@
 export {
   makePublishInfo,
   stringifyValue,
+  refusedAbortReason,
   serializeAbortReason,
   unsubscribeOf,
   neverOpened,
@@ -95,8 +96,12 @@ function serializeAbortReason(reason: unknown): AbortReason {
   try {
     return { value: reason, serialized: stringifyValue(reason, 'abort'), refusal: null }
   } catch (error) {
-    return { value: undefined, serialized: stringifyValue(undefined, 'abort'), refusal: { error } }
+    return refusedAbortReason(error)
   }
+}
+/** The abort without a reason that a reason refused for `error` gives. */
+function refusedAbortReason(error: unknown): AbortReason {
+  return { value: undefined, serialized: stringifyValue(undefined, 'abort'), refusal: { error } }
 }
 type AbortReason = { value: unknown; serialized: string; refusal: { error: unknown } | null }
 

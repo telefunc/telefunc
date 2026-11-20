@@ -15,6 +15,7 @@ import type {
 import {
   LOSSY_WITH_ACK_TEXT,
   neverOpened,
+  refusedAbortReason,
   serializeAbortReason,
   stringifyValue,
   unsubscribeOf,
@@ -277,9 +278,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
     if (this.stopped) return
-    const reason = serializeAbortReason(abortValue)
+    const reason = this.abortReason(abortValue)
     this.abortWith(reason, message)
     if (reason.refusal) throw reason.refusal.error
+  }
+
+  /** `abortValue` as the ABORT carries it: refused, as an abort without a reason, where JSON can't hold it or its frame
+   *  is larger than the server accepts. */
+  private abortReason(abortValue: unknown): AbortReason {
+    const reason = serializeAbortReason(abortValue)
+    if (reason.refusal) return reason
+    try {
+      this.connection.assertAbortFits(this, reason.serialized)
+      return reason
+    } catch (error) {
+      return refusedAbortReason(error)
+    }
   }
 
   /** Ends the channel with `reason`, sent to the server, unless serializing it, which runs the app's getters and
@@ -603,7 +617,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _abortFromCallback(err: AbortError): void {
-    const reason = serializeAbortReason(err.abortValue)
+    const reason = this.abortReason(err.abortValue)
     this.abortWith(reason, err.message)
     if (reason.refusal) reportChannelError(reason.refusal.error)
   }
