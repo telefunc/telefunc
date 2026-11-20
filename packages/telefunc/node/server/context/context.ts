@@ -53,13 +53,13 @@ function provideContext(context: Telefunc.Context): void {
 // ── Async mode ─────────────────────────────────────────────────────
 
 function installAsyncMode({
+  getContext_async,
   provideTelefuncContext_async,
   restoreContext_async,
-  getContext_async,
 }: {
+  getContext_async: ContextGetter
   provideTelefuncContext_async: ProvideTelefuncContext
   restoreContext_async: RestoreContext
-  getContext_async: ContextGetter
 }): void {
   globalObject.getContext = getContext_async
   globalObject.restoreContext = restoreContext_async
