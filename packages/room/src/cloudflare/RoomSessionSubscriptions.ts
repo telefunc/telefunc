@@ -209,11 +209,10 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.stopDeliveries()
   }
 
-  /** Sent in this turn, behind what this session sent the room before; a stub that can't be opened rejects it, once the
-   *  caller has the attempt. */
-  private async sendRegistration(): Promise<RegisterWire> {
+  /** Sent in this turn, behind what this session sent the room before. */
+  private sendRegistration(): Promise<RegisterWire> {
     const first = this.firstRegistration
-    return await this.callAuthority((authority) =>
+    return this.callAuthority((authority) =>
       first === null ? authority.registerRoute(this.route) : first.attempt(() => authority.registerRoute(this.route)),
     )
   }

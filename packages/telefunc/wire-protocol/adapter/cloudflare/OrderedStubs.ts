@@ -18,10 +18,17 @@ type Line<Stub> = {
 class OrderedStubs<Stub> {
   private readonly lines = new Map<string, Line<Stub>>()
 
+  /** Never throws: a stub that can't be opened rejects the call, and the next call opens one again. */
   call<T>(target: string, open: () => Stub, invoke: (stub: Stub) => Promise<T>): Promise<T> {
     let line = this.lines.get(target)
     if (line === undefined || line.failed) {
-      line = { stub: open(), after: line?.idle.promise ?? null, idle: createDeferred(), calls: 0, failed: false }
+      let stub: Stub
+      try {
+        stub = open()
+      } catch (err) {
+        return Promise.reject(err)
+      }
+      line = { stub, after: line?.idle.promise ?? null, idle: createDeferred(), calls: 0, failed: false }
       this.lines.set(target, line)
     }
     line.calls++
