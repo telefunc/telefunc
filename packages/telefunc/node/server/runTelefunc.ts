@@ -5,6 +5,7 @@ import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { isAsyncMode } from './context/context.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
 import { REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
@@ -301,6 +302,11 @@ async function runTelefunc_({
     objectAssign(runContext, { logMalformedRequests })
   }
 
+  assertWarning(
+    !isAsyncMode() || !context,
+    'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `serve()` has no effect.',
+    { onlyOnce: true },
+  )
   objectAssign(runContext, {
     context: {
       [PROVIDED_CONTEXT]: context,
