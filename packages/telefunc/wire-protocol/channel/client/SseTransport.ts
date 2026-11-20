@@ -435,7 +435,9 @@ class SseTransport implements UpgradeSource {
         }
         const frame = decode(raw)
         if (frame.tag === TAG.PONG) {
-          this.heartbeatOf(abortController)?.resetPong()
+          // A PONG still on its way on a wire the page left says nothing of the wire in use.
+          if (this.transportAbort !== abortController) continue
+          this.heartbeat?.resetPong()
           this.owner.onTransportPong(frame.ended)
           continue
         }

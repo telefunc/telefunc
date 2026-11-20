@@ -183,8 +183,13 @@ async function postFrames(body: Blob): Promise<{ metadata: { streamResponse?: bo
 }
 
 /** How the server's side answers a batch POST: at once with a 200 (`taken`), after `ms` with a 200 (`slow`), with no
- *  answer once it took the frames (`lost`), or with `status` and an HTML page before taking them (`refused`). */
-type PostAnswer = { tag: 'taken' } | { tag: 'slow'; ms: number } | { tag: 'lost' } | { tag: 'refused'; status: number }
+ *  answer once it took the frames (`lost`), or with `status` and an HTML page before taking them (`refused`); a
+ *  refusal's `pongAfterMs` has the wire the POST went on carry a PONG that long after it, as one already on its way. */
+type PostAnswer =
+  | { tag: 'taken' }
+  | { tag: 'slow'; ms: number }
+  | { tag: 'lost' }
+  | { tag: 'refused'; status: number; pongAfterMs?: number }
 
 /** The test's server and what it saw; `useScriptedServer` makes a new one for each test. */
 const world = {
@@ -239,6 +244,8 @@ function serveSse(): void {
     const answer = (data ? world.postAnswers.shift() : world.controlAnswers.shift()) ?? { tag: 'taken' }
     if (answer.tag === 'refused') {
       post.status = answer.status
+      const { pongAfterMs } = answer
+      if (pongAfterMs !== undefined) setTimeout(() => stream?.frame(encode.pong()), pongAfterMs)
       return new Response('<h1>Refused</h1>', { status: answer.status, headers: { 'Content-Type': 'text/html' } })
     }
     if (answer.tag === 'slow') await new Promise((resolve) => setTimeout(resolve, answer.ms))

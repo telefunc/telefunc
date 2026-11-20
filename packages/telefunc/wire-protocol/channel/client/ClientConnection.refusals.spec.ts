@@ -4,6 +4,7 @@
 import { describe, expect, test } from 'vitest'
 import { SSE_POST_MIN_BYTES, SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
+import type { PostAnswer } from './scriptedServer.fixture.js'
 
 useScriptedServer()
 
@@ -90,6 +91,20 @@ test("a batch of the connection's own frames refused again after a reconnect end
   await advance(30_000)
   expect(page.ended).toHaveLength(1)
   expect(page.ended[0]?.err?.message).toMatch(/refused with 400 text\/html/)
+  expect(world.streams.length).toBeLessThanOrEqual(3)
+})
+
+test("a PONG the wire left behind carried after its own frames' refusal doesn't keep the connection from ending", async () => {
+  const page = (await openOverSse(1))(0)
+  // As the row above, and each refused wire carries a PONG already on its way 70 ms after the refusal, while the page
+  // waits to reconnect (msg16 R1.1).
+  world.controlAnswers = Array.from(
+    { length: 100 },
+    (): PostAnswer => ({ tag: 'refused', status: 400, pongAfterMs: 70 }),
+  )
+  await advance(30_000)
+  expect(page.ended).toHaveLength(1)
+  expect(defined(page.ended[0], 'the connection ending').err?.message).toMatch(/refused with 400 text\/html/)
   expect(world.streams.length).toBeLessThanOrEqual(3)
 })
 

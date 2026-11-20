@@ -208,8 +208,11 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         this.headroomChanged(sender)
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        this.heartbeatOf(ws)?.resetPong()
-        this.owner.onTransportPong(frame.ended)
+        // A PONG on a socket the page left says nothing of the wire in use.
+        if (ws === this.ws) {
+          this.heartbeat?.resetPong()
+          this.owner.onTransportPong(frame.ended)
+        }
       } else {
         const paired = pair(frame)
         if (paired) this.owner.onTransportFrame(paired, this, byteLength, ws === this.abandoned?.ws)
