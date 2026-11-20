@@ -129,16 +129,19 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   waitingPublishes(ix: number): number {
-    return this.wireQueue.waitingPublishes(ix) + countWaitingPublishes(this.held, ix)
+    const queued = this.wireQueue.waitingPublishes(ix)
+    return this.held.length === 0 ? queued : queued + countWaitingPublishes(this.held, ix)
   }
 
   dropWaitingPublishes(ix: number, keep: number): void {
+    if (this.held.length === 0) return this.wireQueue.dropWaitingPublishes(ix, keep)
     const queued = this.wireQueue.waitingPublishes(ix)
     this.wireQueue.dropWaitingPublishes(ix, keep)
     this.dropHeld(droppingPublishes(ix, Math.max(0, keep - queued)))
   }
 
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    if (this.held.length === 0) return this.wireQueue.dropWaitingFrom(ix, from)
     // From a publish the transport holds on, all of the channel's frames held behind it go too.
     const fromStart = from === 'start' || this.wireQueue.waitingPublishes(ix) > 0
     this.wireQueue.dropWaitingFrom(ix, from)
