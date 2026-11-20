@@ -9,6 +9,7 @@ import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRequestPathname, readRequestUrl } from '../utils/getUrlPathname.js'
+import { hasProp } from '../utils/hasProp.js'
 import type { IncomingMessage, ServerResponse, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 import type { Duplex } from 'node:stream'
@@ -57,6 +58,26 @@ class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse
   }
 }
 
+/** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), a request with `Upgrade` that isn't
+ *  Telefunc's is upgraded only where another `upgrade` listener is there to take it and the server's own callback (the
+ *  app's, or Node's default) accepts it; any other goes to the app's `request` listeners, as on the same server without
+ *  Telefunc's WebSocket. The server's own callback is put back when `listener` is removed. */
+function upgradeOthersOnlyForTheirListeners(server: HttpServer, listener: (...args: never[]) => void): void {
+  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
+  const own = server.shouldUpgradeCallback
+  Reflect.set(server, 'shouldUpgradeCallback', (req: IncomingMessage) => {
+    if (readRequestUrl(req.url ?? '')?.pathname === getServerConfig().telefuncUrl) return true
+    return server.listenerCount('upgrade') > 1 && Boolean(own.call(server, req))
+  })
+  const putBack = (event: string | symbol, removed: unknown) => {
+    if (event !== 'upgrade' || removed !== listener) return
+    server.off('removeListener', putBack)
+    Reflect.set(server, 'shouldUpgradeCallback', own)
+    registeredServers.delete(server)
+  }
+  server.on('removeListener', putBack)
+}
+
 function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>(): TelefuncServe<
   Req,
   Res
@@ -85,10 +106,19 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       }),
     ))
 
-    httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       const config = getServerConfig()
       const url = readRequestUrl(req.url ?? '')
-      if (url?.pathname !== config.telefuncUrl) return
+      if (url?.pathname !== config.telefuncUrl) {
+        // Here only on a Node that doesn't read `shouldUpgradeCallback` (before 22.21 and 24.9), which hands every
+        // request with `Upgrade` to the `upgrade` listeners: one that no other listener is there to take is answered as
+        // a page the server doesn't have.
+        if (httpServer.listenerCount('upgrade') === 1) {
+          socket.once('finish', socket.destroy)
+          socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        }
+        return
+      }
       if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
         socket.once('finish', socket.destroy)
         socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
@@ -101,7 +131,9 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       const request = new Request(url, { headers })
       sockets.set(request, socket)
       adapter.handleUpgrade(req, socket, head, request)
-    })
+    }
+    httpServer.on('upgrade', onUpgrade)
+    upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade)
   }
 
   function inferServer(req: Req): HttpServer | undefined {
