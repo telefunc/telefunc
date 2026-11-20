@@ -65,6 +65,34 @@ test("a reliable broadcast near the budget stays open when another channel's tex
   }
 })
 
+test('near the budget, what a page may already have goes before a reliable broadcast is cut', async () => {
+  const broadcast = subscribedPage(crypto.randomUUID(), false)
+  const channel = new ServerChannel<never, string>()
+  channel._registerChannel()
+  // As an ended channel kept only for its verdict, larger here than the send is short of room.
+  const kept: MemoryHolder = { heldBytes: 0, letGoKept: () => releaseHolder(kept) }
+  const filler: MemoryHolder = { heldBytes: 0 }
+  try {
+    await broadcast.publish('a'.repeat(400_000))
+    await broadcast.publish('b'.repeat(400_000))
+    hold(kept, 10_000)
+    // Room below the shedding target for 95,000 bytes: the send of 100,000 is a few thousand short.
+    hold(filler, (getChannelConfig().maxMemory * 7) / 8 - ledgerTotal() - 95_000)
+    void channel.send('c'.repeat(100_000))
+    expect(channel.heldBytes).toBeGreaterThan(100_000)
+    expect(kept.heldBytes).toBe(0)
+    expect(broadcast.isClosed).toBe(false)
+  } finally {
+    releaseHolder(kept)
+    letGo(filler, filler.heldBytes)
+    releaseHolder(filler)
+    channel._end()
+    channel._release()
+    broadcast._end()
+    broadcast._release()
+  }
+})
+
 for (const lossy of [false, true]) {
   test(`a ${lossy ? 'lossy' : 'reliable'} broadcast whose publish doesn't fit under the budget closes, and the server holds no more than it`, async () => {
     const key = crypto.randomUUID()
