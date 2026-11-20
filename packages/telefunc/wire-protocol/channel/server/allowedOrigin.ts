@@ -44,7 +44,10 @@ function parseAllowedOrigin(entry: string): AllowedOrigin | string {
   const origin = originOf(url)
   if (origin === null) return NOT_AN_ORIGIN
   if (!anySubdomain) return { origin }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:')
-    return "a leading '*.' stands for a subdomain on http and https only: list an app shell's origin as it is, such as 'capacitor://localhost'"
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    const why = "a leading '*.' stands for a subdomain on http and https only"
+    // A scheme the URL standard gives no origin is an app shell's own (`capacitor:`); `ws:`, `wss:` and `ftp:` are none.
+    return url.origin === 'null' ? `${why}: list an app shell's origin as it is, such as 'capacitor://localhost'` : why
+  }
   return { protocol: url.protocol, port: url.port, parent: url.hostname.slice('x.'.length) }
 }

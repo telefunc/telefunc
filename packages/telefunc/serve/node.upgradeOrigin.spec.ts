@@ -173,6 +173,17 @@ test.each([
   }).toThrow(why)
 })
 
+test.each(['ws://*.example.com', 'wss://*.example.com', 'ftp://*.example.com'])(
+  "`allowedOrigins` refuses %j at configuration, saying a leading '*.' is for http and https, and nothing of app shells",
+  (entry) => {
+    const assign = () => {
+      config.channel.allowedOrigins = [entry]
+    }
+    expect(assign).toThrow("a leading '*.' stands for a subdomain on http and https only")
+    expect(assign).toThrow(expect.objectContaining({ message: expect.not.stringContaining('app shell') }))
+  },
+)
+
 test('`allowedOrigins` refuses a value that is not an array at configuration', () => {
   // `Reflect.set` assigns what the setting's type doesn't allow, as an app written in JavaScript can.
   expect(() => Reflect.set(config.channel, 'allowedOrigins', 'https://app.example.com')).toThrow(
