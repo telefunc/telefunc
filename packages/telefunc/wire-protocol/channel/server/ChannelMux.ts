@@ -639,8 +639,18 @@ class ChannelMux implements UpgradeStagesOwner {
   /** `isBarrier`: this commit retires the old wire's session, so the outcome names that wire, which gets a FIN once
    *  the new wire's RECONCILED has gone out. */
   private reconcile(entry: WireEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
-    const { wire, state, transport } = entry
     entry.sender.owesReconciled()
+    try {
+      return this.settleReconcile(entry, ctrl, isBarrier)
+    } catch (err) {
+      // No RECONCILED will go: what the wire holds for it would stay held on a wire that is up.
+      this.terminateWire(entry.wire)
+      throw err
+    }
+  }
+
+  private settleReconcile(entry: WireEntry, ctrl: ReconcilePayload, isBarrier: boolean): ReconcileOutcome {
+    const { wire, state, transport } = entry
     const retiredWire = isBarrier && ctrl.sessionId ? (this.sessionWires.get(ctrl.sessionId) ?? null) : null
     this.resetPingTimer(entry)
     // A RECONCILE on the wire that holds the session it names keeps that session, and what is bound to it, such as a

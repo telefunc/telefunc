@@ -3,6 +3,7 @@ export { WireSender }
 import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
+import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { ServerChannel } from './ServerChannel.js'
 import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
@@ -61,10 +62,12 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private largestSent = 0
   /** Its backlog passed that, and the wire is being terminated. */
   private pastBacklog = false
-  /** The RECONCILEDs owed: what is sent meanwhile is held behind the last of them. */
-  private owed = 0
+  /** A RECONCILED is owed: what is sent meanwhile is held behind it. */
+  private owed = false
   /** What was sent while a RECONCILED was owed, in order: the frames themselves, which a replay also keeps. */
   private readonly held: Uint8Array<ArrayBuffer>[] = []
+  /** Their bytes, which the backlog counts as it does what the socket holds. */
+  private heldBytes = 0
 
   constructor({ wire, transport, pingInterval, sseFlushThrottle, deliveries, sessions, attaching }: WireSenderOptions) {
     this.wire = wire
@@ -90,30 +93,34 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (this.owed > 0) this.held.push(frame)
-    else this.write(frame)
+    if (!this.admit(frame)) return
+    if (!this.owed) return this.hand(frame)
+    this.held.push(frame)
+    this.heldBytes += frame.byteLength
   }
 
   /** A RECONCILE is answered: what is sent from now, its replay first, goes behind its RECONCILED (`sendReconciled`),
-   *  so the page reads that first on every host and transport. */
+   *  so the page reads that first on every host and transport. A page has one RECONCILE out at a time. */
   owesReconciled(): void {
-    this.owed++
+    assertProtocol(!this.owed, 'RECONCILE while its wire owes a RECONCILED')
+    this.owed = true
   }
 
   /** An attach probe's answer, which says no credit ran out and names no round trip: the one frame that goes ahead of
    *  what is held, since a RECONCILED of many channels would read the path as slower than it is. */
   answerProbe(ix: number, probe: number): void {
-    this.write(encode.bdpPingAck(ix, probe, Infinity, Infinity))
+    const answer = encode.bdpPingAck(ix, probe, Infinity, Infinity)
+    if (this.admit(answer)) this.hand(answer)
   }
 
-  /** The RECONCILED goes ahead of what was held; once none is owed, so does that, in order. */
+  /** The RECONCILED goes ahead of what was held, and that follows, in order. */
   sendReconciled(reconciled: Uint8Array<ArrayBuffer>): void {
-    this.write(reconciled)
-    this.owed--
-    if (this.owed > 0) return
-    // `write` hands the frame to the transport only, which sends nothing back through here meanwhile.
-    for (const frame of this.held) this.write(frame)
+    this.owed = false
+    if (this.admit(reconciled)) this.hand(reconciled)
+    // `hand` gives the frame to the transport only, which sends nothing back through here meanwhile.
+    for (const frame of this.held) this.hand(frame)
     this.held.length = 0
+    this.heldBytes = 0
   }
 
   /** What the wire holds back for its page: what its transport holds, then what it holds for a RECONCILED. */
@@ -141,23 +148,34 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** `drops` is asked in the order the frames were held. */
   private dropHeld(drops: (frame: Uint8Array) => boolean): void {
     let kept = 0
-    for (const frame of this.held) if (!drops(frame)) this.held[kept++] = frame
+    for (const frame of this.held) {
+      if (!drops(frame)) this.held[kept++] = frame
+      else this.heldBytes -= frame.byteLength
+    }
     this.held.length = kept
   }
 
-  private write(frame: Uint8Array<ArrayBuffer>): void {
-    if (this.closed || this.pastBacklog) return
-    if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
+  /** Counts `frame` against what the wire may hold, whether it is handed now or held for a RECONCILED; false once the
+   *  wire's backlog passed that, and the wire is being terminated. */
+  private admit(frame: Uint8Array<ArrayBuffer>): boolean {
+    if (this.closed || this.pastBacklog) return false
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
     if (frame.byteLength > this.headroom) {
       this.headroom = this.measureHeadroom()
       if (this.headroom < 0) {
         this.pastBacklog = true
         queueMicrotask(() => this.transport.terminateWire(this.wire))
-        return
+        return false
       }
     }
     this.headroom -= frame.byteLength
+    return true
+  }
+
+  /** Gives an admitted frame to the transport. */
+  private hand(frame: Uint8Array<ArrayBuffer>): void {
+    if (this.closed || this.pastBacklog) return
+    if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
     const at = performance.now()
     this.wait.handed(frame.byteLength, passesData(frame[0]!), at)
     if (this.pieces) this.pieces.headroom.send(frame, at)
@@ -189,8 +207,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true
-    this.owed = 0
+    this.owed = false
     this.held.length = 0
+    this.heldBytes = 0
     this.pieces?.headroom.close()
   }
 
@@ -207,14 +226,15 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
   }
 
-  /** What the wire may hold, less what it holds; `Infinity` if the runtime can't tell. Its data is what its channels hold,
-   *  so what passes this is what nothing else bounds: a page flooding it with what it answers at once. */
+  /** What the wire may hold, less what it holds, in its socket and for a RECONCILED; `Infinity` if the runtime can't tell
+   *  the socket's while nothing is held. Its data is what its channels hold, so what passes this is what nothing else
+   *  bounds: a page flooding it with what it answers at once. */
   private measureHeadroom(): number {
-    const backlog = this.bufferedAmount()
-    if (backlog === undefined) return Infinity
+    const socket = this.bufferedAmount()
+    if (socket === undefined && this.heldBytes === 0) return Infinity
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
     for (const channel of this.channels()) allowed += channel.heldBytes
-    return allowed - backlog
+    return allowed - (socket ?? 0) - this.heldBytes
   }
 
   /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */

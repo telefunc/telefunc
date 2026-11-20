@@ -6,13 +6,15 @@
 import { expect, test, vi } from 'vitest'
 import { Readable } from 'node:stream'
 
-import { WIRE_VERSION } from '../../constants.js'
+import { CHANNEL_TRANSPORT, MAX_CHANNELS_PER_CONNECTION, WIRE_VERSION } from '../../constants.js'
 import { loadStreamNodeModuleOnce } from '../../../utils/loadStreamNodeModule.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
-import { decode, encode, isSequencedFrame } from '../../wire/frame.js'
+import { decode, encode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
+import { HEADER, SEQ_OFFSET, readU32 } from '../../wire/header.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
-import { getChannelMux } from './ChannelMux.js'
+import { getChannelMux, type ServerTransport } from './ChannelMux.js'
+import { SessionRegistry } from './SessionRegistry.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
@@ -117,3 +119,136 @@ test.each(['web', 'node'] as const)(
     vi.restoreAllMocks()
   },
 )
+
+// What a wire holds while its RECONCILED is owed is bounded by the limit on what waits on its socket or stream, whatever
+// keeps the hold on (decisions/516-sse-carrier.md msg44, the review's R1.1).
+
+type FakeWire = { sessionId: string | undefined }
+
+/** A WebSocket the real mux sends on, whose socket keeps all it is handed, unread: the frames' tags in the order
+ *  handed, and whether the mux ended it. */
+function openWebSocket() {
+  const mux = getChannelMux()
+  const wire: FakeWire = { sessionId: undefined }
+  const tags: number[] = []
+  const state = { buffered: 0, terminated: false }
+  const transport: ServerTransport<FakeWire> = {
+    getSessionId: (w) => w.sessionId,
+    setSessionId: (w, sessionId) => {
+      w.sessionId = sessionId
+    },
+    getConnId: () => null,
+    sendNow: (_, message) => {
+      state.buffered += message.byteLength
+      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) tags.push(decode(frame).tag)
+    },
+    type: CHANNEL_TRANSPORT.WS,
+    wholeMessages: true,
+    bufferedAmount: () => state.buffered,
+    terminateWire: () => {
+      state.terminated = true
+    },
+  }
+  mux.onWireOpen(wire, transport)
+  return { mux, wire, tags, state, close: () => mux.onWireClosed(wire, { permanent: true }) }
+}
+
+/** A PING listing as many channels as a page may have, none of them open: its PONG answers each, about 28 KB. */
+const widePing = () => encode.ping(Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({ ix, lastSeq: 0 })))
+
+/** More wide PINGs than the send backlog's base allows PONGs for. */
+const PINGS_PAST_THE_LIMIT = 3_000
+
+test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONCILE out at a time', async () => {
+  const page = openWebSocket()
+  const first = encode.reconcile({ open: [] })
+  const second = encode.reconcile({ open: [] })
+  await page.mux.onWireMessage(
+    page.wire,
+    encode.message([first, second], first.byteLength + HEADER + second.byteLength),
+  )
+  for (let i = 0; i < 200 && !page.state.terminated; i++) await page.mux.onWireMessage(page.wire, encode.ping([]))
+  expect(page.state.terminated).toBe(true)
+  page.close()
+})
+
+test('a reconcile that throws a bug ends its wire: nothing stays held on a wire that is up', async () => {
+  const page = openWebSocket()
+  vi.spyOn(SessionRegistry.prototype, 'setSession').mockImplementationOnce(() => {
+    throw new Error('a bug in reconcile')
+  })
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
+  await Promise.resolve()
+  expect(page.state.terminated).toBe(true)
+  vi.restoreAllMocks()
+  page.close()
+})
+
+test('on a WebSocket, what a hold kept on by anything else holds ends its wire past the backlog limit', async () => {
+  const page = openWebSocket()
+  vi.spyOn(page.mux, 'sendReconciled').mockImplementation(() => {})
+  await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
+  let pings = 0
+  for (; pings < PINGS_PAST_THE_LIMIT && !page.state.terminated; pings++)
+    await page.mux.onWireMessage(page.wire, widePing())
+  expect(page.state.terminated).toBe(true)
+  expect(page.tags.filter((tag) => tag === TAG.PONG)).toEqual([])
+  vi.restoreAllMocks()
+  page.close()
+})
+
+test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end the wire past the backlog limit', async () => {
+  const mux = getChannelMux()
+  vi.spyOn(mux, 'sendReconciled').mockImplementation(() => {})
+  const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
+  const connId = crypto.randomUUID()
+  const opened = await handleSseChannelRequest(
+    new Request(url, {
+      method: 'POST',
+      body: encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]),
+    }),
+  )
+  expect(opened.statusCode).toBe(200)
+  let status = 200
+  for (let post = 0; post < PINGS_PAST_THE_LIMIT / 100 && status === 200; post++) {
+    const pings = Array.from({ length: 100 }, widePing)
+    const answered = await handleSseChannelRequest(
+      new Request(url, { method: 'POST', body: encodeSseRequest({ connId }, pings) }),
+    )
+    status = answered.statusCode
+  }
+  expect(status).toBe(400)
+  vi.restoreAllMocks()
+})
+
+test("over SSE, a reconnect whose replay passes the backlog base is not ended by the limit: the replay is its channel's", async () => {
+  const mux = getChannelMux()
+  const channel = new ServerChannel()
+  mux.registerChannel(channel)
+  const first = await openStream(
+    'web',
+    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  const [reconciled] = await first.readUntil((frame) => frame[0] === TAG.RECONCILED)
+  const answer = reconciled === undefined ? undefined : decode(reconciled)
+  if (answer?.tag !== TAG.RECONCILED) throw new Error('no RECONCILED on the first wire')
+  // 100 MiB the page never confirms, past what the backlog allows a wire beside its channels' (64 MiB and its largest
+  // frame).
+  const names = ['m1', 'm2', 'm3', 'm4', 'm5']
+  for (const name of names) void channel.send(name + 'x'.repeat(20 * 2 ** 20))
+  /** The frame of the last message, read from its header alone. */
+  const last = (frame: Uint8Array) => frame[0] === TAG.TEXT && readU32(frame, SEQ_OFFSET) === names.length
+  await first.readUntil(last)
+  await first.drop()
+  const second = await openStream(
+    'web',
+    encode.reconcile({ sessionId: answer.payload.sessionId, open: [{ id: channel.id, ix: 0, lastSeq: 0 }] }),
+  )
+  // Each message's name: what comes before its padding.
+  expect(order(await second.readUntil(last)).map((label) => label.split('x')[0])).toEqual([
+    'RECONCILED',
+    ...names.map((name, i) => `${i + 1}:${name}`),
+  ])
+  await second.drop()
+}, 60_000)
