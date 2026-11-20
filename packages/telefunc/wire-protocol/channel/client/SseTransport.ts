@@ -99,6 +99,8 @@ class SseTransport implements UpgradeSource {
   /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
+  /** When a read of the wire's event stream last ended inside an event: a frame was crossing. */
+  private partwayAt = Number.NEGATIVE_INFINITY
   private readonly abandonedControllers = new WeakSet<AbortController>()
   private outbox: OutboxEntry[] = []
   private readonly flushScheduler = new DeadlineScheduler(() => {
@@ -221,6 +223,11 @@ class SseTransport implements UpgradeSource {
     }, SSE_RECONCILE_DEADLINE_MS)
   }
 
+  /** When the wire last delivered part of a frame and not its end: a frame was still crossing. */
+  get frameCrossingAt(): number {
+    return this.partwayAt
+  }
+
   hasWire(): boolean {
     return this.transportAbort !== null
   }
@@ -301,7 +308,13 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
-      (bytes) => this.heartbeatOf(abortController)?.noteReceived(bytes),
+      (bytes, partway) => {
+        const heartbeat = this.heartbeatOf(abortController)
+        if (heartbeat === null) return
+        const now = performance.now()
+        heartbeat.noteReceived(bytes, now)
+        if (partway) this.partwayAt = now
+      },
     )
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
@@ -880,11 +893,12 @@ function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
-/** `onChunk`: each read, so an event taking longer than the pong deadline to arrive shows the wire alive meanwhile. */
+/** `onChunk`: each read that carried any of an event, so an event taking longer than the pong deadline to arrive shows
+ *  the wire alive meanwhile; `partway` where the read ended inside one. */
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,
-  onChunk: (bytes: number) => void,
+  onChunk: (bytes: number, partway: boolean) => void,
 ): {
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
@@ -910,8 +924,7 @@ function createSseEventStreamReader(
       if (event !== undefined) return event
       const { done, value } = await reader.read()
       if (done) return null
-      onChunk(value.byteLength)
-      sse.push(value, onEvent)
+      if (sse.push(value, onEvent)) onChunk(value.byteLength, sse.partway)
     }
   }
 

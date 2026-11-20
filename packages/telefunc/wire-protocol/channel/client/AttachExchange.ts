@@ -307,14 +307,17 @@ class AttachExchange {
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
 
-  /** The RECONCILED didn't come by the deadline. Unless the wire delivered something meanwhile, it is dropped as on a
-   *  missed pong, and `handleTransportLoss` reconnects. */
+  /** The RECONCILED didn't come by the deadline: the wire is dropped as on a missed pong, and `handleTransportLoss`
+   *  reconnects. A wire's first RECONCILE has nothing of the page's ahead of it, so only its RECONCILED ends the wait:
+   *  what else the wire says (an SSE comment, a PONG) doesn't answer it. */
   private onReconcileTimeout(): void {
     if (!this.isReconciling) return
     const { transport } = this.owner
-    // A RECONCILE waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
-    const quiet = transport.heartbeat?.quietFor() ?? Infinity
-    if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
+    if (!this.boundsWire) {
+      // A later one waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
+      const quiet = transport.heartbeat?.quietFor() ?? Infinity
+      if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
+    }
     this.owner.onReconcileLate(transport)
   }
 
