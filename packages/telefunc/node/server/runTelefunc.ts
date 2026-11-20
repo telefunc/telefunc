@@ -2,6 +2,7 @@ export { runTelefunc }
 export type { HttpResponse }
 
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import type { RefusalContentType } from '../../wire-protocol/refusal.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -65,7 +66,7 @@ type HttpResponse = {
   err?: unknown
 }
 
-type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
+type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream' | RefusalContentType
 /** A response body is either a literal string or a concrete stream of the
  *  matching runtime (Node `Readable` when the adapter passed a Node
  *  `IncomingMessage`, Web `ReadableStream` otherwise). Producers commit to one

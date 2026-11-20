@@ -25,6 +25,8 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
+import { HEADER, readU16 } from '../../wire/header.js'
+import type { Refusal } from '../../refusal.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   BarrierPayload,
@@ -69,7 +71,8 @@ type ServerTransport<TWire> = {
   queuedAhead?(wire: TWire): number | undefined
   /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
   queueOf?(wire: TWire): WireQueue
-  terminateWire(wire: TWire): void
+  /** `refused`: the frame of the page's it ends for, which an HTTP transport answers the page's requests with. */
+  terminateWire(wire: TWire, refused?: Refusal): void
 }
 
 /** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
@@ -82,6 +85,14 @@ type ReconcileOutcome = {
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
+}
+
+/** The refusal of a frame the server can't take: it names the frame's channel where its header says one. */
+function refusedFrame(rawFrame: Uint8Array<ArrayBuffer>, err: ProtocolViolationError): Refusal {
+  const tag = rawFrame[0]
+  const channel =
+    tag !== undefined && !isWireCtrlTag(tag) && rawFrame.byteLength >= HEADER ? readU16(rawFrame, 1) : undefined
+  return { kind: 'frames', channel, reason: `The server can't take a frame of the page's: ${err.message}.` }
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
@@ -461,7 +472,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
-      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire)
+      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire, refusedFrame(rawFrame, err))
       else handleTelefunctionBug(err)
       return null
     } finally {
@@ -472,12 +483,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** `wire` may be a wire other than the one that sent the offending frame — a barrier's
    *  violation is the staged probe's. */
-  terminateWire(wire: Wire): void {
+  terminateWire(wire: Wire, refused?: Refusal): void {
     const entry = this.wires.get(wire)
     if (!entry) return
     if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
     entry.state.terminatePermanently = true
-    entry.transport.terminateWire(wire)
+    entry.transport.terminateWire(wire, refused)
   }
 
   /** Returns a RECONCILE's or barrier's `ReconcileOutcome` for the caller to send. Before a RECONCILE, a channel frame
