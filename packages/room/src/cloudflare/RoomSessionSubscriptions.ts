@@ -8,12 +8,16 @@ import {
   currentCloudflareMember,
   getOrCreate,
   hostLocal,
+  HolderGrants,
+  LEASE_RENEW_EVERY_MS,
   TransientRetry,
+  type Invoke,
+  type LeaseOrder,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { assert } from '../utils/assert.js'
-import { ROUTE_RENEW_EVERY_MS, laneRoute, type RouteInstallation } from './routes.js'
+import { laneRoute, type RouteInstallation } from './routes.js'
 import type { RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
@@ -47,6 +51,7 @@ type RoomSessionSubscriptionsOptions = { sessionId: string; member: CloudflareMe
 /** A session DO's Room subscriptions, and its calls to room authorities. */
 class RoomSessionSubscriptions {
   private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  private readonly grants = new HolderGrants()
   /** By room: a session's lanes of a room renew in one call, which the first of them to register times. */
   private readonly renewals = new Map<string, RoomRenewal>()
   private readonly id: string
@@ -74,15 +79,35 @@ class RoomSessionSubscriptions {
 
   /** Calls the room's authority through the ordered stub this session keeps for it, so a room's commits and route calls
    *  reach its authority in the order they were made. A line opens a fresh stub: a stub that rejected may be broken. */
-  callAuthority<T>(roomId: string, invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
+  callAuthority<T>(
+    roomId: string,
+    invoke: Invoke<CloudflareRoomAuthorityStub, T> | Promise<Invoke<CloudflareRoomAuthorityStub, T>>,
+  ): Promise<T> {
     return this.authorityCalls.call(roomId, () => this.driver.stub(roomId), invoke)
+  }
+
+  /** A registration or removal of a route at the room's authority, through its ordered stub, with this session's grant
+   *  there and its next order. */
+  writeRoute<T>(
+    roomId: string,
+    write: (authority: CloudflareRoomAuthorityStub, order: LeaseOrder) => Promise<T | 'regrant'>,
+  ): Promise<T> {
+    return this.grants.send(
+      roomId,
+      () => this.callAuthority(roomId, (authority) => authority.grantHolder(this.id)),
+      (order) =>
+        this.callAuthority(
+          roomId,
+          order.then((order) => (authority: CloudflareRoomAuthorityStub) => write(authority, order)),
+        ),
+    )
   }
 
   renewWithRoom(attempt: CloudflareRoomAttempt): void {
     const { roomId } = attempt.route
     const renewal = getOrCreate(this.renewals, roomId, () => ({
       attempts: new Set<CloudflareRoomAttempt>(),
-      timer: setTimeout(() => void this.renewRoutes(roomId), ROUTE_RENEW_EVERY_MS),
+      timer: setTimeout(() => void this.renewRoutes(roomId), LEASE_RENEW_EVERY_MS),
     }))
     renewal.attempts.add(attempt)
   }
@@ -147,6 +172,8 @@ class CloudflareRoomAttempt extends DriverAttempt {
     // Unsubscribed while it registered: its release already went out.
     if (this.state() === 'closed') return
     if (registration === 'dropped') return this.end()
+    // A write of this session's on the lane, sent later, came first: registered again, behind it.
+    if (registration === 'stale') return this.lose(new Error(`Cloudflare route '${this.route.laneKey}' was overtaken`))
     this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
     this.transition('ready')
@@ -156,7 +183,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
   async unsubscribe(): Promise<void> {
     this.stop()
     this.transition('closed')
-    await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
+    await this.owner.writeRoute(this.route.roomId, (authority, order) => authority.unsubscribeRoute(this.route, order))
   }
 
   onRenewal(renewal: RenewWire): void {
@@ -209,15 +236,13 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.stopDeliveries()
   }
 
-  /** Sent in this turn, behind what this session sent the room before. */
-  private sendRegistration(): Promise<RegisterWire> {
+  /** Sent behind what this session sent the room before, with the grant it may ask for first. */
+  private sendRegistration(): Promise<Exclude<RegisterWire, 'regrant'>> {
     const first = this.firstRegistration
-    return this.callAuthority((authority) =>
-      first === null ? authority.registerRoute(this.route) : first.attempt(() => authority.registerRoute(this.route)),
+    return this.owner.writeRoute(this.route.roomId, (authority, order) =>
+      first === null
+        ? authority.registerRoute(this.route, order)
+        : first.attempt(() => authority.registerRoute(this.route, order)),
     )
-  }
-
-  private callAuthority<T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>): Promise<T> {
-    return this.owner.callAuthority(this.route.roomId, invoke)
   }
 }

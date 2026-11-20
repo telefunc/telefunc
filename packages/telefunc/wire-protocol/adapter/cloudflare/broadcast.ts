@@ -3,14 +3,16 @@ export { CloudflareBroadcast, CloudflareBroadcastAuthorityState, CloudflareBroad
 export type {
   BroadcastCalls,
   BroadcastForwardRequest,
-  BroadcastPresenceRequest,
+  BroadcastHoldRequest,
+  BroadcastLeaseRequest,
   BroadcastPublishRequest,
+  BroadcastReleaseRequest,
   MemberPlacement,
   TelefuncBroadcastStub,
 }
 
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
-import type { OrderedStubs } from './OrderedStubs.js'
+import type { Invoke, OrderedStubs } from './OrderedStubs.js'
 import { TransientRetry } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
 import {
@@ -27,9 +29,21 @@ import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
 import type { BroadcastDelivery } from './extensions.js'
-
-const PRESENCE_TTL_MS = 90_000
-const PRESENCE_REFRESH_INTERVAL_MS = 30_000
+import {
+  HolderGrants,
+  LEASE_RENEW_EVERY_MS,
+  LEASE_SCHEMA,
+  grantHolder,
+  liveLeases,
+  registerLease,
+  removeLease,
+  renewLease,
+  sweepLeases,
+  type LeaseOrder,
+  type LeaseRegistered,
+  type LeaseRemoved,
+  type LeaseRenewed,
+} from './leases.js'
 
 type BroadcastPublishRequest = {
   key: string
@@ -43,21 +57,22 @@ type BroadcastForwardRequest = BroadcastDelivery & { members: string[] }
 /** A member DO, by id, and the bucket its session was placed in. */
 type MemberPlacement = { member: string; bucket: LocationBucket }
 
-/** A member DO's presence on a route, at the key's authority, by DO id; `bucket: null` withdraws it. */
-type BroadcastPresenceRequest = {
-  key: string
-  kind: BroadcastRoute['kind']
-  member: string
-  bucket: LocationBucket | null
-}
+/** A member DO's presence on a route, at the key's authority, by DO id and the lease of its subscription there. */
+type BroadcastLeaseRequest = { key: string; kind: BroadcastRoute['kind']; member: string; lease: string }
+/** Records the presence, in the bucket its member DO was placed in. */
+type BroadcastHoldRequest = BroadcastLeaseRequest & { bucket: LocationBucket; order: LeaseOrder }
+type BroadcastReleaseRequest = BroadcastLeaseRequest & { order: LeaseOrder }
 
 type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
   /** Resolves to how many of the member DOs it names failed to take the delivery. */
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<number>
   telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<void>
-  /** Resolves to whether the member DO had no live record, so that fan-out was skipping it. */
-  telefuncBroadcastPresence(request: BroadcastPresenceRequest): Promise<boolean>
+  /** A new grant for the member DO, for its writes of presence at this key's authority (`leases.ts`). */
+  telefuncBroadcastGrant(member: string): Promise<number>
+  telefuncBroadcastHold(request: BroadcastHoldRequest): Promise<LeaseRegistered>
+  telefuncBroadcastRenew(request: BroadcastLeaseRequest): Promise<LeaseRenewed>
+  telefuncBroadcastRelease(request: BroadcastReleaseRequest): Promise<LeaseRemoved>
 }
 
 /** One DO's outgoing Broadcast calls. */
@@ -77,6 +92,9 @@ class MemberRoute {
   /** Null once it unsubscribed: an establishing route is released once its presence is recorded. */
   attempt: MemberAttempt | null = null
   readonly route: BroadcastRoute
+  readonly lease = crypto.randomUUID()
+  /** Its presence lapsed and was reported, and is recorded again before it is renewed. */
+  private lapsed = false
   private refreshTimer: ReturnType<typeof setInterval> | undefined
 
   constructor({ route }: MemberRouteOptions) {
@@ -96,21 +114,29 @@ class MemberRoute {
     this.attempt?.presence('lost')
   }
 
-  startRefresh(refresh: () => Promise<boolean>): void {
-    this.refreshTimer = setInterval(() => void this.refreshPresence(refresh), PRESENCE_REFRESH_INTERVAL_MS)
+  startRefresh(renew: () => Promise<LeaseRenewed>, hold: () => Promise<LeaseRegistered>): void {
+    this.refreshTimer = setInterval(() => void this.refreshPresence(renew, hold), LEASE_RENEW_EVERY_MS)
   }
 
-  private async refreshPresence(refresh: () => Promise<boolean>): Promise<void> {
-    let lapsed: boolean
+  /** A lapse its key's authority answers is reported once, however many renewals it answers it to, until the presence
+   *  is recorded again. */
+  private async refreshPresence(
+    renew: () => Promise<LeaseRenewed>,
+    hold: () => Promise<LeaseRegistered>,
+  ): Promise<void> {
     try {
-      lapsed = await refresh()
+      if (!this.lapsed) {
+        if ((await renew()) === 'renewed') return this.presenceRecorded()
+        this.lapsed = true
+        const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
+        reportBroadcastDeliveryLost(this.route.key, reason)
+      }
+      // Else a later write of this DO's on the route came first: its release.
+      if ((await hold()) !== 'registered') return
     } catch (error) {
       return this.presenceLost(error)
     }
-    if (lapsed) {
-      const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
-      reportBroadcastDeliveryLost(this.route.key, reason)
-    }
+    this.lapsed = false
     this.presenceRecorded()
   }
 
@@ -151,9 +177,7 @@ class MemberAttempt extends DriverAttempt {
 
 const AUTHORITY_SCHEMA = `
   CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS broadcast_presence
-    (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL,
-     PRIMARY KEY (route_key, member));
+  ${LEASE_SCHEMA}
 `
 
 /** The Broadcast state of a key authority DO, in its SQLite storage: each key's `seq` and each route's member presence.
@@ -176,48 +200,42 @@ class CloudflareBroadcastAuthorityState {
     })
   }
 
-  /** Records or withdraws a member DO, dropping the route's lapsed entries; the RPC reply waits for the write. Returns
-   *  whether it had no live record. */
-  setPresence({ key, kind, member, bucket }: BroadcastPresenceRequest): boolean {
-    const sql = this.sql()
-    const routeKey = broadcastRouteKey({ key, kind })
+  /** A grant for a member DO's writes of presence here; a member DO that holds no presence lapses with its grant. */
+  grant(member: string): number {
     const now = Date.now()
-    return this.storage.transactionSync(() => {
-      const lapsed =
-        sql
-          .exec(
-            'SELECT 1 FROM broadcast_presence WHERE route_key = ? AND member = ? AND expires_at > ?',
-            routeKey,
-            member,
-            now,
-          )
-          .toArray().length === 0
-      sql.exec(
-        'DELETE FROM broadcast_presence WHERE route_key = ? AND (member = ? OR expires_at <= ?)',
-        routeKey,
-        member,
-        now,
-      )
-      if (bucket === null) return lapsed
-      sql.exec(
-        'INSERT INTO broadcast_presence (route_key, member, bucket, expires_at) VALUES (?, ?, ?, ?)',
-        routeKey,
-        member,
-        bucket,
-        now + PRESENCE_TTL_MS,
-      )
-      return lapsed
+    return this.transaction((sql) => {
+      sweepLeases(sql, now)
+      return grantHolder(sql, member, now)
     })
   }
 
-  /** The route's unexpired member DOs, each with its bucket. */
-  livePresence(routeKey: string, now: number): Array<{ member: string; bucket: LocationBucket }> {
-    return this.sql()
-      .exec<{
-        member: string
-        bucket: LocationBucket
-      }>('SELECT member, bucket FROM broadcast_presence WHERE route_key = ? AND expires_at > ?', routeKey, now)
-      .toArray()
+  /** The RPC reply waits for the write. */
+  hold({ key, kind, member, lease, bucket, order }: BroadcastHoldRequest): LeaseRegistered {
+    const scope = broadcastRouteKey({ key, kind })
+    return this.transaction((sql) => registerLease(sql, { scope, holder: member, lease, bucket }, order, Date.now()))
+  }
+
+  renew({ key, kind, member, lease }: BroadcastLeaseRequest): LeaseRenewed {
+    const scope = broadcastRouteKey({ key, kind })
+    return this.transaction((sql) => renewLease(sql, scope, member, lease, Date.now()))
+  }
+
+  release({ key, kind, member, lease, order }: BroadcastReleaseRequest): LeaseRemoved {
+    const scope = broadcastRouteKey({ key, kind })
+    return this.transaction((sql) => removeLease(sql, scope, member, lease, order, Date.now()))
+  }
+
+  /** The route's member DOs whose presence is unexpired, each with its bucket. */
+  livePresence(routeKey: string, now: number): MemberPlacement[] {
+    return liveLeases<LocationBucket>(this.sql(), [routeKey], now).map(({ holder, bucket }) => ({
+      member: holder,
+      bucket,
+    }))
+  }
+
+  private transaction<T>(fn: (sql: SqlStorage) => T): T {
+    const sql = this.sql()
+    return this.storage.transactionSync(() => fn(sql))
   }
 
   private sql(): SqlStorage {
@@ -241,6 +259,7 @@ class CloudflareBroadcastMember {
   /** This incarnation of the DO: a slot an evicted one left is never shared with the next. */
   readonly hostKey = crypto.randomUUID()
   private readonly routes = new Map<string, MemberRoute>()
+  private readonly grants = new HolderGrants()
   /** The receivers of routes whose sender keeps its own list of receivers, by route key. */
   private readonly localReceivers = new Map<string, BackendReceiver>()
 
@@ -312,7 +331,10 @@ class CloudflareBroadcastMember {
     const retry = new TransientRetry()
     for (;;) {
       try {
-        await this.recordPresence(memberRoute.route, retry)
+        const held = await this.hold(memberRoute, retry)
+        // A write of this DO's on the route that was sent later came first.
+        if (held === 'stale')
+          throw new Error(`Cloudflare Broadcast presence for '${memberRoute.route.key}' was overtaken`)
         break
       } catch (error) {
         const delay = retry.delayAfter(error)
@@ -327,26 +349,53 @@ class CloudflareBroadcastMember {
     }
     memberRoute.presenceRecorded()
     if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
-    memberRoute.startRefresh(() => this.recordPresence(memberRoute.route))
+    memberRoute.startRefresh(
+      () => this.renew(memberRoute),
+      () => this.hold(memberRoute),
+    )
   }
 
   private async release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     memberRoute.stopRefresh()
     this.routes.delete(routeKey)
-    await this.withdrawPresence(memberRoute.route)
+    const request = this.leaseRequest(memberRoute)
+    await this.write(memberRoute.route, (authority, order) => authority.telefuncBroadcastRelease({ ...request, order }))
   }
 
-  /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made; a first
-   *  one's attempt is made through `retry`. */
-  private recordPresence(route: BroadcastRoute, retry?: TransientRetry): Promise<boolean> {
+  /** A first one's attempt is made through `retry`, with the grant it may ask for first. */
+  private hold(memberRoute: MemberRoute, retry?: TransientRetry): Promise<LeaseRegistered> {
     assert(this.locatedBucket, 'A Broadcast member registers from a session that knows its bucket')
-    const request = { key: route.key, kind: route.kind, member: this.id, bucket: this.locatedBucket }
-    return this.broadcast.sendPresence(this.calls, request, retry)
+    const request = { ...this.leaseRequest(memberRoute), bucket: this.locatedBucket }
+    return this.write(memberRoute.route, (authority, order) =>
+      retry === undefined
+        ? authority.telefuncBroadcastHold({ ...request, order })
+        : retry.attempt(() => authority.telefuncBroadcastHold({ ...request, order })),
+    )
   }
 
-  private withdrawPresence(route: BroadcastRoute): Promise<boolean> {
-    const request = { key: route.key, kind: route.kind, member: this.id, bucket: null }
-    return this.broadcast.sendPresence(this.calls, request)
+  private renew(memberRoute: MemberRoute): Promise<LeaseRenewed> {
+    const request = this.leaseRequest(memberRoute)
+    return this.broadcast.callAuthority(this.calls, memberRoute.route.key, this.locatedBucket, (authority) =>
+      authority.telefuncBroadcastRenew(request),
+    )
+  }
+
+  /** Through the DO's ordered stubs, with its grant at the key's authority and its next order there. */
+  private write<T>(
+    route: BroadcastRoute,
+    write: (authority: TelefuncBroadcastStub, order: LeaseOrder) => Promise<T | 'regrant'>,
+  ): Promise<T> {
+    const call = <R>(invoke: Invoke<TelefuncBroadcastStub, R> | Promise<Invoke<TelefuncBroadcastStub, R>>) =>
+      this.broadcast.callAuthority(this.calls, route.key, this.locatedBucket, invoke)
+    return this.grants.send(
+      this.broadcast.authorityName(route.key),
+      () => call((authority) => authority.telefuncBroadcastGrant(this.id)),
+      (order) => call(order.then((order) => (authority: TelefuncBroadcastStub) => write(authority, order))),
+    )
+  }
+
+  private leaseRequest({ route, lease }: MemberRoute): BroadcastLeaseRequest {
+    return { key: route.key, kind: route.kind, member: this.id, lease }
   }
 }
 
@@ -392,12 +441,14 @@ class CloudflareBroadcast {
     return this.callByName(member.calls, name, member.bucket, send)
   }
 
-  sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest, retry?: TransientRetry): Promise<boolean> {
-    return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
-      retry === undefined
-        ? authority.telefuncBroadcastPresence(request)
-        : retry.attempt(() => authority.telefuncBroadcastPresence(request)),
-    )
+  /** Through `calls`, to the authority of `key`. */
+  callAuthority<T>(
+    calls: BroadcastCalls,
+    key: string,
+    locationHint: LocationBucket | null,
+    invoke: Invoke<TelefuncBroadcastStub, T> | Promise<Invoke<TelefuncBroadcastStub, T>>,
+  ): Promise<T> {
+    return calls.call(this.authorityName(key), () => this.stubByName(this.authorityName(key), locationHint), invoke)
   }
 
   /** At the key's authority: sequences the publish, reads its presence and forwards it, all in one synchronous turn,
@@ -476,7 +527,7 @@ class CloudflareBroadcast {
     return calls.call(name, () => this.stubByName(name, locationHint), invoke)
   }
 
-  private authorityName(key: string): string {
+  authorityName(key: string): string {
     return `${this.baseInstanceName}:broadcast:authority:${key}`
   }
 

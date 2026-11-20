@@ -2,7 +2,7 @@ export { Fanout }
 
 import type { CloudflareRegions, OrderingInfo } from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_PREFIX } from '../server/constants.js'
-import { laneRoute, type RouteInstallation } from './routes.js'
+import { laneRoute } from './routes.js'
 
 type FanoutOptions = { regions: CloudflareRegions }
 
@@ -22,11 +22,11 @@ class Fanout {
   send(
     inc: string,
     laneKeys: readonly string[],
-    routes: RouteInstallation[],
+    routes: { holder: string; bucket: string }[],
     payload: Uint8Array,
     info: OrderingInfo,
   ): Promise<void> {
-    const members = new Map(routes.map(({ sessionDoId, bucket }) => [sessionDoId, { member: sessionDoId, bucket }]))
+    const members = new Map(routes.map(({ holder, bucket }) => [holder, { member: holder, bucket }]))
     const delivery = { routes: laneKeys.map((laneKey) => laneRoute(inc, laneKey)), payload, info }
     return this.regions.forward(ROOM_CLOUDFLARE_PREFIX + inc, delivery, members.values())
   }

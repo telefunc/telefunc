@@ -18,18 +18,17 @@ config.channel = {
 // so these reach Cloudflare's binding resolver intact.
 export class TelefuncDurableObject extends (tf.TelefuncDurableObject as TelefuncDurableObjectWithPresence) {
   // Test-only: the key's authority refuses the first presence of each `refused-presence:` key's subscriber.
-  override async telefuncBroadcastPresence(request: PresenceRequest) {
-    if (request.key.startsWith('refused-presence:') && request.bucket !== null && !refusedPresences.has(request.key)) {
+  override async telefuncBroadcastHold(request: PresenceRequest) {
+    if (request.key.startsWith('refused-presence:') && !refusedPresences.has(request.key)) {
       refusedPresences.add(request.key)
       throw new Error('Test: the authority refused the presence')
     }
-    // Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for 100 s, past its record's 90 s.
-    if (request.key.startsWith('lapsed-presence:') && request.bucket !== null) {
-      const recordedAt = lapsedPresences.get(request.key)
-      if (recordedAt === undefined) lapsedPresences.set(request.key, Date.now())
-      else if (Date.now() - recordedAt < 100_000) throw new Error('Test: the authority refused the refresh')
-    }
-    return super.telefuncBroadcastPresence(request)
+    refuseLapsedPresenceRefresh(request)
+    return super.telefuncBroadcastHold(request)
+  }
+  override async telefuncBroadcastRenew(request: PresenceRequest) {
+    refuseLapsedPresenceRefresh(request)
+    return super.telefuncBroadcastRenew(request)
   }
 
   // Test-only: each Room delivery a coordinator forwards, and the region of each session that takes one.
@@ -79,20 +78,29 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
 export { TodoListDurableObject } from './database/todoItems'
 
 // The Durable Object's Broadcast RPCs and extension Durable Object RPCs, which its public type doesn't name.
-type PresenceRequest = { key: string; bucket: string | null }
+type PresenceRequest = { key: string }
 type DeliveryRequest = { routes: { key: string }[]; payload: string | Uint8Array }
 type TelefuncDurableObjectWithPresence = new (
   ctx: DurableObjectState,
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
   fetch(request: Request): Promise<Response>
-  telefuncBroadcastPresence(request: PresenceRequest): Promise<boolean>
+  telefuncBroadcastHold(request: PresenceRequest): Promise<string>
+  telefuncBroadcastRenew(request: PresenceRequest): Promise<string>
   telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
 const lapsedPresences = new Map<string, number>()
+
+/** Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for 100 s, past its record's 90 s. */
+function refuseLapsedPresenceRefresh({ key }: PresenceRequest): void {
+  if (!key.startsWith('lapsed-presence:')) return
+  const recordedAt = lapsedPresences.get(key)
+  if (recordedAt === undefined) lapsedPresences.set(key, Date.now())
+  else if (Date.now() - recordedAt < 100_000) throw new Error('Test: the authority refused the refresh')
+}
 const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 

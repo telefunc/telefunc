@@ -24,7 +24,16 @@ import type {
 } from '../backend/contract.js'
 import {
   OrderedStubs,
+  grantHolder,
+  liveLeases,
+  registerLease,
+  removeLease,
+  renewLease,
+  sweepLeases,
   type CloudflareExtensionKit,
+  type LeaseOrder,
+  type LeaseRegistered,
+  type LeaseRemoved,
   type OrderingInfo,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
@@ -38,14 +47,7 @@ import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backe
 import { Fanout } from './Fanout.js'
 import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained, retainedOwner } from './retained.js'
-import {
-  deleteExpiredRoutes,
-  deleteRoute,
-  renewRoute,
-  snapshotRoutes,
-  type RouteInstallation,
-  upsertRoute,
-} from './routes.js'
+import { routeLease, routeScope, type RouteInstallation } from './routes.js'
 import {
   advanceOrder,
   claimListingBucket,
@@ -81,16 +83,18 @@ type AcceptedCommitWire = {
   timestamp: number
   lost?: string
 }
-/** A commit the transaction accepted: its order, the lanes it reaches, and the routes subscribed to them then. */
-type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteInstallation[] }
+/** A session DO subscribed to a lane, and the bucket it is in. */
+type RouteHolder = { holder: string; bucket: string }
+/** A commit the transaction accepted: its order, the lanes it reaches, and the session DOs subscribed to them then. */
+type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteHolder[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
 /** An operation that ran, with its commit's receipt, or its incarnation stale. */
 type OperationWire =
   | { kind: 'done'; value: unknown; counters: Map<string, CellCounter>; commit?: AcceptedCommitWire }
   | { kind: 'stale-incarnation' }
 
-/** A route registered, or refused because its incarnation is dropped or closing. */
-type RegisterWire = 'registered' | 'dropped'
+/** A route registered, refused because its incarnation is dropped or closing, or not, as `registerLease()` says. */
+type RegisterWire = LeaseRegistered | 'dropped'
 /** A route renewed, lapsed on its own, or deleted with its dropped incarnation. */
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
@@ -144,7 +148,13 @@ class RoomAuthority {
     return this.transaction((sql) => compareExchangeCells(sql, inc, exchange, now))
   }
 
-  async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
+  async commitLane(
+    roomId: string,
+    inc: string,
+    lane: LaneId,
+    payload: Uint8Array,
+    opts?: CommitOptions,
+  ): Promise<CommitWire> {
     const now = Date.now()
     const outcome = this.transaction((sql): StaleCommit | AcceptedCommit => {
       if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
@@ -159,12 +169,12 @@ class RoomAuthority {
       return commitIn(sql, inc, lane, payload, opts ?? {}, now)
     })
     if (outcome.kind !== 'accepted') return outcome
-    return await this.deliver(inc, lane, payload, outcome)
+    return await this.deliver(roomId, inc, lane, payload, outcome)
   }
 
   /** Runs the operation `request` names in one transaction, which a plan that throws rolls back, then fans its commit
    *  out. */
-  async runOperation(inc: string, request: RoomOperationRequest): Promise<OperationWire> {
+  async runOperation(roomId: string, inc: string, request: RoomOperationRequest): Promise<OperationWire> {
     assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
     const outcome = this.transaction((sql) => {
@@ -189,11 +199,17 @@ class RoomAuthority {
     if (outcome.expiring) await this.scheduleMaintenanceIfNeeded()
     const { value, counters, commit, payload } = outcome
     if (commit === null || payload === null) return { kind: 'done', value, counters }
-    return { kind: 'done', value, counters, commit: await this.deliver(inc, OPERATION_COMMIT_LANE, payload, commit) }
+    return {
+      kind: 'done',
+      value,
+      counters,
+      commit: await this.deliver(roomId, inc, OPERATION_COMMIT_LANE, payload, commit),
+    }
   }
 
   /** Fans a commit out; an inbox or control commit's receipt waits for its handoff. */
   private async deliver(
+    roomId: string,
     inc: string,
     lane: LaneId,
     payload: Uint8Array,
@@ -203,7 +219,7 @@ class RoomAuthority {
     const receipt: AcceptedCommitWire = { kind: 'accepted', seq: mark.seq, timestamp: mark.timestamp }
     if (lane.kind !== 'inbox' && lane.kind !== 'control') {
       // No committer awaits a data or binary frame's handoff, so a lost one is reported here.
-      void reportIfLost(delivery, routes, lane)
+      void reportIfLost(delivery, roomId, lane)
       return receipt
     }
     const lost = await lostReason(delivery)
@@ -223,12 +239,18 @@ class RoomAuthority {
     return listRetained(this.sql(), inc, of)
   }
 
-  async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
+  /** A grant for a session DO's writes of routes here (`leases.ts` of core). */
+  async grantHolder(sessionDoId: string): Promise<number> {
+    const grant = this.transaction((sql) => grantHolder(sql, sessionDoId, Date.now()))
+    await this.scheduleMaintenanceIfNeeded()
+    return grant
+  }
+
+  async registerRoute(route: RouteInstallation, order: LeaseOrder): Promise<RegisterWire> {
     const now = Date.now()
     const registration = this.transaction((sql): RegisterWire => {
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) return 'dropped'
-      upsertRoute(sql, route, now)
-      return 'registered'
+      return registerLease(sql, routeLease(route), order, now)
     })
     if (registration === 'registered') await this.scheduleMaintenanceIfNeeded()
     return registration
@@ -240,7 +262,8 @@ class RoomAuthority {
     const now = Date.now()
     const renewals = this.transaction((sql) =>
       routes.map((route): RenewWire => {
-        if (renewRoute(sql, route, now)) return 'renewed'
+        const { scope, holder, lease } = routeLease(route)
+        if (renewLease(sql, scope, holder, lease, now) === 'renewed') return 'renewed'
         return hasIncarnation(sql, route.inc) ? 'lapsed' : 'dropped'
       }),
     )
@@ -248,9 +271,11 @@ class RoomAuthority {
     return renewals
   }
 
-  async unsubscribeRoute(route: RouteInstallation): Promise<void> {
-    this.transaction((sql) => deleteRoute(sql, route))
+  async unsubscribeRoute(route: RouteInstallation, order: LeaseOrder): Promise<LeaseRemoved> {
+    const { scope, holder, lease } = routeLease(route)
+    const removal = this.transaction((sql) => removeLease(sql, scope, holder, lease, order, Date.now()))
     await this.scheduleMaintenanceIfNeeded()
+    return removal
   }
 
   async dropIncarnation(inc: string): Promise<void> {
@@ -307,7 +332,7 @@ class RoomAuthority {
       const unlisted = settleDueListing(sql, now)
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedHead(sql, now)
-      deleteExpiredRoutes(sql, now)
+      sweepLeases(sql, now)
       deleteExpiredCells(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
       return unlisted
@@ -368,7 +393,12 @@ function commitIn(
   // A binary commit also reaches its member's every-track lane and its track's every-member lane.
   const laneKeys =
     lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
-  return { kind: 'accepted', mark, laneKeys, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+  const routes = liveLeases(
+    sql,
+    laneKeys.map((laneKey) => routeScope(inc, laneKey)),
+    now,
+  )
+  return { kind: 'accepted', mark, laneKeys, routes }
 }
 
 function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uint8Array | undefined {
@@ -377,11 +407,11 @@ function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uin
   return read.cells.get(key)
 }
 
-/** A commit nobody subscribes to has no route. A delivery that can be lost has one, and each route is this room's. */
-async function reportIfLost(delivery: Promise<void>, routes: RouteInstallation[], lane: LaneId): Promise<void> {
+/** A data or binary frame a subscribed session DO didn't take is reported as lost on its room's lane. */
+async function reportIfLost(delivery: Promise<void>, roomId: string, lane: LaneId): Promise<void> {
   try {
     await delivery
   } catch (error) {
-    reportLaneLost(routes[0]!.roomId, lane, String(error))
+    reportLaneLost(roomId, lane, String(error))
   }
 }

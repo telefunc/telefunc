@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CloudflareMember } from 'telefunc/__internal'
+import { LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS, type CloudflareMember } from 'telefunc/__internal'
 import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
-import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import type { RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { LaneId } from '../backend/contract.js'
@@ -26,6 +25,7 @@ function setup(
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
   }
   const authority = {
+    grantHolder: async () => 1,
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
     unsubscribeRoute: async () => {},

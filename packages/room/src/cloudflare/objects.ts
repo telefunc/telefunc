@@ -26,6 +26,7 @@ const ROOM_AUTHORITY_METHODS = [
   'readLaneOrder',
   'readRetained',
   'listRetained',
+  'grantHolder',
   'registerRoute',
   'renewRoutes',
   'unsubscribeRoute',

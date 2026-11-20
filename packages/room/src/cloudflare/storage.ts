@@ -45,6 +45,8 @@ import {
   type ExpiringCellsRead,
   type StaleIncarnation,
 } from '../backend/contract.js'
+import { LEASE_SCHEMA, dropLeaseScopes, nextLeaseSweep } from 'telefunc/__internal'
+import { incarnationScopes } from './routes.js'
 import {
   countCell,
   encodeCellCounter,
@@ -94,11 +96,7 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS rt_chunk
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL,
        PRIMARY KEY (inc, lane_key, i));
-    CREATE TABLE IF NOT EXISTS route
-      (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, session_do_id TEXT NOT NULL,
-       lease_id TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL,
-       PRIMARY KEY (inc, lane_key, session_do_id));
-    CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
+    ${LEASE_SCHEMA}
     CREATE TABLE IF NOT EXISTS listing (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
     CREATE TABLE IF NOT EXISTS listing_bucket (id INTEGER PRIMARY KEY CHECK (id = 1), bucket TEXT NOT NULL);
   `)
@@ -206,20 +204,21 @@ function hasIncarnation(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, a
- *  route or an expiring cell, or the listing's check, or null for none. */
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or
+ *  an expiring cell, the listing's check, or when a route's session DO may be dropped, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
-  // Each table takes its own MIN, so the route table's seeks its expires_at index.
-  return sql
+  // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
+  const deadline = sql
     .exec<{
       deadline: number | null
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-        'UNION ALL SELECT MIN(expires_at) FROM route UNION ALL SELECT MIN(expires_at) FROM expiring_cell ' +
-        'UNION ALL SELECT MIN(check_at) FROM listing)',
+        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(check_at) FROM listing)',
     )
-    .toArray()[0]!.deadline
+    .one().deadline
+  const sweep = nextLeaseSweep(sql)
+  return deadline === null || sweep === null ? (deadline ?? sweep) : Math.min(deadline, sweep)
 }
 
 /** Called inside `transactionSync`; a lost race returns the current head. */
@@ -418,7 +417,8 @@ function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
 }
 
 function dropIncarnationRows(sql: SqlStorage, inc: string): void {
-  for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'route', 'gen']) {
+  for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'gen']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }
+  dropLeaseScopes(sql, incarnationScopes(inc))
 }

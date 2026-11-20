@@ -12,12 +12,17 @@ function sqliteStorage(): { storage: DurableObjectStorage; plans: string[] } {
       if (/^\s*SELECT/i.test(query)) {
         const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...bindings) as Array<{ detail: string }>
         for (const step of plan) plans.push(step.detail)
-        const rows = db.prepare(query).all(...bindings)
-        return { toArray: () => rows }
+        return cursor(db.prepare(query).all(...bindings), 0)
       }
-      if (bindings.length === 0) db.exec(query)
-      else db.prepare(query).run(...bindings)
-      return { toArray: () => [] }
+      if (/\bRETURNING\b/i.test(query)) {
+        const rows = db.prepare(query).all(...bindings)
+        return cursor(rows, rows.length)
+      }
+      if (bindings.length === 0 && !/^\s*(INSERT|UPDATE|DELETE)/i.test(query)) {
+        db.exec(query)
+        return cursor([], 0)
+      }
+      return cursor([], Number(db.prepare(query).run(...bindings).changes))
     },
   }
   const storage = {
@@ -35,4 +40,16 @@ function sqliteStorage(): { storage: DurableObjectStorage; plans: string[] } {
     },
   }
   return { storage: storage as unknown as DurableObjectStorage, plans }
+}
+
+/** As Cloudflare's cursor: `one()` throws unless there is exactly one row; `rowsWritten` counts the rows changed. */
+function cursor(rows: unknown[], rowsWritten: number) {
+  return {
+    toArray: () => rows,
+    one: () => {
+      if (rows.length !== 1) throw new Error(`Expected exactly one row from the query, got ${rows.length}`)
+      return rows[0]
+    },
+    rowsWritten,
+  }
 }

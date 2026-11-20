@@ -19,7 +19,9 @@ import {
 import type {
   BroadcastCalls,
   BroadcastForwardRequest,
-  BroadcastPresenceRequest,
+  BroadcastHoldRequest,
+  BroadcastLeaseRequest,
+  BroadcastReleaseRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import { OrderedStubs } from '../wire-protocol/adapter/cloudflare/OrderedStubs.js'
@@ -201,8 +203,20 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#runInSession(() => this.session.broadcast.deliver(delivery))
     }
 
-    telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
-      return this.authorityState.setPresence(request)
+    telefuncBroadcastGrant(member: string) {
+      return this.authorityState.grant(member)
+    }
+
+    telefuncBroadcastHold(request: BroadcastHoldRequest) {
+      return this.authorityState.hold(request)
+    }
+
+    telefuncBroadcastRenew(request: BroadcastLeaseRequest) {
+      return this.authorityState.renew(request)
+    }
+
+    telefuncBroadcastRelease(request: BroadcastReleaseRequest) {
+      return this.authorityState.release(request)
     }
 
     /** The RPC method every extension's `durableObject` is called through. */

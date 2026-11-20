@@ -90,7 +90,7 @@ class CloudflareRoomDriver implements RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(inc, lane, payload, opts)
+    const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(roomId, inc, lane, payload, opts)
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
@@ -105,7 +105,7 @@ class CloudflareRoomDriver implements RoomDriver {
     args: Args,
   ): Promise<OperationResult<Value>> {
     const request = operationRequest(operation, args)
-    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, request)
+    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(roomId, inc, request)
     const session = currentRoomSessionSubscriptions(this)
     const wire = await (session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
     if (wire.kind !== 'done') return wire

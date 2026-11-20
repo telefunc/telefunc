@@ -33,4 +33,32 @@ describe("a Durable Object's calls to another, through OrderedStubs", () => {
     void stubs.call('target', open, (stub) => stub.send('second'))
     expect(record).toEqual(['stub:first', 'stub:second'])
   })
+
+  // A lease write is called before its grant is answered, and the calls made after it must not overtake it.
+  it('made after one whose invoke is still to come reach the stub after it, whether it is sent or not', async () => {
+    const stubs = new OrderedStubs<Stub>()
+    const record: string[] = []
+    // Its first call is never answered, so the line stays open throughout.
+    const open = () => ({
+      send: (what: string) => (record.push(what), what === 'first' ? new Promise<void>(() => {}) : Promise.resolve()),
+    })
+    const turns = () => new Promise((resolve) => setTimeout(resolve, 0))
+    const write = Promise.withResolvers<(stub: Stub) => Promise<void>>()
+    const refused = Promise.withResolvers<(stub: Stub) => Promise<void>>()
+    void stubs.call('target', open, (stub) => stub.send('first'))
+    const written = stubs.call('target', open, write.promise)
+    void stubs.call('target', open, (stub) => stub.send('after the write'))
+    const notSent = stubs.call('target', open, refused.promise).catch((error: Error) => error.message)
+    void stubs.call('target', open, (stub) => stub.send('after the refused one'))
+    refused.reject(new Error('no grant'))
+    await turns()
+    expect(record).toEqual(['first'])
+    write.resolve((stub) => stub.send('the write'))
+    await written
+    expect(await notSent).toBe('no grant')
+    await turns()
+    expect(record).toEqual(['first', 'the write', 'after the write', 'after the refused one'])
+    void stubs.call('target', open, (stub) => stub.send('last'))
+    expect(record.at(-1)).toBe('last')
+  })
 })
