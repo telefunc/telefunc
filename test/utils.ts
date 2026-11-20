@@ -68,7 +68,7 @@ async function rawRequestStatus(head: string[]): Promise<number> {
   const socket = connect(Number(port), hostname)
   await once(socket, 'connect')
   socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
-  const [first] = (await once(socket, 'data')) as [Buffer]
+  const first = await new Promise<Buffer>((resolve) => socket.once('data', resolve))
   socket.destroy()
   return Number(first.toString('latin1').split(' ')[1])
 }
