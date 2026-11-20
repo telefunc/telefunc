@@ -103,6 +103,11 @@ test.each<[string, number, () => Record<string, string>]>([
   ],
   ['a page whose origin is opaque', REFUSED, () => ({ Host: host, Origin: 'null' })],
   [
+    "a page of an app shell with a scheme of its own, which the app doesn't allow, against a Host of the same name",
+    REFUSED,
+    () => ({ Host: 'localhost', Origin: 'capacitor://localhost' }),
+  ],
+  [
     'a page of the same origin behind a proxy that sends an empty X-Forwarded-Host',
     OPENS,
     () => ({ Host: host, Origin: `http://${host}`, 'X-Forwarded-Host': '' }),
@@ -156,6 +161,17 @@ test.each([
   }).toThrow(
     "an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com'",
   )
+})
+
+test.each([
+  ['null', 'a page that has no origin sends `null`, and any site can make its page send it'],
+  ['file://', 'a page opened from a file has no origin of its own'],
+  ['file:///home/app/index.html', 'a page opened from a file has no origin of its own'],
+  ['capacitor://*.localhost', "a leading '*.' stands for a subdomain on http and https only"],
+])('`allowedOrigins` refuses %j at configuration, saying why', (entry, why) => {
+  expect(() => {
+    config.channel.allowedOrigins = [entry]
+  }).toThrow(why)
 })
 
 test('`allowedOrigins` refuses a value that is not an array at configuration', () => {

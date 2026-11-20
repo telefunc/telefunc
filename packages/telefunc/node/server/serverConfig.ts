@@ -56,7 +56,11 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { parseAllowedOrigin, type AllowedOrigin } from '../../wire-protocol/channel/server/allowedOrigin.js'
+import {
+  NOT_AN_ORIGIN,
+  parseAllowedOrigin,
+  type AllowedOrigin,
+} from '../../wire-protocol/channel/server/allowedOrigin.js'
 import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
@@ -569,11 +573,8 @@ function applyChannelConfig(val: unknown): void {
         assertUsage(Array.isArray(value), `\`${configPath}\` should be an array of origins`)
         // `for…of` reads a hole as `undefined`, which is no origin.
         for (const entry of value) {
-          const allowed = typeof entry === 'string' ? parseAllowedOrigin(entry) : null
-          assertUsage(
-            allowed !== null,
-            `\`${configPath}\` lists ${JSON.stringify(entry)}: an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'`,
-          )
+          const allowed = typeof entry === 'string' ? parseAllowedOrigin(entry) : NOT_AN_ORIGIN
+          assertUsage(typeof allowed !== 'string', `\`${configPath}\` lists ${JSON.stringify(entry)}: ${allowed}`)
           allowedOrigins.push(allowed)
         }
         // Its own copy: a later change of the caller's array changes nothing, and reading it back can't change it.

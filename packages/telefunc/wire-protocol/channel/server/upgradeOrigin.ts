@@ -1,6 +1,7 @@
 export { upgradeRefusal }
 
 import { getAllowedOrigins } from '../../../node/server/serverConfig.js'
+import { originOf } from './allowedOrigin.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
@@ -22,20 +23,27 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin
 function upgradeRefusal(request: Request): Response | undefined {
   const origin = request.headers.get('origin')
   const site = request.headers.get('sec-fetch-site')
-  if (origin === null && site === null) return undefined
   if (site === 'same-origin') return undefined
-  const url = origin !== null && URL.canParse(origin) ? new URL(origin) : null
-  if (origin !== null && url !== null && isServersHost(origin, url.protocol, request)) return undefined
-  // A browser writes a page's origin as the URL standard serializes it: a header written any other way names none.
-  const page = url !== null && url.origin === origin ? url : null
-  if (page && isAllowed(page)) return undefined
-  if (origin === null) warnRefusal('a page that sent no Origin', 'it sent no Origin header')
-  else if (page === null || page.hostname.length > HOSTNAME_MAX)
+  if (origin === null) {
+    if (site === null) return undefined
+    warnRefusal('a page that sent no Origin', 'it sent no Origin header')
+    return refused()
+  }
+  const url = URL.canParse(origin) ? new URL(origin) : null
+  if (url !== null && isServersHost(origin, url.protocol, request)) return undefined
+  // A browser writes a page's origin in one form (`originOf()`): a header written any other way names none.
+  const page = url !== null && originOf(url) === origin ? url : null
+  if (page !== null && isAllowed(page, origin)) return undefined
+  if (page === null || page.hostname.length > HOSTNAME_MAX)
     warnRefusal(
       'a page whose Origin header names no origin',
       "its Origin header isn't an origin as a browser writes one, or is the `null` of a page that has none",
     )
-  else warnRefusal(page.origin)
+  else warnRefusal(origin)
+  return refused()
+}
+
+function refused(): Response {
   return new Response(null, { status: 403 })
 }
 
@@ -65,21 +73,23 @@ function warnRefusal(name: string, noOrigin?: string): void {
 }
 
 /** Whether `origin`, the `Origin` header, is the origin of the host the client reached, on the page's `protocol`: the
- *  first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. */
+ *  first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. A page of an app shell's own scheme
+ *  never is: the URL standard gives that scheme no origin to compare. */
 function isServersHost(origin: string, protocol: string, request: Request): boolean {
   const host = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || request.headers.get('host')
   const reached = `${protocol}//${host}`
   return host !== null && URL.canParse(reached) && new URL(reached).origin === origin
 }
 
-function isAllowed(origin: URL): boolean {
+/** Whether `config.channel.allowedOrigins` lists the page at `page`, whose origin is `origin`. */
+function isAllowed(page: URL, origin: string): boolean {
   return getAllowedOrigins().some((allowed) => {
-    if ('origin' in allowed) return allowed.origin === origin.origin
-    const label = origin.hostname.slice(0, -(allowed.parent.length + 1))
+    if ('origin' in allowed) return allowed.origin === origin
+    const label = page.hostname.slice(0, -(allowed.parent.length + 1))
     return (
-      origin.protocol === allowed.protocol &&
-      origin.port === allowed.port &&
-      origin.hostname.endsWith(`.${allowed.parent}`) &&
+      page.protocol === allowed.protocol &&
+      page.port === allowed.port &&
+      page.hostname.endsWith(`.${allowed.parent}`) &&
       label !== '' &&
       !label.includes('.')
     )
