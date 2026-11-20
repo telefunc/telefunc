@@ -5,16 +5,18 @@ export {
   createSubscriberSocket,
   callDefinedCommand,
   isCluster,
+  rawWrites,
   deploymentOf,
   connectsAlike,
   addressOf,
   redisFailure,
   isRefusal,
 }
-export type { RedisClient, SubscriberSocket, Dispatch }
+export type { RedisClient, SubscriberSocket, Dispatch, RawCommand }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { hasFlag } from '@ioredis/commands'
 import { Cluster, type Redis } from 'ioredis'
 import { BackendError, isObject } from 'telefunc/__internal'
 import { assert, isBug } from './assert.js'
@@ -24,6 +26,32 @@ type RedisClient = Redis | Cluster
 
 /** A command that only reads, or one that may write. */
 type Dispatch = 'read' | 'write'
+
+/** The client's commands the backend sends without a script, by their method's name: `getBuffer` is GET, its reply
+ *  bytes. */
+const RAW_COMMANDS = [
+  'get',
+  'getBuffer',
+  'hget',
+  'hkeys',
+  'hmget',
+  'smembers',
+  'sscan',
+  'unlink',
+  'zrangebylex',
+] as const
+type RawCommand = (typeof RAW_COMMANDS)[number]
+
+/** The raw commands that may write: those ioredis's own table of Redis's commands, which it routes by, doesn't flag
+ *  `readonly`. Built once; the table throws here for a name it lacks. */
+const WRITING: ReadonlySet<RawCommand> = new Set(
+  RAW_COMMANDS.filter((name) => !hasFlag(name.replace(/Buffer$/, ''), 'readonly')),
+)
+
+/** Whether the raw command `name` may write, by ioredis's table: no flag of a raw command is written by hand. */
+function rawWrites(name: RawCommand): boolean {
+  return WRITING.has(name)
+}
 
 /** What `RedisSubscriptions` needs of its connection. */
 type SubscriberSocket = {

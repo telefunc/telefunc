@@ -188,8 +188,8 @@ class RedisRoomDriver implements RoomDriver {
   private async memberLanes(roomId: string, inc: string, member: string): Promise<DroppedMember> {
     const { prefix } = this.connection
     const [lanes, retained] = await Promise.all([
-      this.connection.send('read', (client) => client.hkeys(memberOrderKey(prefix, roomId, inc, member))),
-      this.connection.send('read', (client) => client.smembers(retainedOfKey(prefix, roomId, inc, member))),
+      this.connection.send('hkeys', (client) => client.hkeys(memberOrderKey(prefix, roomId, inc, member))),
+      this.connection.send('smembers', (client) => client.smembers(retainedOfKey(prefix, roomId, inc, member))),
     ])
     return { member, lanes, retained }
   }
@@ -376,17 +376,17 @@ class RedisRoomDriver implements RoomDriver {
     const laneKey = this.kit.encodeLaneKey(lane)
     const mark =
       lane.kind === 'inbox' || lane.kind === 'binary'
-        ? await this.connection.send('read', (client) =>
+        ? await this.connection.send('hget', (client) =>
             client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey),
           )
-        : await this.connection.send('read', (client) =>
+        : await this.connection.send('get', (client) =>
             client.get(orderKey(this.connection.prefix, roomId, inc, laneKey)),
           )
     return mark === null ? null : parseOrdering(mark)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const frame = await this.connection.send('read', (client) =>
+    const frame = await this.connection.send('getBuffer', (client) =>
       client.getBuffer(retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane))),
     )
     if (frame === null) return null
@@ -403,7 +403,7 @@ class RedisRoomDriver implements RoomDriver {
           ? retainedOfKey(this.connection.prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this.connection.prefix, roomId, inc, of.track)
     }
-    return (await this.connection.send('read', (client) => client.smembers(index))).map((laneKey) =>
+    return (await this.connection.send('smembers', (client) => client.smembers(index))).map((laneKey) =>
       this.kit.decodeLaneKey(laneKey),
     )
   }
@@ -418,14 +418,14 @@ class RedisRoomDriver implements RoomDriver {
       // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
       const [[next, keys]] = await Promise.all([
         call.read(() =>
-          this.connection.send('read', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
+          this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
         ),
         unlinking,
       ])
       cursor = next
       unlinking =
         keys.length > 0
-          ? call.write(() => this.connection.send('write', (client) => client.unlink(...keys)))
+          ? call.write(() => this.connection.send('unlink', (client) => client.unlink(...keys)))
           : undefined
     } while (cursor !== '0')
     await unlinking
@@ -442,7 +442,7 @@ class RedisRoomDriver implements RoomDriver {
 
   async directoryGet(roomId: string): Promise<string | undefined> {
     return (
-      (await this.connection.send('read', (client) => client.hget(directoryTagsKey(this.connection.prefix), roomId))) ??
+      (await this.connection.send('hget', (client) => client.hget(directoryTagsKey(this.connection.prefix), roomId))) ??
       undefined
     )
   }
@@ -450,7 +450,7 @@ class RedisRoomDriver implements RoomDriver {
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this.connection.prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this.connection.send('read', (client) =>
+    const page = await this.connection.send('zrangebylex', (client) =>
       client.zrangebylex(index, min, '+', 'LIMIT', 0, this.kit.DIRECTORY_PAGE_SIZE + 1),
     )
     const matching: string[] = []
@@ -461,7 +461,7 @@ class RedisRoomDriver implements RoomDriver {
     const roomIds = matching.slice(0, this.kit.DIRECTORY_PAGE_SIZE)
     const last = roomIds.at(-1)
     if (last === undefined) return { entries: [] }
-    const tags = await this.connection.send('read', (client) =>
+    const tags = await this.connection.send('hmget', (client) =>
       client.hmget(directoryTagsKey(this.connection.prefix), ...roomIds),
     )
     const entries = roomIds.flatMap((roomId, i) => {

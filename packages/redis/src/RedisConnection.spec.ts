@@ -1,6 +1,6 @@
 import { inspect } from 'node:util'
 import { Cluster, Redis } from 'ioredis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
 import { addressOf, redisFailure } from './ioredis.js'
 
@@ -188,6 +188,32 @@ describe('a write whose connection failed, as ioredis rejects it', () => {
     })
     expect(gaveUp).toMatchObject({ name: 'MaxRetriesPerRequestError' })
     expect(redisFailure(gaveUp, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+})
+
+/** What `send` rejects with when the reply to the command client's `name` is lost, on a command client that was ready. */
+async function replyLost(name: 'unlink' | 'hkeys', send: (connection: RedisConnection) => Promise<unknown>) {
+  const connection = installed(client())
+  vi.spyOn(connection.client, name).mockRejectedValue(new Error('Connection is closed.'))
+  const sent = send(connection)
+  connection.client.emit('ready')
+  return sent.then(
+    () => 'answered',
+    (error: unknown) => error,
+  )
+}
+
+describe('a command sent without a script, read or write as ioredis tells it', () => {
+  it('UNLINK, a write: its lost reply says it may have run', async () => {
+    expect(
+      await replyLost('unlink', (connection) => connection.send('unlink', (commands) => commands.unlink('tf:0:k'))),
+    ).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+
+  it("HKEYS, a read: its lost reply says it didn't run", async () => {
+    expect(
+      await replyLost('hkeys', (connection) => connection.send('hkeys', (commands) => commands.hkeys('tf:0:k'))),
+    ).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
   })
 })
 

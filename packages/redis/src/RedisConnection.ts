@@ -7,8 +7,10 @@ import {
   createCommandClient,
   createSubscriberSocket,
   isCluster,
+  rawWrites,
   redisFailure,
   type Dispatch,
+  type RawCommand,
   type RedisClient,
   type SubscriberSocket,
 } from './ioredis.js'
@@ -52,14 +54,27 @@ class RedisConnection {
     return createSubscriberSocket(this.commands)
   }
 
-  /** The command client, for the commands that need no script: sent through `send()`. */
+  /** The command client, which the drivers ask whether it is a Cluster and the subscriber names in its failures;
+   *  commands go through `send()` and `run()`. */
   get client(): RedisClient {
     return this.commands
   }
 
+  /** Sends the command client's command `name` once the client is ready, as `call` makes it, which reaches no other
+   *  command: a read or a write as ioredis's own table of Redis's commands says (`rawWrites()`). */
+  send<Name extends RawCommand, Output>(
+    name: Name,
+    call: (client: Pick<RedisClient, Name>) => Promise<Output>,
+  ): Promise<Output> {
+    return this.dispatch(rawWrites(name) ? 'write' : 'read', call)
+  }
+
   /** Sends `command` on the command client once it is ready; a failure of Redis rejects as the backend reports it, with
    *  what this dispatch proves (`redisFailure()`). */
-  async send<Output>(dispatch: Dispatch, command: (client: RedisClient) => Promise<Output>): Promise<Output> {
+  private async dispatch<Output>(
+    dispatch: Dispatch,
+    command: (client: RedisClient) => Promise<Output>,
+  ): Promise<Output> {
     const client = this.commands
     try {
       if (client.status !== 'ready') await this.ready(client)
@@ -150,7 +165,10 @@ class RedisConnection {
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
     const dispatch = command.writes ? 'write' : 'read'
-    return command.parse(await this.send(dispatch, (client) => callDefinedCommand(client, name, keysAndArgs)), input)
+    return command.parse(
+      await this.dispatch(dispatch, (client) => callDefinedCommand(client, name, keysAndArgs)),
+      input,
+    )
   }
 }
 
