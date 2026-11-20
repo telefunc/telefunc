@@ -543,14 +543,15 @@ class SseTransport implements UpgradeSource {
       )
       this.postOutBytes = body.size
       const answer = await answerOf(this.postWithDeadline(body, wire.signal))
+      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch), and its
+      // answer, however late, says nothing of the wire after it.
+      if (wire !== this.transportAbort) {
+        if (answer?.tag !== 'expected') this.requeue(queued.filter(isWindowRefresh))
+        return
+      }
       if (answer?.tag === 'expected') {
         this.sizePosts(body.size, performance.now() - now)
         this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
-        return
-      }
-      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
-      if (wire !== this.transportAbort) {
-        this.requeue(queued.filter(isWindowRefresh))
         return
       }
       if (answer?.tag === 'tooLarge') {

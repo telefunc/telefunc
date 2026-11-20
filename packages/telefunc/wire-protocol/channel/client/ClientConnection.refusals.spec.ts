@@ -2,7 +2,7 @@
 // answers to its POSTs: a REAL ClientChannel and its connection against a scripted server (scriptedServer.fixture.ts).
 
 import { describe, expect, test } from 'vitest'
-import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
+import { SSE_POST_MIN_BYTES, SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
 
 useScriptedServer()
@@ -91,4 +91,25 @@ test("a batch of the connection's own frames refused again after a reconnect end
   expect(page.ended).toHaveLength(1)
   expect(page.ended[0]?.err?.message).toMatch(/refused with 400 text\/html/)
   expect(world.streams.length).toBeLessThanOrEqual(3)
+})
+
+test("a late answer to a POST of a wire the page left doesn't size the POSTs of the wire after it", async () => {
+  const page = (await openOverSse(1))(0)
+  // Fast and full POSTs: the page sizes its next ones larger.
+  sendTexts(page.channel, 2_000, 100)
+  await advance(2_000)
+  const grown = Math.max(...world.posts.filter(({ data }) => data).map(({ bytes }) => bytes))
+  expect(grown).toBeGreaterThan(2 * SSE_POST_MIN_BYTES)
+  // A POST answered 3 s later, after its wire went and the page opened another.
+  world.postAnswers = [{ tag: 'slow', ms: 3_000 }]
+  void page.channel.send('answered late').catch(() => {})
+  await advance(100)
+  world.streams[0]?.end()
+  await advance(4_000)
+  expect(world.streams.length).toBe(2)
+  const before = world.posts.length
+  sendTexts(page.channel, 2_000, 100)
+  await advance(2_000)
+  const next = world.posts.slice(before).find(({ data }) => data)
+  expect(next?.bytes).toBeGreaterThan(2 * SSE_POST_MIN_BYTES)
 })
