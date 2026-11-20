@@ -108,6 +108,15 @@ async function overSse(channels: ServerChannel[]) {
       }
       return frames
     },
+    /** Reads `bytes` of the event stream, whole events or not. */
+    async readBytes(bytes: number): Promise<void> {
+      for (let read = 0; read < bytes; ) {
+        const chunk = await reader.read()
+        if (chunk.done) return
+        read += chunk.value.byteLength
+        events.push(chunk.value, (frame) => frames.push(frame))
+      }
+    },
     /** Reads the event stream to its end, and returns the frames it carried. */
     async readToEnd(): Promise<Uint8Array[]> {
       for (let read = await reader.read(); !read.done; read = await reader.read())
@@ -833,9 +842,10 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
     const key = crypto.randomUUID()
     const channel = new ServerBroadcast<string>({ key })
     const page = await overSse([channel])
-    // The page starts reading: p1 leaves the server's queue, as it does on a WebSocket.
+    // The page starts reading: p1 leaves the server's queue, as it does on a WebSocket. The others come while its event
+    // is under way, so they wait: once it ended, the stream would ask for the next.
     await Broadcast.publish(key, publishes[0]!)
-    await page.readUntil('0:p1')
+    await page.readBytes(100_000)
     await Promise.all(publishes.slice(1).map((data) => Broadcast.publish(key, data)))
     expect(channel.isClosed).toBe(true)
     expect(reads(await page.readUntil('0:ERROR'))).toEqual(pageReads)

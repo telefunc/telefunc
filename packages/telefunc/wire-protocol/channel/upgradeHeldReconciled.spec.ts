@@ -11,6 +11,7 @@ import { ClientChannel } from './client/ClientChannel.js'
 import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { TAG } from '../wire/tags.js'
+import { messageFrames } from '../wire/frame.js'
 
 // A link whose queue holds the RECONCILED back holds the old wire's FIN, which goes out after it, as long: the page's
 // join then waits for both, as here.
@@ -73,7 +74,10 @@ class HeldBackWebSocket extends RealWebSocket {
       else deliver()
     }
     this.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
-      if (queue === 'none yet' && new Uint8Array(event.data)[0] === TAG.RECONCILED) {
+      // The acknowledgements the server carries ride ahead of the RECONCILED in its message.
+      const carriesReconciled = () =>
+        Array.from(messageFrames(new Uint8Array(event.data)), (frame) => frame[0]).includes(TAG.RECONCILED)
+      if (queue === 'none yet' && carriesReconciled()) {
         const holding: (() => void)[] = []
         queue = holding
         onHeld()

@@ -261,9 +261,7 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
-    this.wires.get(outcome.deliverTo)?.sender.dropProbes()
-    this.send(
-      outcome.deliverTo,
+    this.wires.get(outcome.deliverTo)?.sender.sendReconciled(
       encode.reconciled({
         upgradeId: outcome.upgradeId,
         sessionId: outcome.sessionId,
@@ -642,6 +640,7 @@ class ChannelMux implements UpgradeStagesOwner {
    *  the new wire's RECONCILED has gone out. */
   private reconcile(entry: WireEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
     const { wire, state, transport } = entry
+    entry.sender.owesReconciled()
     const retiredWire = isBarrier && ctrl.sessionId ? (this.sessionWires.get(ctrl.sessionId) ?? null) : null
     this.resetPingTimer(entry)
     // A RECONCILE on the wire that holds the session it names keeps that session, and what is bound to it, such as a
@@ -740,9 +739,9 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Returns null to leave the channel out of the RECONCILED; an initial channel not registered yet is awaited until
    *  its ATTACH_RESULT. */
   private attach(open: ReconcileOpenEntry, entry: WireEntry, replay: boolean): ChannelHandle | null {
-    // The probe is answered ahead of the channel's frames, and of its registration where the channel is awaited, so its
-    // round trip measures the path alone.
-    if (open.probe !== undefined) entry.sender.addProbe(open.ix, open.probe)
+    // The probe is answered at once, ahead of the RECONCILED and of the channel's frames, and of its registration where
+    // the channel is awaited, so its round trip measures the path alone.
+    if (open.probe !== undefined) entry.sender.answerProbe(open.ix, open.probe)
     const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {
       awaited.open = open

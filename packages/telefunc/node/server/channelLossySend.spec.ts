@@ -553,7 +553,18 @@ describe('a large lossy send near the memory budget', () => {
     assert(peer)
     assert(response.body instanceof ReadableStream)
     const reader = response.body.getReader()
-    const { events } = getChannelMux().getWireByConnId<{ events: WireQueue }>(connId)!
+    const wire = getChannelMux().getWireByConnId<{ events: WireQueue; ready: Promise<void> }>(connId)
+    assert(wire)
+    // The channel opens as its attach runs; what it sends goes to the stream once the RECONCILED went, which the page
+    // reads as it opens: from there it reads nothing unless asked.
+    await wire.ready
+    const opening = new SseEvents()
+    for (let reconciled = false; !reconciled; ) {
+      const read = await reader.read()
+      if (read.done) throw new Error('the event stream ended before its RECONCILED')
+      opening.push(read.value, (frame) => (reconciled ||= frame[0] === TAG.RECONCILED))
+    }
+    const { events } = wire
     return {
       /** The page reads and confirms the channel's first send. */
       async readFirst() {

@@ -8,7 +8,12 @@ import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
-import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
+import {
+  countWaitingPublishes,
+  droppingFrom,
+  droppingPublishes,
+  type WireQueue,
+} from '../../flowControl/server/waitingPublishes.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
@@ -35,12 +40,13 @@ type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
-class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
+class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, WireQueue {
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
-  readonly queue: WireQueue
+  /** What the transport holds back for the page; what the sender holds for a RECONCILED is newer. */
+  private readonly wireQueue: WireQueue
   private readonly sseFlushThrottle: number
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
@@ -55,8 +61,10 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private largestSent = 0
   /** Its backlog passed that, and the wire is being terminated. */
   private pastBacklog = false
-  /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
-  private probed: { ix: number; probe: number }[] = []
+  /** The RECONCILEDs owed: what is sent meanwhile is held behind the last of them. */
+  private owed = 0
+  /** What was sent while a RECONCILED was owed, in order: the frames themselves, which a replay also keeps. */
+  private readonly held: Uint8Array<ArrayBuffer>[] = []
 
   constructor({ wire, transport, pingInterval, sseFlushThrottle, deliveries, sessions, attaching }: WireSenderOptions) {
     this.wire = wire
@@ -67,7 +75,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
           receiver: new ServerPieceReceiver({ owner: this }),
         }
       : null
-    this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
+    this.wireQueue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
     this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.sessions = sessions
@@ -82,8 +90,63 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
+    if (this.owed > 0) this.held.push(frame)
+    else this.write(frame)
+  }
+
+  /** A RECONCILE is answered: what is sent from now, its replay first, goes behind its RECONCILED (`sendReconciled`),
+   *  so the page reads that first on every host and transport. */
+  owesReconciled(): void {
+    this.owed++
+  }
+
+  /** An attach probe's answer, which says no credit ran out and names no round trip: the one frame that goes ahead of
+   *  what is held, since a RECONCILED of many channels would read the path as slower than it is. */
+  answerProbe(ix: number, probe: number): void {
+    this.write(encode.bdpPingAck(ix, probe, Infinity, Infinity))
+  }
+
+  /** The RECONCILED goes ahead of what was held; once none is owed, so does that, in order. */
+  sendReconciled(reconciled: Uint8Array<ArrayBuffer>): void {
+    this.write(reconciled)
+    this.owed--
+    if (this.owed > 0) return
+    // `write` hands the frame to the transport only, which sends nothing back through here meanwhile.
+    for (const frame of this.held) this.write(frame)
+    this.held.length = 0
+  }
+
+  /** What the wire holds back for its page: what its transport holds, then what it holds for a RECONCILED. */
+  get queue(): WireQueue {
+    return this
+  }
+
+  waitingPublishes(ix: number): number {
+    return this.wireQueue.waitingPublishes(ix) + countWaitingPublishes(this.held, ix)
+  }
+
+  dropWaitingPublishes(ix: number, keep: number): void {
+    const queued = this.wireQueue.waitingPublishes(ix)
+    this.wireQueue.dropWaitingPublishes(ix, keep)
+    this.dropHeld(droppingPublishes(ix, Math.max(0, keep - queued)))
+  }
+
+  dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {
+    // From a publish the transport holds on, all of the channel's frames held behind it go too.
+    const fromStart = from === 'start' || this.wireQueue.waitingPublishes(ix) > 0
+    this.wireQueue.dropWaitingFrom(ix, from)
+    this.dropHeld(droppingFrom(ix, fromStart ? 'start' : 'publish'))
+  }
+
+  /** `drops` is asked in the order the frames were held. */
+  private dropHeld(drops: (frame: Uint8Array) => boolean): void {
+    let kept = 0
+    for (const frame of this.held) if (!drops(frame)) this.held[kept++] = frame
+    this.held.length = kept
+  }
+
+  private write(frame: Uint8Array<ArrayBuffer>): void {
     if (this.closed || this.pastBacklog) return
-    if (this.probed.length > 0) this.answerProbes()
     if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
     if (frame.byteLength > this.headroom) {
@@ -126,17 +189,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true
+    this.owed = 0
+    this.held.length = 0
     this.pieces?.headroom.close()
-  }
-
-  /** Answers the probe ahead of the next frame, unless the RECONCILED goes first. */
-  addProbe(ix: number, probe: number): void {
-    this.probed.push({ ix, probe })
-  }
-
-  /** The RECONCILED going out answers the probes. */
-  dropProbes(): void {
-    this.probed = []
   }
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
@@ -150,13 +205,6 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   queuedAhead(): number | undefined {
     if (this.closed) return 0
     return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
-  }
-
-  /** Each answer says no credit ran out and names no round trip. */
-  private answerProbes(): void {
-    const probed = this.probed
-    this.probed = []
-    for (const { ix, probe } of probed) this.send(encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
   /** What the wire may hold, less what it holds; `Infinity` if the runtime can't tell. Its data is what its channels hold,
