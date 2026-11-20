@@ -61,7 +61,12 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('A WebSocket upgrade from https://another-site.example was refused') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
-        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
+        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed')) ||
+        // function/e2e-test.ts's `GET //` with Upgrade: Vike 0.4.259 logs a bug of its own for it (vikejs/vike#3357, fixed in Vike 0.4.260).
+        (cmd === 'pnpm dev' &&
+          log.logSource === 'stderr' &&
+          log.logText.includes('[Bug] You stumbled upon a Vike bug') &&
+          log.logText.includes('at logHttpResponse'))
       )
     },
   })

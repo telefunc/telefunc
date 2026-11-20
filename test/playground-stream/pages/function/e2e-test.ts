@@ -1,6 +1,6 @@
 export { testFunction }
 
-import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import * as http from 'node:http'
 import * as os from 'node:os'
 import { navigate, getResult, forceServerGc, serverRuntime, resetCleanupState, getCleanupState } from '../../e2e-utils'
@@ -151,12 +151,6 @@ function testFunction(isDev: boolean, inDocker = false) {
       await autoRetry(async () => {
         expect(await getResult<string>('#greeter-result')).toBe('Hello, World! (from server)')
       })
-      // In development no other `upgrade` listener is there to take it, so it is the app's request: Vike answers it, and
-      // logs a bug of its own for the path `//` (vike 0.4.259).
-      if (isDev)
-        await autoRetry(async () => {
-          expectLog('You stumbled upon a Vike bug')
-        })
     })
 
   // Preview only: in development, telefunc logs a GET or HEAD as a malformed request.
