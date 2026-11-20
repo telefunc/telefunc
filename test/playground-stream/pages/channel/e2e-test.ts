@@ -1636,13 +1636,13 @@ function testChannelApi() {
     })
   })
 
-  test('channel: config.channel refuses what would break it, and any change once a channel exists', async () => {
+  test('channel: config.channel refuses what would break it, and any change once the server has used it', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-config-checks')
     await autoRetry(async () => {
       const checks = JSON.parse((await page.textContent('#channel-config-checks-result'))!)
       expect(checks.same).toBe(null)
-      expect(checks.changed).toContain("can't change once a channel exists")
+      expect(checks.changed).toContain("can't change once the server has used it")
       expect(checks.reconnectTimeout).toContain('`config.channel.reconnectTimeout` should be at least 1000')
       expect(checks.pingInterval).toContain('`config.channel.pingInterval` should be at least 1000')
       expect(checks.maxMemory).toContain(

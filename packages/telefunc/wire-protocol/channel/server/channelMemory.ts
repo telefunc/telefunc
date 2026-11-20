@@ -232,7 +232,7 @@ function shedTo(level: number, stuck: Set<MemoryHolder>): void {
   }
 }
 
-/** `config.channel` can't change once a channel exists. */
+/** `config.channel` can't change once the server has used it. */
 function maxMemoryOf(): number {
   return (memory.maxMemory ||= getChannelConfig().maxMemory)
 }

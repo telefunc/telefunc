@@ -618,7 +618,7 @@ function applyChannelConfig(val: unknown): void {
   assertUsage(
     !globalObject.channelConfigInUse ||
       JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
-    "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
+    "`config.channel` can't change once the server has used it, from its first channel or page connection on, as those already open would keep the old values: set it before the server handles a request",
   )
   configState.channel = next
 }
