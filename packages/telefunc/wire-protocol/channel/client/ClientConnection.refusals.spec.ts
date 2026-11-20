@@ -41,6 +41,8 @@ describe('after a batch POST is refused for its size', () => {
     const after = world.posts.slice(world.posts.indexOf(refused) + 1).filter(({ data }) => data)
     expect(after.length).toBeGreaterThan(1)
     expect(after.filter(({ bytes }) => bytes > learned)).toEqual([])
+    // Split, and packed: each POST but the last carries what fits, never a frame at a time (msg16 R1.8).
+    expect(after.slice(0, -1).filter(({ bytes }) => bytes <= learned / 2)).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(400)
   })
 
@@ -64,6 +66,8 @@ describe('after a batch POST is refused for its size', () => {
     const refusedBatches = world.posts.slice(loneAt).filter(({ status, bytes }) => status === 413 && bytes < 100_000)
     expect(refusedBatches).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(40)
+    // The lone message is never dropped unsaid: refused again after a reconnect, its channel ends (msg16 R1.8).
+    expect(alone.ended).toHaveLength(1)
   })
 
   test('a channel ended for it sends nothing more of what it had queued, while the wire stays up', async () => {
