@@ -2,13 +2,13 @@ import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { once } from 'node:events'
-import { Readable } from 'node:stream'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
 import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
+import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 
 // The body of a binary call (a telefunction given a `Blob`) and of an SSE upload, read through Telefunc's body reader,
 // fails on the app's side: printed and given to `onBug()` as the app's own error. A client that leaves stays quiet.
@@ -87,14 +87,8 @@ function nodeRequest(req: IncomingMessage, res: ServerResponse) {
 }
 /** Telefunc given a Fetch `Request` built from Node's request, as Hono's or srvx's Node server builds one. */
 function fetchRequest(req: IncomingMessage, res: ServerResponse) {
-  const init: RequestInit & { duplex: 'half' } = {
-    method: 'POST',
-    headers: { 'x-telefunc-request': String(req.headers['x-telefunc-request']) },
-    body: Readable.toWeb(req),
-    duplex: 'half',
-  }
-  telefunc
-    .serve({ request: new Request(`http://127.0.0.1${telefuncPath}`, init) })
+  nodeReadableToWebRequest(req, `http://127.0.0.1${telefuncPath}`, 'POST', req.headers)
+    .then(({ request }) => telefunc.serve({ request }))
     .then(async (response) => {
       res.writeHead(response?.status ?? 404)
       for await (const chunk of response?.body ?? []) res.write(chunk)
