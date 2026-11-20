@@ -24,9 +24,17 @@ import {
 } from '../../wire-protocol/channel/channelErrors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
-import { CREDIT_MSG_WINDOW_INITIAL, TIMER_DELAY_MAX_MS } from '../../wire-protocol/constants.js'
-import { getChannelConfig, reconnectWindow } from './serverConfig.js'
+import {
+  CREDIT_MSG_WINDOW_INITIAL,
+  CREDIT_WINDOW_INITIAL_BYTES,
+  TIMER_DELAY_MAX_MS,
+} from '../../wire-protocol/constants.js'
+import { config, reconnectWindow } from './serverConfig.js'
 import { onBug } from './runTelefunc/onBug.js'
+
+/** The least a channel may hold, the credit window it starts with: the overflow row reaches it in a few messages. */
+const MAX_PENDING_BYTES = CREDIT_WINDOW_INITIAL_BYTES
+config.channel = { maxPendingBytes: MAX_PENDING_BYTES }
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
@@ -920,7 +928,7 @@ describe("a server BroadcastChannel's publish from its onClose()", () => {
 /** How each ending settles what a server listener awaits: a send waiting for credit, whose frame already went, and an
  *  acknowledged send's answer. The waiting send resolves only where its frame is ahead of an end the page reads; else it
  *  rejects with the channel's outcome, and the listener that rethrows it reports nothing. */
-const ENDINGS: {
+type Ending = {
   ending: string
   end: (end: {
     channel: ServerChannel<string, string>
@@ -929,7 +937,8 @@ const ENDINGS: {
   }) => unknown
   outcome: (outcome: Error | null) => boolean
   waiting: 'resolves' | 'rejects'
-}[] = [
+}
+const ENDINGS: Ending[] = [
   {
     ending: "this end's abort()",
     end: ({ channel }) => channel.abort('stop'),
@@ -1043,73 +1052,83 @@ const ENDINGS: {
     outcome: (outcome) => outcome instanceof ChannelClosedError,
     waiting: 'rejects',
   },
-  {
-    ending: "an overflow: the page's messages past what the server may hold",
-    end: ({ page }) => {
-      // Its binary listener holds each one: one more than the channel may hold.
-      const bytes = 768 * 1024
-      for (let i = 0; i <= getChannelConfig().maxPendingBytes / bytes + 1; i++) page.binary(bytes)
-    },
-    outcome: (outcome) => outcome instanceof ChannelOverflowError,
-    waiting: 'rejects',
-  },
 ]
 
 describe('a send still waiting as its channel ends', () => {
   const bugs: unknown[] = []
   onBug((err) => bugs.push(err))
 
-  for (const { ending, end, outcome, waiting } of ENDINGS) {
-    test(`${ending}: the send waiting for credit ${waiting}, the answer awaited rejects unless given, and nothing is reported`, async () => {
-      bugs.length = 0
-      const printed = vi.spyOn(console, 'error').mockImplementation(() => {})
-      try {
-        const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
-        const frames: Uint8Array[] = []
-        const peer = createPeer(frames)
-        channel._registerChannel()
-        channel._attachPeer(peer)
-        const page = fromPage(channel, frames)
-        const settled: { waiting?: unknown; answer?: unknown } = {}
-        const listened = createDeferred<void>()
-        channel.listenBinary(() => new Promise(() => {}))
-        channel.listen(async () => {
-          // The acknowledged send goes first, at seq 1, outside credit; the page answers it only where the close is
-          // graceful. The 100th plain send is out of the credit the page starts with.
-          const answer = channel.send('question', { ack: true })
-          for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL - 1; i++) void channel.send('fill')
-          const waits = channel.send('last')
-          void answer.then(
-            (value) => (settled.answer = value),
-            (err: unknown) => (settled.answer = err),
-          )
-          void waits.then(
-            () => (settled.waiting = 'resolved'),
-            (err: unknown) => (settled.waiting = err),
-          )
-          listened.resolve()
-          // The listener awaits both and rethrows what they reject with.
-          await Promise.all([waits, answer])
-        })
-        page.text('"go"')
-        await listened.promise
-        expect(settled).toEqual({})
+  /** Ends a channel whose listener awaits a send waiting for credit and an acknowledged send's answer, and checks what
+   *  each settles with once the listener is done. */
+  async function waitingAsItEnds({ end, outcome, waiting }: Ending): Promise<void> {
+    bugs.length = 0
+    const printed = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
+      const frames: Uint8Array[] = []
+      const peer = createPeer(frames)
+      channel._registerChannel()
+      channel._attachPeer(peer)
+      const page = fromPage(channel, frames)
+      const settled: { waiting?: unknown; answer?: unknown } = {}
+      const listened = createDeferred<{ listening: Promise<unknown>; settling: Promise<unknown> }>()
+      channel.listenBinary(() => new Promise(() => {}))
+      channel.listen(() => {
+        // The acknowledged send goes first, at seq 1, outside credit; the page answers it only where the close is
+        // graceful. The 100th plain send is out of the credit the page starts with.
+        const answer = channel.send('question', { ack: true })
+        for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL - 1; i++) void channel.send('fill')
+        const waits = channel.send('last')
+        void answer.then(
+          (value) => (settled.answer = value),
+          (err: unknown) => (settled.answer = err),
+        )
+        void waits.then(
+          () => (settled.waiting = 'resolved'),
+          (err: unknown) => (settled.waiting = err),
+        )
+        // The listener awaits both and rethrows what they reject with.
+        const listening = Promise.all([waits, answer])
+        listened.resolve({ listening, settling: Promise.allSettled([waits, answer]) })
+        return listening
+      })
+      page.text('"go"')
+      const { listening, settling } = await listened.promise
+      expect(settled).toEqual({})
 
-        await end({ channel, page, peer })
-        await new Promise((resolve) => setTimeout(resolve, 30))
+      await end({ channel, page, peer })
+      const result = await channel.closed
+      await settling
+      // The channel took what the listener rejected with before this test's own handler runs.
+      await listening.catch(() => {})
 
-        const result = await channel.closed
-        expect(outcome(result)).toBe(true)
-        if (waiting === 'resolves') expect(settled.waiting).toBe('resolved')
-        else expect(settled.waiting).toBe(result)
-        expect(settled.answer).toBe(result === null ? 'answered' : result)
-        expect(bugs).toEqual([])
-        expect(printed).not.toHaveBeenCalled()
-      } finally {
-        printed.mockRestore()
-      }
-    })
+      expect(outcome(result)).toBe(true)
+      if (waiting === 'resolves') expect(settled.waiting).toBe('resolved')
+      else expect(settled.waiting).toBe(result)
+      expect(settled.answer).toBe(result === null ? 'answered' : result)
+      expect(bugs).toEqual([])
+      expect(printed).not.toHaveBeenCalled()
+    } finally {
+      printed.mockRestore()
+    }
   }
+
+  for (const ending of ENDINGS) {
+    test(`${ending.ending}: the send waiting for credit ${ending.waiting}, the answer awaited rejects unless given, and nothing is reported`, () =>
+      waitingAsItEnds(ending))
+  }
+
+  test("an overflow, the page's messages past what the server may hold: the send waiting for credit rejects, the answer awaited too, and nothing is reported", () =>
+    waitingAsItEnds({
+      ending: 'an overflow',
+      end: ({ page }) => {
+        // Its binary listener holds each one: one more than the channel may hold.
+        const bytes = 64 * 1024
+        for (let i = 0; i <= MAX_PENDING_BYTES / bytes + 1; i++) page.binary(bytes)
+      },
+      outcome: (outcome) => outcome instanceof ChannelOverflowError,
+      waiting: 'rejects',
+    }))
 
   test("a listener that rejects with an error that isn't its channel's end is reported", async () => {
     bugs.length = 0
