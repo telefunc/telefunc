@@ -32,8 +32,7 @@ const ROOM_AUTHORITY_METHODS = [
   'renewRoutes',
   'unsubscribeRoute',
   'dropIncarnation',
-  'directoryPut',
-  'directoryDelete',
+  'directoryShow',
   'directoryGet',
 ] as const satisfies readonly (keyof RoomAuthority)[]
 
@@ -51,7 +50,7 @@ function openRoomAuthority(
 }
 
 /** The methods a region's directory serves, all a call reaches of it. */
-const REGION_DIRECTORY_METHODS = ['list', 'add', 'remove'] as const satisfies readonly (keyof RegionDirectory)[]
+const REGION_DIRECTORY_METHODS = ['list', 'show'] as const satisfies readonly (keyof RegionDirectory)[]
 
 type RegionDirectoryStub = Pick<RegionDirectory, (typeof REGION_DIRECTORY_METHODS)[number]>
 

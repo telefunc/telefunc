@@ -67,7 +67,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
-    return this.stub(roomId).compareExchangeHead(expected, next)
+    return this.stub(roomId).compareExchangeHead(expected, next, { roomId, bucket: this.bucketHere() })
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
@@ -157,18 +157,19 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).dropIncarnation(inc)
   }
 
-  // A room's listing is kept by its own authority, which also writes it to its region's directory for `Room.list()`.
+  // A room's listing is kept by its own authority, which lists what its head lists, with the head's exchange, and sends
+  // it to its region's directory for `Room.list()`: a put or a delete sends it and waits for the directory.
 
-  async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    return this.stub(roomId).directoryPut(roomId, incTag, checkAt, minDelayMs, this.bucketHere())
+  async directoryPut(roomId: string): Promise<void> {
+    return this.stub(roomId).directoryShow()
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.stub(roomId).directoryDelete(roomId, incTag)
+    return this.stub(roomId).directoryShow(incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return this.stub(roomId).directoryGet(roomId)
+    return this.stub(roomId).directoryGet()
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {

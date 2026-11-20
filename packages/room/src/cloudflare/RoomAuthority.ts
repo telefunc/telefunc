@@ -19,10 +19,10 @@ import type {
   CommitOptions,
   RetainedFrame,
   RetainedOf,
-  DirectoryPage,
   ExpiringCellsRead,
 } from '../backend/contract.js'
 import {
+  LEASE_CALL_DEADLINE_MS,
   OrderedStubs,
   grantHolder,
   leaseAnswer,
@@ -53,11 +53,9 @@ import { deleteRetained, installRetained, listRetained, readRetained, retainedOw
 import { routeLease, routeScope, type RouteInstallation } from './routes.js'
 import {
   advanceOrder,
-  claimListingBucket,
   compareExchangeCells,
   compareExchangeHead,
   dropCellPrefix,
-  deleteListing,
   dropIncarnationRows,
   dropLaneOrderRows,
   initSchema,
@@ -68,12 +66,15 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
-  readListing,
-  readListingBucket,
+  readListedInc,
+  readUnsentListing,
   readOrder,
-  settleDueListing,
-  writeListing,
+  listWithHead,
+  relistOver,
+  resendListing,
+  settleListing,
   type CellPage,
+  type ListingPlace,
   readExpiringCells,
   writeExpiringCell,
   deleteExpiredCells,
@@ -132,6 +133,11 @@ class RoomAuthority {
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
   private readonly directoryCalls = new OrderedStubs<RegionDirectoryStub>()
+  /** The listing's versions this run is sending, one call at a time, until none is unsent. */
+  private showing: Promise<void> | null = null
+  /** The alarm as this run set it, or undefined until it sets one: the first schedule of a run sets it, whatever an
+   *  earlier run had set. */
+  private alarmAt: number | null | undefined = undefined
   /** The stored commits this run of the object is handing on, each to why its hand-on lost it, or null. */
   private readonly handingOn = new Map<string, Promise<string | null>>()
   /** Whether this run handed on what an earlier one stored and didn't. */
@@ -149,9 +155,19 @@ class RoomAuthority {
     return head === null ? null : publicHead(head, head.config)
   }
 
-  async compareExchangeHead(expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
+  /** Lists what the head it stores lists, at `place`, in the same transaction: no call but a head's change lists a
+   *  room or unlists it. */
+  async compareExchangeHead(
+    expected: HeadExpectation,
+    next: HeadNext,
+    place: ListingPlace,
+  ): Promise<HeadExchangeResult> {
     const now = Date.now()
-    const outcome = this.transaction((sql) => compareExchangeHead(sql, expected, next, now))
+    const outcome = this.transaction((sql) => {
+      const exchanged = compareExchangeHead(sql, expected, next, now)
+      if (exchanged.kind === 'committed') listWithHead(sql, exchanged.head, now, place)
+      return exchanged
+    })
     await this.scheduleMaintenanceIfNeeded()
     if (outcome.kind === 'committed') return { kind: 'committed', head: publicHead(outcome.head, outcome.head.config) }
     const { current } = outcome
@@ -389,70 +405,74 @@ class RoomAuthority {
     await this.scheduleMaintenanceIfNeeded()
   }
 
-  /** Lists the room, and tells its region's directory when `incTag` is new here: `bucket`'s, if it is the room's first
-   *  listing. */
-  async directoryPut(
-    roomId: string,
-    incTag: string,
-    checkAt: number,
-    minDelayMs: number,
-    bucket: string,
-  ): Promise<void> {
-    const at = Math.max(checkAt, Date.now() + minDelayMs)
-    const newlyListedIn = this.transaction((sql) => {
-      const listed = readListing(sql, roomId) === incTag
-      writeListing(sql, roomId, incTag, at)
-      const listedIn = claimListingBucket(sql, bucket)
-      return listed ? null : listedIn
+  /** Sends the listing to its region's directory, waiting for the directory's answer; a call that fails leaves it due
+   *  for the alarm. With `staleInc`, which the directory was found listing and the head doesn't, it sends it also when
+   *  the directory has it. */
+  async directoryShow(staleInc?: string): Promise<void> {
+    const now = Date.now()
+    this.transaction((sql) => {
+      settleListing(sql, now)
+      if (staleInc !== undefined) relistOver(sql, staleInc, now)
     })
-    await Promise.all([
-      newlyListedIn !== null && this.callDirectory(newlyListedIn, (directory) => directory.add(roomId, incTag)),
-      this.scheduleMaintenanceIfNeeded(),
-    ])
+    await this.scheduleMaintenanceIfNeeded()
+    // The listing is stored: what the directory shows of it follows, here or from the alarm.
+    await this.showInDirectory().catch(() => {})
   }
 
-  /** Its region directory forgets `incTag` even when the listing here is gone or newer, as after an alarm that couldn't
-   *  reach it. */
-  async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    this.transaction((sql) => deleteListing(sql, roomId, incTag))
-    await this.unlistInItsRegion(roomId, incTag)
-  }
-
-  async directoryGet(roomId: string): Promise<string | undefined> {
-    return readListing(this.sql(), roomId)
+  async directoryGet(): Promise<string | undefined> {
+    return readListedInc(this.sql())
   }
 
   async alarm(): Promise<void> {
+    // Cloudflare unsets the alarm that runs this.
+    this.alarmAt = null
     try {
       this.resumeHandoffs(true)
-      const unlisted = this.runSweep(Date.now())
-      if (unlisted) await this.unlistInItsRegion(unlisted.roomId, unlisted.incTag)
+      this.runSweep(Date.now())
+      await this.scheduleMaintenanceIfNeeded()
+      await this.showInDirectory().catch(() => {})
     } finally {
       await this.scheduleMaintenanceIfNeeded()
     }
   }
 
-  /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal. Returns the
-   *  listing it deleted, for its region directory to forget too. */
-  private runSweep(now: number): DirectoryPage['entries'][number] | null {
-    return this.transaction((sql) => {
-      const unlisted = settleDueListing(sql, now)
+  /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal, and the
+   *  listing of a lapsed head goes. */
+  private runSweep(now: number): void {
+    this.transaction((sql) => {
+      settleListing(sql, now)
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
       deleteLapsedHead(sql, now)
       sweepLeases(sql, now)
       deleteExpiredCells(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
-      return unlisted
     })
   }
 
-  private async unlistInItsRegion(roomId: string, incTag: string): Promise<void> {
-    const listedIn = readListingBucket(this.sql())
-    if (listedIn !== null) await this.callDirectory(listedIn, (directory) => directory.remove(roomId, incTag))
+  /** The listing's unsent version to its region's directory, and each newer one that comes meanwhile; one whose call
+   *  fails is due again a retry from now, and rejects this. */
+  private showInDirectory(): Promise<void> {
+    this.showing ??= this.sendListing().finally(() => {
+      this.showing = null
+    })
+    return this.showing
   }
 
-  private callDirectory(bucket: string, invoke: (directory: RegionDirectoryStub) => Promise<void>): Promise<void> {
-    return this.directoryCalls.call(bucket, () => openRegionDirectory(this.getNamespace(), bucket), invoke)
+  private async sendListing(): Promise<void> {
+    for (let unsent = readUnsentListing(this.sql()); unsent !== null; unsent = readUnsentListing(this.sql())) {
+      const { roomId, incTag, bucket, version } = unsent
+      const open = () => openRegionDirectory(this.getNamespace(), bucket)
+      try {
+        const show = (directory: RegionDirectoryStub) => directory.show(roomId, incTag, version)
+        await this.directoryCalls.call(bucket, open, show, { deadline: Date.now() + LEASE_CALL_DEADLINE_MS })
+      } catch (error) {
+        this.transaction((sql) => resendListing(sql, version, Date.now() + ROOM_MAINTENANCE_RETRY_MS))
+        await this.scheduleMaintenanceIfNeeded()
+        throw error
+      }
+      this.transaction((sql) => resendListing(sql, version, null))
+      await this.scheduleMaintenanceIfNeeded()
+    }
   }
 
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */
@@ -469,19 +489,23 @@ class RoomAuthority {
     return this.ctx.storage.sql
   }
 
-  private async scheduleMaintenanceIfNeeded(): Promise<void> {
+  /** Sets the alarm to the next deadline in the turn of the write that stored it, with no `await` between them, so
+   *  both are stored or neither. */
+  private scheduleMaintenanceIfNeeded(): Promise<void> {
     const now = Date.now()
     const deadline = nextMaintenanceDeadline(this.sql(), now)
-    const currentAlarm = await this.ctx.storage.getAlarm()
+    const current = this.alarmAt
     if (deadline === null) {
-      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm()
-      return
+      if (current === null) return Promise.resolve()
+      this.alarmAt = null
+      return this.ctx.storage.deleteAlarm()
     }
     const nextAlarm = deadline <= now ? now + ROOM_MAINTENANCE_RETRY_MS : deadline
-    if (currentAlarm === nextAlarm) return
+    if (current === nextAlarm) return Promise.resolve()
     // Never postpone an already-scheduled retry for work that is due now.
-    if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
-    await this.ctx.storage.setAlarm(nextAlarm)
+    if (deadline <= now && current !== undefined && current !== null && current <= nextAlarm) return Promise.resolve()
+    this.alarmAt = nextAlarm
+    return this.ctx.storage.setAlarm(nextAlarm)
   }
 }
 

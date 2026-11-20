@@ -1,12 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
 export {
   initSchema,
-  writeListing,
-  deleteListing,
-  readListing,
-  claimListingBucket,
-  readListingBucket,
-  settleDueListing,
+  listWithHead,
+  readListedInc,
+  readUnsentListing,
+  settleListing,
+  resendListing,
+  relistOver,
   readLiveHead,
   deleteLapsedHead,
   listOrphanIncarnations,
@@ -30,7 +30,7 @@ export {
   deleteHandoff,
 }
 
-export type { CellPage, Handoff }
+export type { CellPage, Handoff, ListingPlace }
 
 // Room-DO `transactionSync` makes head exchanges, cell batches, and order advance atomic under authority time.
 
@@ -43,7 +43,6 @@ import {
   type HeadNext,
   type CellSelector,
   type CellsRead,
-  type DirectoryPage,
   type ExpiringCell,
   type ExpiringCellsRead,
   type StaleIncarnation,
@@ -103,55 +102,74 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS handoff
       (inc TEXT NOT NULL, seq INTEGER NOT NULL, lane_key TEXT NOT NULL, ts INTEGER NOT NULL, payload BLOB NOT NULL,
        resume_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, seq));
-    CREATE TABLE IF NOT EXISTS listing (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
-    CREATE TABLE IF NOT EXISTS listing_bucket (id INTEGER PRIMARY KEY CHECK (id = 1), bucket TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS listing
+      (id INTEGER PRIMARY KEY CHECK (id = 1), room_id TEXT NOT NULL, inc_tag TEXT, bucket TEXT NOT NULL,
+       version INTEGER NOT NULL, due_at INTEGER);
   `)
 }
 
-/** A NULL check_at is never due. */
-function writeListing(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {
+/** The room's listing, as its region's directory is to show it: the incarnation its head lists, or none. `version`
+ *  counts its changes; `dueAt` is when the alarm sends it, null once the directory has this version. */
+type Listing = { roomId: string; incTag: string | null; bucket: string; version: number; dueAt: number | null }
+
+/** Where a room is listed: its id, and the bucket of the call that first lists it, whose region's directory lists it
+ *  for good, as the authority itself never moves. */
+type ListingPlace = { roomId: string; bucket: string }
+
+type ListingRow = { room_id: string; inc_tag: string | null; bucket: string; version: number; due_at: number | null }
+
+function readListingRow(sql: SqlStorage): Listing | null {
+  const row = sql.exec<ListingRow>('SELECT * FROM listing WHERE id = 1').toArray()[0]
+  if (row === undefined) return null
+  return { roomId: row.room_id, incTag: row.inc_tag, bucket: row.bucket, version: row.version, dueAt: row.due_at }
+}
+
+/** Lists what `head` lists, an open or closing incarnation, or nothing: a change is a new version, due `now`. */
+function listWithHead(sql: SqlStorage, head: StoredHead | null, now: number, place?: ListingPlace): void {
+  const incTag = head !== null && head.state !== 'closed' ? head.currentInc : null
+  const listing = readListingRow(sql)
+  if ((listing?.incTag ?? null) === incTag) return
+  const at = listing ?? place
+  // A room never listed has nothing to unlist; one listed has its place.
+  if (at === undefined) return
   sql.exec(
-    'INSERT OR REPLACE INTO listing (room_id, inc_tag, check_at) VALUES (?, ?, ?)',
-    roomId,
+    'INSERT OR REPLACE INTO listing (id, room_id, inc_tag, bucket, version, due_at) VALUES (1, ?, ?, ?, ?, ?)',
+    at.roomId,
     incTag,
-    checkAt === Infinity ? null : checkAt,
+    at.bucket,
+    (listing?.version ?? 0) + 1,
+    now,
   )
 }
 
-/** Deletes iff the stored tag matches (a stale tag is a no-op). */
-function deleteListing(sql: SqlStorage, roomId: string, incTag: string): void {
-  sql.exec('DELETE FROM listing WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
+/** What the alarm lists once a head lapsed. */
+function settleListing(sql: SqlStorage, now: number): void {
+  listWithHead(sql, readLiveHead(sql, now), now)
 }
 
-function readListing(sql: SqlStorage, roomId: string): string | undefined {
-  return sql.exec<{ inc_tag: string }>('SELECT inc_tag FROM listing WHERE room_id = ?', roomId).toArray()[0]?.inc_tag
+function readListedInc(sql: SqlStorage): string | undefined {
+  return readListingRow(sql)?.incTag ?? undefined
 }
 
-/** The bucket whose region's directory lists this authority's room: its first listing's, kept for good, as the
- *  authority itself never moves. */
-function claimListingBucket(sql: SqlStorage, bucket: string): string {
-  sql.exec('INSERT OR IGNORE INTO listing_bucket (id, bucket) VALUES (1, ?)', bucket)
-  return readListingBucket(sql)!
+/** The listing while its directory may not have its version: the alarm sends it at `dueAt`, any send before. */
+function readUnsentListing(sql: SqlStorage): Listing | null {
+  const listing = readListingRow(sql)
+  return listing !== null && listing.dueAt !== null ? listing : null
 }
 
-function readListingBucket(sql: SqlStorage): string | null {
-  return sql.exec<{ bucket: string }>('SELECT bucket FROM listing_bucket WHERE id = 1').toArray()[0]?.bucket ?? null
+/** `version` is due again at `dueAt`, or never (null) once the directory has it; a newer version stays due. */
+function resendListing(sql: SqlStorage, version: number, dueAt: number | null): void {
+  sql.exec('UPDATE listing SET due_at = ? WHERE id = 1 AND version = ?', dueAt, version)
 }
 
-/** Its listing once due: due again when the head that still names it may lapse, or else deleted and returned, as
- *  `repairRoomIndex()` does for a directory's sweep. */
-function settleDueListing(sql: SqlStorage, now: number): DirectoryPage['entries'][number] | null {
-  const due = sql
-    .exec<{ room_id: string; inc_tag: string }>('SELECT room_id, inc_tag FROM listing WHERE check_at <= ?', now)
-    .toArray()[0]
-  if (due === undefined) return null
-  const head = readLiveHead(sql, now)
-  if (head?.currentInc === due.inc_tag) {
-    writeListing(sql, due.room_id, due.inc_tag, head.expiresAt ?? Infinity)
-    return null
-  }
-  deleteListing(sql, due.room_id, due.inc_tag)
-  return { roomId: due.room_id, incTag: due.inc_tag }
+/** A new version of a listing the directory has, due `now`, unless it names `staleInc`: the directory was found
+ *  listing that incarnation, as after a call delivered later than its successors. */
+function relistOver(sql: SqlStorage, staleInc: string, now: number): void {
+  sql.exec(
+    'UPDATE listing SET version = version + 1, due_at = ? WHERE id = 1 AND due_at IS NULL AND inc_tag IS NOT ?',
+    now,
+    staleInc,
+  )
 }
 
 /** The strings of `column` starting with `prefix`, past `cursor` if given, as a range, so a query seeks its index
@@ -211,7 +229,7 @@ function hasIncarnation(sql: SqlStorage, inc: string): boolean {
 }
 
 /** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or
- *  an expiring cell, the listing's check, or when a route's session DO may be dropped, or null for none. */
+ *  an expiring cell, the listing's next send, or when a route's session DO may be dropped, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
@@ -220,7 +238,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
       deadline: number | null
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(check_at) FROM listing ' +
+        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
         'UNION ALL SELECT MIN(resume_at) FROM handoff)',
     )
     .one().deadline

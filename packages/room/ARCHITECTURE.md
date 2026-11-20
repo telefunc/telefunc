@@ -112,7 +112,8 @@ and returns the refusal its result type names (`conflict`, `stale-incarnation` o
   in seq order, if the head's open incarnation is `inc`, or, with `closingLease`, the commit is a control commit and
   the head is closing under that lease. Each of `requiredCellKeys` must exist too.
 - `directoryPut()` writes one room's entry, with its tag and when it is due. `directoryDelete()` deletes it if it is
-  still listed under `incTag`.
+  still listed under `incTag`. On Cloudflare a room's authority writes its entry with the head's exchange instead, as
+  its head lists it, and the two send it to its region's directory.
 
 The other calls are each atomic only on their own. A cell read, and each page of `readCellPages()`, is taken at once,
 but nothing holds between two of them. `subscribe()` delivers each lane's commits in seq order from when it confirms;
