@@ -8,12 +8,13 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 let server: Server
 let host: string
 /** The array the app assigns, which it may change afterwards: origins of sites, of app shells with a scheme of their own
- *  (Capacitor on iOS, Tauri on macOS and Linux), and one written as an address bar shows it. */
+ *  (Capacitor on iOS, Tauri on macOS and Linux), one in another case than a browser sends it, and one written as an
+ *  address bar shows it. */
 const appOrigins = [
   'https://app.example.com',
   'https://*.example.org',
   'https://bücher.example',
-  'capacitor://localhost',
+  'Capacitor://LocalHost',
   'tauri://localhost',
   'https://pages.example.com/',
 ]
@@ -77,7 +78,7 @@ test.each<[string, number, () => Record<string, string>]>([
   ],
   ['a page of an allowed origin', OPENS, () => ({ Host: host, Origin: 'https://app.example.com' })],
   [
-    'a page of the allowed app shell origin capacitor://localhost',
+    'a page of an app shell origin allowed with an entry in another case',
     OPENS,
     () => ({ Host: host, Origin: 'capacitor://localhost' }),
   ],
@@ -244,7 +245,7 @@ test("a later change of the app's array doesn't change `allowedOrigins`, and rea
     'https://app.example.com',
     'https://*.example.org',
     'https://bücher.example',
-    'capacitor://localhost',
+    'Capacitor://LocalHost',
     'tauri://localhost',
     'https://pages.example.com/',
   ])
