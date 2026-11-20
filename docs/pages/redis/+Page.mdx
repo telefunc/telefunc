@@ -63,6 +63,32 @@ Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `pu
 
 ## Errors
 
+A `publish()` or a Room call that Redis can't run rejects with `BackendError`:
+
+```ts
+// Environment: server
+
+import { Broadcast, BackendError } from 'telefunc'
+
+try {
+  await Broadcast.publish('chat', message)
+} catch (err) {
+  if (!(err instanceof BackendError)) throw err
+  console.error(err.message) // What failed and what to do, with Redis's error code, such as `NOPERM`
+  err.code // 'unreachable' | 'unavailable' | 'denied' | 'failed'
+  err.outcome // 'may-have-run'
+}
+```
+
+| `code` | When | What to do |
+|---|---|---|
+| `'unreachable'` | The connection to Redis failed or closed | Call again once Redis is reachable |
+| `'unavailable'` | Redis can't serve it now: it is loading its data, busy, out of memory, or a replica | Call again once it passes; for a replica, give `installRedis()` a client of the primary |
+| `'denied'` | Redis refuses it until you change its ACL, the password, or a command its operator disabled | Change that, then call again |
+| `'failed'` | Redis failed it otherwise | See the message |
+
+> `outcome` is `'may-have-run'`: the call may have taken effect, so publishing again can deliver a message twice.
+
 While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 
 A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, or the server is a replica (`READONLY`). That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access.

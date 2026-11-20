@@ -16,6 +16,7 @@ export type { RedisClient, SubscriberSocket }
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { Cluster, type Redis } from 'ioredis'
+import { BackendError } from 'telefunc/__internal'
 import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
@@ -111,68 +112,88 @@ const WHAT_TO_DO: Record<string, string> = {
   WRONGTYPE: "a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
 }
 
-/** A failure of Redis, or of the connection to it, as the backend reports it: what failed and what to do, with Redis's
- *  error code (the first word of its reply) or the connection's. It holds none of what ioredis' error does: the command,
- *  its arguments (a password, a message's bytes) or a nested error. */
-class RedisFailure extends Error {
-  /** `NOPERM`, `WRONGPASS`, `ECONNREFUSED` and the like. */
-  readonly code: string | undefined
-  /** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role. */
-  readonly refused: boolean
-  constructor(message: string, code: string | undefined, refused: boolean) {
-    super(message)
-    this.code = code
-    this.refused = refused
-  }
-}
+/** Redis's codes for a state it leaves by itself. */
+const PASSING = new Set(['LOADING', 'BUSY', 'MASTERDOWN', 'TRYAGAIN', 'CLUSTERDOWN', 'OOM'])
+
+/** A command Redis doesn't know: disabled or renamed by its operator. */
+const UNKNOWN_COMMAND = /^ERR unknown (?:sub)?command /
 
 /** What the backend reports of an error ioredis gave on a connection of `redis`'s: the one place a failure of Redis
- *  becomes Telefunc's. An error the backend's own `assert()` threw passes as it is, and so does one this made. */
+ *  becomes Telefunc's `BackendError`, which says what failed and what to do, with Redis's error code (the first word of
+ *  its reply) or the connection's, and holds nothing of ioredis' error: not the command, its arguments (a password, a
+ *  message's bytes) or a nested error. An error the backend's own `assert()` threw passes as it is, and so does one
+ *  this made. */
 function redisFailure(error: unknown, redis: RedisClient): unknown {
-  if (error instanceof RedisFailure || isBug(error)) return error
+  if (error instanceof BackendError || isBug(error)) return error
   const where = addressOf(redis)
-  if (!(error instanceof Error) || error.name !== 'ReplyError') {
+  const outcome = 'may-have-run'
+  if (!isReplyError(error)) {
     const code = connectionCode(error)
-    return new RedisFailure(
-      `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
-      code,
-      false,
-    )
+    return new BackendError({
+      code: 'unreachable',
+      outcome,
+      message: `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
+    })
   }
   const { message } = error
   const code = replyCode(message)
   const tagged = code === undefined ? '' : ` (${code})`
   if (READ_ONLY.test(message)) {
-    return new RedisFailure(
-      `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
+    return refusal({
+      code: 'unavailable',
+      outcome,
+      message:
+        `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
         'client of the primary',
-      code,
-      true,
-    )
+    })
   }
   if (ACL_REFUSAL.test(message)) {
-    return new RedisFailure(
-      `Redis at ${where} refused Telefunc's Redis backend a command, key or channel by its user's ACL${tagged}: allow ` +
-        'that user what the ACL rule in the docs of @telefunc/redis lists',
-      code,
-      true,
-    )
+    return refusal({
+      code: 'denied',
+      outcome,
+      message:
+        `Redis at ${where} refused Telefunc's Redis backend a command, key or channel by its user's ACL${tagged}: ` +
+        'allow that user what the ACL rule in the docs of @telefunc/redis lists',
+    })
   }
   if (LOGIN_REFUSAL.test(message)) {
-    return new RedisFailure(
-      `Redis at ${where} refused the login of Telefunc's Redis backend${tagged}: check the username and password of ` +
-        'the client given to installRedis()',
-      code,
-      false,
-    )
+    return new BackendError({
+      code: 'denied',
+      outcome,
+      message:
+        `Redis at ${where} refused the login of Telefunc's Redis backend${tagged}: check the username and password ` +
+        'of the client given to installRedis()',
+    })
+  }
+  if (UNKNOWN_COMMAND.test(message)) {
+    return new BackendError({
+      code: 'denied',
+      outcome,
+      message:
+        `Redis at ${where} doesn't run a command Telefunc's Redis backend sends, as its operator disabled or renamed ` +
+        'it: allow the commands the ACL rule in the docs of @telefunc/redis lists',
+    })
   }
   const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
-  return new RedisFailure(
-    `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
+  return new BackendError({
+    code: code !== undefined && PASSING.has(code) ? 'unavailable' : 'failed',
+    outcome,
+    message:
+      `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
       (toDo === undefined ? ": Redis's log may say why" : `: ${toDo}`),
-    code,
-    false,
-  )
+  })
+}
+
+/** A failure `isRefusal()` knows. */
+function refusal(failure: ConstructorParameters<typeof BackendError>[0]): BackendError {
+  const error = new BackendError(failure)
+  refusals.add(error)
+  return error
+}
+
+/** An error Redis replied with, as ioredis gives it. */
+function isReplyError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'ReplyError'
 }
 
 /** The first word of the reply a script's call got, where it is a code, else of Redis's reply. */
@@ -189,9 +210,10 @@ function connectionCode(error: unknown): string | undefined {
   return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
 }
 
-/** Redis refused it, by its user's ACL or as a replica; `BUSY`, `LOADING` and the like pass. */
-function isRefusal(error: unknown): error is RedisFailure {
-  return error instanceof RedisFailure && error.refused
+/** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role;
+ *  `BUSY`, `LOADING` and the like pass. */
+function isRefusal(error: unknown): error is BackendError {
+  return error instanceof BackendError && refusals.has(error)
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
@@ -253,11 +275,13 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
+const { subscriberNodes, clusterWaits, refusals } = getGlobalObject('ioredis.ts', () => ({
   /** The node each Cluster's subscriber was last duplicated from. */
   subscriberNodes: new WeakMap<Cluster, Redis>(),
   /** One wait per connecting Cluster, however often subscribers reopen during it. */
   clusterWaits: new WeakMap<Cluster, Promise<void>>(),
+  /** The failures that are Redis's refusal by ACL or role (`isRefusal()`). */
+  refusals: new WeakSet<BackendError>(),
 }))
 
 function clusterReady(cluster: Cluster): Promise<void> {

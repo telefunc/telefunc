@@ -618,7 +618,7 @@ import { installRedis } from '@telefunc/redis'
 installRedis(new IORedis('redis://localhost:6379'))
 ```
 
-Then route each client to one server with sticky sessions, see <Link href="/stream/scale" />. For Redis's requirements, see <Link href="/redis" />. On Cloudflare Workers, you need neither, see <Link href="/stream/cloudflare" />.
+Then route each client to one server with sticky sessions, see <Link href="/stream/scale" />. For Redis's requirements, see <Link href="/redis" />. A Room call that Redis can't run rejects with `BackendError`, see <Link href="/redis#errors">Redis errors</Link>. On Cloudflare Workers, you need neither, see <Link href="/stream/cloudflare" />.
 
 
 ## Methods

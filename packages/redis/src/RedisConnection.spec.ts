@@ -106,7 +106,11 @@ describe('a client of a replica', () => {
     await expect(rejection).rejects.toThrow(
       "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
     )
-    await expect(rejection).rejects.toMatchObject({ code: 'READONLY', refused: true })
+    await expect(rejection).rejects.toMatchObject({
+      name: 'BackendError',
+      code: 'unavailable',
+      outcome: 'may-have-run',
+    })
     await expect(rejection).rejects.not.toHaveProperty('cause')
   })
 })

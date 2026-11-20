@@ -124,8 +124,8 @@ describe('a start read Redis answers with an error', () => {
 
       const refusal = await Promise.all(subscriptions.establishingOn([TEXT])).catch((error: unknown) => error)
       expect(refusal).toMatchObject({
-        refused: true,
-        code: message.includes('READONLY') ? 'READONLY' : expect.any(String),
+        name: 'BackendError',
+        code: message.includes('READONLY') ? 'unavailable' : 'denied',
       })
       await expect(closed).resolves.toEqual(['closed', refusal])
       expect(reads).toBe(1)
@@ -176,7 +176,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toMatchObject({ refused: true, code: 'NOPERM' })
+    await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toMatchObject({ name: 'BackendError', code: 'denied' })
   })
 
   it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
