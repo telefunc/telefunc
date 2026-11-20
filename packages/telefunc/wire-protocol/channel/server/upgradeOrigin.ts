@@ -31,7 +31,7 @@ function upgradeRefusal(request: Request, host: string): Response | undefined {
   if (origin === null) {
     if (site === null) return undefined
     warnRefusal('a page that sent no Origin', 'it sent no Origin header')
-    return refused()
+    return new Response(null, { status: 403 })
   }
   const url = URL.canParse(origin) ? new URL(origin) : null
   if (url !== null && isServersHost(origin, url.protocol, request, host)) return undefined
@@ -44,10 +44,6 @@ function upgradeRefusal(request: Request, host: string): Response | undefined {
       "its Origin header isn't an origin as a browser writes one, or is the `null` of a page that has none",
     )
   else warnRefusal(origin)
-  return refused()
-}
-
-function refused(): Response {
   return new Response(null, { status: 403 })
 }
 
