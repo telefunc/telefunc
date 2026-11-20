@@ -36,7 +36,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     const ret = this.sendPublish(encode.publishAckReq, stringifyValue(data, 'publish'))
     ret.catch(() => {})
     return ret
@@ -51,7 +51,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     const ret = this.sendPublish(encode.publishBinaryAckReq, data)
     ret.catch(() => {})
     return ret

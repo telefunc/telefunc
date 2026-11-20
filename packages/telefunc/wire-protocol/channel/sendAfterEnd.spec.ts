@@ -9,7 +9,9 @@ import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { isAbort } from '../../shared/Abort.js'
 import { ChannelClosedError, ChannelPageLeftError } from './channelErrors.js'
 import { ServerChannel } from './server/ServerChannel.js'
+import { Broadcast, ServerBroadcast } from './server/ServerBroadcast.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { ClientBroadcast } from './client/ClientBroadcast.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
 // The page's transport listens for `pagehide` on the global object, as in a browser.
@@ -168,6 +170,59 @@ describe('a listen() callback that sends after its channel ended', () => {
     })
     expect(server).toEqual([expect.any(ChannelClosedError)])
   })
+})
+
+const PUBLISHES = {
+  'publish()': (page: ClientBroadcast<string>) => page.publish('late'),
+  'publishBinary()': (page: ClientBroadcast<string>) => page.publishBinary(new Uint8Array([1])),
+}
+
+describe("a page's subscribe() callback that publishes after its broadcast ended", () => {
+  for (const [method, publish] of Object.entries(PUBLISHES)) {
+    test(`the server aborted: ${method} throws one ChannelClosedError whose cause is the end, and nothing is printed`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key })
+      getChannelMux().registerChannel(channel)
+      const page = new ClientBroadcast<string>({
+        channelId: channel.id,
+        connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },
+      })
+      await Promise.all([channel.opened, page.opened])
+      const thrown: unknown[] = []
+      const { page: printed } = await reported(async () => {
+        let started = false
+        let published = () => {}
+        const publishedAll = new Promise<void>((resolve) => (published = resolve))
+        const subscription = page.subscribe(async () => {
+          started = true
+          await page.closed
+          for (let i = 0; i < 2; i++) {
+            try {
+              await publish(page)
+            } catch (err) {
+              thrown.push(err)
+            }
+          }
+          published()
+          await publish(page)
+        })
+        await subscription.opened
+        await Broadcast.publish(key, 'go')
+        await vi.waitFor(() => expect(started).toBe(true))
+        channel.abort('stop')
+        await publishedAll
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      })
+
+      const end = await page.closed
+      expect(isAbort(end)).toBe(true)
+      expect(thrown).toHaveLength(2)
+      expect(thrown[0]).toBeInstanceOf(ChannelClosedError)
+      expect(thrown[1]).toBe(thrown[0])
+      expect(thrown[0] instanceof Error && thrown[0].cause).toBe(end)
+      expect(printed).toEqual([])
+    })
+  }
 })
 
 test('an onClose() callback that sends on its own channel after the end is reported: the send can never go', async () => {
