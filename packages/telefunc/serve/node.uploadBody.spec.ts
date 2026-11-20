@@ -1,15 +1,18 @@
 import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
-import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { once } from 'node:events'
+import { Readable } from 'node:stream'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
+import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
 
 // The body of a binary call (a telefunction given a `Blob`) and of an SSE upload, read through Telefunc's body reader,
 // fails on the app's side: printed and given to `onBug()` as the app's own error. A client that leaves stays quiet.
+// Through a Fetch `Request` (`serve({ request })`), nothing tells the two apart: both are a truncation, as in 0.3.1.
 
 vi.hoisted(() => vi.stubEnv('NODE_ENV', 'development'))
 // The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
@@ -76,24 +79,50 @@ const sseStart = concat(
 const kinds = { binary: 'bin', sse: 'sse' }
 const telefuncPath = '/_telefunc?wire=2'
 
-let server: Server
-let port: number
 let onRequest: ((req: IncomingMessage) => void) | undefined
 
+/** Telefunc given Node's request (`serve({ req, res })`). */
+function nodeRequest(req: IncomingMessage, res: ServerResponse) {
+  telefunc.serve({ req, res }).catch(() => {})
+}
+/** Telefunc given a Fetch `Request` built from Node's request, as Hono's or srvx's Node server builds one. */
+function fetchRequest(req: IncomingMessage, res: ServerResponse) {
+  const init: RequestInit & { duplex: 'half' } = {
+    method: 'POST',
+    headers: { 'x-telefunc-request': String(req.headers['x-telefunc-request']) },
+    body: Readable.toWeb(req),
+    duplex: 'half',
+  }
+  telefunc
+    .serve({ request: new Request(`http://127.0.0.1${telefuncPath}`, init) })
+    .then(async (response) => {
+      res.writeHead(response?.status ?? 404)
+      for await (const chunk of response?.body ?? []) res.write(chunk)
+      res.end()
+    })
+    .catch(() => {})
+}
+const servers = { 'Node request': nodeRequest, 'Fetch Request': fetchRequest }
+const vias = ['Node request', 'Fetch Request'] as const
+const ports = new Map<keyof typeof servers, number>()
+const listening: Server[] = []
+
 beforeAll(async () => {
-  server = createServer((req, res) => {
-    const serving = telefunc.serve({ req, res })
-    serving.catch(() => {})
-    onRequest?.(req)
-  })
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  const address = server.address()
-  if (address === null || typeof address === 'string') throw new Error('no port')
-  port = address.port
+  for (const via of vias) {
+    const server = createServer((req, res) => {
+      servers[via](req, res)
+      onRequest?.(req)
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no port')
+    ports.set(via, address.port)
+    listening.push(server)
+  }
 })
 afterAll(() => {
-  server.close()
+  for (const server of listening) server.close()
   vi.unstubAllEnvs()
 })
 
@@ -118,8 +147,11 @@ async function blobRead(): Promise<void> {
   await once(process, 'requestBody.telefunc:read')
 }
 
-/** Sends a POST of `kind` with `start` from a socket of the test's own; resolves once Telefunc read the first bytes. */
-async function startUpload(kind: keyof typeof kinds, start: Uint8Array) {
+/** Sends a POST of `kind` with `start` from a socket of the test's own to the server that gives Telefunc `via`; resolves
+ *  once Telefunc read the first bytes. */
+async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: keyof typeof servers = 'Node request') {
+  const port = ports.get(via)
+  if (port === undefined) throw new Error('no server')
   const arrived = new Promise<IncomingMessage>((resolve) => {
     onRequest = (req) => {
       onRequest = undefined
@@ -200,26 +232,27 @@ test("a binary call whose request an app destroys in its metadata has the app's 
   expect(printed).toEqual([expect.stringContaining('app body transform failed')])
 })
 
-test("a binary call whose Fetch body an app's transform fails while the telefunction reads its Blob is answered 500 with the app's error", async () => {
+// A Fetch body's failure says nothing of who failed it: it is taken for the client leaving, as in 0.3.1.
+test("a binary call whose Fetch body an app's transform fails while the telefunction reads its Blob is answered 500 with a truncation, the app's error its cause", async () => {
   const { printed, bugs } = recordErrors()
   const appError = new Error('app body transform failed')
   const response = await telefunc.serve({ request: failingRequest('binary', binaryStart, appError, blobRead()) })
   expect(response?.status).toBe(500)
-  expect(bugs).toHaveLength(1)
-  expect(bugs[0]).toBe(appError)
-  expect(printed).toEqual([expect.stringContaining('app body transform failed')])
+  expect(bugs).toEqual([expect.any(StreamTruncatedError)])
+  expect(bugs[0]).toHaveProperty('cause', appError)
+  expect(printed).toEqual([])
 })
 
-test("a binary call whose Fetch body an app's transform fails in its metadata is answered 500 with the app's error", async () => {
+test("a binary call whose Fetch body an app's transform fails in its metadata is answered 500 with a truncation, the app's error its cause", async () => {
   const { printed, bugs } = recordErrors()
   const appError = new Error('app body transform failed')
   const response = await telefunc.serve({
     request: failingRequest('binary', binaryMetadataStart, appError, Promise.resolve()),
   })
   expect(response?.status).toBe(500)
-  expect(bugs).toHaveLength(1)
-  expect(bugs[0]).toBe(appError)
-  expect(printed).toEqual([expect.stringContaining('app body transform failed')])
+  expect(bugs).toEqual([expect.any(StreamTruncatedError)])
+  expect(bugs[0]).toHaveProperty('cause', appError)
+  expect(printed).toEqual([])
 })
 
 test("an SSE upload whose request an app destroys after its wire opened has the app's error printed and given to onBug()", async () => {
@@ -233,35 +266,54 @@ test("an SSE upload whose request an app destroys after its wire opened has the 
   expect(printed).toEqual([expect.stringContaining('app body transform failed')])
 })
 
-test("an SSE upload whose Fetch body an app's transform fails after its wire opened has the app's error printed and given to onBug()", async () => {
+test("an SSE upload whose Fetch body an app's transform fails after its wire opened prints nothing", async () => {
   const { printed, bugs } = recordErrors()
   const appError = new Error('app body transform failed')
   const response = await telefunc.serve({ request: failingRequest('sse', sseStart, appError, Promise.resolve()) })
-  await vi.waitFor(() => expect(bugs).toHaveLength(1))
-  expect(bugs[0]).toBe(appError)
-  expect(printed).toEqual([expect.stringContaining('app body transform failed')])
-  await response?.body?.cancel()
-})
-
-test('a binary call whose client leaves while the telefunction reads its Blob prints nothing', async () => {
-  const { printed, bugs } = recordErrors()
-  const reading = blobRead()
-  const { socket } = await startUpload('binary', binaryStart)
-  await reading
-  socket.destroy()
-  // The failed call reaches `onBug()`, as every failed call does, once the telefunction has settled.
-  await vi.waitFor(() => expect(bugs).toHaveLength(1))
-  expect(printed).toEqual([])
-  // Node's own error is kept as the cause.
-  expect(bugs[0]).toHaveProperty('cause.message', 'aborted')
-})
-
-test('an SSE upload whose client leaves after its wire opened prints nothing', async () => {
-  const { printed } = recordErrors()
-  const { socket } = await startUpload('sse', sseStart)
-  socket.destroy()
-  await closed(socket)
   // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
   await new Promise((resolve) => setTimeout(resolve, 500))
   expect(printed).toEqual([])
+  expect(bugs).toEqual([])
+  await response?.body?.cancel()
 })
+
+test.each(vias)(
+  'a binary call whose client leaves while the telefunction reads its Blob prints nothing (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const reading = blobRead()
+    const { socket } = await startUpload('binary', binaryStart, via)
+    await reading
+    socket.destroy()
+    // The failed call reaches `onBug()`, as every failed call does, once the telefunction has settled.
+    await vi.waitFor(() => expect(bugs).toHaveLength(1))
+    expect(printed).toEqual([])
+    // Node's own error is kept as the cause.
+    expect(bugs[0]).toHaveProperty('cause.message', 'aborted')
+  },
+)
+
+test.each(vias)(
+  'a binary call whose client leaves in its metadata prints nothing (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const { socket } = await startUpload('binary', binaryMetadataStart, via)
+    socket.destroy()
+    await vi.waitFor(() => expect(bugs).toHaveLength(1))
+    expect(printed).toEqual([])
+    expect(bugs[0]).toHaveProperty('cause.message', 'aborted')
+  },
+)
+
+test.each(vias)(
+  'an SSE upload whose client leaves after its wire opened prints nothing (Telefunc given a %s)',
+  async (via) => {
+    const { printed } = recordErrors()
+    const { socket } = await startUpload('sse', sseStart, via)
+    socket.destroy()
+    await closed(socket)
+    // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(printed).toEqual([])
+  },
+)

@@ -202,7 +202,7 @@ async function readBody(
 }
 
 /** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
- *  call's is; any other failure is thrown as it is. */
+ *  call's is; any other failure, and one nothing explains (`noTransportEvidence`), is thrown as it is. */
 async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
   try {
     return await request.text()

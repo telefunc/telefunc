@@ -252,11 +252,12 @@ class SseServerTransport {
     terminateWire: (wire) => this.terminateWire(wire),
   }
 
-  /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does. */
+  /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
+   *  or null where it can't say. */
   async handleRequest(
     request: Request,
     readable: Readable | undefined,
-    clientLeft: (err: unknown) => boolean,
+    clientLeft: (err: unknown) => boolean | null,
   ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
@@ -581,7 +582,7 @@ function okResponse(): SseChannelHttpResponse {
 async function handleSseChannelRequest(
   request: Request,
   readable: Readable | undefined,
-  clientLeft: (err: unknown) => boolean,
+  clientLeft: (err: unknown) => boolean | null,
 ): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
   return globalObject.sseTransport.handleRequest(request, readable, clientLeft)

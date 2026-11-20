@@ -43,14 +43,16 @@ class BodyReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
-  /** Why a read of the source failed: its client left (the body is truncated), or the app's own error. */
-  private failure: { error: unknown; clientLeft: boolean } | undefined
-  /** Whether a read's failure is the client leaving, on the evidence of the server that received the request (the caller's). */
-  private clientLeft: (err: unknown) => boolean
+  /** Why a read of the source failed: the app's own error, or not (its client left, or nothing says: the body is
+   *  truncated). */
+  private failure: { error: unknown; appsError: boolean } | undefined
+  /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
+   *  received the request, passed by the caller. */
+  private clientLeft: (err: unknown) => boolean | null
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
-  constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean) {
+  constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean | null) {
     this.clientLeft = clientLeft
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
     // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
@@ -160,11 +162,11 @@ class BodyReader {
 
   // ── Primitives ──
 
-  /** Pull one chunk from the underlying source, or null once it ended or its client left. A read that fails for any
-   *  other reason throws its error, and so does every pull after it. */
+  /** Pull one chunk from the underlying source, or null once it ended or its client left, or failed where nothing says
+   *  why. A read that fails as the app's own error throws it, and so does every pull after it. */
   private async pullChunk() {
     if (this.disconnected) {
-      if (this.failure?.clientLeft === false) throw this.failure.error
+      if (this.failure?.appsError) throw this.failure.error
       return null
     }
     try {
@@ -177,13 +179,13 @@ class BodyReader {
       return value
     } catch (error) {
       this.disconnected = true
-      this.failure = { error, clientLeft: this.clientLeft(error) }
-      if (!this.failure.clientLeft) throw error
+      this.failure = { error, appsError: this.clientLeft(error) === false }
+      if (this.failure.appsError) throw error
       return null
     }
   }
 
-  /** The body stopped short, with the runtime's error as the cause where its client left mid-read. */
+  /** The body stopped short, with the runtime's error as the cause where a read failed. */
   private truncated() {
     return new StreamTruncatedError(this.failure && { cause: this.failure.error })
   }
