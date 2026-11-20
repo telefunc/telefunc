@@ -1,7 +1,7 @@
 export { tryCreateRoom }
 
 import { assertUsage } from '../../utils/assert.js'
-import { isObject } from 'telefunc/__internal'
+import { BackendCall, isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { HeadExpectation, HeadNext, RoomHead } from '../../backend/contract.js'
 import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/arguments.js'
@@ -28,14 +28,19 @@ type Refusal = { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const plane = getRoomPlane()
+  const call = new BackendCall()
   return await retryCompareExchange(async () => {
     // The head a create may replace: a closing one taken over, a closed one cleaned up.
-    let current = await plane.driver.readHead(id)
+    let current = await call.read(() => plane.driver.readHead(id))
     if (current?.state === 'closing') {
-      if (!(await takeOverClose(plane, id, current))) return { kind: 'closing' }
-      current = await plane.driver.readHead(id)
+      const closing = current
+      if (!(await call.write(() => takeOverClose(plane, id, closing)))) return { kind: 'closing' }
+      current = await call.read(() => plane.driver.readHead(id))
     }
-    if (current?.state === 'closed') await cleanupFinalizedIncarnation(plane, id, current)
+    if (current?.state === 'closed') {
+      const closed = current
+      await call.write(() => cleanupFinalizedIncarnation(plane, id, closed))
+    }
     if (current !== null && current.state !== 'closed') return refusalOrRetry(current)
     const incarnation: RoomIncarnation = {
       id,
@@ -44,16 +49,17 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsedInc = current === null ? await plane.driver.directoryGet(id) : undefined
+    const lapsedInc = current === null ? await call.read(() => plane.driver.directoryGet(id)) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
-    if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
+    if (lapsedInc === undefined) await call.write(() => listRoom(plane, incarnation, undefined))
     const next = { head: openHead(created), ...newRoomHold(incarnation.hold) }
-    const result = await plane.compareExchangeHead(id, replacing(current), next)
+    const expected = replacing(current)
+    const result = await call.write(() => plane.compareExchangeHead(id, expected, next))
     if (result.kind === 'conflict') return refusalOrRetry(result.current)
     scheduleNewRoomClose(incarnation)
     // The lapsed incarnation's data goes before the listing that names it is replaced.
-    if (lapsedInc !== undefined) await plane.driver.dropIncarnation(id, lapsedInc)
-    await listRoom(plane, incarnation, result.head.expiresAt)
+    if (lapsedInc !== undefined) await call.write(() => plane.driver.dropIncarnation(id, lapsedInc))
+    await call.write(() => listRoom(plane, incarnation, result.head.expiresAt))
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }
   })

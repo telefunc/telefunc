@@ -3,6 +3,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
+import { BackendCall } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomHead } from '../../backend/contract.js'
 import type { RoomPlane } from '../../backend/RoomPlane.js'
@@ -31,10 +32,11 @@ async function listRoom(
  *  tombstone lapsed), so it is dropped with its listing. */
 async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
   if (head?.currentInc === listedInc) return
-  await plane.driver.dropIncarnation(id, listedInc)
+  const call = new BackendCall()
+  await call.write(() => plane.driver.dropIncarnation(id, listedInc))
   const live = openConfig(head)
-  if (live) await listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
-  else await plane.driver.directoryDelete(id, listedInc)
+  if (live) await call.write(() => listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt))
+  else await call.write(() => plane.driver.directoryDelete(id, listedInc))
 }
 
 const globalObject = getGlobalObject('server/store/directory.ts', {

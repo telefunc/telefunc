@@ -2,7 +2,7 @@ export { roomStatics }
 export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 
 import { assertUsage } from '../utils/assert.js'
-import { isObject } from 'telefunc/__internal'
+import { BackendCall, isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
@@ -269,7 +269,11 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 /** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. */
 async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Promise<RoomInfo | null> {
   const head = await plane.driver.readHead(roomId)
-  const [, info] = await Promise.all([repairRoomIndex(plane, roomId, incTag, head), openRoomInfo(plane, roomId, head)])
+  const call = new BackendCall()
+  const [, info] = await Promise.all([
+    call.write(() => repairRoomIndex(plane, roomId, incTag, head)),
+    call.read(() => openRoomInfo(plane, roomId, head)),
+  ])
   return info
 }
 
@@ -336,7 +340,9 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   }
   const members = await resolveParticipantRef(incarnation, target)
   const cause = removedCause(target.reason)
-  await eachInFlight(members, (member) => evictMember(incarnation, member.id, cause))
+  const call = new BackendCall()
+  // Each eviction goes on after another failed, so the failure is told once every one settled.
+  await call.read(() => eachInFlight(members, (member) => call.write(() => evictMember(incarnation, member.id, cause))))
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
@@ -380,11 +386,15 @@ async function sendToParticipant(
   const members = await resolveParticipantRef(incarnation, target)
   if ('id' in target) return deliveredOrThrow(id, await sendDm(id, incarnation.inc, target.id, message))
   const receipts: RoomSendReceipt[] = []
-  await eachInFlight(members, async (member) => {
-    const commit = await sendDm(id, incarnation.inc, member.id, message)
-    // A tab that left since the user's tabs were read is skipped: the others still get the message.
-    if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
-  })
+  const call = new BackendCall()
+  // Each send goes on after another failed, so the failure is told once every one settled.
+  await call.read(() =>
+    eachInFlight(members, async (member) => {
+      const commit = await call.write(() => sendDm(id, incarnation.inc, member.id, message))
+      // A tab that left since the user's tabs were read is skipped: the others still get the message.
+      if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
+    }),
+  )
   return receipts
 }
 
