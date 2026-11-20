@@ -55,7 +55,7 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { parseAllowedOrigin } from '../../wire-protocol/channel/server/upgradeOrigin.js'
+import { parseAllowedOrigin, type AllowedOrigin } from '../../wire-protocol/channel/server/upgradeOrigin.js'
 import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
@@ -95,7 +95,7 @@ type ChannelConfigUser = {
    *
    * @default []
    */
-  allowedOrigins?: string[]
+  allowedOrigins?: readonly string[]
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -151,7 +151,7 @@ type ChannelConfigUser = {
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
-  allowedOrigins: string[]
+  allowedOrigins: readonly AllowedOrigin[]
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -246,6 +246,8 @@ const globalObject = getGlobalObject('node/server/serverConfig.ts', {
   defaultMaxMemory: undefined as number | undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
+  /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
+  allowedOrigins: [] as readonly AllowedOrigin[],
 })
 const configState = globalObject.config
 
@@ -361,16 +363,19 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: resolveChannelConfig(configState.channel),
+    channel: resolveChannelConfig(configState.channel, globalObject.allowedOrigins),
     extensions: configState.extensions,
   }
 }
 
-function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
+function resolveChannelConfig(
+  channel: ChannelConfigUser,
+  allowedOrigins: readonly AllowedOrigin[],
+): ChannelConfigResolved {
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
-    allowedOrigins: channel.allowedOrigins ?? [],
+    allowedOrigins,
     reconnectTimeout,
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
@@ -399,7 +404,7 @@ function defaultMaxMemory(): number {
 /** The settings a channel runs by, which can't change from here on. */
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
-  return resolveChannelConfig(configState.channel)
+  return resolveChannelConfig(configState.channel, globalObject.allowedOrigins)
 }
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
@@ -551,6 +556,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
+  const allowedOrigins: AllowedOrigin[] = []
   for (const [key, value] of Object.entries(val)) {
     const configPath = `config.channel.${key}`
     switch (key) {
@@ -559,12 +565,17 @@ function applyChannelConfig(val: unknown): void {
         break
       case 'allowedOrigins': {
         assertUsage(Array.isArray(value), `\`${configPath}\` should be an array of origins`)
-        const wrong = value.find((entry: unknown) => typeof entry !== 'string' || parseAllowedOrigin(entry) === null)
-        assertUsage(
-          wrong === undefined,
-          `\`${configPath}\` lists ${JSON.stringify(wrong)}: an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'`,
-        )
-        next[key] = value
+        // `for…of` reads a hole as `undefined`, which is no origin.
+        for (const entry of value) {
+          const allowed = typeof entry === 'string' ? parseAllowedOrigin(entry) : null
+          assertUsage(
+            allowed !== null,
+            `\`${configPath}\` lists ${JSON.stringify(entry)}: an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'`,
+          )
+          allowedOrigins.push(allowed)
+        }
+        // Its own copy: a later change of the caller's array changes nothing, and reading it back can't change it.
+        next[key] = Object.freeze(value.slice())
         break
       }
       case 'pingInterval':
@@ -617,10 +628,12 @@ function applyChannelConfig(val: unknown): void {
   }
   assertUsage(
     !globalObject.channelConfigInUse ||
-      JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
+      JSON.stringify(resolveChannelConfig(next, allowedOrigins)) ===
+        JSON.stringify(resolveChannelConfig(configState.channel, globalObject.allowedOrigins)),
     "`config.channel` can't change once the server has used it, from its first channel or page connection on, as those already open would keep the old values: set it before the server handles a request",
   )
   configState.channel = next
+  globalObject.allowedOrigins = allowedOrigins
 }
 
 /** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */

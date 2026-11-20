@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test, vi } from 'vitest'
+import { afterAll, beforeAll, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, request, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { Telefunc } from './node.js'
@@ -7,9 +7,11 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 
 let server: Server
 let host: string
+/** The array the app assigns, which it may change afterwards. */
+const appOrigins = ['https://app.example.com', 'https://*.example.org']
 
 beforeAll(async () => {
-  config.channel.allowedOrigins = ['https://app.example.com', 'https://*.example.org']
+  config.channel.allowedOrigins = appOrigins
   server = createServer((_req, res) => res.writeHead(404).end())
   new Telefunc().installWebSocket(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -149,7 +151,28 @@ test('`allowedOrigins` refuses a value that is not an array at configuration', (
   expect(() => Reflect.set(config.channel, 'allowedOrigins', 'https://app.example.com')).toThrow(
     '`config.channel.allowedOrigins` should be an array of origins',
   )
-  expect(config.channel.allowedOrigins).toEqual(['https://app.example.com', 'https://*.example.org'])
+  expect(config.channel.allowedOrigins).toEqual(appOrigins)
+})
+
+test.each([
+  ['an entry that is `undefined`', [undefined]],
+  // Its index 0 is a hole.
+  ['a hole', Object.assign([], { 1: 'https://app.example.com' })],
+])('`allowedOrigins` refuses a list with %s at configuration', (_case, list) => {
+  expect(() => Reflect.set(config.channel, 'allowedOrigins', list)).toThrow(
+    '`config.channel.allowedOrigins` lists undefined: an entry is an origin',
+  )
+})
+
+test("a later change of the app's array doesn't change `allowedOrigins`, and reading it back gives the entries as assigned, which can't be changed", async () => {
+  appOrigins.push('https://pushed.example')
+  onTestFinished(() => {
+    appOrigins.pop()
+  })
+  expect(await upgradeStatus({ Host: host, Origin: 'https://pushed.example' })).toBe(REFUSED)
+  const readBack = config.channel.allowedOrigins
+  expect(readBack).toEqual(['https://app.example.com', 'https://*.example.org'])
+  expect(Object.isFrozen(readBack)).toBe(true)
 })
 
 /** What refused handshakes leave behind, from a process that has logged no refusal yet: the lines printed, the keys
