@@ -84,7 +84,22 @@ test.each<[string, number, () => Record<string, string>]>([
     () => ({ Host: host, Origin: 'https://a.b.example.org' }),
   ],
   ["a page of the wildcard's parent itself", REFUSED, () => ({ Host: host, Origin: 'https://example.org' })],
+  [
+    'a page of one subdomain under an allowed wildcard, on another scheme',
+    REFUSED,
+    () => ({ Host: host, Origin: 'http://a.example.org' }),
+  ],
+  [
+    'a page of one subdomain under an allowed wildcard, on another port',
+    REFUSED,
+    () => ({ Host: host, Origin: 'https://a.example.org:8443' }),
+  ],
   ['a page whose origin is opaque', REFUSED, () => ({ Host: host, Origin: 'null' })],
+  [
+    'a page of the same origin behind a proxy that sends an empty X-Forwarded-Host',
+    OPENS,
+    () => ({ Host: host, Origin: `http://${host}`, 'X-Forwarded-Host': '' }),
+  ],
   [
     'a page whose origin matches Host but not the forwarded public host',
     REFUSED,
@@ -127,6 +142,14 @@ test.each([
   }).toThrow(
     "an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com'",
   )
+})
+
+test('`allowedOrigins` refuses a value that is not an array at configuration', () => {
+  // `Reflect.set` assigns what the setting's type doesn't allow, as an app written in JavaScript can.
+  expect(() => Reflect.set(config.channel, 'allowedOrigins', 'https://app.example.com')).toThrow(
+    '`config.channel.allowedOrigins` should be an array of origins',
+  )
+  expect(config.channel.allowedOrigins).toEqual(['https://app.example.com', 'https://*.example.org'])
 })
 
 /** What refused handshakes leave behind, from a process that has logged no refusal yet: the lines printed, the keys
