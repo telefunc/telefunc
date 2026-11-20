@@ -125,12 +125,12 @@ test.each(['web', 'node'] as const)(
 
 type FakeWire = { sessionId: string | undefined }
 
-/** A WebSocket the real mux sends on, whose socket keeps all it is handed, unread: the frames' tags in the order
- *  handed, and whether the mux ended it. */
-function openWebSocket() {
+/** A WebSocket the real mux sends on: the frames it was handed, in order, and whether the mux ended it. Its socket keeps
+ *  all it is handed, unread, unless `reads`. */
+function openWebSocket({ reads = false } = {}) {
   const mux = getChannelMux()
   const wire: FakeWire = { sessionId: undefined }
-  const tags: number[] = []
+  const frames: Uint8Array[] = []
   const state = { buffered: 0, terminated: false }
   const transport: ServerTransport<FakeWire> = {
     getSessionId: (w) => w.sessionId,
@@ -139,8 +139,8 @@ function openWebSocket() {
     },
     getConnId: () => null,
     sendNow: (_, message) => {
-      state.buffered += message.byteLength
-      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) tags.push(decode(frame).tag)
+      if (!reads) state.buffered += message.byteLength
+      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) frames.push(frame)
     },
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
@@ -150,8 +150,44 @@ function openWebSocket() {
     },
   }
   mux.onWireOpen(wire, transport)
-  return { mux, wire, tags, state, close: () => mux.onWireClosed(wire, { permanent: true }) }
+  return {
+    mux,
+    wire,
+    frames,
+    state,
+    /** The page's connection drops: the server's wire closes, transiently unless `permanent`. */
+    close: (permanent = true) => mux.onWireClosed(wire, { permanent }),
+  }
 }
+
+test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then what the app sent in the gap before the RECONCILED went out, lossy sends too', async () => {
+  const mux = getChannelMux()
+  const channel = new ServerChannel()
+  mux.registerChannel(channel)
+  const first = openWebSocket({ reads: true })
+  await mux.onWireMessage(
+    first.wire,
+    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  const { sessionId } = first.wire
+  if (sessionId === undefined) throw new Error('no session on the first wire')
+  void channel.send('a')
+  void channel.send('b')
+  first.close(false)
+
+  const sendReconciled = mux.sendReconciled.bind(mux)
+  vi.spyOn(mux, 'sendReconciled').mockImplementationOnce((outcome) => {
+    void channel.send('c')
+    void channel.send('l1', { lossy: true })
+    void channel.send('l2', { lossy: true })
+    sendReconciled(outcome)
+  })
+  const second = openWebSocket({ reads: true })
+  await mux.onWireMessage(second.wire, encode.reconcile({ sessionId, open: [{ id: channel.id, ix: 0, lastSeq: 0 }] }))
+  expect(order(second.frames)).toEqual(['RECONCILED', '1:a', '2:b', '3:c', '4:l1', '5:l2'])
+  vi.restoreAllMocks()
+  second.close()
+})
 
 /** A PING listing as many channels as a page may have, none of them open: its PONG answers each, about 28 KB. */
 const widePing = () => encode.ping(Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({ ix, lastSeq: 0 })))
@@ -193,7 +229,7 @@ test('on a WebSocket, what a hold kept on by anything else holds ends its wire p
   for (; pings < PINGS_PAST_THE_LIMIT && !page.state.terminated; pings++)
     await page.mux.onWireMessage(page.wire, widePing())
   expect(page.state.terminated).toBe(true)
-  expect(page.tags.filter((tag) => tag === TAG.PONG)).toEqual([])
+  expect(page.frames.filter((frame) => frame[0] === TAG.PONG)).toEqual([])
   vi.restoreAllMocks()
   page.close()
 })
