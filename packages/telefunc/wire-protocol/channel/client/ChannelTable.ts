@@ -73,9 +73,10 @@ class ChannelTable {
     return this.records.values()
   }
 
-  /** The channels a RECONCILE on the wire that has the session names: the undeclared and the closed. */
+  /** The channels a RECONCILE on the wire that has the session names: the closed, then the undeclared, so the server
+   *  lets go of what the closed kept before a new one's `onOpen()` may need it. */
   changed(): Set<ChannelRecord> {
-    return new Set([...this.undeclared, ...this.closed])
+    return new Set([...this.closed, ...this.undeclared])
   }
 
   isUndeclared(ix: number): boolean {
