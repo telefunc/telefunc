@@ -110,7 +110,7 @@ channel.send('Hello!')
 | `closed` | Promise of how the channel ended: `null` where it closed gracefully, else the error. Never rejects: see <Link href="#how-a-channel-ends" />. |
 | `messages({ signal })` | Iterate `{ type: 'text' \| 'binary', data }` messages; abort to stop. |
 | `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
-| `onClose(cb)` | Called when the channel closes, with `null` where it closes gracefully, else the error. Returns a function that removes the callback. |
+| `onClose(cb)` | Cleanup, called once the channel stops: with `null` where it is closing gracefully, else the error it ended with. `closed` and `close()` give the final outcome. Returns a function that removes the callback. |
 | `close()` | Close gracefully. Resolves as `closed` does. |
 | `abort(value?)` | End at once. The client still gets what was sent before it, then the abort: see <Link href="#abort" />. |
 
@@ -302,7 +302,7 @@ A publish waits for no subscriber, so a `BroadcastChannel` refuses none: the ser
 
 > Over SSE, the server can't pause a message on its way to the client. Encoding adds a third, so 8 MiB at 1 MiB/s takes about 11 s. A later `send()` of up to 16 KiB on another channel goes as soon as that 8 MiB message is out, ahead of what's queued behind it. Every other later message from the server waits behind what's queued before it. What the client sends still reaches the server.
 
-> Once its telefunction has returned the channel, a server's `close()` waits for the client's answer, up to its timeout of 5 s by default. When a message on its way takes longer, as the 8 MiB one above does, the `close()` times out: the channel ends with a `ChannelClosedError`, which `onClose()` receives and `closed` resolves with. To avoid that, pass a longer timeout, such as `close({ timeout: 20_000 })`. A channel no telefunction has returned yet, such as a `BroadcastChannel` used only on the server, ends at once on `close()`, and its `onClose()` receives `null`; a client that gets it afterwards reads what was sent, then the close.
+> Once its telefunction has returned the channel, a server's `close()` waits for the client's answer, up to its timeout of 5 s by default. When a message on its way takes longer, as the 8 MiB one above does, the `close()` times out: the channel ends with a `ChannelClosedError`, which `onClose()` receives and `closed` resolves with. To avoid that, pass a longer timeout, such as `close({ timeout: 20_000 })`. A channel no telefunction has returned yet, such as a `BroadcastChannel` used only on the server, doesn't wait for a client on `close()`: it closes once its own `onClose()` callbacks are done, and they receive `null`. A client that gets it afterwards reads what was sent, then the close.
 
 #### When held messages clear
 
@@ -365,14 +365,14 @@ When the server calls `abort()`, the channel ends there at once, and its `onClos
 
 ### How a channel ends
 
-`closed`, `close()` and `onClose()` tell how the channel ended: `null` where it closed gracefully, else the error it ended with. `closed` never rejects.
+`closed` and `close()` tell how the channel ended: `null` where it closed gracefully, else the error it ended with. `closed` never rejects. `onClose()` callbacks are the channel's cleanup: each gets what is known of the end when it is called, as the table below shows.
 
 ```ts
 const err = await channel.closed
 if (err) console.error('The channel ended with', err)
 ```
 
-A graceful `close()` waits for both ends, up to its timeout (5 s by default): for the answers to acknowledged sends, and for the `onClose()` callbacks on each end. One end decides the outcome and sends it to the other, so both ends read the same one. An `onClose()` callback that runs past the timeout ends the channel with the timeout on both ends, and one that throws `Abort` aborts it. Another error it throws goes to <Link href="/onBug">`onBug()`</Link> and leaves the outcome as it is. A callback that rejects with its own channel's outcome, as an awaited `send()` does when the channel ends, reports nothing: `closed` gives it already. Neither does a `listen()`, `onOpen()` or `subscribe()` callback whose `send()` or `publish()` on its own channel throws because the channel ended while it worked, such as a reply after a database read while the user closed the tab: that call throws a `ChannelClosedError` whose `cause` is the outcome. An `onClose()` callback's `send()` on its own channel can never go, so what it throws is reported.
+A graceful `close()` waits for both ends, up to its timeout (5 s by default): for the answers to acknowledged sends, and for the `onClose()` callbacks on each end. One end decides the outcome and sends it to the other, so both ends read the same one. An `onClose()` callback that runs past the timeout ends the channel with the timeout on both ends, and one that throws `Abort` aborts it. Another error it throws goes to <Link href="/onBug">`onBug()`</Link> and leaves the outcome as it is. A callback that rejects with its own channel's outcome, as an awaited `send()` does when the channel ends, reports nothing: `closed` gives it already. Neither does a `listen()`, `onOpen()` or `subscribe()` callback whose `send()` or `publish()` on its own channel throws because the channel ended while it worked, such as a reply after a database read while the user closed the tab: that call throws a `ChannelClosedError` whose `cause` is the error the channel ended with, where it didn't close gracefully. An `onClose()` callback's `send()` on its own channel can never go, so what it throws is reported.
 
 A `send()` still waiting for capacity when the channel ends resolves where its message goes ahead of an ending the other end reads: a graceful close, or this end's `abort()`. Otherwise it rejects with the channel's outcome.
 
@@ -626,7 +626,7 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb, { signal }?)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function, with an `opened` promise. |
 | `onOpen(cb)` | Called when the channel opens. Returns a function that removes the callback. |
-| `onClose(cb)` | Called when the channel closes, with `null` where it closes gracefully, else the error. Returns a function that removes the callback. |
+| `onClose(cb)` | Cleanup, called once the channel stops: with `null` where it is closing gracefully, else the error it ended with. `closed` and `close()` give the final outcome. Returns a function that removes the callback. |
 | `close()` | Close gracefully. Resolves as `closed` does. |
 | `abort(abortValue?)` | End at once. The client still gets what was published before it, then the abort: see <Link href="#abort" />. |
 
@@ -702,7 +702,7 @@ Channels and broadcasts signal failure through these errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout`, or its first connection was refused or answered with something other than a stream of events, such as a proxy's login page: the message names the status and `Content-Type` it got. `ChannelCloseUnknownError` and `ChannelPageLeftError` are kinds of it | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel; a `close()` that timed out; a frame the other end couldn't read | Closed | Recreate the channel |
-| `ChannelCloseUnknownError` | The connection was lost during a close, on either end: the other end was gone longer than `reconnectTimeout`, or its verdict took longer than the close's timeout and `reconnectTimeout`. `cause` is the lost connection's error | Closed | Treat the close as unconfirmed: the other end's cleanup may have run past the timeout |
+| `ChannelCloseUnknownError` | The connection was lost during a close, on either end: the other end was gone longer than `reconnectTimeout`, or its verdict took longer than the close's timeout and `reconnectTimeout`. `cause` is the lost connection's error, where the connection ended it; a verdict that didn't arrive in time leaves no `cause` | Closed | Treat the close as unconfirmed: the other end's cleanup may have run past the timeout |
 | `ChannelPageLeftError` | On the server: the page left for good, during a close or outside one | Closed | Nothing to do: what the server still held for the page reaches no one |
 | `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next. Split a message past the per-channel limit: awaiting doesn't help it, and neither does `maxMemory`. Raise `maxMemory` only where all channels together hold too much |
 | `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for a lossy one, the server couldn't hold even the newest message. For any channel, its client sent more than the server holds while your `listen()` callbacks or a stream's reader work on what it sent, or had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then pass `lossy: true`, `await` each send and acknowledged call before the next, or raise `maxMemory` |
@@ -722,7 +722,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 - Messages sent while offline are held and delivered in order on reconnect, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>.
 - Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`.
-- Otherwise, the channel closes with `NetworkError`, as `ChannelCloseUnknownError` during a close.
+- Otherwise, the channel closes with `NetworkError`, as `ChannelCloseUnknownError` during a close, unless the end that decides already has the other end's result (see <Link href="#how-a-channel-ends" />).
 - A `BroadcastChannel` holds up to the default per-channel limit of 320 MiB of what's published while its client is away, and closes with `ChannelOverflowError` past that. A lossy one holds only the newest, and `info.seq` shows the jump.
 - While its client is away, a `Channel` keeps the newest `lossy` send between two sends without `lossy`.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.

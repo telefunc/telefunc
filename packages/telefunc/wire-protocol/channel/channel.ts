@@ -169,13 +169,14 @@ type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
 }
-/** How the channel ended, the same on every reader of it (`close()`, `closed`, `onClose`): `null` where it closed
- *  gracefully on both ends, else the error it ended with.
+/** How the channel ended, as `close()` and `closed` give it: `null` where it closed gracefully on both ends, else the
+ *  error it ended with.
  *
  *  https://telefunc.com/channel#how-a-channel-ends */
 type ChannelCloseResult = Error | null
-/** `err` is `null` where the channel is closing gracefully: the cleanup may start before the close's outcome is known,
- *  which `closed` gives. */
+/** Cleanup, called once with what is known of the end when it is called: `null` where the channel is closing
+ *  gracefully, as a close's cleanup starts before its outcome is known, else the error it ended with. `closed` and
+ *  `close()` give the final outcome. */
 type ChannelCloseCallback = (err: Error | null) => void | Promise<void>
 
 /** The channel surface both ends share: `TOut` is what this end sends, `TIn` what it receives, each a message type or a
