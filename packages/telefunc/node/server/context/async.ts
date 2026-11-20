@@ -14,7 +14,7 @@ const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context> }
 installAsyncMode({
   provideTelefuncContext_async,
   restoreContext_async,
-  getContext_async: () => globalObject.asyncStore?.getStore() ?? null,
+  getContext_async,
 })
 
 function provideTelefuncContext_async(context: Telefunc.Context): void {
@@ -36,4 +36,8 @@ function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
   )
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
   return globalObject.asyncStore.run(rawContext, fn)
+}
+
+function getContext_async() {
+  return globalObject.asyncStore?.getStore() ?? null
 }
