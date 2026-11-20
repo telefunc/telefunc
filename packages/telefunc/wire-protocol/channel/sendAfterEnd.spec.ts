@@ -112,7 +112,7 @@ describe('a listen() callback that sends after its channel ended', () => {
       expect(thrown).toHaveLength(2)
       expect(thrown[0]).toBeInstanceOf(ChannelClosedError)
       expect(thrown[1]).toBe(thrown[0])
-      expect((thrown[0] as Error).cause).toBe(end)
+      expect(thrown[0] instanceof Error && thrown[0].cause).toBe(end)
       expect({ server, page: printed }).toEqual({ server: [], page: [] })
     })
 
@@ -148,7 +148,7 @@ describe('a listen() callback that sends after its channel ended', () => {
       expect(thrown).toHaveLength(2)
       expect(thrown[0]).toBeInstanceOf(ChannelClosedError)
       expect(thrown[1]).toBe(thrown[0])
-      expect((thrown[0] as Error).cause).toBe(end)
+      expect(thrown[0] instanceof Error && thrown[0].cause).toBe(end)
       expect({ server, page: printed }).toEqual({ server: [], page: [] })
     })
   }

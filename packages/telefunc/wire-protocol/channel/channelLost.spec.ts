@@ -40,14 +40,14 @@ let telefuncUrl: string
 beforeAll(async () => {
   const telefunc = new Telefunc()
   server = createServer((req, res) => void telefunc.serve({ req, res }))
-  telefunc.installWebSocket(server)
-  const handlers = server.listeners('upgrade') as ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)[]
-  server.removeAllListeners('upgrade')
+  // Telefunc takes the upgrades this server hands on, as they reach it.
+  const telefuncUpgrades = createServer()
+  telefunc.installWebSocket(telefuncUpgrades)
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (upgrades.refuse) return void socket.destroy()
     if (upgrades.otherWireVersion) req.url = req.url?.replace(/([?&]wire=)\d+/, '$10')
     sockets.add(socket)
-    for (const handler of handlers) handler(req, socket, head)
+    telefuncUpgrades.emit('upgrade', req, socket, head)
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -95,7 +95,7 @@ test("a page that leaves ends the server's channel with ChannelPageLeftError, a 
   const end = await channel.closed
   expect(end).toBeInstanceOf(ChannelPageLeftError)
   expect(end).toBeInstanceOf(NetworkError)
-  expect(end && (end as NetworkError).isChannel).toBe(true)
+  expect(end instanceof NetworkError && end.isChannel).toBe(true)
   expect(onClose).toEqual([end])
 })
 
@@ -105,8 +105,8 @@ test('a page in a close whose connection is lost for good ends with ChannelClose
   dropWire()
   const end = await page.closed
   expect(end).toBeInstanceOf(ChannelCloseUnknownError)
-  expect(end?.cause).toBeInstanceOf(NetworkError)
-  expect((end?.cause as NetworkError).isChannel).toBe(true)
+  const cause = end?.cause
+  expect(cause instanceof NetworkError && cause.isChannel).toBe(true)
   await expect(closing).resolves.toBe(end)
 }, 10_000)
 

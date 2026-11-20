@@ -569,7 +569,9 @@ test("on a WebSocket, an aborted subscriber whose wire closed is cut for another
   channel.abort()
   // Its wire closes, as the mux closes a wire that went: the wire holds nothing more.
   page.headroom.close()
-  channel._onPeerDisconnect(page.peers[0]!, 60_000)
+  const [peer] = page.peers
+  if (peer === undefined) throw new Error('no peer')
+  channel._onPeerDisconnect(peer, 60_000)
   const release = leaveRoom(300_000)
   try {
     await Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000))
