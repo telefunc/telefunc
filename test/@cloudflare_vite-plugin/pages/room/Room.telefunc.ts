@@ -16,11 +16,14 @@ export {
   onSubscribeHeld,
   onMetaKeyOrder,
   onThrowingReceiver,
+  onJoinClosing,
+  onJoinRefused,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
+import { inboxRegistrations } from './inboxRegistrations'
 
 async function onRoomRoundTrip() {
   const id = `telefunction-${crypto.randomUUID()}`
@@ -198,4 +201,45 @@ async function onThrowingReceiver() {
   const writes = [await write(1), await write(2)]
   await attempt.unsubscribe()
   return { writes, calls }
+}
+
+/** The name of a room's authority, as `telefuncDurableObjectCall` sees it. */
+const authorityOf = (roomId: string) => `__telefunc_room__:${roomId}`
+
+const failureOf = (error: unknown) => ({
+  message: error instanceof Error ? error.message : String(error),
+  cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : null,
+})
+
+/** Joins a room that closes while its authority holds the join's inbox registration: what the join gets, and when. */
+async function onJoinClosing() {
+  const roomId = `join-closing:${crypto.randomUUID()}`
+  const room = await Room.create(roomId)
+  const reached = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  inboxRegistrations.set(authorityOf(roomId), { kind: 'hold', reached, release: release.promise })
+  const startedAt = Date.now()
+  const joining = room.join().then(
+    () => ({ joined: true, failure: null }),
+    (error: unknown) => ({ joined: false, failure: failureOf(error) }),
+  )
+  await reached.promise
+  await Room.close(roomId)
+  release.resolve()
+  const outcome = await joining
+  return { ...outcome, seconds: Math.round((Date.now() - startedAt) / 100) / 10 }
+}
+
+/** Joins a room whose authority refuses the join's inbox registration: what the join gets, and who is in the room. */
+async function onJoinRefused() {
+  const roomId = `join-refused:${crypto.randomUUID()}`
+  const room = await Room.create(roomId)
+  inboxRegistrations.set(authorityOf(roomId), { kind: 'refuse' })
+  const outcome = await room.join().then(
+    () => ({ joined: true, failure: null }),
+    (error: unknown) => ({ joined: false, failure: failureOf(error) }),
+  )
+  const members = (await Room.get(roomId)).count
+  await Room.close(roomId)
+  return { ...outcome, members }
 }

@@ -5,11 +5,14 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from 'telefunc/__internal'
 import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
+import { roomClosedError } from '../../shared/errors.js'
 assertIsNotBrowser()
 
 /** The plan that holds a lane subscription: it subscribes the lane, takes what the lane delivers, and is told as the
  *  lane ends, recovers, and goes pending or ready. */
 interface LaneSubscriptionOwner {
+  /** The room whose lanes it subscribes. */
+  readonly roomId: string
   /** One attempt at `address`, delivering to `listener`. */
   subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
@@ -106,7 +109,8 @@ class LaneSubscription {
   }
 
   /** Core rejects `ready` right after announcing `closed`: with the driver's reason as the cause where the lane failed
-   *  (Redis refused it), which its readiness rejects with; without one where the backend dropped its incarnation. */
+   *  (Redis refused it), which its readiness rejects with; without one where the backend dropped its incarnation, so
+   *  the room closed, which its readiness rejects with. */
   private ended(subscription: BackendSubscription): void {
     void this.endOnReadyFailure(subscription, this.ensurePendingReady())
   }
@@ -116,7 +120,9 @@ class LaneSubscription {
       await subscription.ready
     } catch (failure) {
       if (this.subscription !== subscription) return
-      if (failure instanceof Error && failure.cause !== undefined) pending.reject(failure)
+      pending.reject(
+        failure instanceof Error && failure.cause !== undefined ? failure : roomClosedError(this.owner.roomId),
+      )
       this.owner.onLaneEnded(this)
     }
   }

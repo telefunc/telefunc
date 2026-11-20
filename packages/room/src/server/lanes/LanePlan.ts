@@ -595,6 +595,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   }
 
   /** `LaneSubscriptionOwner`: a lane of this incarnation. */
+  get roomId(): string {
+    return this.incarnation.id
+  }
+
   subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription {
     return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, listener)
   }

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
+import { inboxRegistrations } from './pages/room/inboxRegistrations'
 
 const tf = new Telefunc({ scale: 5 })
 
@@ -59,6 +60,14 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     const object = this.ctx.id.name ?? null
     const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
     roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })
+    // Test-only: the next inbox registration a test set up for this room is held until it releases it, or refused.
+    const next = inbox && object !== null ? inboxRegistrations.get(object) : undefined
+    if (object !== null && next !== undefined) {
+      inboxRegistrations.delete(object)
+      if (next.kind === 'refuse') throw new Error('Test: the authority refused the inbox')
+      next.reached.resolve()
+      await next.release
+    }
     const result = await super.telefuncDurableObjectCall(name, method, args)
     if (inbox && roomCalls !== null) {
       await new Promise((resolve) => setTimeout(resolve, 200))

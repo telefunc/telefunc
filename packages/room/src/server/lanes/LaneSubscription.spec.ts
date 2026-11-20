@@ -61,6 +61,7 @@ function setup() {
   const subscriptions: ReturnType<typeof fakeSubscription>[] = []
   const calls = { ended: 0, recovered: 0, terminal: 0 }
   const owner = {
+    roomId: 'room',
     subscribeLane() {
       const fake = fakeSubscription()
       subscriptions.push(fake)
@@ -110,6 +111,21 @@ describe('a Room lane', () => {
     await lane.ready
     expect(subscriptions).toHaveLength(1)
     expect(calls).toEqual({ ended: 0, recovered: 1, terminal: 0 })
+  })
+
+  it('whose incarnation the backend dropped before it was ready fails its consumer at once with the closed room', async () => {
+    const { lane, subscriptions, calls } = setup()
+    lane.start()
+    subscriptions[0]?.close()
+    const failure = await Promise.race([
+      lane.ready.then(
+        () => 'ready',
+        (error: unknown) => (error instanceof Error ? error.message : error),
+      ),
+      tick().then(() => 'pending'),
+    ])
+    expect(failure).toBe('Room is closed: room')
+    expect(calls.ended).toBe(1)
   })
 
   it('whose incarnation the backend dropped tells its owner, which finds the close, and subscribes nothing again', async () => {

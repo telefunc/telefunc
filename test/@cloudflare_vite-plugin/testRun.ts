@@ -33,7 +33,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // testRoomStorage()'s receiver throws, as a test of what a store does then.
       log.logText.includes('Test: a receiver throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
-      log.logText.includes('Test: the session refused the delivery'),
+      log.logText.includes('Test: the session refused the delivery') ||
+      // testRoomJoinInbox()'s authority refuses an inbox's registration, and the subscription it ended is reported.
+      log.logText.includes('Backend subscription closed: join-refused'),
   })
   testTodolist()
   testChannel()
@@ -52,6 +54,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
   if (!isDev) testRoomJoinRoundTrip()
+  testRoomJoinInbox()
   testRoomAcrossSessions()
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
@@ -530,7 +533,7 @@ function testRoomOrderAcrossSessions() {
 }
 
 function testRoomJoinRoundTrip() {
-  test("Room: a join reaches the room's authority right after its inbox's registration, without waiting for its reply", async () => {
+  test("Room: a join reaches the room's authority once its inbox's route is stored, after its registration's reply", async () => {
     const id = crypto.randomUUID()
     const [session] = await openSessions(id, ['p1'])
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
@@ -542,13 +545,30 @@ function testRoomJoinRoundTrip() {
       }[]
       const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
       const registered = methods.indexOf('registerRoute(inbox)')
-      const joined = methods.indexOf('runOperation')
+      const replied = methods.indexOf('registerRoute(inbox) replied')
       expect(registered).greaterThan(-1)
-      expect(joined).greaterThan(registered)
-      expect(methods.indexOf('registerRoute(inbox) replied')).greaterThan(joined)
+      expect(replied).greaterThan(registered)
+      expect(methods.indexOf('runOperation')).greaterThan(replied)
     })
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
     await session!.context().close()
+  })
+}
+
+function testRoomJoinInbox() {
+  test('Room: a join into a room that closes while its inbox registers rejects at once with the closed room', async () => {
+    await openRoomPage()
+    const result = await clickRoomCard(page, 'join-closing', 90_000)
+    expect(result.joined).toBe(false)
+    expect(result.failure.message.startsWith('Room is closed: join-closing:')).toBe(true)
+    expect(result.seconds).lessThan(5)
+  })
+
+  test("Room: a join whose inbox's registration the authority refuses rejects with the refusal, and leaves no member", async () => {
+    await openRoomPage()
+    const result = await clickRoomCard(page, 'join-refused')
+    expect({ joined: result.joined, members: result.members }).deep.equal({ joined: false, members: 0 })
+    expect(result.failure.cause).toContain('Test: the authority refused the inbox')
   })
 }
 
@@ -699,13 +719,13 @@ async function openSessions(id: string, names: string[], colos: Record<string, s
   )
 }
 
-async function clickRoomCard(target: typeof page, id: string): Promise<any> {
+async function clickRoomCard(target: typeof page, id: string, timeout = 30_000): Promise<any> {
   await target.locator('#room-card-result').evaluate((element) => {
     element.textContent = ''
   })
   await target.click(`#room-${id}`)
   await target.waitForFunction(() => document.querySelector('#room-card-result')!.textContent !== '', undefined, {
-    timeout: 30_000,
+    timeout,
   })
   return JSON.parse((await target.textContent('#room-card-result'))!)
 }

@@ -142,17 +142,18 @@ describe('a Cloudflare Room lane', () => {
     expect(reasons[0]).toContain(failed)
   })
 
-  // An inbox is ready once its registration went out: a message to its member then follows it to the authority.
-  it('that is an inbox whose first route registration failed as retryable is lost until it is sent again', async () => {
+  // A member's join waits for its inbox: a private message to the member can't reach the authority before its route.
+  it('that is an inbox is ready once its route is registered, not when the registration went out, also where its first registration failed as retryable', async () => {
+    const registered = Promise.withResolvers<RegisterWire>()
     const { attempt, states } = setup(
-      { register: [transient(false), 'registered'], renew: [] },
+      { register: [transient(false), registered.promise], renew: [] },
       { kind: 'inbox', member: 'm' },
     )
-    await vi.advanceTimersByTimeAsync(0)
-    expect(attempt.state()).toBe('lost')
     await vi.advanceTimersByTimeAsync(1_000)
-    // Ready when `subscribe()` returned.
-    expect(states).toEqual(['lost', 'ready'])
+    expect(attempt.state()).not.toBe('ready')
+    registered.resolve('registered')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states).toEqual(['ready'])
   })
 
   // A retry made on a fresh stub waits until the failed stub's calls settled, which can be past the 10 s.

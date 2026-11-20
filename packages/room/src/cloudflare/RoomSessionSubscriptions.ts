@@ -67,8 +67,7 @@ class RoomSessionSubscriptions {
     const laneKey = encodeLaneKey(lane)
     const route = { roomId, inc, laneKey, sessionDoId: this.id, leaseId: crypto.randomUUID(), bucket }
     const stopDeliveries = this.member.subscribeLocal(laneRoute(inc, laneKey), receiver)
-    const readyWhenSent = lane.kind === 'inbox'
-    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries, readyWhenSent })
+    const attempt = new CloudflareRoomAttempt({ owner: this, route, stopDeliveries })
     void attempt.register()
     return attempt
   }
@@ -115,39 +114,33 @@ type CloudflareRoomAttemptOptions = {
   route: RouteInstallation
   /** Stops the lane's frames reaching its receiver. */
   stopDeliveries: () => void
-  /** What this session commits next to the room follows the registration on the same ordered stub, so a member's join
-   *  needn't wait for the reply: no private message can target it before the route is stored. */
-  readyWhenSent: boolean
 }
 
-/** Ready once the authority has durably registered this attempt's exact route, or for an inbox once the registration
- *  went out. Its first registration that fails is made again only as Cloudflare says to (`TransientRetry`), and
- *  otherwise closes it with the error. Once registered, a failed call to the authority, or a lapsed route, holds it
- *  back until its route is registered again. */
+/** Ready once the authority has durably registered this attempt's exact route: a member's join waits for its inbox's,
+ *  as a join committed after a registration that failed would let a private message reach no route. Its first
+ *  registration that fails is made again only as Cloudflare says to (`TransientRetry`), and otherwise closes it with
+ *  the error. Once registered, a failed call to the authority, or a lapsed route, holds it back until its route is
+ *  registered again. */
 class CloudflareRoomAttempt extends DriverAttempt {
   readonly route: RouteInstallation
   private readonly owner: RoomSessionSubscriptions
   private readonly stopDeliveries: () => void
-  private readonly readyWhenSent: boolean
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
   /** How its first registration is made again, until its route was registered. */
   private firstRegistration: TransientRetry | null = new TransientRetry()
 
-  constructor({ owner, route, stopDeliveries, readyWhenSent }: CloudflareRoomAttemptOptions) {
+  constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
     super()
     this.owner = owner
     this.route = route
     this.stopDeliveries = stopDeliveries
-    this.readyWhenSent = readyWhenSent
   }
 
   async register(): Promise<void> {
-    const registering = this.sendRegistration()
-    if (this.readyWhenSent) this.transition('ready')
     let registration: RegisterWire
     try {
-      registration = await registering
+      registration = await this.sendRegistration()
     } catch (error) {
       return this.firstRegistration === null ? this.lose(error) : this.failFirst(this.firstRegistration, error)
     }
@@ -189,7 +182,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
   }
 
   /** Its first registration failed: made again after a wait where Cloudflare says to, else closed with `error`, which
-   *  core reports. An inbox ready once it went out is lost meanwhile: what is sent to its member may miss it. */
+   *  core reports. */
   private failFirst(retry: TransientRetry, error: unknown): void {
     if (this.state() === 'closed') return
     const delay = retry.delayAfter(error)
@@ -197,7 +190,6 @@ class CloudflareRoomAttempt extends DriverAttempt {
       this.stop()
       return this.transition('closed', error)
     }
-    if (this.state() === 'ready') this.transition('lost')
     this.retry = setTimeout(() => {
       this.retry = null
       void this.register()
