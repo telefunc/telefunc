@@ -12,6 +12,7 @@ export {
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinWithEveryKindOfMeta,
   onJoinRoomAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
@@ -232,6 +233,19 @@ async function onGetAudit(roomId: string) {
 
 async function onJoinAsServer(roomId: string, name: string) {
   return await Room.join(roomId, { meta: { name }, identity: `user:${name}` })
+}
+
+/** A server member whose meta holds a value of each kind that freezing alone leaves changeable. */
+async function onJoinWithEveryKindOfMeta(roomId: string) {
+  const meta = {
+    name: 'Kinds',
+    tags: new Map([['role', 'host']]),
+    seen: new Set(['a']),
+    since: new Date(0),
+    bytes: new Uint8Array([1, 2]),
+    nested: { deep: { n: 1 }, list: [{ n: 1 }] },
+  }
+  return (await Room.join(roomId, { meta })).id
 }
 
 /** The room and `me`, joined in the same call. */

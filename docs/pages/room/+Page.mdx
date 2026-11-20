@@ -150,7 +150,7 @@ await me.updateMeta({ status: 'away' })               // changes only `status`
 await me.setMeta({ name: 'Alice', status: 'online' }) // replaces all of your meta
 ```
 
-Everyone in the room sees the change. The `meta` you read is read-only, and freezing doesn't lock a `Map`, `Set`, `Date` or `Uint8Array` inside it, so build a new value to change any of it, as above.
+Everyone in the room sees the change. The `meta` you read, from a participant, `snapshot()` or `getParticipants()`, is read-only all the way down, so build a new value to change any of it, as above: its objects and arrays are frozen, the methods that change a `Map`, `Set` or `Date` in it throw, and each read of a typed array in it gets a copy of its own, as bytes can't be frozen. A typed array inside a `Map` or `Set` of a meta is refused, as it can't be either.
 
 
 ## Send a message to everyone

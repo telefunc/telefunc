@@ -865,6 +865,14 @@ function testRoom() {
       expect(r.order).deep.equal([...Array.from({ length: 10 }, (_, i) => `live-${i + 1}`), 'end'])
     },
   )
+  testRoomScenario<{ snapshot: unknown; getParticipants: unknown }>(
+    'meta-read-only',
+    "room: a Map, Set, Date, typed array or nested object a page changes in a participant's meta, read from snapshot(), shows in neither the next snapshot() nor getParticipants()",
+    (r) => {
+      const unchanged = { role: 'host', seen: ['a'], since: 0, bytes: [1, 2], deep: 1, listed: 1 }
+      expect(r).deep.equal({ snapshot: unchanged, getParticipants: unchanged })
+    },
+  )
   testRoomScenario<{ held: string[] }>(
     'dm-hold',
     'room: a DM sent before listen() is held and flushed on attach',

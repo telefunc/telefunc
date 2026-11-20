@@ -17,6 +17,7 @@ import {
   onOpenAuditedRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinWithEveryKindOfMeta,
   onJoinRoomAsServer,
   onJoinRoomAsServerSelf,
   onJoinAsServerSelf,
@@ -2104,6 +2105,69 @@ function Room() {
           releaseRoom()
         },
       )}
+
+      {scenario('meta-read-only', null, "Change each kind of value in a participant's meta as read", async () => {
+        const [roomId, room] = await createRoom('meta-read-only')
+        const releaseRoom = keepReachable(room)
+        const id = await onJoinWithEveryKindOfMeta(roomId)
+        await getParticipantWhenJoined(room, id)
+        const metaOf = (participants: readonly { id: string; meta: object }[]) =>
+          participants.find((participant) => participant.id === id)?.meta
+        const at = (value: unknown, ...path: Array<string | number>): unknown =>
+          path.reduce<unknown>(
+            (v, key) => (typeof v === 'object' && v !== null ? Reflect.get(v, key) : undefined),
+            value,
+          )
+        const changes = [
+          (meta: unknown) => {
+            const tags = at(meta, 'tags')
+            if (tags instanceof Map) tags.set('role', 'changed')
+          },
+          (meta: unknown) => {
+            const seen = at(meta, 'seen')
+            if (seen instanceof Set) seen.add('changed')
+          },
+          (meta: unknown) => {
+            const since = at(meta, 'since')
+            if (since instanceof Date) since.setTime(1)
+          },
+          (meta: unknown) => {
+            const bytes = at(meta, 'bytes')
+            if (bytes instanceof Uint8Array) bytes[0] = 9
+          },
+          (meta: unknown) => {
+            const deep = at(meta, 'nested', 'deep')
+            if (typeof deep === 'object' && deep !== null) Reflect.set(deep, 'n', 9)
+          },
+          (meta: unknown) => {
+            const listed = at(meta, 'nested', 'list', 0)
+            if (typeof listed === 'object' && listed !== null) Reflect.set(listed, 'n', 9)
+          },
+        ]
+        for (const change of changes) {
+          try {
+            change(metaOf(room.snapshot().participants))
+          } catch {}
+        }
+        const read = (meta: unknown) => {
+          const [tags, seen, bytes, since] = [at(meta, 'tags'), at(meta, 'seen'), at(meta, 'bytes'), at(meta, 'since')]
+          return {
+            role: tags instanceof Map ? tags.get('role') : null,
+            seen: seen instanceof Set ? [...seen] : null,
+            since: since instanceof Date ? since.getTime() : null,
+            bytes: bytes instanceof Uint8Array ? [...bytes] : null,
+            deep: at(meta, 'nested', 'deep', 'n'),
+            listed: at(meta, 'nested', 'list', 0, 'n'),
+          }
+        }
+        setResult(
+          JSON.stringify({
+            snapshot: read(metaOf(room.snapshot().participants)),
+            getParticipants: read(metaOf(room.getParticipants())),
+          }),
+        )
+        releaseRoom()
+      })}
 
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
         const [roomId, observer] = await createRoom('dmhold')

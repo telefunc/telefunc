@@ -36,24 +36,23 @@ type RoomShield<Pub> = {
   }
 }
 
-/** Room metadata (e.g. topic). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set`, `Date` or
- *  `Uint8Array` in it, so build a new value to change any of it. */
+/** Room metadata (e.g. topic). Must be serializable. Read-only as Room hands it to you: build a new value to change
+ *  any of it. */
 type RoomMeta = Record<string, unknown>
-/** Participant metadata (e.g. name, score). Must be serializable. Read-only: freezing doesn't lock a `Map`, `Set`,
- *  `Date` or `Uint8Array` in it, so build a new value to change any of it. */
+/** Participant metadata (e.g. name, score). Must be serializable. Read-only as Room hands it to you: build a new value
+ *  to change any of it. */
 type ParticipantMeta = Record<string, unknown>
-/** A meta as Room hands it to you: its records and arrays read-only all the way down. A `Map`, `Set`, `Date` or
- *  `Uint8Array` in it keeps its type, and the rule that meta is read-only. */
-type ReadonlyMeta<T> = T extends
-  | Date
-  | Map<unknown, unknown>
-  | Set<unknown>
-  | ArrayBufferView
-  | ((...args: never[]) => unknown)
-  ? T
-  : T extends object
-    ? { readonly [K in keyof T]: ReadonlyMeta<T[K]> }
-    : T
+/** A meta as Room hands it to you: read-only all the way down. Its objects and arrays are frozen, the methods that
+ *  change a `Map`, `Set` or `Date` in it throw, and each read of a typed array in it gets a copy of its own. */
+type ReadonlyMeta<T> = T extends Map<infer K, infer V>
+  ? ReadonlyMap<ReadonlyMeta<K>, ReadonlyMeta<V>>
+  : T extends Set<infer V>
+    ? ReadonlySet<ReadonlyMeta<V>>
+    : T extends Date | ArrayBufferView | ((...args: never[]) => unknown)
+      ? T
+      : T extends object
+        ? { readonly [K in keyof T]: ReadonlyMeta<T[K]> }
+        : T
 
 /** A verified sender: a plain `{ id, meta, identity }`, or a live `RemoteParticipant`, which has the same fields. */
 type Sender<P extends ParticipantMeta = ParticipantMeta> = {
