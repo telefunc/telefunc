@@ -35,11 +35,47 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
   }
 }
 
-/** The media type a response says it carries, without its parameters (`text/event-stream; charset=utf-8` is
- *  `text/event-stream`), as the Fetch standard extracts it; null without a `Content-Type`. */
-function mediaTypeOf(response: Response): string | null {
-  const contentType = response.headers.get('content-type')
-  return contentType === null ? null : (contentType.split(';', 1)[0] ?? '').trim().toLowerCase()
+/** The media type a response carries, without its parameters (`text/event-stream; charset=utf-8` is
+ *  `text/event-stream`), as Fetch extracts it from its `Content-Type` values
+ *  (https://fetch.spec.whatwg.org/#concept-header-extract-mime-type): the last that parses and isn't `*\/*` wins. Empty
+ *  where none does. Written out, since a page can't ask the platform: Fetch types a body's `blob()` by this extraction,
+ *  but Chromium 158 types it with the header as it came. */
+function mediaTypeOf(response: Response): string {
+  let essence = ''
+  for (const value of splitHeaderValue(response.headers.get('content-type') ?? '')) {
+    const parsed = essenceOf(value)
+    if (parsed !== null && parsed !== '*/*') essence = parsed
+  }
+  return essence
+}
+
+/** A header's values: split at each comma outside a quoted string, each without the spaces and tabs around it
+ *  (https://fetch.spec.whatwg.org/#header-value-get-decode-and-split). */
+function splitHeaderValue(value: string): string[] {
+  const values: string[] = []
+  let current = ''
+  let quoted = false
+  for (let i = 0; i < value.length; i++) {
+    const char = value.charAt(i)
+    if (!quoted && char === ',') {
+      values.push(current.replace(/^[\t ]+|[\t ]+$/g, ''))
+      current = ''
+      continue
+    }
+    current += char
+    if (char === '"') quoted = !quoted
+    // Inside a quoted string, a backslash takes the character after it as it is.
+    else if (quoted && char === '\\' && i + 1 < value.length) current += value.charAt(++i)
+  }
+  values.push(current.replace(/^[\t ]+|[\t ]+$/g, ''))
+  return values
+}
+
+/** A MIME type's `type/subtype`, lowercased; null where it doesn't parse: either is empty or holds more than HTTP token
+ *  code points (https://mimesniff.spec.whatwg.org/#parse-a-mime-type, whose parameters never make it fail). */
+function essenceOf(value: string): string | null {
+  const match = /^[\t\n\r ]*([-!#$%&'*+.^_`|~0-9A-Za-z]+)\/([-!#$%&'*+.^_`|~0-9A-Za-z]+)[\t\n\r ]*(?:;|$)/.exec(value)
+  return match === null ? null : `${match[1]}/${match[2]}`.toLowerCase()
 }
 
 /** A response's status and `Content-Type`, as an error message names them. */

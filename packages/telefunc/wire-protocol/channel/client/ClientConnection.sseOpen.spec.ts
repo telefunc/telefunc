@@ -54,10 +54,12 @@ async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[]
   return frames
 }
 
-/** A wire: the event stream, with the RECONCILED for the channels the open's RECONCILE names. */
-function wire({ pingInterval = 100_000, reconnectTimeout = 60_000 } = {}): Answer {
+/** A wire: the event stream, with the RECONCILED for the channels the open's RECONCILE names. `contentType`: its
+ *  `Content-Type` values, each on a line of its own. */
+function wire({ pingInterval = 100_000, reconnectTimeout = 60_000, contentType = ['text/event-stream'] } = {}): Answer {
   return (res, ixes) => {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    if (contentType.length > 0) res.setHeader('Content-Type', contentType)
+    res.writeHead(200)
     const frame = encode.reconciled({
       sessionId: crypto.randomUUID(),
       open: ixes.map((ix) => ({ ix, lastSeq: 0 })),
@@ -203,6 +205,37 @@ test('a first open redirected to a page of HTML ends the channel at once, naming
   )
   expect(opens).toBe(1)
 })
+
+// Fetch extracts a response's media type from all its Content-Type values: the last that parses and isn't */* wins
+// (https://fetch.spec.whatwg.org/#concept-header-extract-mime-type).
+test.each([
+  { sent: ['text/plain', 'text/event-stream'] },
+  { sent: ['nonsense', 'text/event-stream'] },
+  { sent: ['text/event-stream; charset=utf-8, text/event-stream;x="a,b"'] },
+])(
+  'a first open whose Content-Type values are $sent opens, as its media type is text/event-stream',
+  async ({ sent }) => {
+    answers.push(wire({ contentType: sent }))
+    expect(await openingOf(openChannel())).toBe('opened')
+    expect(opens).toBe(1)
+  },
+)
+
+test.each([
+  { sent: ['text/event-stream', 'text/plain'], answer: '200 text/event-stream, text/plain' },
+  { sent: ['application/json'], answer: '200 application/json' },
+  { sent: [], answer: '200 and no Content-Type' },
+])(
+  'a first open whose Content-Type values are $sent ends the channel at once, naming them',
+  async ({ sent, answer }) => {
+    answers.push(wire({ contentType: sent }))
+    const opening = await openingOf(openChannel())
+    expect(opening instanceof Error && opening.message).toBe(
+      `The server answered the SSE connection with ${answer}, not an event stream`,
+    )
+    expect(opens).toBe(1)
+  },
+)
 
 // Its reconnects wait up to 0.5 s, 1 s and 2 s.
 test('during a recovery, an open answered with a page of HTML is tried again', { timeout: 15_000 }, async () => {
