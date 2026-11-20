@@ -35,7 +35,13 @@ import {
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
-import { WIRE_VERSION_REFUSAL, refusalContentType, type Refusal, type RefusalContentType } from '../../refusal.js'
+import {
+  WIRE_VERSION_REFUSAL,
+  frameRefusal,
+  refusalContentType,
+  type Refusal,
+  type RefusalContentType,
+} from '../../refusal.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400 | 409
@@ -294,11 +300,13 @@ class SseServerTransport {
       // A typed protocol-input fault is the client's: refused, quietly. Anything else is our bug — rethrow so the request
       // pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
-      // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not just this POST. Its
-      // header was read: the refusal names its channel where it is a channel's.
+      // An over-limit frame is read no further than its header, so the request's frames after it go unread: its
+      // channel ends, named by that header, and its wire closes (`refuseFrame`).
       if (err instanceof OversizeFrameError) {
-        this.closeWireOf(connId)
-        return refuse({ ...REFUSED.oversize, channel: channelOf(err.head) })
+        const channel = channelOf(err.head)
+        const wire = this.mux.getWireByConnId<SseWire>(connId)
+        if (wire) this.mux.refuseFrame(wire, 'overLimit', channel)
+        return refuse(frameRefusal('overLimit', channel))
       }
       if (isProtocolViolationError(err)) return refuse(REFUSED.unframed)
       throw err
@@ -421,10 +429,11 @@ class SseServerTransport {
       })
     } catch (err) {
       // The body ended mid-frame; this promise is fire-and-forget, so a rethrow would be unhandled.
-      // A truncation is the client hanging up (channels keep their grace); an oversize frame leaves
-      // no next frame boundary, so that wire is finished.
+      // A truncation is the client hanging up (channels keep their grace); an over-limit frame is refused as on any
+      // other request, its channel told on this stream or at its next attach.
       reportDispatchBug(err)
-      this.closeWire(wire, { permanent: err instanceof OversizeFrameError })
+      if (err instanceof OversizeFrameError) this.mux.refuseFrame(wire, 'overLimit', channelOf(err.head))
+      else this.closeWire(wire, { permanent: false })
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
       wire.resolveReady()
@@ -513,11 +522,6 @@ class SseServerTransport {
     for (const resolve of pending) resolve(wire)
   }
 
-  private closeWireOf(connId: string): void {
-    const wire = this.mux.getWireByConnId<SseWire>(connId)
-    if (wire) this.closeWire(wire, { permanent: true })
-  }
-
   private sendNow(wire: SseWire, frame: Uint8Array<ArrayBuffer>): void {
     if (!wire.closed) wire.events.send(frame)
   }
@@ -581,7 +585,6 @@ const REFUSED = {
   notReady: { kind: 'retry', reason: "The connection this request is for didn't open in time." },
   closed: { kind: 'retry', reason: 'The connection this request is for closed under it.' },
   truncated: { kind: 'retry', reason: 'The request ended in the middle of a frame.' },
-  oversize: { kind: 'frames', reason: "A frame is over the server's frame limit." },
   unframed: { kind: 'frames', reason: "The server can't read the request's frames." },
 } as const satisfies Record<string, Refusal>
 

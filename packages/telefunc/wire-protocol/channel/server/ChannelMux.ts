@@ -34,7 +34,7 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
-import type { Refusal } from '../../refusal.js'
+import { frameRefusal, type FrameRefusalCause, type Refusal } from '../../refusal.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   BarrierPayload,
@@ -93,15 +93,6 @@ type ReconcileOutcome = {
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
-}
-
-/** The refusal of a frame the server can't take: it names the frame's channel where its header says one. */
-function refusedFrame(rawFrame: Uint8Array<ArrayBuffer>, err: ProtocolViolationError): Refusal {
-  return {
-    kind: 'frames',
-    channel: channelOf(rawFrame),
-    reason: `The server can't take a frame of the page's: ${err.message}.`,
-  }
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
@@ -481,13 +472,28 @@ class ChannelMux implements UpgradeStagesOwner {
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
-      if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire, refusedFrame(rawFrame, err))
+      if (isProtocolViolationError(err)) this.refuseFrame(err.target ?? entry.wire, 'refused', channelOf(rawFrame))
       else handleTelefunctionBug(err)
       return null
     } finally {
       entry.state.recvBacklog.bytes -= byteLength
       entry.state.recvBacklog.frames--
     }
+  }
+
+  /** The server can't take a frame its page sent on `wire`, for `cause`. A frame of one of the session's channels ends
+   *  that channel, told to its page, and the wire closes as a loss: the others reattach under their session, and what
+   *  they sent that the server didn't confirm goes again. A frame of no channel the session has ends the wire for good. */
+  refuseFrame(wire: Wire, cause: FrameRefusalCause, ix: number | undefined): void {
+    const entry = this.wires.get(wire)
+    if (!entry) return
+    const refused = frameRefusal(cause, ix)
+    const sessionId = entry.transport.getSessionId(wire)
+    const handle = ix === undefined || !sessionId ? undefined : this.sessions.peekSession(sessionId)?.get(ix)
+    if (!handle) return this.terminateWire(wire, refused)
+    handle.channel._onFrameRefused(cause)
+    if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
+    entry.transport.terminateWire(wire, refused)
   }
 
   /** `wire` may be a wire other than the one that sent the offending frame — a barrier's

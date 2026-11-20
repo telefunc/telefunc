@@ -4,7 +4,8 @@ export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError, unconfirmedError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, framesRefusedError, unconfirmedError } from '../channelErrors.js'
+import { FRAME_REFUSAL } from '../../refusal.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -458,9 +459,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (record === undefined) return
     this.gate.release(record)
     this.exchange.scheduleRegisterReconcile()
-    record.channel._onEnded(
-      new NetworkError(`Channel closed: the server refused what the page sent on it: ${reason}`, true),
-    )
+    record.channel._onEnded(framesRefusedError(reason))
   }
 
   /** The server doesn't serve the page's SSE requests: with WebSocket next in the page's order, the connection goes on
@@ -882,5 +881,8 @@ function channelErrorFor(reason: number, reconnectTimeoutMs: number): Error {
     )
   }
   if (reason === ERROR_REASON.UNCONFIRMED) return unconfirmedError(reconnectTimeoutMs)
+  for (const { error, reason: sentence } of Object.values(FRAME_REFUSAL)) {
+    if (reason === error) return framesRefusedError(sentence)
+  }
   return makeBugError()
 }

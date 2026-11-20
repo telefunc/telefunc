@@ -48,7 +48,14 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError, unconfirmedError } from '../channelErrors.js'
+import {
+  ChannelClosedError,
+  ChannelOverflowError,
+  framesRefusedError,
+  replayLossError,
+  unconfirmedError,
+} from '../channelErrors.js'
+import { FRAME_REFUSAL, type FrameRefusalCause } from '../../refusal.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
@@ -836,6 +843,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._phase === 'ended') return
     this.peer = null
     this.shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), { pageGone: true })
+  }
+
+  /** @internal The server can't take a frame of the channel's that its page sent: the channel ends, told to its page
+   *  now or at its next attach, as the page's refusal tells it. */
+  _onFrameRefused(cause: FrameRefusalCause): void {
+    const { error, reason } = FRAME_REFUSAL[cause]
+    this.endWithError(error, framesRefusedError(reason))
   }
 
   /** @internal The page's wire ended for good: the channel ends with it. */

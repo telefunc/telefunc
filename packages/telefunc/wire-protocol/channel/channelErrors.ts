@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelOverflowError, replayLossError, unconfirmedError }
+export { ChannelClosedError, ChannelOverflowError, framesRefusedError, replayLossError, unconfirmedError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
 
@@ -17,6 +17,12 @@ class ChannelOverflowError extends Error {
     super(message)
     this.name = 'ChannelOverflowError'
   }
+}
+
+/** How a channel ends, on both ends, when the server can't take a frame of it the page sent: `reason` is the cause's
+ *  sentence (`FRAME_REFUSAL`). */
+function framesRefusedError(reason: string): NetworkError {
+  return new NetworkError(`Channel closed: the server refused what the page sent on it: ${reason}`, true)
 }
 
 /** How a channel ends, on both ends, when its page hasn't confirmed what the server sent on it for over

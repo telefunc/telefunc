@@ -96,6 +96,10 @@ const ERROR_REASON = {
   NOT_IN_EFFECT: 0x03 as const,
   /** Its page hasn't confirmed what the server sent on it for over `reconnectTimeout` of reconnects. */
   UNCONFIRMED: 0x04 as const,
+  /** Its page sent a frame of it over the server's frame limit (`FRAME_REFUSAL.overLimit`). */
+  FRAME_OVER_LIMIT: 0x05 as const,
+  /** Its page sent a frame of it the protocol doesn't allow (`FRAME_REFUSAL.refused`). */
+  FRAME_REFUSED: 0x06 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]

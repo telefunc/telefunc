@@ -1,5 +1,7 @@
-export { REFUSAL_MEDIA_TYPE, WIRE_VERSION_REFUSAL, refusalContentType }
-export type { Refusal, RefusalKind, RefusalContentType }
+export { FRAME_REFUSAL, REFUSAL_MEDIA_TYPE, WIRE_VERSION_REFUSAL, frameRefusal, refusalContentType }
+export type { FrameRefusalCause, Refusal, RefusalKind, RefusalContentType }
+
+import { ERROR_REASON } from './wire/frame.js'
 
 /** The media type of Telefunc's own refusals of the page's SSE requests, so that the page tells them from an answer of
  *  anything in front of the server, at the headers, from any origin (`Content-Type` is a CORS-safelisted response
@@ -24,6 +26,20 @@ const WIRE_VERSION_REFUSAL = {
   kind: 'reload',
   reason: 'The server runs another wire version: reload the page.',
 } as const satisfies Refusal
+
+/** Why the server can't take a frame of the page's: the sentence the page's error gives, and the ERROR that tells it on
+ *  the wire where no refusal does. A channel learns its end with the same error however it reaches the page. */
+const FRAME_REFUSAL = {
+  overLimit: { error: ERROR_REASON.FRAME_OVER_LIMIT, reason: "A frame is over the server's frame limit." },
+  refused: { error: ERROR_REASON.FRAME_REFUSED, reason: "The server can't take a frame of the page's." },
+} as const
+
+type FrameRefusalCause = keyof typeof FRAME_REFUSAL
+
+/** The `frames` refusal of a frame refused for `cause`, naming `channel` where its header says one. */
+function frameRefusal(cause: FrameRefusalCause, channel: number | undefined): Refusal {
+  return { kind: 'frames', channel, reason: FRAME_REFUSAL[cause].reason }
+}
 
 /** `text/vnd.telefunc.refusal; kind=frames; channel=3; reason="…"`: the reason as a quoted string (RFC 9110 section
  *  5.6.4). */
