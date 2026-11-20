@@ -143,7 +143,8 @@ class SseTransport implements UpgradeSource {
     if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide)
   }
 
-  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
+  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it.
+   *  Nothing reads the answer of its POST: the page is gone, and the server's ping deadline ends a wire it never got. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
     // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
@@ -159,6 +160,7 @@ class SseTransport implements UpgradeSource {
     return this.emitBarrierBatch(buildFrame, signal)
   }
 
+  /** The barrier goes last on the streaming upload, whose end owns its answer as for every frame on it. */
   private emitBarrierStreamRequest(buildFrame: () => OutboundFrame): BarrierEmission {
     assert(this.streamRequest.tag === 'active' && !this.flushing && this.outbox.length === 0)
     const frame = buildFrame()
@@ -168,6 +170,7 @@ class SseTransport implements UpgradeSource {
     return 'emitted'
   }
 
+  /** The barrier goes last in a POST of its own with the outbox, whatever its answer (see `sendStandalonePost`). */
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     // The outbox goes with the barrier, so it waits only for the POST out, whose frames the server must take first.
     if (this.flushing) {
@@ -466,6 +469,8 @@ class SseTransport implements UpgradeSource {
     return this.transportAbort === abortController ? this.heartbeat : null
   }
 
+  /** What the open carries: the RECONCILE and the control frames buffered behind it, never split. The open's answer
+   *  owns them: refused, the open fails (`failOpen`) and they go back to the outbox for the next wire. */
   private stageInitialBatch(): SseInitialBatchStage {
     const reconcileBatch = this.owner.stageInitialReconcileBatch()
     const initialFrames: OutboundFrame[] = []
@@ -678,8 +683,9 @@ class SseTransport implements UpgradeSource {
     return response
   }
 
-  /** For frames that cannot wait for the next flush. Failure is swallowed: its two senders are a
-   *  heartbeat ping (its own deadline notices a dead wire) and the barrier (delivered either way). */
+  /** For frames that cannot wait for the next flush. Failure is swallowed, a refusal too, and neither is split nor sent
+   *  again: its two senders are a heartbeat ping passing a POST out (its own deadline notices a wire whose PINGs don't
+   *  arrive) and the barrier (delivered either way). */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
     assert(this.transportAbort)
