@@ -408,7 +408,7 @@ class AttachExchange {
   private replayTo(record: ChannelRecord, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     record.replay.acknowledge(lastSeq)
     const missed = record.replay.getAfter(lastSeq, throughSeq)
-    if (missed !== null) return missed.map((frame) => ({ kind: 'released', frame }))
+    if (missed !== null) return missed.map(({ kind, frame }) => ({ kind, frame, released: true }))
     // One the server ended needs nothing more.
     if (record.state.tag === 'closed' && record.state.delivered) return []
     return [this.loseChannel(record)]

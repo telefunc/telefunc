@@ -30,11 +30,14 @@ import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
 
-type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
 
+/** A frame and its kind, which it keeps through every wait. `released`: it waited (held back, for headroom, or in the
+ *  replay), and goes by the sooner of its kind's deadline and the release's. */
 type OutboundFrame = {
   kind: OutboundFrameKind
   frame: Uint8Array<ArrayBuffer>
+  released?: boolean
 }
 
 interface MuxChannel {

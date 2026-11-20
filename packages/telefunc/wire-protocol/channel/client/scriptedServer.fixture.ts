@@ -40,8 +40,9 @@ class Server {
   readonly omits = new Set<number>()
   /** How many seqs behind what it got it confirms, as when the page's newest frames are still on their way. */
   lags = 0
-  /** Each data frame it got: the channel, the seq, and the wire it came on (the event streams opened by then). */
-  readonly got: { ix: number; seq: number; wire: number }[] = []
+  /** Each data frame it got: the channel, the seq, its tag, the wire it came on (the event streams opened by then), and
+   *  when. */
+  readonly got: { ix: number; seq: number; tag: number; wire: number; at: number }[] = []
   settings: Partial<ReconciledPayload> = {}
 
   /** The frames it sends down in answer to `frame`. */
@@ -59,7 +60,8 @@ class Server {
       return [...windows, ...this.messageWindows(), encode.pong()]
     }
     if (isSequencedFrame(frame)) {
-      this.got.push({ ix: frame.index, seq: frame.seq, wire: world.streams.length + FakeWebSocket.made.length })
+      const wire = world.streams.length + FakeWebSocket.made.length
+      this.got.push({ ix: frame.index, seq: frame.seq, tag: frame.tag, wire, at: performance.now() })
       if (!this.drops.has(frame.index)) this.confirmed.set(frame.index, frame.seq)
     }
     return []
@@ -163,6 +165,7 @@ function eventStream() {
     },
   })
   return {
+    openedAt: performance.now(),
     response: new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }),
     frame: (frame: Uint8Array<ArrayBuffer>) =>
       controller?.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)),

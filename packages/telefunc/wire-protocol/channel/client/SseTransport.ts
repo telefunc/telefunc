@@ -237,7 +237,8 @@ class SseTransport implements UpgradeSource {
       return
     }
     const now = performance.now()
-    const deadline = this.getFrameDeadline(frame.kind, now)
+    const own = this.getFrameDeadline(frame.kind, now)
+    const deadline = frame.released ? Math.min(own, now + SSE_RECONCILE_DEADLINE_MS) : own
     const entry = { frame: frame.frame, deadline, queuedAt: now }
     this.outbox.push(entry)
     this.outboxBytes += frame.frame.byteLength
@@ -548,10 +549,12 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
+    // One that goes before its deadline, because the outbox is full, waited for no throttle, so the next frame doesn't
+    // wait for one after it either.
+    if (this.outbox.some(({ deadline }) => deadline <= now)) this.lastPostStartedAt = now
     const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
-    this.lastPostStartedAt = now
     const wire = this.transportAbort
     try {
       const body = encodeSseRequest(
@@ -643,7 +646,9 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.headroom() <= 0) void this.flushOutbox()
+      // As in `sendFrame`: a frame whose deadline passed while the POST was out goes now, as does a whole POST.
+      const now = performance.now()
+      if (this.headroom() <= 0 || this.outbox.some(({ deadline }) => deadline <= now)) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }
@@ -737,16 +742,16 @@ class SseTransport implements UpgradeSource {
   private getFrameDeadline(kind: OutboundFrameKind, now = performance.now()): number {
     switch (kind) {
       case 'reconcile':
-      case 'released':
         return now + SSE_RECONCILE_DEADLINE_MS
+      // The app awaits the server's answer to an `ack` send: nothing that could join its POST brings that sooner.
       case 'control':
       case 'urgent-flow-control':
+      case 'ack':
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
       case 'flow-control':
       case 'acknowledgement':
-      case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
         return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
