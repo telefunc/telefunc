@@ -18,6 +18,10 @@ describe('prepare()', () => {
               "node_version": "22",
               "os": "ubuntu-latest",
             },
+            {
+              "node_version": "22.0.0",
+              "os": "ubuntu-latest",
+            },
           ],
           "jobTests": null,
           "splitFiles": false,
