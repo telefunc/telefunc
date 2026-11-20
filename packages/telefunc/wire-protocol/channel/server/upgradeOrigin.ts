@@ -1,6 +1,6 @@
 export { upgradeRefusal }
 
-import { getChannelConfig } from '../../../node/server/serverConfig.js'
+import { getAllowedOrigins } from '../../../node/server/serverConfig.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
@@ -65,7 +65,7 @@ function isServersHost(origin: URL, request: Request): boolean {
 }
 
 function isAllowed(origin: URL): boolean {
-  return getChannelConfig().allowedOrigins.some((allowed) => {
+  return getAllowedOrigins().some((allowed) => {
     if ('origin' in allowed) return allowed.origin === origin.origin
     const label = origin.hostname.slice(0, -(allowed.parent.length + 1))
     return (

@@ -9,6 +9,7 @@ export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
+export { getAllowedOrigins }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -151,7 +152,6 @@ type ChannelConfigUser = {
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
-  allowedOrigins: readonly AllowedOrigin[]
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -363,19 +363,15 @@ function getServerConfig(): ConfigResolved {
     stream: {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
-    channel: resolveChannelConfig(configState.channel, globalObject.allowedOrigins),
+    channel: resolveChannelConfig(configState.channel),
     extensions: configState.extensions,
   }
 }
 
-function resolveChannelConfig(
-  channel: ChannelConfigUser,
-  allowedOrigins: readonly AllowedOrigin[],
-): ChannelConfigResolved {
+function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
-    allowedOrigins,
     reconnectTimeout,
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
@@ -404,7 +400,13 @@ function defaultMaxMemory(): number {
 /** The settings a channel runs by, which can't change from here on. */
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
-  return resolveChannelConfig(configState.channel, globalObject.allowedOrigins)
+  return resolveChannelConfig(configState.channel)
+}
+
+/** The entries of `config.channel.allowedOrigins`, as a WebSocket upgrade reads them: reading them neither marks
+ *  `config.channel` as used nor resolves the rest of it, since a refused upgrade opens nothing. */
+function getAllowedOrigins(): readonly AllowedOrigin[] {
+  return globalObject.allowedOrigins
 }
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
@@ -628,8 +630,8 @@ function applyChannelConfig(val: unknown): void {
   }
   assertUsage(
     !globalObject.channelConfigInUse ||
-      JSON.stringify(resolveChannelConfig(next, allowedOrigins)) ===
-        JSON.stringify(resolveChannelConfig(configState.channel, globalObject.allowedOrigins)),
+      (JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)) &&
+        JSON.stringify(allowedOrigins) === JSON.stringify(globalObject.allowedOrigins)),
     "`config.channel` can't change once the server has used it, from its first channel or page connection on, as those already open would keep the old values: set it before the server handles a request",
   )
   configState.channel = next
