@@ -8,6 +8,8 @@ import { Telefunc } from './node.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
 import { hasProp } from '../utils/hasProp.js'
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 // A request with `Upgrade` that isn't Telefunc's, on a server with Telefunc's WebSocket: it gets what the app's own
 // listeners give it, as on the same server without Telefunc's WebSocket.
 
@@ -53,25 +55,30 @@ const requests = {
   "Telefunc's WebSocket handshake": [`GET /_telefunc?wire=${WIRE_VERSION} HTTP/1.1`, ...websocket()],
 }
 
-/** What the server writes to `request` within 500 ms: its status and body, null where it writes nothing; and whether
- *  the socket is still open then. */
+/** What the server writes to `request`: its status and body, null where it writes nothing within `waitMs`; and whether
+ *  the socket is still open 500 ms after the first bytes or the close. */
 async function answer(
   port: number,
   request: string[],
+  waitMs = 10_000,
 ): Promise<{ status: number | null; body: string; open: boolean }> {
   const socket = connect(port, '127.0.0.1')
   socket.on('error', () => {})
   await once(socket, 'connect')
   let received = ''
   let open = true
+  const { promise: answered, resolve } = Promise.withResolvers<void>()
   socket.on('data', (chunk: Buffer) => {
     received += chunk.toString('latin1')
+    resolve()
   })
   socket.on('close', () => {
     open = false
+    resolve()
   })
   socket.write(`${[...request, 'Host: localhost'].join('\r\n')}\r\n\r\n`)
-  await new Promise((resolve) => setTimeout(resolve, 500))
+  await Promise.race([answered, sleep(waitMs)])
+  await sleep(500)
   socket.destroy()
   if (received === '') return { status: null, body: '', open }
   const [head = '', body = ''] = received.split('\r\n\r\n')
@@ -129,9 +136,9 @@ test('beside another upgrade listener that ignores a request, the request gets w
   const beside = await server({ telefunc: true })
   beside.server.on('upgrade', () => {})
   const request = requests["a WebSocket handshake for a page the app doesn't have"]
-  const appsAnswer = await answer(alone.port, request)
+  const appsAnswer = await answer(alone.port, request, 500)
   expect(appsAnswer).toEqual({ status: null, body: '', open: true })
-  expect(await answer(beside.port, request)).toEqual(appsAnswer)
+  expect(await answer(beside.port, request, 500)).toEqual(appsAnswer)
 })
 
 test.runIf(nodeHasTheCallback)(
