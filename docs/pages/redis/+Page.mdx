@@ -76,7 +76,7 @@ try {
   if (!(err instanceof BackendError)) throw err
   console.error(err.message) // What failed and what to do, with Redis's error code, such as `NOPERM`
   err.code // 'unreachable' | 'unavailable' | 'denied' | 'failed'
-  err.outcome // 'may-have-run'
+  err.outcome // 'not-run' | 'may-have-run'
 }
 ```
 
@@ -87,7 +87,16 @@ try {
 | `'denied'` | Redis refuses it until you change its ACL, the password, or a command its operator disabled | Change that, then call again |
 | `'failed'` | Redis failed it otherwise | See the message |
 
-> `outcome` is `'may-have-run'`: the call may have taken effect, so publishing again can deliver a message twice.
+`outcome` is `'not-run'` when the call changed nothing: Redis refused it before running it, or Telefunc never sent it because the connection was down. Calling again is safe.
+
+It is `'may-have-run'` when the call may have taken effect, for example when the connection dropped before Redis answered:
+
+| Call | After `'may-have-run'` |
+|---|---|
+| `Broadcast.publish()`, `Room.publish()`, `Room.send()`, a participant's `publish()` and `send()` | Publishing again can deliver the message twice |
+| `Room.create()` | Call `Room.get()`: a second `Room.create()` rejects with `Room already exists` if the first took effect. Or use `Room.getOrCreate()` |
+| `Room.close()`, `Room.setMeta()`, `Room.updateMeta()`, `Room.removeParticipant()`, a participant's `setMeta()`, `updateMeta()` and `leave()` | Call it again: two calls end as one does |
+| `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join, at once or at its next heartbeat |
 
 While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 

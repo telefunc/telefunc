@@ -27,11 +27,6 @@ function answered(message: string, command: { name: string; args: unknown[] }): 
   return Object.assign(replyError(message), { command })
 }
 
-/** All of a rejection as Node prints it, its causes and own properties too. */
-async function printed(rejection: Promise<unknown>): Promise<string> {
-  return inspect(await rejection.catch((error: unknown) => error), { depth: 8 })
-}
-
 function installed(redis: Redis): RedisConnection {
   const connection = new RedisConnection({ redis, prefix: 'tf:' })
   connection.holdFor(redis)
@@ -100,40 +95,37 @@ describe('a client of a replica', () => {
     )
   })
 
-  it('a command a replica refuses with READONLY rejects with an error that names the replica and READONLY, and no cause', async () => {
-    const connection = installed(client())
+  it('a command a replica refuses with READONLY is an error that names the replica and READONLY, and no cause', () => {
     const readOnly = replyError("READONLY You can't write against a read only replica.")
-    const rejection = connection.send(() => Promise.reject(readOnly))
-    await expect(rejection).rejects.toThrow(
-      "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
-    )
-    await expect(rejection).rejects.toMatchObject({
+    const failure = redisFailure(readOnly, client(), 'write')
+    expect(failure).toMatchObject({
       name: 'BackendError',
+      message:
+        "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
       code: 'unavailable',
-      outcome: 'may-have-run',
+      outcome: 'not-run',
     })
-    await expect(rejection).rejects.not.toHaveProperty('cause')
+    expect(failure).not.toHaveProperty('cause')
   })
 })
 
-describe('a failure of Redis, as a command rejects with it', () => {
-  it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", async () => {
-    const connection = installed(client())
+describe('a failure of Redis, as the backend reports it', () => {
+  it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", () => {
     const refused = answered('WRONGPASS invalid username-password pair or user is disabled.', {
       name: 'auth',
       args: ['tf', 'pw-SECRET'],
     })
-    const rejection = connection.send(() => Promise.reject(refused))
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
-    )
-    const text = await printed(rejection)
+    const failure = redisFailure(refused, client(), 'write')
+    expect(failure).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    })
+    const text = inspect(failure, { depth: 8 })
     expect(text).not.toContain('pw-SECRET')
     expect(text).not.toContain('args')
   })
 
-  it("a script Redis fails: Telefunc's error, with Redis's code, and not the message it was publishing", async () => {
-    const connection = installed(client())
+  it("a script Redis fails: Telefunc's error, with Redis's code, and not the message it was publishing", () => {
     const failed = answered(
       'WRONGTYPE Operation against a key holding the wrong kind of value script: 06f79f6ab4, on @user_script:1.',
       {
@@ -141,11 +133,13 @@ describe('a failure of Redis, as a command rejects with it', () => {
         args: ['06f79f6ab4', '2', 'tf:0:seq:{k}', 'tf:0:t:{k}', Buffer.from('body-SECRET')],
       },
     )
-    const rejection = connection.send(() => Promise.reject(failed))
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
-    )
-    const text = await printed(rejection)
+    const failure = redisFailure(failed, client(), 'write')
+    expect(failure).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
+      outcome: 'may-have-run',
+    })
+    const text = inspect(failure, { depth: 8 })
     expect(text).not.toContain('body-SECRET')
     expect(text).not.toContain('args')
   })
@@ -185,7 +179,7 @@ describe('the address a failure names', () => {
         name: 'evalsha',
         args: [],
       })
-      expect(inspect(redisFailure(refused, redis))).not.toContain('SECRET')
+      expect(inspect(redisFailure(refused, redis, 'write'))).not.toContain('SECRET')
     },
   )
 
@@ -203,23 +197,25 @@ describe('the address a failure names', () => {
 })
 
 describe('a state of Redis that a later call may get past', () => {
-  it('NOREPLICAS: unavailable, saying the replicas are behind', async () => {
-    const connection = installed(client())
+  it('NOREPLICAS: unavailable, saying the replicas are behind', () => {
     const behind = replyError('NOREPLICAS Not enough good replicas to write.')
-    const rejection = connection.send(() => Promise.reject(behind))
-    await expect(rejection).rejects.toMatchObject({ name: 'BackendError', code: 'unavailable' })
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (NOREPLICAS): fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do",
-    )
+    expect(redisFailure(behind, client(), 'write')).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (NOREPLICAS): fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do",
+      code: 'unavailable',
+      outcome: 'not-run',
+    })
   })
 
-  it('OOM: unavailable, saying it may pass and what it needs if it lasts', async () => {
-    const connection = installed(client())
+  it('OOM: unavailable, saying it may pass and what it needs if it lasts', () => {
     const full = replyError("OOM command not allowed when used memory > 'maxmemory'.")
-    const rejection = connection.send(() => Promise.reject(full))
-    await expect(rejection).rejects.toMatchObject({ name: 'BackendError', code: 'unavailable' })
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (OOM): Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction",
-    )
+    expect(redisFailure(full, client(), 'write')).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (OOM): Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction",
+      code: 'unavailable',
+      outcome: 'not-run',
+    })
   })
 })

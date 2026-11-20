@@ -8,6 +8,7 @@ import {
   createSubscriberSocket,
   isCluster,
   redisFailure,
+  type Dispatch,
   type RedisClient,
   type SubscriberSocket,
 } from './ioredis.js'
@@ -33,6 +34,8 @@ class RedisConnection {
   private readonly holders = new Map<RedisClient, () => void>()
   /** The last holder ended, so `commands` was disconnected; its socket may still be closing. */
   private commandsEnded = false
+  /** The wait for the command client's next `ready`, shared by the commands made meanwhile. */
+  private readyWait: { client: RedisClient; promise: Promise<void> } | null = null
 
   constructor({ redis, prefix }: RedisConnectionOptions) {
     assertKeyPrefix(prefix)
@@ -54,13 +57,57 @@ class RedisConnection {
     return this.commands
   }
 
-  /** Sends `command` on the command client; a failure of Redis rejects as the backend reports it (`redisFailure()`). */
-  async send<Output>(command: (client: RedisClient) => Promise<Output>): Promise<Output> {
+  /** Sends `command` on the command client once it is ready; a failure of Redis rejects as the backend reports it, with
+   *  what this dispatch proves (`redisFailure()`). */
+  async send<Output>(dispatch: Dispatch, command: (client: RedisClient) => Promise<Output>): Promise<Output> {
+    const client = this.commands
     try {
-      return await command(this.commands)
+      if (client.status !== 'ready') await this.ready(client)
     } catch (error) {
-      throw redisFailure(error, this.commands)
+      // Never written: as for a read, it ran nowhere.
+      throw redisFailure(error, client, 'read')
     }
+    try {
+      return await command(client)
+    } catch (error) {
+      throw redisFailure(error, client, dispatch)
+    }
+  }
+
+  /** The client's next `ready`, one wait for every command made meanwhile; it rejects with the client's last error once
+   *  the connection closes first, which is when ioredis would fail a command it held. */
+  private ready(client: RedisClient): Promise<void> {
+    if (this.readyWait?.client === client) return this.readyWait.promise
+    if (client.status === 'end') return Promise.reject(new Error('Connection is closed.'))
+    const promise = new Promise<void>((resolve, reject) => {
+      let lastError: unknown = new Error('Connection is closed.')
+      const onError = (error: unknown) => {
+        lastError = error
+      }
+      const settle = () => {
+        client.off('error', onError)
+        client.off('ready', onReady)
+        client.off('close', onClose)
+        client.off('end', onClose)
+        if (this.readyWait?.client === client) this.readyWait = null
+      }
+      const onReady = () => {
+        settle()
+        resolve()
+      }
+      const onClose = () => {
+        settle()
+        reject(lastError)
+      }
+      client.on('error', onError)
+      client.once('ready', onReady)
+      client.once('close', onClose)
+      client.once('end', onClose)
+    })
+    this.readyWait = { client, promise }
+    // A client made with `lazyConnect` connects at its first command.
+    if (client.status === 'wait') void client.connect().catch(() => {})
+    return promise
   }
 
   /** The backend's command client lives while `redis`, or another app client installed with it, does; a client
@@ -102,7 +149,8 @@ class RedisConnection {
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    return command.parse(await this.send((client) => callDefinedCommand(client, name, keysAndArgs)), input)
+    const dispatch = command.writes ? 'write' : 'read'
+    return command.parse(await this.send(dispatch, (client) => callDefinedCommand(client, name, keysAndArgs)), input)
   }
 }
 

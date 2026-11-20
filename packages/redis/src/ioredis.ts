@@ -11,7 +11,7 @@ export {
   redisFailure,
   isRefusal,
 }
-export type { RedisClient, SubscriberSocket }
+export type { RedisClient, SubscriberSocket, Dispatch }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -21,6 +21,9 @@ import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
+
+/** A command that only reads, or one that may write. */
+type Dispatch = 'read' | 'write'
 
 /** What `RedisSubscriptions` needs of its connection. */
 type SubscriberSocket = {
@@ -138,15 +141,33 @@ const PASSING = new Set(['LOADING', 'BUSY', 'MASTERDOWN', 'TRYAGAIN', 'CLUSTERDO
 /** A command Redis doesn't know: disabled or renamed by its operator. */
 const UNKNOWN_COMMAND = /^ERR unknown (?:sub)?command /
 
-/** What the backend reports of an error ioredis gave on a connection of `redis`'s: the one place a failure of Redis
- *  becomes Telefunc's `BackendError`, which says what failed and what to do, with Redis's error code (the first word of
- *  its reply) or the connection's, and holds nothing of ioredis' error: not the command, its arguments (a password, a
- *  message's bytes) or a nested error. An error the backend's own `assert()` threw passes as it is, and so does one
- *  this made. */
-function redisFailure(error: unknown, redis: RedisClient): unknown {
+/** Redis's refusal of a command before running it: at top level; inside a script, `READONLY`, `OOM`, `MISCONF` and
+ *  `NOREPLICAS`, which Redis 7 and Valkey raise there only until the script writes; and an ACL refusal inside one of
+ *  Telefunc's write scripts, which checks each of its calls before its first write (`tf_allowed`). */
+const REFUSED_BEFORE_RUNNING =
+  /^(?:(?:NOPERM|WRONGPASS|NOAUTH|LOADING|BUSY|READONLY|OOM|MISCONF|NOREPLICAS) |ERR unknown command |ERR ACL failure in script: |ERR The user executing the script )/
+
+/** ioredis's rejection of a command it didn't write, as the backend's command client keeps no offline queue. */
+const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQueue options is false$/
+
+/** What one dispatch of a command proves when it fails: a read changes nothing, and a write didn't run only where it was
+ *  never written or Redis refused it before running it. */
+function outcomeOf(error: unknown, dispatch: Dispatch): BackendError['outcome'] {
+  if (dispatch === 'read') return 'not-run'
+  if (!(error instanceof Error)) return 'may-have-run'
+  const proof = isReplyError(error) ? REFUSED_BEFORE_RUNNING : UNSENT
+  return proof.test(error.message) ? 'not-run' : 'may-have-run'
+}
+
+/** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that reads or one that
+ *  may write: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what failed and what to do,
+ *  with Redis's error code (the first word of its reply) or the connection's, and holds nothing of ioredis' error: not
+ *  the command, its arguments (a password, a message's bytes) or a nested error. An error the backend's own `assert()`
+ *  threw passes as it is, and so does one this made. */
+function redisFailure(error: unknown, redis: RedisClient, dispatch: Dispatch): unknown {
   if (error instanceof BackendError || isBug(error)) return error
   const where = addressOf(redis)
-  const outcome = 'may-have-run'
+  const outcome = outcomeOf(error, dispatch)
   if (!isReplyError(error)) {
     const code = connectionCode(error)
     return new BackendError({
@@ -236,7 +257,8 @@ function isRefusal(error: unknown): error is BackendError {
   return error instanceof BackendError && refusals.has(error)
 }
 
-/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
+/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
+ *  it can't write yet (`RedisConnection.send()` waits for it to be ready instead), and reads masters
  *  only (Room reads are strongly consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
@@ -257,12 +279,13 @@ function createCommandClient(redis: RedisClient): RedisClient {
     ? redis.duplicate([], {
         scaleReads: 'master',
         retryDelayOnFailover: 0,
+        enableOfflineQueue: false,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
         // variable key count is the count, and refuses a batch whose keys span masters.
         enableAutoPipelining: false,
         redisOptions: { ...redis.options.redisOptions, maxRetriesPerRequest: 0, reconnectOnError: null },
       })
-    : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null })
+    : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null, enableOfflineQueue: false })
   // A connection error reaches the backend as its command's rejection.
   commands.on('error', () => {})
   return commands

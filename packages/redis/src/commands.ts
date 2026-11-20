@@ -780,11 +780,13 @@ return reply
 
 type Invocation = { keys: readonly string[]; argv: ReadonlyArray<string | Buffer> }
 
-/** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
+/** One script: whether it writes, its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
  *  first; `binaryReply` reads bulk strings as Buffers. */
 type RedisCommand<Input, Output> = {
   readonly name: string
   readonly lua: string
+  /** It may write: a failure that Redis doesn't prove came before it ran may have taken effect. */
+  readonly writes: boolean
   readonly numberOfKeys: number | null
   readonly binaryReply?: true
   invoke(prefix: string, input: Input): Invocation
@@ -863,6 +865,7 @@ type OperationOutcome =
 const REDIS_COMMANDS = {
   publish: command({
     name: 'tfPublish',
+    writes: true,
     lua: PUBLISH_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => {
@@ -884,6 +887,7 @@ const REDIS_COMMANDS = {
   }),
   headExchange: command({
     name: 'tfRoomHeadExchange',
+    writes: true,
     lua: HEAD_EXCHANGE_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, expected, next }: { roomId: string; expected: HeadExpectation; next: HeadNext }) => {
@@ -918,6 +922,7 @@ const REDIS_COMMANDS = {
   }),
   readHead: command({
     name: 'tfRoomReadHead',
+    writes: false,
     lua: READ_HEAD_LUA,
     numberOfKeys: 1,
     invoke: (prefix, roomId: string) => ({ keys: [headKey(prefix, roomId)], argv: [] }),
@@ -928,6 +933,7 @@ const REDIS_COMMANDS = {
   }),
   readCells: command({
     name: 'tfRoomReadCells',
+    writes: false,
     lua: READ_CELLS_LUA,
     numberOfKeys: 4,
     binaryReply: true,
@@ -947,6 +953,7 @@ const REDIS_COMMANDS = {
   }),
   readExpiringCells: command({
     name: 'tfRoomReadExpiringCells',
+    writes: false,
     lua: READ_EXPIRING_CELLS_LUA,
     numberOfKeys: null,
     binaryReply: true,
@@ -964,6 +971,7 @@ const REDIS_COMMANDS = {
   }),
   readCellPage: command({
     name: 'tfRoomReadCellPage',
+    writes: false,
     lua: READ_CELL_PAGE_LUA,
     numberOfKeys: 4,
     binaryReply: true,
@@ -988,6 +996,7 @@ const REDIS_COMMANDS = {
   }),
   laneStart: command({
     name: 'tfRoomLaneStart',
+    writes: false,
     lua: LANE_START_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, lane, laneKey }: RoomSubscriptionSource & { laneKey: string }) => {
@@ -1007,6 +1016,7 @@ const REDIS_COMMANDS = {
   }),
   memberLaneStarts: command({
     name: 'tfRoomMemberLaneStarts',
+    writes: false,
     lua: MEMBER_LANE_STARTS_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, member, cursor }: RoomInc & { member: string; cursor: string }) => ({
@@ -1023,6 +1033,7 @@ const REDIS_COMMANDS = {
   }),
   trackLanes: command({
     name: 'tfRoomTrackLanes',
+    writes: false,
     lua: TRACK_LANES_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, track, cursor }: RoomInc & { track: string; cursor: string }) => ({
@@ -1037,6 +1048,7 @@ const REDIS_COMMANDS = {
   }),
   laneMarks: command({
     name: 'tfRoomLaneMarks',
+    writes: false,
     lua: LANE_MARKS_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
@@ -1047,6 +1059,8 @@ const REDIS_COMMANDS = {
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
+    // It sets the key's mark where none is.
+    writes: true,
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
@@ -1058,6 +1072,7 @@ const REDIS_COMMANDS = {
   }),
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',
+    writes: true,
     lua: DROP_INCARNATION_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
@@ -1068,6 +1083,7 @@ const REDIS_COMMANDS = {
   }),
   cellsExchange: command({
     name: 'tfRoomCellsExchange',
+    writes: true,
     lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 6,
     invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
@@ -1106,6 +1122,7 @@ const REDIS_COMMANDS = {
   }),
   commit: command({
     name: 'tfRoomCommit',
+    writes: true,
     lua: COMMIT_LUA,
     numberOfKeys: Object.keys(COMMIT_KEYS).length,
     invoke: commitInvocation,
@@ -1119,6 +1136,7 @@ const REDIS_COMMANDS = {
   }),
   operation: command({
     name: 'tfRoomOperation',
+    writes: true,
     lua: OPERATION_LUA,
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, writes, reads, members, commit, kit }: OperationInput) => {
@@ -1199,6 +1217,7 @@ const REDIS_COMMANDS = {
   }),
   directoryPut: command({
     name: 'tfRoomDirectoryPut',
+    writes: true,
     lua: DIRECTORY_PUT_LUA,
     numberOfKeys: 3,
     invoke: (prefix, { roomId, incTag, checkAt, minDelayMs }: DirectoryPutInput) => ({
@@ -1209,6 +1228,7 @@ const REDIS_COMMANDS = {
   }),
   directoryDelete: command({
     name: 'tfRoomDirectoryDelete',
+    writes: true,
     lua: DIRECTORY_DELETE_LUA,
     numberOfKeys: 3,
     invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
@@ -1219,6 +1239,7 @@ const REDIS_COMMANDS = {
   }),
   directoryDue: command({
     name: 'tfRoomDirectoryDue',
+    writes: false,
     lua: DIRECTORY_DUE_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { limit }: { limit: number }) => ({

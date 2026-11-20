@@ -414,7 +414,7 @@ class RedisSubscriptions {
 
   /** What the backend reports of an error of the subscriber connection (`redisFailure()`). */
   private failure(error: unknown): unknown {
-    return redisFailure(error, this.connection.client)
+    return redisFailure(error, this.connection.client, 'read')
   }
 
   private attempts(): Set<RedisAttempt> {
