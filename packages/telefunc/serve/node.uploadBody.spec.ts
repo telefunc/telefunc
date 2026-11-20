@@ -143,7 +143,7 @@ async function blobRead(): Promise<void> {
 }
 
 /** Sends a POST of `kind` with `start` from a socket of the test's own to the server that gives Telefunc `via`; resolves
- *  once Telefunc read the first bytes. */
+ *  once Telefunc read the first bytes. `answered` is the status code the server answers with, from its first bytes. */
 async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: keyof typeof servers = 'Node request') {
   const port = ports.get(via)
   if (port === undefined) throw new Error('no server')
@@ -155,6 +155,9 @@ async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: key
   })
   const socket = connect(port, '127.0.0.1')
   socket.on('error', () => {})
+  const answered = new Promise<number>((resolve) => {
+    socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ', 2)[1])))
+  })
   // Reads (and drops) what the server answers, so the socket sees the server's end and closes.
   socket.resume()
   await once(socket, 'connect')
@@ -164,7 +167,7 @@ async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: key
   socket.write(start)
   const req = await arrived
   await vi.waitFor(() => expect(req.readableDidRead).toBe(true))
-  return { socket, req }
+  return { socket, req, answered }
 }
 
 /** A Fetch request of `kind` whose body gives `start`, then fails with `error` once `when` resolves. */
@@ -265,6 +268,8 @@ test("an SSE upload whose Fetch body an app's transform fails after its wire ope
   const { printed, bugs } = recordErrors()
   const appError = new Error('app body transform failed')
   const response = await telefunc.serve({ request: failingRequest('sse', sseStart, appError, Promise.resolve()) })
+  // Its wire opened, so Telefunc took the request and read its body's metadata: a request it refused prints nothing too.
+  expect(response?.status).toBe(200)
   // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
   await new Promise((resolve) => setTimeout(resolve, 500))
   expect(printed).toEqual([])
@@ -304,7 +309,9 @@ test.each(vias)(
   'an SSE upload whose client leaves after its wire opened prints nothing (Telefunc given a %s)',
   async (via) => {
     const { printed } = recordErrors()
-    const { socket } = await startUpload('sse', sseStart, via)
+    const { socket, answered } = await startUpload('sse', sseStart, via)
+    // Its wire opened, so Telefunc took the request and read its body's metadata: a request it refused prints nothing too.
+    expect(await answered).toBe(200)
     socket.destroy()
     await closed(socket)
     // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
