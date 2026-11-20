@@ -321,7 +321,7 @@ class SseTransport implements UpgradeSource {
       return null
     }
     // A login page or an app's HTML fallback, also behind a followed redirect, is no event stream.
-    if (answer.tag === 'refused') {
+    if (answer.tag === 'refused' || answer.tag === 'tooLarge') {
       this.failOpen(stage, abortController, {
         refusal: response.ok
           ? `The server answered the SSE connection with ${answer.answer}, not an event stream`
@@ -378,7 +378,7 @@ class SseTransport implements UpgradeSource {
     const answer = await ended
     if (this.streamRequest.tag !== 'active' || this.streamRequest.body !== body) return
     // Something in front refuses a body that never ends (a limit on its size): the next wires send in batch POSTs.
-    if (answer?.tag === 'refused') {
+    if (answer?.tag === 'refused' || answer?.tag === 'tooLarge') {
       this.closeStreamRequest()
       this.streamRequest = { tag: 'failed' }
     }
@@ -541,16 +541,16 @@ class SseTransport implements UpgradeSource {
         this.requeue(queued.filter(isWindowRefresh))
         return
       }
-      if (answer?.tag === 'refused') {
-        if (answer.status === 413) {
-          this.postLimit = Math.floor(body.size / 2)
-          this.postBytes = Math.min(this.postBytes, this.postLimit)
-          // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
-          if (queued.length > 1) {
-            this.requeue(queued)
-            return
-          }
+      if (answer?.tag === 'tooLarge') {
+        this.postLimit = Math.floor(body.size / 2)
+        this.postBytes = Math.min(this.postBytes, this.postLimit)
+        // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
+        if (queued.length > 1) {
+          this.requeue(queued)
+          return
         }
+      }
+      if (answer?.tag === 'refused' || answer?.tag === 'tooLarge') {
         // Every channel whose data it refused ended: the wire goes on without that data.
         if (
           !this.owner.onTransportRefused(

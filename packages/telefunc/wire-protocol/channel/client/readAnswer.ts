@@ -8,6 +8,9 @@ type HttpAnswer =
   | { tag: 'expected' }
   /** The server runs another `WIRE_VERSION`. */
   | { tag: 'otherWireVersion' }
+  /** A 413: something in front refused the request for its size (a proxy's limit on a request's body), so a smaller one
+   *  may pass. `answer` and `retryAfterMs` as for `refused` (RFC 9110, section 15.5.14: a 413 may ask to wait). */
+  | { tag: 'tooLarge'; answer: string; retryAfterMs: number }
   /** Anything else: `answer` names its status and type, `retryAfterMs` is the wait its `Retry-After` asks for. */
   | { tag: 'refused'; status: number; answer: string; retryAfterMs: number }
 
@@ -21,6 +24,9 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
       ? response.ok
       : response.status === 200 && mediaTypeOf(response) === 'text/event-stream' && response.body !== null
   if (expected) return { tag: 'expected' }
+  if (response.status === 413) {
+    return { tag: 'tooLarge', answer: describeAnswer(response), retryAfterMs: retryAfterMsOf(response) }
+  }
   return {
     tag: 'refused',
     status: response.status,
