@@ -125,3 +125,40 @@ test("a `frames` refusal of a frame over the server's limit ends its channel onc
   expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(400)
   expect(refused.ended[0]?.err?.message).toMatch(/over the server's frame limit/)
 })
+
+/** Opens `count` channels over SSE with the streaming upload taken, and waits till their wire carries them. */
+async function openWithUpload(count: number) {
+  serveSse()
+  world.uploads = true
+  const opened = Array.from({ length: count }, () => openChannel(['sse']))
+  await advance(SSE_RECONCILE_DEADLINE_MS + 500)
+  expect(world.uploadPosts).toBe(1)
+  return (i: number) => defined(opened[i], `channel ${i}`)
+}
+
+test('a `retry` answer to the streaming upload is a loss that keeps it: the next wire uploads again, and the data arrives', async () => {
+  const page = (await openWithUpload(1))(0)
+  world.uploadAnswers = [{ status: 400, contentType: [marked('kind=retry; reason="No wire."')] }]
+  void page.channel.send('on the upload').catch(() => {})
+  await advance(5_000)
+  expect(page.ended).toEqual([])
+  expect(world.uploadPosts).toBe(2)
+  expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(1)
+})
+
+test.each([
+  ['`reload`', marked('kind=reload; reason="Another wire version."'), /server was updated since this page loaded/],
+  [
+    '`route`',
+    marked('kind=route; reason="Not served so."'),
+    /The server refused the page's SSE requests: Not served so\./,
+  ],
+  ['`frames`, naming the channel', marked('kind=frames; channel=0; reason="Unreadable."'), /Unreadable\./],
+])('a %s answer to the streaming upload ends as on the batch path', async (_kind, contentType, told) => {
+  const page = (await openWithUpload(1))(0)
+  world.uploadAnswers = [{ status: 400, contentType: [contentType] }]
+  void page.channel.send('on the upload').catch(() => {})
+  await advance(5_000)
+  expect(page.ended).toHaveLength(1)
+  expect(page.ended[0]?.err?.message).toMatch(told)
+})

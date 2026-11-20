@@ -239,6 +239,13 @@ type World = {
   controlAnswers: PostAnswer[]
   /** How each open is answered before it opens, in order; an event stream once none is left. */
   openAnswers: { status: number; contentType: string[] }[]
+  /** While set, a streaming upload is taken: acknowledged on the latest event stream, its frames answered as a batch
+   *  POST's are. Unset, it fails to fetch, and the page sends in batch POSTs. */
+  uploads: boolean
+  /** How each streaming upload is answered once it carried data, in order; once none is left, it is read till it ends. */
+  uploadAnswers: { status: number; contentType: string[] }[]
+  /** How many streaming uploads the page sent. */
+  uploadPosts: number
   postLimit: number
   holdOpens: boolean
   heldOpens: (() => void)[]
@@ -259,6 +266,9 @@ const world: World = {
   /** How the next batch POSTs that carry no data are answered, one each; once they run out, `taken`. */
   controlAnswers: [],
   openAnswers: [],
+  uploads: false,
+  uploadAnswers: [],
+  uploadPosts: 0,
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
   /** While set, the server answers no open, and writes nothing on its stream: each waits in `heldOpens`, which a test
@@ -277,6 +287,9 @@ const world: World = {
 /** The page's `fetch` against the server over SSE: an open gets an event stream, any other POST its frames' answer. */
 function serveSse(): void {
   vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+    if (world.uploads && String(url).startsWith(world.telefuncUrl) && init.body instanceof ReadableStream) {
+      return takeUpload(init.body)
+    }
     // No streaming upload: the page's frames go in batch POSTs, which the server reads.
     if (!String(url).startsWith(world.telefuncUrl) || !(init.body instanceof Blob))
       throw new TypeError('Failed to fetch')
@@ -347,6 +360,44 @@ function serveSse(): void {
   })
 }
 
+/** A streaming upload, acknowledged on its wire's event stream (each wire opens one of each): its frames are answered as they come, as a batch
+ *  POST's are, until it carried data while an answer waits in `uploadAnswers`, or its body ended. */
+async function takeUpload(body: ReadableStream<Uint8Array>): Promise<Response> {
+  const wire = ++world.uploadPosts
+  // The page sends a wire's open and its upload together: the upload is acknowledged on its wire's event stream, once
+  // the open made it.
+  while (world.streams.length < wire) await new Promise((resolve) => setTimeout(resolve, 1))
+  const stream = world.streams[wire - 1]
+  stream?.frame(encode.streamRequestOpenAck())
+  const reader = body.getReader()
+  let pending = new Uint8Array(0)
+  let metadataRead = false
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return new Response(null)
+    const joined = new Uint8Array(pending.length + value.length)
+    joined.set(pending)
+    joined.set(value, pending.length)
+    pending = joined
+    while (pending.length >= 4 && pending.length >= 4 + decodeU32(pending.subarray(0, 4))) {
+      const len = decodeU32(pending.subarray(0, 4))
+      const raw = pending.slice(4, 4 + len)
+      pending = pending.slice(4 + len)
+      if (!metadataRead) {
+        metadataRead = true
+        continue
+      }
+      const frame = decode(raw)
+      const refusal = isSequencedFrame(frame) ? world.uploadAnswers.shift() : undefined
+      if (refusal !== undefined) {
+        void reader.cancel().catch(() => {})
+        return typedResponse(refusal)
+      }
+      for (const down of world.server.answer(frame)) stream?.frame(down)
+    }
+  }
+}
+
 /** A channel the page opens over `transports`, and when and how it ended. */
 function openChannel(transports: ('sse' | 'ws')[]) {
   const channel = new ClientChannel({
@@ -394,6 +445,9 @@ function useScriptedServer(): void {
     world.posts = []
     world.openAnswers = []
     world.opens = 0
+    world.uploads = false
+    world.uploadAnswers = []
+    world.uploadPosts = 0
     world.holdOpens = false
     world.heldOpens = []
     world.holdReady = false
