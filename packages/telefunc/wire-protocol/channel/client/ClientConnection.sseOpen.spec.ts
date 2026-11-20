@@ -9,7 +9,7 @@ import { once } from 'node:events'
 import { ClientChannel } from './ClientChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { decodeU32 } from '../../wire/envelope.js'
+import { decodeU32, parseSseRequestMetadata } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
@@ -39,7 +39,10 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[] | null> {
   const chunks: Buffer[] = []
   try {
-    for await (const chunk of req) chunks.push(chunk as Buffer)
+    for await (const chunk of req) {
+      if (!Buffer.isBuffer(chunk)) throw new Error('Expected the request body in Buffers')
+      chunks.push(chunk)
+    }
   } catch (err) {
     if (req.readableAborted) return null
     throw err
@@ -107,8 +110,8 @@ beforeEach(async () => {
     }
     void framesOf(req).then((frames) => {
       if (frames === null) return
-      const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
-      if (!metadata.streamResponse) {
+      const metadata = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(frames[0])))
+      if (metadata.kind !== 'streamResponse') {
         posts.push({ bytes, status: 200, wire: opens })
         for (const raw of frames.slice(1)) {
           if (raw[0] === TAG.TEXT || raw[0] === TAG.BINARY) received.push({ tag: raw[0], bytes: raw.byteLength })
@@ -148,10 +151,16 @@ function openChannel(connectionKey = crypto.randomUUID()) {
   return channel
 }
 
+/** `value`'s message, which the test expects of an Error. */
+function messageOf(value: unknown): string {
+  if (!(value instanceof Error)) throw new Error(`Expected an Error, got ${String(value)}`)
+  return value.message
+}
+
 /** What the channel's opening came to: its error, or `'opened'`. */
 function openingOf(channel: ClientChannel) {
   return channel.opened.then(
-    () => 'opened' as const,
+    (): 'opened' => 'opened',
     (err: unknown) => err,
   )
 }
@@ -159,7 +168,7 @@ function openingOf(channel: ClientChannel) {
 /** What the channel's end came to: its error, or `'closed'`. */
 function closingOf(channel: ClientChannel) {
   return channel.closed.then(
-    () => 'closed' as const,
+    (): 'closed' => 'closed',
     (err: unknown) => err,
   )
 }
@@ -190,9 +199,7 @@ test('a first open answered with a page of HTML ends the channel at once, naming
   const channel = openChannel()
   const opening = await openingOf(channel)
   expect(opening).toBeInstanceOf(Error)
-  expect((opening as Error).message).toBe(
-    'The server answered the SSE connection with 200 text/html, not an event stream',
-  )
+  expect(messageOf(opening)).toBe('The server answered the SSE connection with 200 text/html, not an event stream')
   expect(opens).toBe(1)
 })
 
@@ -200,9 +207,7 @@ test('a first open redirected to a page of HTML ends the channel at once, naming
   answers.push((res) => res.writeHead(302, { Location: '/login' }).end())
   const channel = openChannel()
   const opening = await openingOf(channel)
-  expect((opening as Error).message).toBe(
-    'The server answered the SSE connection with 200 text/html, not an event stream',
-  )
+  expect(messageOf(opening)).toBe('The server answered the SSE connection with 200 text/html, not an event stream')
   expect(opens).toBe(1)
 })
 
@@ -252,7 +257,7 @@ test('a first open refused ends the channel at once, naming the status that refu
   const notFound = await openingOf(openChannel())
   answers.push(html(502))
   const badGateway = await openingOf(openChannel())
-  expect([(notFound as Error).message, (badGateway as Error).message]).toEqual([
+  expect([messageOf(notFound), messageOf(badGateway)]).toEqual([
     'Server rejected SSE connection with 404 text/html',
     'Server rejected SSE connection with 502 text/html',
   ])
@@ -326,7 +331,7 @@ test.each([
     const closing = await closingOf(channel)
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
     expect(closing).toBeInstanceOf(Error)
-    expect((closing as Error).message).toBe(message)
+    expect(messageOf(closing)).toBe(message)
   },
 )
 
@@ -354,7 +359,7 @@ test(
     expect(await Promise.all([openingOf(channel), openingOf(other)])).toEqual(['opened', 'opened'])
     void channel.sendBinary(new Uint8Array(2 * 1024 * 1024)).catch(() => {})
     const closing = await closingOf(channel)
-    expect((closing as Error).message).toBe(
+    expect(messageOf(closing)).toBe(
       "Channel closed: what the page sent on it was refused with 413 text/html, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.",
     )
     // The message alone is refused once on each wire; a POST that carried it with another frame was refused before

@@ -18,7 +18,7 @@ export type { Script, PostAnswer }
 import { afterEach, beforeEach, vi } from 'vitest'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { decodeU32 } from '../../wire/envelope.js'
+import { decodeU32, parseSseRequestMetadata, type SseRequestMetadata } from '../../wire/envelope.js'
 import { decode, encode, isOneFrame, isSequencedFrame, messageFrames, type DecodedFrame } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { reconnectWindowOf } from '../../wire/pingDeadline.js'
@@ -173,17 +173,22 @@ function eventStream() {
   }
 }
 
-/** The frames of an SSE POST's body, its metadata first. */
-async function postFrames(body: Blob): Promise<{ metadata: { streamResponse?: boolean }; frames: DecodedFrame[] }> {
+/** The frames of an SSE POST's body, its metadata first, read as the server reads them: a body that ends inside a
+ *  frame or its length is no request the server takes. */
+async function postFrames(body: Blob): Promise<{ metadata: SseRequestMetadata; frames: DecodedFrame[] }> {
   const buf = new Uint8Array(await body.arrayBuffer())
   const raw: Uint8Array<ArrayBuffer>[] = []
-  for (let off = 0; off + 4 <= buf.length; ) {
+  let off = 0
+  while (off < buf.length) {
+    if (off + 4 > buf.length) throw new Error('The POST body ends inside a frame length')
     const len = decodeU32(buf.subarray(off, off + 4))
+    if (off + 4 + len > buf.length) throw new Error('The POST body ends inside a frame')
     raw.push(buf.slice(off + 4, off + 4 + len))
     off += 4 + len
   }
   const [head, ...rest] = raw
-  return { metadata: JSON.parse(new TextDecoder().decode(head)), frames: rest.map((frame) => decode(frame)) }
+  const metadata = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(head)))
+  return { metadata, frames: rest.map((frame) => decode(frame)) }
 }
 
 /** How the server's side answers a batch POST: at once with a 200 (`taken`), after `ms` with a 200 (`slow`), with no
@@ -196,23 +201,35 @@ type PostAnswer =
   | { tag: 'refused'; status: number; pongAfterMs?: number }
 
 /** The test's server and what it saw; `useScriptedServer` makes a new one for each test. */
-const world = {
+type World = {
+  server: Server
+  telefuncUrl: string
+  streams: ReturnType<typeof eventStream>[]
+  postAnswers: PostAnswer[]
+  controlAnswers: PostAnswer[]
+  postLimit: number
+  holdReady: boolean
+  heldReady: (() => void)[]
+  posts: { bytes: number; status: number; data: boolean; wire: number }[]
+}
+
+const world: World = {
   server: new Server(),
   telefuncUrl: '',
   /** The page's SSE event streams, the latest last. */
-  streams: [] as ReturnType<typeof eventStream>[],
+  streams: [],
   /** How the next batch POSTs that carry data are answered, one each; once they run out, `taken`. */
-  postAnswers: [] as PostAnswer[],
+  postAnswers: [],
   /** How the next batch POSTs that carry no data are answered, one each; once they run out, `taken`. */
-  controlAnswers: [] as PostAnswer[],
+  controlAnswers: [],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
   /** While set, the server's READY to a WebSocket's PREPARE waits in `heldReady`, which a test calls to send it: the
    *  page stays on SSE meanwhile. */
   holdReady: false,
-  heldReady: [] as (() => void)[],
+  heldReady: [],
   /** Each batch POST: its body's size, its status (0 for none), whether it carried data, and the wire it went on. */
-  posts: [] as { bytes: number; status: number; data: boolean; wire: number }[],
+  posts: [],
 }
 
 /** The page's `fetch` against the server over SSE: an open gets an event stream, any other POST its frames' answer. */
@@ -224,7 +241,7 @@ function serveSse(): void {
     const bytes = init.body.size
     const { metadata, frames } = await postFrames(init.body)
     const { server } = world
-    if (metadata.streamResponse) {
+    if (metadata.kind === 'streamResponse') {
       const stream = eventStream()
       world.streams.push(stream)
       for (const frame of frames) for (const down of server.answer(frame)) stream.frame(down)
