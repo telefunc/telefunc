@@ -18,7 +18,7 @@ function Timestamp({ children }: { children: TimestampType }) {
   return (
     <span
       style={{
-        background: 'white',
+        background: 'var(--dp-color-surface-elevated)',
         fontSize: '1.13em',
         fontWeight: 'bold',
         fontFamily: 'monospace',

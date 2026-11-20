@@ -35,12 +35,6 @@ const headings = [
     title: 'Learn',
     titleIcon: iconEyes,
     color: '#bd55dd',
-    titleIconStyle: {
-      width: 30,
-      height: 30,
-      position: 'relative',
-      top: -2,
-    },
   },
   {
     level: 2,
