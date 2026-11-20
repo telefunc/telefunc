@@ -1,6 +1,9 @@
+import type { config as ClientConfig } from '../client/clientConfig.js'
+
 // no-op
-export const telefuncConfig = {}
-export const config = {}
+/** The client's config, which code shared with the client writes to on the server too: here, writes do nothing. */
+const config: typeof ClientConfig = { stream: {}, channel: {}, extensions: [] }
+export { config, config as telefuncConfig }
 export const onAbort = () => {}
 export const abort = () => {}
 export const close = () => {}
