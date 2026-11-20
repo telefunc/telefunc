@@ -30,10 +30,9 @@ class ReplayBuffer {
     return this.acknowledgedSeq
   }
 
-  /** A wire was lost at `at`, after the `reconciles`th accepted RECONCILED: what the peer hasn't acknowledged is dated
-   *  from then, unless it is already. */
-  dateStall(at: number, reconciles: number): void {
-    if (this.stallDate === null && this.acknowledgedSeq < this.issuedSeq) this.stallDate = { since: at, reconciles }
+  /** A try was lost at `at`: what the peer hasn't acknowledged is dated from then, unless it is already. */
+  dateStall(at: number): void {
+    if (this.stallDate === null && this.acknowledgedSeq < this.issuedSeq) this.stallDate = { since: at }
   }
 
   /** The last seq handed out (see `nextSeq`). */
@@ -97,9 +96,9 @@ class ReplayBuffer {
   }
 }
 
-/** When a channel's unacknowledged data was dated, and how many RECONCILEDs the page had accepted then: one accepted
- *  after it shows a server that could have acknowledged it. */
-type Stall = { since: number; reconciles: number }
+/** When a channel's unacknowledged data was dated: a frame the page read from the server after it shows a server that
+ *  could have acknowledged it. */
+type Stall = { since: number }
 
 const REPLAY_KINDS: readonly ReplayKind[] = ['text', 'binary', 'closing']
 

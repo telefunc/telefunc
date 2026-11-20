@@ -162,9 +162,11 @@ class FakeWebSocket {
   }
 }
 
-/** An SSE event stream the test writes the server's frames to, and ends as a server or a proxy that drops it does. */
+/** An SSE event stream the test writes the server's frames to, and ends as a server or a proxy that drops it does. One
+ *  `held` carries nothing, as a server that hasn't answered the open writes nothing on it, till `answer`. */
 function eventStream() {
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  let held = false
   const stream = new ReadableStream<Uint8Array>({
     start: (c) => {
       controller = c
@@ -176,8 +178,15 @@ function eventStream() {
   return {
     openedAt: performance.now(),
     response: new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }),
-    frame: (frame: Uint8Array<ArrayBuffer>) =>
-      controller?.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)),
+    frame: (frame: Uint8Array<ArrayBuffer>) => {
+      if (!held) controller?.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+    },
+    hold: () => {
+      held = true
+    },
+    answer: () => {
+      held = false
+    },
     end: () => {
       controller?.close()
       controller = null
@@ -238,7 +247,8 @@ const world: World = {
   controlAnswers: [],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
-  /** While set, the server answers no open: each waits in `heldOpens`, which a test calls to answer it. */
+  /** While set, the server answers no open, and writes nothing on its stream: each waits in `heldOpens`, which a test
+   *  calls to answer it. */
   holdOpens: false,
   heldOpens: [],
   /** While set, the server's READY to a WebSocket's PREPARE waits in `heldReady`, which a test calls to send it: the
@@ -262,10 +272,13 @@ function serveSse(): void {
       const stream = eventStream()
       world.streams.push(stream)
       const answer = () => {
+        stream.answer()
         for (const frame of frames) for (const down of server.answer(frame)) stream.frame(down)
       }
-      if (world.holdOpens) world.heldOpens.push(answer)
-      else answer()
+      if (world.holdOpens) {
+        stream.hold()
+        world.heldOpens.push(answer)
+      } else answer()
       return stream.response
     }
     const data = frames.some((frame) => isSequencedFrame(frame))

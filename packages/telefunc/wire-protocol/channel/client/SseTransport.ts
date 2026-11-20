@@ -103,6 +103,9 @@ class SseTransport implements UpgradeSource {
   private partwayAt = Number.NEGATIVE_INFINITY
   private readonly abandonedControllers = new WeakSet<AbortController>()
   private outbox: OutboxEntry[] = []
+  /** Stalled channels' data whose POST failed, waiting out `stalledTimer` (`holdStalled`). */
+  private stalledHeld: OutboxEntry[] = []
+  private stalledTimer: ReturnType<typeof setTimeout> | null = null
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
@@ -188,6 +191,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     const queued = this.takeOutbox().map((entry) => entry.frame)
+    this.dropStalled()
     queued.push(buildFrame().frame)
     // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
     // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
@@ -247,6 +251,13 @@ class SseTransport implements UpgradeSource {
     const own = this.getFrameDeadline(frame.kind, now)
     const deadline = frame.released ? Math.min(own, now + SSE_RECONCILE_DEADLINE_MS) : own
     const entry = { frame: frame.frame, deadline, queuedAt: now }
+    if (this.stalledHeld.length > 0 && isSequenced(entry)) {
+      const ix = readU16(entry.frame, 1)
+      if (this.stalledHeld.some((held) => isDataOf(held, ix))) {
+        this.stalledHeld.push(entry)
+        return
+      }
+    }
     this.outbox.push(entry)
     this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
@@ -619,6 +630,17 @@ class SseTransport implements UpgradeSource {
           return
         }
       }
+      // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on.
+      const cause =
+        answer === null
+          ? 'The request carrying it got no answer'
+          : answer.tag === 'refused' && asksLater(answer.status)
+            ? `The server refused what the page sent with ${answer.answer}`
+            : null
+      if (cause !== null && this.carriesStalledOnly(queued)) {
+        this.holdStalled(queued, cause)
+        return
+      }
       this.requeue(queued)
       this.abandonActiveTransport()
       this.owner.onTransportClosed(this, endOf(answer))
@@ -629,6 +651,50 @@ class SseTransport implements UpgradeSource {
       else this.flushNextOrDrain()
       this.owner.onTransportHeadroom(this)
     }
+  }
+
+  /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */
+  private carriesStalledOnly(queued: OutboxEntry[]): boolean {
+    const stalled = this.owner.stalledChannels
+    const data = queued.filter(isSequenced)
+    return data.length > 0 && data.every(({ frame }) => stalled.has(readU16(frame, 1)))
+  }
+
+  /** The data `queued` carried waits, out of the outbox, behind one wait on the stalled schedule for the whole wire, and
+   *  goes again then if the server still lacks it; what else it carried goes on at once. That try is those channels'
+   *  loss (`onStalledPostLost`). */
+  private holdStalled(queued: OutboxEntry[], cause: string): void {
+    this.requeue(queued.filter((entry) => !isSequenced(entry)))
+    const wait = this.owner.onStalledPostLost(cause)
+    const held = queued.filter((entry) => isSequenced(entry) && this.owner.stillOwed(entry.frame))
+    // What its channels sent since, queued or held, waits behind it: the server drops a seq below one it has.
+    const ixs = new Set(held.map(({ frame }) => readU16(frame, 1)))
+    const later = this.outbox.filter((entry) => isSequenced(entry) && ixs.has(readU16(entry.frame, 1)))
+    if (later.length > 0) {
+      this.outbox = this.outbox.filter((entry) => !later.includes(entry))
+      this.outboxBytes -= bytesOf(later)
+    }
+    this.stalledHeld = held.concat(this.stalledHeld, later)
+    if (this.stalledTimer === null && this.stalledHeld.length > 0)
+      this.stalledTimer = setTimeout(() => this.releaseStalled(), wait)
+  }
+
+  /** The stalled wait ended: what the server still lacks goes back to the head of the outbox. */
+  private releaseStalled(): void {
+    this.stalledTimer = null
+    const held = this.stalledHeld.filter((entry) => this.owner.stillOwed(entry.frame))
+    this.stalledHeld = []
+    this.requeue(held)
+    if (this.outbox.length > 0) void this.flushOutbox()
+    else this.flushNextOrDrain()
+  }
+
+  /** The held data goes with its wire, or with the barrier that leaves it: the next wire's replay sends what the server
+   *  lacks. */
+  private dropStalled(): void {
+    if (this.stalledTimer) clearTimeout(this.stalledTimer)
+    this.stalledTimer = null
+    this.stalledHeld = []
   }
 
   /** Sizes next POSTs to what this one's rate carries in `SSE_POST_TARGET_MS`, unless it was quicker and not full. */
@@ -675,7 +741,7 @@ class SseTransport implements UpgradeSource {
       else this.scheduleFlush()
       return
     }
-    this.settleDrained()
+    if (this.stalledHeld.length === 0) this.settleDrained()
   }
 
   /** A PING still held at its deadline goes alone: the next POST would bring it past the server's ping deadline. */
@@ -794,6 +860,7 @@ class SseTransport implements UpgradeSource {
   }
 
   dropQueued(ix: number): void {
+    this.stalledHeld = this.stalledHeld.filter((entry) => !isDataOf(entry, ix))
     const dropped = this.outbox.filter((entry) => isDataOf(entry, ix))
     if (dropped.length === 0) return
     this.outbox = this.outbox.filter((entry) => !isDataOf(entry, ix))
@@ -808,6 +875,7 @@ class SseTransport implements UpgradeSource {
     this.connecting = false
     this.openPending = false
     if (this.streamRequest.tag === 'active') this.streamRequest = { tag: 'idle' }
+    this.dropStalled()
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)
@@ -843,7 +911,8 @@ class SseTransport implements UpgradeSource {
   }
 
   drained(): Promise<void> {
-    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0)) return Promise.resolve()
+    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0 && this.stalledHeld.length === 0))
+      return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
@@ -860,6 +929,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.takeOutbox()
+    this.dropStalled()
     this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()

@@ -4,8 +4,10 @@
 
 import { expect, test } from 'vitest'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
+import { encode } from '../../wire/frame.js'
 import {
   FakeWebSocket,
+  PING_INTERVAL_MS,
   RECONNECT_TIMEOUT_MS,
   advance,
   holdPage,
@@ -47,20 +49,102 @@ test('a channel whose data never gets through ends at the first loss after recon
   const sentAt = performance.now()
   void stuck.channel.send('never through').catch(() => {})
   await advance(1_000)
-  // Queued behind the stuck data in the one outbox: it goes once the stuck channel has ended.
-  void other.channel.send('behind it').catch(() => {})
+  // The stuck data goes alone, and its POST failing keeps the wire: the other channel's message goes at once.
+  const otherSentAt = performance.now()
+  void other.channel.send('beside it').catch(() => {})
   await advance(30_000)
   expect(stuck.ended).toHaveLength(1)
   const { at, err } = defined(stuck.ended[0], 'the stuck channel ending')
   expect(err?.message).toMatch(
-    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: Connection dropped/,
+    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: The request carrying it got no answer/,
   )
   expect(at - sentAt).toBeGreaterThan(RECONNECT_TIMEOUT_MS)
   expect(at - sentAt).toBeLessThan(RECONNECT_TIMEOUT_MS + MOST_BACKOFF_MS + 1_000)
   expect(other.ended).toEqual([])
-  // The page puts the undated channel's message back ahead of the stuck data: it arrives at the next reconnect.
   expect(gotOf(1)).toHaveLength(1)
-  expect(defined(gotOf(1)[0], "the other channel's message").at - sentAt).toBeLessThan(1_000 + MOST_BACKOFF_MS + 1_000)
+  expect(defined(gotOf(1)[0], "the other channel's message").at - otherSentAt).toBeLessThan(200)
+  // One loss of the wire, the first try's, which dated the channel: no other.
+  expect(world.streams).toHaveLength(2)
+})
+
+test("a stalled channel's POST the server took, its answer lost: the wire stays, and once the stream confirms it, it isn't sent again", async () => {
+  const page = (await openOverSse(1))(0)
+  world.server.drops.add(0)
+  void page.channel.send('taken, its answer lost').catch(() => {})
+  await advance(1_000)
+  // A loss dates the channel; its replay's POST is taken, and its answer lost: its data waits to go again.
+  world.postAnswers = [{ tag: 'lost' }]
+  defined(world.streams.at(-1), 'an event stream').end()
+  world.server.drops.delete(0)
+  await advance(1_000)
+  expect(world.postAnswers).toEqual([])
+  const taken = gotOf(0)
+  // The stream confirms it before the wait ends.
+  const { seq } = defined(taken.at(-1), 'the frame the server took')
+  defined(world.streams.at(-1), 'the event stream').frame(encode.window(0, 1_000_000, seq))
+  await advance(30_000)
+  expect(gotOf(0)).toEqual(taken)
+  expect(page.ended).toEqual([])
+  expect(world.streams).toHaveLength(2)
+})
+
+test("a stalled channel's send while its refused data waits goes behind it: the server gets its seqs in order", async () => {
+  const page = (await openOverSse(1))(0)
+  world.server.cuts.add(0)
+  void page.channel.send('first').catch(() => {})
+  // The cut is a loss that dates it; the replay's POST is asked to come later, and its data waits.
+  await advance(300)
+  world.server.cuts.delete(0)
+  world.postAnswers = [{ tag: 'refused', status: 503 }]
+  await advance(1_000)
+  expect(world.postAnswers).toEqual([])
+  void page.channel.send('second').catch(() => {})
+  await advance(10_000)
+  expect(gotOf(0).map(({ seq }) => seq)).toEqual([1, 2])
+  expect(page.ended).toEqual([])
+})
+
+test('the event stream ending while stalled data waits to go again is a loss as any: the data goes once on the next wire', async () => {
+  const page = (await openOverSse(1))(0)
+  world.server.cuts.add(0)
+  void page.channel.send('never through').catch(() => {})
+  // The first try's loss dates it; the next wire's try of it fails, and it waits.
+  await advance(MOST_BACKOFF_MS + 500)
+  expect(world.streams).toHaveLength(2)
+  const tries = world.posts.filter(({ data }) => data).length
+  defined(world.streams.at(-1), 'the event stream').end()
+  await advance(MOST_BACKOFF_MS + 500)
+  expect(world.streams).toHaveLength(3)
+  // On the third wire: its replay, once, and not the wait's copy beside it.
+  expect(world.posts.filter(({ data, wire }) => data && wire === 3)).toHaveLength(1)
+  expect(world.posts.filter(({ data }) => data).length).toBe(tries + 1)
+  await advance(30_000)
+  expect(page.ended).toHaveLength(1)
+  const after = world.posts.length
+  await advance(30_000)
+  expect(
+    world.posts.filter(({ data }) => data).length - world.posts.slice(0, after).filter(({ data }) => data).length,
+  ).toBe(0)
+})
+
+test("a healthy send waits for a stalled channel's POST in flight that is slow and not cut: its deadline bounds it", async () => {
+  const opened = await openOverSse(2)
+  const stalled = opened(0)
+  const other = opened(1)
+  world.server.drops.add(0)
+  void stalled.channel.send('taken, unconfirmed').catch(() => {})
+  await advance(1_000)
+  // A loss dates it; its replay's POST takes 5 s to be answered.
+  world.postAnswers = [{ tag: 'slow', ms: 5_000 }]
+  defined(world.streams.at(-1), 'an event stream').end()
+  await advance(MOST_BACKOFF_MS + 500)
+  const otherSentAt = performance.now()
+  void other.channel.send('behind the slow POST').catch(() => {})
+  await advance(10_000)
+  // The listed "awaited SSE send behind a large POST" (defects-open.md): it waits for the POST out.
+  const arrived = defined(gotOf(1)[0], "the other channel's message").at - otherSentAt
+  expect(arrived).toBeGreaterThan(0)
+  expect(arrived).toBeLessThan(5_000 + 1_000)
 })
 
 test('a send behind the stuck message on its channel ends with it, with the same cause: it never goes ahead of it', async () => {
@@ -76,7 +160,7 @@ test('a send behind the stuck message on its channel ends with it, with the same
   await advance(30_000)
   const { err } = defined(page.ended[0], 'the channel ending')
   expect(err?.message).toMatch(
-    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: Connection dropped/,
+    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: The request carrying it got no answer/,
   )
   expect(told.map(({ message }) => message)).toEqual([err?.message])
   expect(gotOf(0)).toEqual([])
@@ -160,7 +244,7 @@ test('a channel closed behind its stuck data is judged as an open one: it ends w
   await advance(30_000)
   const { at, err } = defined(page.ended[0], 'the channel ending')
   expect(err?.message).toMatch(
-    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: Connection dropped/,
+    /the server hasn't confirmed what the page sent on it for over \d+ s of reconnects\. The last try: The request carrying it got no answer/,
   )
   expect(at - sentAt).toBeGreaterThan(RECONNECT_TIMEOUT_MS)
   expect(at - sentAt).toBeLessThan(RECONNECT_TIMEOUT_MS + MOST_BACKOFF_MS + 1_000)
@@ -206,7 +290,7 @@ test("a refusal's cause is dropped once the data it named is confirmed: a later 
   void page.channel.send('never through').catch(() => {})
   await advance(30_000)
   const { err } = defined(page.ended[0], 'the channel ending')
-  expect(err?.message).toMatch(/The last try: Connection dropped/)
+  expect(err?.message).toMatch(/The last try: The request carrying it got no answer/)
   expect(err?.message).not.toMatch(/503/)
 })
 
@@ -216,7 +300,9 @@ test('a reconnectTimeout that a reconnect answer changes inside the window is th
   const sentAt = performance.now()
   void page.channel.send('never through').catch(() => {})
   await advance(3_000)
+  // Its POSTs failing keep the wire: a loss of it brings the reconnect answer that carries the new value.
   world.server.settings = { reconnectTimeout: 2 * RECONNECT_TIMEOUT_MS }
+  defined(world.streams.at(-1), 'an event stream').end()
   await advance(40_000)
   const { at, err } = defined(page.ended[0], 'the channel ending')
   expect(err?.message).toMatch(new RegExp(`for over ${(2 * RECONNECT_TIMEOUT_MS) / 1_000} s of reconnects`))
