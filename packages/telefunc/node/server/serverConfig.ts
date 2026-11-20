@@ -55,7 +55,7 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { parseAllowedOrigin, type AllowedOrigin } from '../../wire-protocol/channel/server/upgradeOrigin.js'
+import { parseAllowedOrigin, type AllowedOrigin } from '../../wire-protocol/channel/server/allowedOrigin.js'
 import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
