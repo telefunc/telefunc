@@ -59,13 +59,18 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     const object = this.ctx.id.name ?? null
     const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
     roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })
-    // Test-only: the next inbox registration a test set up for this room is held until it releases it, or refused.
-    const next = inbox && object !== null ? inboxRegistrations.get(object) : undefined
+    // Test-only: the next inbox registration a test set up for this room is refused, or held until it releases it,
+    // with the join that registers the inbox in its own write.
+    const next =
+      (inbox || method === 'runOperationWithInbox') && object !== null ? inboxRegistrations.get(object) : undefined
     if (object !== null && next !== undefined) {
-      inboxRegistrations.delete(object)
-      if (next.kind === 'refuse') throw new Error('Test: the authority refused the inbox')
+      if (next.kind === 'refuse') {
+        inboxRegistrations.delete(object)
+        throw new Error('Test: the authority refused the inbox')
+      }
       next.reached.resolve()
       await next.release
+      if (inboxRegistrations.get(object) === next) inboxRegistrations.delete(object)
     }
     const result = await super.telefuncDurableObjectCall(name, method, args)
     if (inbox && roomCalls !== null) {
