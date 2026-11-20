@@ -53,7 +53,7 @@ function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
   */
   assertUsage(isObject(context), '[provideTelefuncContext()] Argument `context` should be an object')
   assertUsage(
-    fn === undefined || isCallable(fn),
+    arguments.length === 1 || isCallable(fn),
     '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
   )
   return provideContext({ [PROVIDED_CONTEXT]: context }, fn)
