@@ -68,7 +68,7 @@ function pumpProducerToChannel(
     if (cancelled) return
     cancelled = true
     resolveCancelled({ done: true, value: undefined as never })
-    producer.cancel()
+    restoreContext(runContext.context, () => producer.cancel())
   }
 
   channel.onClose(doCancel)

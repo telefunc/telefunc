@@ -49,9 +49,10 @@ function getRawContext(): Context | null {
  * for the synchronous part of `fn` only and puts the previous value back when `fn` returns, so that code running later,
  * for another request, cannot read it.
  *
- * When: Telefunc wraps the telefunction, an extension's `onTelefunctionResult()` hook, and the loop that reads a
- * generator or stream the telefunction returned. Without AsyncLocalStorage it also wraps each pull of that loop
- * (`restoreContextInSyncMode()`) and `useData()` during a server render.
+ * When: Telefunc wraps the telefunction, an extension's `onTelefunctionResult()` hook, a `getContext().onClose()`
+ * callback, and the loop that reads a generator or stream the telefunction returned and the call that cancels it.
+ * Without AsyncLocalStorage it also wraps each pull of that loop (`restoreContextInSyncMode()`) and `useData()` during
+ * a server render.
  *
  * With `telefunc/async_hooks` it is `AsyncLocalStorage.run()`, and the context also follows `fn` across its `await`s.
  */

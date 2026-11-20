@@ -52,7 +52,23 @@ async function onReadAtClose() {
   })
 }
 
-const telefunctions: Record<string, unknown> = { onReadAroundAwait, onReadAfterYield, onReadAfterWait, onReadAtClose }
+const usersAtCancel: Record<string, string> = {}
+async function onReadAtCancel() {
+  const { user } = getContext<{ user: string }>()
+  return new ReadableStream<Uint8Array<ArrayBuffer>>({
+    cancel() {
+      usersAtCancel[user] = readUser()
+    },
+  })
+}
+
+const telefunctions: Record<string, unknown> = {
+  onReadAroundAwait,
+  onReadAfterYield,
+  onReadAfterWait,
+  onReadAtClose,
+  onReadAtCancel,
+}
 for (const [telefunctionName, telefunction] of Object.entries(telefunctions)) {
   assertTelefunction(telefunction, telefunctionName, telefuncFilePath)
   decorateTelefunction(telefunction, telefunctionName, telefuncFilePath, '/')
@@ -91,6 +107,12 @@ test('after a `yield`, getContext() gives each of two generators started togethe
 test('an onClose() callback reads the context of its own request, for each of two calls started together', async () => {
   await Promise.all([call('onReadAtClose', 'A'), call('onReadAtClose', 'B')])
   expect(usersAtClose).toEqual({ A: 'A', B: 'B' })
+})
+
+test('the `cancel()` of a returned stream reads the context of its own request, for each of two responses cancelled together', async () => {
+  const httpResponses = await Promise.all([call('onReadAtCancel', 'A'), call('onReadAtCancel', 'B')])
+  await Promise.all(httpResponses.map((httpResponse) => httpResponse.getReadableWebStream().cancel()))
+  expect(usersAtCancel).toEqual({ A: 'A', B: 'B' })
 })
 
 test('a call never reads the context another caller gives provideTelefuncContext()', async () => {

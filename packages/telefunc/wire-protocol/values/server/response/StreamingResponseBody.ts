@@ -79,7 +79,9 @@ function buildInlineResponseBody(runContext: {
   // `reader.read()` inside a producer — `iter.return()` alone can't.
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
   const flow = flowId
-    ? new StreamFlow(flowId, (index) => producers.find((p) => p.index === index)?.producer.cancel())
+    ? new StreamFlow(flowId, (index) =>
+        restoreContext(context, () => producers.find((p) => p.index === index)?.producer.cancel()),
+      )
     : null
 
   let cancelled = false
@@ -99,7 +101,9 @@ function buildInlineResponseBody(runContext: {
   const cancelProducers = () => {
     if (producersStopped) return
     producersStopped = true
-    for (const { producer, index } of producers) if (!flow?.cancelled.has(index)) producer.cancel()
+    for (const { producer, index } of producers) {
+      if (!flow?.cancelled.has(index)) restoreContext(context, () => producer.cancel())
+    }
     // Unblock any emit awaiting drain so the IIFE can progress to its catch/finally.
     wakeDrain()
   }
