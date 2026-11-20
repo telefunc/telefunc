@@ -8,7 +8,7 @@
 // commit from abort. The paired sse-only run is the control: no `/_telefunc` WebSocket may ever open.
 export { testUpgrade }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, resetCleanupState, serverRuntime } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
@@ -16,7 +16,7 @@ import { rawRequestStatus, upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
 
-function testUpgrade() {
+function testUpgrade(isDev: boolean) {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const isSseOnly = transports.length === 1 && transports[0] === 'sse'
@@ -43,6 +43,11 @@ function testUpgrade() {
       // that isn't Telefunc's.
       const appsAnswer = await rawRequestStatus(['GET /no-such-page HTTP/1.1', `Host: ${host}`])
       expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`])).toBe(appsAnswer)
+      // In development Vike answers both with 500, as the playground has no error page, and logs that on stderr.
+      if (isDev)
+        await autoRetry(async () => {
+          expectLog(/No error page found|HTTP response ← \/(no-such-page|_telefunc\/other) 500/)
+        })
     })
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.
