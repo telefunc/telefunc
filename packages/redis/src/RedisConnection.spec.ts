@@ -1,9 +1,10 @@
 import { inspect } from 'node:util'
-import { Redis } from 'ioredis'
+import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
+import { addressOf, redisFailure } from './ioredis.js'
 
-const clients: Redis[] = []
+const clients: Array<Redis | Cluster> = []
 afterEach(() => {
   for (const client of clients.splice(0)) client.disconnect()
 })
@@ -147,5 +148,56 @@ describe('a failure of Redis, as a command rejects with it', () => {
     const text = await printed(rejection)
     expect(text).not.toContain('body-SECRET')
     expect(text).not.toContain('args')
+  })
+})
+
+describe('the address a failure names', () => {
+  function cluster(nodes: ConstructorParameters<typeof Cluster>[0]): Cluster {
+    const redis = new Cluster(nodes, { lazyConnect: true })
+    clients.push(redis)
+    return redis
+  }
+  function standalone(redis: Redis): Redis {
+    clients.push(redis)
+    return redis
+  }
+
+  const STARTUP_NODES: Array<[string, ConstructorParameters<typeof Cluster>[0], string]> = [
+    ['an object', [{ host: '10.0.0.1', port: 7001 }], '10.0.0.1:7001'],
+    ['an object without a host', [{ port: 7002 }], '127.0.0.1:7002'],
+    ['a port', [7003], '127.0.0.1:7003'],
+    ['a port as a string', ['7004'], '127.0.0.1:7004'],
+    ['host:port', ['10.0.0.5:7005'], '10.0.0.5:7005'],
+    ['a redis: URL with a password', ['redis://:pw-SECRET@10.0.0.6:7006'], '10.0.0.6:7006'],
+    ['a rediss: URL with a username and password', ['rediss://app:pw-SECRET@10.0.0.7:7007'], '10.0.0.7:7007'],
+    ['a URL without its scheme', ['//app:pw-SECRET@10.0.0.8:7008'], '10.0.0.8:7008'],
+    ['a URL without a port', ['redis://:pw-SECRET@10.0.0.9'], '10.0.0.9:6379'],
+    ['an IPv6 URL', ['redis://:pw-SECRET@[::1]:7010'], '[::1]:7010'],
+    ['a socket path', ['/run/redis/node.sock'], '/run/redis/node.sock'],
+    ['several', [{ host: '10.0.0.1', port: 7001 }, 'redis://:pw-SECRET@10.0.0.2:7002'], '10.0.0.1:7001, 10.0.0.2:7002'],
+  ]
+  it.each(STARTUP_NODES)(
+    'a Cluster whose startup node is %s: its host and port, and no credential',
+    (_form, nodes, address) => {
+      const redis = cluster(nodes)
+      expect(addressOf(redis)).toBe(address)
+      const refused = answered('NOPERM this user has no permissions to run the evalsha command', {
+        name: 'evalsha',
+        args: [],
+      })
+      expect(inspect(redisFailure(refused, redis))).not.toContain('SECRET')
+    },
+  )
+
+  it.each([
+    [
+      'a URL with a password',
+      () => new Redis('redis://:pw-SECRET@10.0.0.11:7011', { lazyConnect: true }),
+      '10.0.0.11:7011',
+    ],
+    ['a port and a host', () => new Redis(7012, '10.0.0.12', { lazyConnect: true }), '10.0.0.12:7012'],
+    ['a socket path', () => new Redis({ path: '/run/redis.sock', lazyConnect: true }), '/run/redis.sock'],
+  ])('a client given %s: where it connects, and no credential', (_form, make, address) => {
+    expect(addressOf(standalone(make()))).toBe(address)
   })
 })

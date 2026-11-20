@@ -16,7 +16,7 @@ export type { RedisClient, SubscriberSocket }
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { Cluster, type Redis } from 'ioredis'
-import { BackendError } from 'telefunc/__internal'
+import { BackendError, isObject } from 'telefunc/__internal'
 import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
@@ -77,16 +77,35 @@ function connectsAlike(a: RedisClient, b: RedisClient): boolean {
   return CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name]))
 }
 
-/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port. */
+/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port, and never
+ *  a credential its URL holds. */
 function addressOf(redis: RedisClient): string {
   if (isCluster(redis)) {
-    const nodes = (redis as unknown as { startupNodes: Array<{ host?: string; port?: number } | string | number> })
-      .startupNodes
-    return nodes.map((node) => (typeof node === 'object' ? `${node.host}:${node.port}` : String(node))).join(', ')
+    // ioredis keeps a Cluster's startup nodes private, as they were given.
+    const nodes: unknown = redis['startupNodes']
+    return Array.isArray(nodes) ? nodes.map(nodeAddress).join(', ') : 'a Redis Cluster'
   }
   const { path, host, port, sentinels, name } = redis.options
   if (path) return path
   return sentinels?.length ? `Sentinel master ${name}` : `${host}:${port}`
+}
+
+/** A Cluster startup node's host and port as ioredis reads it (an object, a port, a URL or `host:port`, with its
+ *  defaults), or its socket path. */
+function nodeAddress(node: unknown): string {
+  if (typeof node === 'number' || (typeof node === 'string' && /^\d+$/.test(node))) return `127.0.0.1:${node}`
+  if (typeof node === 'string') {
+    if (node.startsWith('/') && !node.startsWith('//')) return node
+    try {
+      const url = new URL(node.includes('//') ? node : `//${node}`, 'redis://localhost')
+      return `${url.hostname || '127.0.0.1'}:${url.port || 6379}`
+    } catch {
+      return 'a startup node'
+    }
+  }
+  if (!isObject(node)) return 'a startup node'
+  const host = typeof node.host === 'string' ? node.host : '127.0.0.1'
+  return `${host}:${typeof node.port === 'number' || typeof node.port === 'string' ? node.port : 6379}`
 }
 
 /** How Redis 5 and 6 and Dragonfly wrap the refusal of a call a script makes. */
