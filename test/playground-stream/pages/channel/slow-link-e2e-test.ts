@@ -23,7 +23,6 @@ type SlowLinkState = {
     closeErr: string
     abortReceived: number
     abortErr: string
-    abortMs: number
   } | null
   lossyTicker: { received: number; last: number | undefined; worstMs: number; closed: string | null } | null
 }
@@ -116,8 +115,9 @@ function testSlowLink(isDev: boolean) {
     )
   })
 
-  // Up to three bodies still wait when the server closes: about 12.6 s, and 16.8 s on SSE.
-  test("channel: on a 1 MB/s link, publishes falling behind don't hold up another channel's answer, the answer to the page's own publish costs it none of them, a graceful close delivers them all, and an abort ends at once without them", async () => {
+  // Up to three bodies of 4 MiB still wait when the server closes: about 12.6 s, 16.8 s on SSE; three of 1 MiB when it
+  // aborts.
+  test("channel: on a 1 MB/s link, publishes falling behind don't hold up another channel's answer, the answer to the page's own publish costs it none of them, a graceful close delivers them all, and so does an abort", async () => {
     await withPacedLink(
       { downBytesPerSecond: 1_000_000, upBytesPerSecond: 1_000_000, queueBytes: 64 * 1024 },
       async () => {
@@ -136,11 +136,14 @@ function testSlowLink(isDev: boolean) {
           : 4000
         expect(behind!.pingMs).lessThan(upToMs)
         expect(behind!.publishesAhead).toBe(1)
-        expect(behind).deep.equal({ ...behind!, closed: '0', received: 5, closeErr: 'none' })
-        expect(behind!.abortErr).not.toBe('none')
-        // Of the three publishes the abort comes behind, only the one already going out may arrive before it.
-        expect(behind!.abortReceived).lessThan(2)
-        expect(behind!.abortMs).lessThan(upToMs)
+        // The abort comes behind the three publishes made before it, as the close does.
+        expect(behind).deep.include({
+          closed: 'clean',
+          received: 5,
+          closeErr: 'none',
+          abortReceived: 3,
+          abortErr: 'Abort',
+        })
       },
     )
   })

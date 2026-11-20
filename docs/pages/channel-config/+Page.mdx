@@ -29,7 +29,7 @@ config.channel = {
 
 > On Cloudflare, `maxMemory` defaults to 64 MiB, as <Link href="/stream/cloudflare">a Durable Object's memory</Link> is limited to 128 MB.
 
-> Telefunc refuses a value that can't work when you assign it: `reconnectTimeout` or `pingInterval` under 1 second, `maxMemory` under 2 MiB, or an `allowedOrigins` entry that isn't an origin. Assign `config.channel` before your server handles its first request: once a channel exists, a change is refused, as open channels would keep the old values.
+> Telefunc refuses a value that can't work when you assign it: `reconnectTimeout` or `pingInterval` under 1 second, `maxMemory` under 2 MiB, or an `allowedOrigins` entry that isn't an origin a page can have. Assign `config.channel` before your server handles its first request: once the server has used it, from its first channel or page connection on, a change is refused, as those already open would keep the old values.
 
 > This is the **server-side** `config.channel`, a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 

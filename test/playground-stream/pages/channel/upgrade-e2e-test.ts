@@ -8,15 +8,15 @@
 // commit from abort. The paired sse-only run is the control: no `/_telefunc` WebSocket may ever open.
 export { testUpgrade }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, resetCleanupState, serverRuntime } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
-import { upgradeStatus } from '../../../utils'
+import { rawRequestStatus, upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
 
-function testUpgrade() {
+function testUpgrade(isDev: boolean) {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const isSseOnly = transports.length === 1 && transports[0] === 'sse'
@@ -25,6 +25,29 @@ function testUpgrade() {
     test("a WebSocket upgrade from a page of another site is refused, and one from the server's own origin opens", async () => {
       expect(await upgradeStatus('https://another-site.example')).toBe(403)
       expect(await upgradeStatus(new URL(getServerUrl()).origin)).toBe(101)
+    })
+  if (transports.includes('ws'))
+    test("on Node a WebSocket handshake whose Host can't be read is answered 400, and on every runtime a request for another path is the app's", async () => {
+      const handshake = [
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      ]
+      // On Node only: on Bun and Deno this app's static files middleware (srvx's) parses the request's URL before
+      // Telefunc's `fetch()` sees it, and answers 500 itself.
+      if (serverRuntime() === 'node')
+        expect(await rawRequestStatus(['GET /_telefunc HTTP/1.1', 'Host: a b', ...handshake])).toBe(400)
+      const { host } = new URL(getServerUrl())
+      // On every runtime: a path that only begins like Telefunc's is the app's own, answered as the app answers a path
+      // that isn't Telefunc's.
+      const appsAnswer = await rawRequestStatus(['GET /no-such-page HTTP/1.1', `Host: ${host}`])
+      expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`])).toBe(appsAnswer)
+      // In development Vike answers both with 500, as the playground has no error page, and logs that on stderr.
+      if (isDev)
+        await autoRetry(async () => {
+          expectLog(/No error page found|HTTP response ← \/(no-such-page|_telefunc\/other) 500/)
+        })
     })
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.

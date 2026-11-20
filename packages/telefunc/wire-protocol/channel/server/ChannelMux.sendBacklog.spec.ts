@@ -57,6 +57,8 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
       method: 'POST',
       body: encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]),
     }),
+    undefined,
+    () => false,
   )
   expect(opened.statusCode).toBe(200)
   let status = 200
@@ -64,6 +66,8 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
     const pings = Array.from({ length: 10 }, widePing)
     const answered = await handleSseChannelRequest(
       new Request(url, { method: 'POST', body: encodeSseRequest({ connId }, pings) }),
+      undefined,
+      () => false,
     )
     status = answered.statusCode
   }

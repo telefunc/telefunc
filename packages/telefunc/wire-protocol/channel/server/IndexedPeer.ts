@@ -87,6 +87,11 @@ class IndexedPeer {
     this.commit(seq, encode.closeAck(this.index, seq))
   }
 
+  sendCloseDone(): void {
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.closeDone(this.index, seq))
+  }
+
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
   sendByteLimit(limit: number, lastSeq: number, urgency: Urgency): void {
     this.sendLimit(encode.window(this.index, limit, lastSeq), urgency)
@@ -112,6 +117,12 @@ class IndexedPeer {
    *  newest. */
   unhanded(): number {
     return this.sender.queue.waitingPublishes(this.index)
+  }
+
+  /** For an aborted channel: takes its messages of which the socket has no byte back from the wire's queue and the
+   *  replay, whose newest they are: its lossy ones (`WireQueue.dropUngiven`). */
+  dropUngivenLossy(): void {
+    this.replay.dropNewestPublishes(this.sender.queue.dropUngiven(this.index))
   }
 
   /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the

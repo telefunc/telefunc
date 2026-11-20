@@ -91,15 +91,17 @@ const ERROR_REASON = {
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
+  /** A graceful close's deadline passed before both ends were done: from the end that decides the close. */
+  CLOSE_TIMED_OUT: 0x04 as const,
   /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
    *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
   NOT_IN_EFFECT: 0x03 as const,
-  /** Its page hasn't confirmed what the server sent on it for over `reconnectTimeout` of reconnects. */
-  UNCONFIRMED: 0x04 as const,
   /** Its page sent a frame of it over the server's frame limit (`FRAME_REFUSAL.overLimit`). */
   FRAME_OVER_LIMIT: 0x05 as const,
   /** Its page sent a frame of it the protocol doesn't allow (`FRAME_REFUSAL.refused`). */
   FRAME_REFUSED: 0x06 as const,
+  /** Its page hasn't confirmed what the server sent on it for over `reconnectTimeout` of reconnects. */
+  UNCONFIRMED: 0x07 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
@@ -124,6 +126,7 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
 type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
   | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
+  | { tag: typeof TAG.CLOSE_DONE; index: number; seq: number }
   | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number }
@@ -140,7 +143,10 @@ type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
 
 type SequencedFrame =
   | ChannelDataFrame
-  | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
+  | Extract<
+      ChannelCtrlFrame,
+      { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.CLOSE_DONE | typeof TAG.ABORT | typeof TAG.ERROR }
+    >
 
 type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
 
@@ -155,6 +161,7 @@ type WireCtrlFrame =
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
+  | { tag: typeof TAG.REJECTED }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
@@ -275,6 +282,7 @@ const encode = {
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
+  rejected: () => encodeBareFrame(TAG.REJECTED),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
   piece(total: number, piece: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -323,6 +331,7 @@ const encode = {
     return frame
   },
   closeAck: (index: number, seq: number) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
+  closeDone: (index: number, seq: number) => encodeBareFrame(TAG.CLOSE_DONE, index, seq),
   abort: (index: number, abortValue: string, seq: number) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
   error(index: number, reason: ErrorReason, seq: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
@@ -411,10 +420,12 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
   [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
+  [TAG.REJECTED]: encode.rejected().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
   [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
   [TAG.CLOSE_ACK]: encode.closeAck(0, 0).byteLength,
+  [TAG.CLOSE_DONE]: encode.closeDone(0, 0).byteLength,
   [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST, 0).byteLength,
   [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
   [TAG.WANT]: encode.want(0, { version: 0, text: false, binary: false }).byteLength,
@@ -548,6 +559,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILED, payload: parseJsonPayload(payload) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
+    case TAG.REJECTED:
+      return { tag: TAG.REJECTED }
     case TAG.PREPARE:
       return { tag: TAG.PREPARE, payload: parsePreparePayload(parseJsonPayload(payload)) }
     case TAG.READY:
@@ -572,6 +585,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.CLOSE, index, seq, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
       return { tag: TAG.CLOSE_ACK, index, seq }
+    case TAG.CLOSE_DONE:
+      return { tag: TAG.CLOSE_DONE, index, seq }
     case TAG.ABORT:
       return { tag: TAG.ABORT, index, seq, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:
@@ -643,6 +658,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PUBLISH_BINARY_ACK_REQ,
   TAG.CLOSE,
   TAG.CLOSE_ACK,
+  TAG.CLOSE_DONE,
   TAG.ABORT,
   TAG.ERROR,
   TAG.WINDOW,

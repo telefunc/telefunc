@@ -7,7 +7,6 @@ import { concatAll, decodeU32 } from './envelope.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
-const DISCONNECT_MSG = 'Client disconnected during file upload'
 
 /** A length-prefixed chunk says it is over the reader's limit. `head`: as much of the chunk's start as the reader was
  *  asked to read of it, so that the caller can say whose it was. */
@@ -19,9 +18,13 @@ class OversizeFrameError extends Error {
   }
 }
 
-/** The request body ended mid-frame — the client disconnected or truncated the upload. Typed so error
- *  sinks discriminate an expected client truncation from a real server bug by class, not message text. */
-class StreamTruncatedError extends Error {}
+/** The request body stopped short: mid-frame, or its client left mid-read. Typed so error sinks
+ *  discriminate an expected client truncation from a real server bug by class, not message text. */
+class StreamTruncatedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super('The client disconnected before the end of the request body', options)
+  }
+}
 
 /**
  * Pull-based byte-counting reader of a request body in the binary frame protocol.
@@ -48,10 +51,17 @@ class BodyReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
+  /** Why a read of the source failed: the app's own error, or not (its client left, or nothing says: the body is
+   *  truncated). */
+  private failure: { error: unknown; appsError: boolean } | undefined
+  /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
+   *  received the request, passed by the caller. */
+  private clientLeft: (err: unknown) => boolean | null
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
-  constructor(source: ReadableStream<Uint8Array> | Readable) {
+  constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean | null) {
+    this.clientLeft = clientLeft
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
     // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
     // bypasses Node's webstreams `dequeueValue` overhead, which is why we accept
@@ -131,7 +141,7 @@ class BodyReader {
           const chunk = await this.pullChunk()
           if (!chunk) {
             remaining = 0
-            controller.error(new StreamTruncatedError(DISCONNECT_MSG))
+            controller.error(this.truncated())
             return
           }
           const take = Math.min(chunk.length, remaining)
@@ -161,9 +171,13 @@ class BodyReader {
 
   // ── Primitives ──
 
-  /** Pull one chunk from the underlying source, or null if disconnected. */
+  /** Pull one chunk from the underlying source, or null once it ended or its client left, or failed where nothing says
+   *  why. A read that fails as the app's own error throws it, and so does every pull after it. */
   private async pullChunk() {
-    if (this.disconnected) return null
+    if (this.disconnected) {
+      if (this.failure?.appsError) throw this.failure.error
+      return null
+    }
     try {
       const { value, done } = await this.source.next()
       if (done) {
@@ -172,10 +186,17 @@ class BodyReader {
       }
       this.onChunk?.()
       return value
-    } catch {
+    } catch (error) {
       this.disconnected = true
+      this.failure = { error, appsError: this.clientLeft(error) === false }
+      if (this.failure.appsError) throw error
       return null
     }
+  }
+
+  /** The body stopped short, with the runtime's error as the cause where a read failed. */
+  private truncated() {
+    return new StreamTruncatedError(this.failure && { cause: this.failure.error })
   }
 
   /** Take up to `max` bytes from the internal buffer, or null if empty. */
@@ -198,7 +219,7 @@ class BodyReader {
     let length = this.buffer.length
     while (length < n) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
+      if (!chunk) throw this.truncated()
       parts ??= this.buffer.length > 0 ? [this.buffer] : []
       parts.push(chunk)
       length += chunk.length
@@ -226,7 +247,7 @@ class BodyReader {
     if (buffered) remaining -= buffered.length
     while (remaining > 0) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
+      if (!chunk) throw this.truncated()
       remaining -= chunk.length
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }

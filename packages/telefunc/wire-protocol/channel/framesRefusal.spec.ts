@@ -154,7 +154,7 @@ test.each([
     void other.page.send('b2').catch(() => {})
     await until(() => other.got.includes('b2'))
     for (const end of [refused.pageEnd, refused.serverEnd]) {
-      expect(end.map((err) => [err.name, err.message])).toEqual([['NetworkError', told[bad]]])
+      expect(end.map((err) => [err.name, err.message])).toEqual([['ChannelClosedError', told[bad]]])
     }
     expect([other.pageEnd, other.serverEnd]).toEqual([[], []])
     expect(other.got).toEqual(['b1', 'b2'])

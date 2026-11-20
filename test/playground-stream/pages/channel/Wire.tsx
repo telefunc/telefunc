@@ -113,7 +113,7 @@ function WireDemo() {
     })
   }, [])
   const endClose = useCallback(async (opts?: { timeout: number }) => {
-    const close = String(await endChannel.current!.close(opts))
+    const close = (await endChannel.current!.close(opts))?.name ?? 'clean'
     setState((s) => ({ ...s, end: { ...s.end!, close } }))
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
@@ -130,7 +130,7 @@ function WireDemo() {
     let closed = 0
     for (let opened = 0; opened < MANY_CHANNELS; opened += 100) {
       const closes = await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
-      for (const close of closes) if (close === 0) closed++
+      for (const close of closes) if (close === null) closed++
     }
     const next = await onWireOpen()
     const opens = new Promise<string>((resolve) => {
@@ -165,9 +165,9 @@ function WireDemo() {
     for (let n = HELD_OPEN; n < HELD_OPEN + HELD_NEXT; n++) {
       const next = await open(n, () => void kept[0]!.channel.send(`kept ${n}`))
       if (next.first) first++
-      if ((await next.channel.close()) === 0) closed++
+      if ((await next.channel.close()) === null) closed++
     }
-    for (const close of await Promise.all(kept.map(({ channel }) => channel.close()))) if (close === 0) closed++
+    for (const close of await Promise.all(kept.map(({ channel }) => channel.close()))) if (close === null) closed++
     setState((s) => ({ ...s, held: { run, first, closed } }))
   }, [])
 
@@ -196,7 +196,7 @@ function WireDemo() {
       }),
     )
     await (when === 'arrived' ? arrived : channel.opened)
-    const close = String(await channel.close())
+    const close = (await channel.close())?.name ?? 'clean'
     setState((s) => ({ ...s, release: { channelId, close } }))
   }, [])
 

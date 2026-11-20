@@ -165,14 +165,6 @@ function openingOf(channel: ClientChannel) {
   )
 }
 
-/** What the channel's end came to: its error, or `'closed'`. */
-function closingOf(channel: ClientChannel) {
-  return channel.closed.then(
-    (): 'closed' => 'closed',
-    (err: unknown) => err,
-  )
-}
-
 // A page that goes away sends the rest of no request it started: the fixture then has no request to answer.
 test('a request whose page leaves in the middle of its body is left unanswered, with no error', async () => {
   const unhandled: unknown[] = []
@@ -328,10 +320,10 @@ test.each([
     const channel = openChannel()
     expect(await openingOf(channel)).toBe('opened')
     wires.shift()?.end()
-    const closing = await closingOf(channel)
+    const closed = await channel.closed
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
-    expect(closing).toBeInstanceOf(Error)
-    expect(messageOf(closing)).toBe(message)
+    expect(closed).toBeInstanceOf(Error)
+    expect(closed?.message).toBe(message)
   },
 )
 
@@ -358,7 +350,7 @@ test(
     const other = openChannel(connectionKey)
     expect(await Promise.all([openingOf(channel), openingOf(other)])).toEqual(['opened', 'opened'])
     void channel.sendBinary(new Uint8Array(2 * 1024 * 1024)).catch(() => {})
-    const closing = await closingOf(channel)
+    const closing = await channel.closed
     expect(messageOf(closing)).toBe(
       "Channel closed: what the page sent on it was refused with 413 text/html, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.",
     )

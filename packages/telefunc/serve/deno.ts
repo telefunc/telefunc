@@ -1,18 +1,13 @@
 export { Telefunc }
 
 import crossws from 'crossws/adapters/deno'
-import { serve as serveTelefunc } from '../node/server/telefunc.js'
+import { serveRuntimeRequest } from '../node/server/telefunc.js'
+import { hasProp } from '../utils/hasProp.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
-import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { isTelefuncRequest, toResponse } from './shared.js'
-
-declare module 'crossws' {
-  interface PeerContext {
-    wireRequest?: Request
-  }
-}
+import { getTelefuncRequestUrl, toResponse } from './shared.js'
 
 type DenoWs = ReturnType<typeof crossws>
 type DenoInfo = Parameters<DenoWs['handleUpgrade']>[1]
@@ -35,16 +30,14 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  const hooks = getTelefuncChannelHooks({
+  const { hooks, getNamespace } = getTelefuncChannelOptions({
     // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/216, closed unmerged).
     // Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
     terminate: (peer) => peer.close(),
-    // Deno frees an upgraded request's headers once the upgrade answers: a copy taken before the upgrade keeps them.
-    upgrade: (request) => ({ context: { wireRequest: new Request(request.url, { headers: request.headers }) } }),
-    wireRequest: (peer) => peer.context.wireRequest!,
     copiesOnSend: true,
   })
   const ws = crossws({
+    getNamespace,
     hooks: {
       upgrade: hooks.upgrade,
       open(peer) {
@@ -63,16 +56,29 @@ function telefunc(): TelefuncServe {
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {
-      const url = new URL(request.url)
+      if (getTelefuncRequestUrl(request) === null) return undefined
       const config = getServerConfig()
-      if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {
+      if (request.headers.get('upgrade') === 'websocket') {
         if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
         return ws.handleUpgrade(request, info) as Response | Promise<Response>
       }
-      if (!isTelefuncRequest(request)) return undefined
 
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
       return toResponse(httpResponse)
     },
   }
+}
+
+/** Deno.serve fails the read of a request it made with its own `BadResource` (the client closed) or `Http` (the client
+ *  reset) error. Its `signal` says nothing while the body is read: it aborts on every response. */
+function clientLeft(err: unknown): boolean {
+  return isDenoConnectionError(err, globalThis)
+}
+
+/** `global` is `globalThis`, whose `Deno` isn't typed here. */
+function isDenoConnectionError(err: unknown, global: object): boolean {
+  if (!hasProp(global, 'Deno', 'object') || !hasProp(global.Deno, 'errors', 'object')) return false
+  const { errors } = global.Deno
+  if (!hasProp(errors, 'BadResource', 'function') || !hasProp(errors, 'Http', 'function')) return false
+  return err instanceof errors.BadResource || err instanceof errors.Http
 }

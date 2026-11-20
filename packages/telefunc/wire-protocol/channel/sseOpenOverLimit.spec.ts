@@ -1,7 +1,7 @@
 // An abort whose reason is over the server's frame limit, made before the page's first open, whose body would carry it:
-// a real server and a real page, in one process, over SSE. The page sizes the ABORT as it sizes a message, so the abort
-// goes without its reason and `abort()` throws; the other channel of the open is untouched (decisions/516-sse-carrier.md,
-// the ruling of 22:17Z on the open's body).
+// a real server and a real page, in one process, over SSE. The page holds the reason to the frame limit, so the abort
+// goes without it and `abort()` throws a `ChannelOverflowError`; the other channel of the open is untouched
+// (decisions/516-sse-carrier.md, the ruling of 22:17Z on the open's body).
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
@@ -10,6 +10,7 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
+import { ChannelOverflowError } from './channelErrors.js'
 
 // The frame limit at 1 MiB, not 64 MiB, on both ends: an over-limit reason is built in milliseconds.
 vi.mock('../constants.js', async (importOriginal) => ({
@@ -77,9 +78,19 @@ test("an abort before the first open, its reason over the server's frame limit, 
   page.onClose((err) => void pageEnds.push({ channel: 'aborted', err: ended(err) }))
   otherPage.onClose((err) => void pageEnds.push({ channel: 'other', err: ended(err) }))
   // Before the first open: its ABORT rides in the open's body. Its reason, 2 MiB, is over the limit.
-  expect(() => page.abort('x'.repeat(2 * 2 ** 20))).toThrow(
-    /Channel abort reason too large: \d+ bytes encoded, the server accepts 1048576 at most$/,
-  )
+  let refusal: unknown
+  try {
+    page.abort('x'.repeat(2 * 2 ** 20))
+  } catch (err) {
+    refusal = err
+  }
+  expect(refusal).toBeInstanceOf(ChannelOverflowError)
+  expect(ended(refusal)).toEqual({
+    name: 'ChannelOverflowError',
+    message:
+      'abort(): the value is more than the server accepts in one frame (1048576 bytes), so the channel ended without it',
+    abortValue: 'none',
+  })
   void otherPage.send('alongside').catch(() => {})
 
   await until(() => got.includes('alongside') && serverEnds.length > 0)

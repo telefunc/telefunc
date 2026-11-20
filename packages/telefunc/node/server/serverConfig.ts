@@ -9,6 +9,7 @@ export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { getChannelConfig }
+export { getAllowedOrigins }
 export { reconnectWindow }
 export type {
   ConfigUser,
@@ -55,7 +56,11 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_TRANSPORT,
 } from '../../wire-protocol/constants.js'
-import { parseAllowedOrigin } from '../../wire-protocol/channel/server/upgradeOrigin.js'
+import {
+  NOT_AN_ORIGIN,
+  parseAllowedOrigin,
+  type AllowedOrigin,
+} from '../../wire-protocol/channel/server/allowedOrigin.js'
 import { PING_INTERVAL_MAX_MS, reconnectWindowOf } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
@@ -88,14 +93,16 @@ type ChannelConfigUser = {
   transports?: ChannelTransports
   /**
    * The origins of other sites' pages that may open a WebSocket to this server, as a browser sends them
-   * (`'https://app.example.com'`); a leading `*.` stands for any one subdomain label (`'https://*.example.com'`). A
-   * page of this server's own origin needs no entry, behind a proxy too where it forwards `X-Forwarded-Host`.
+   * (`'https://app.example.com'`, an app shell's `'capacitor://localhost'`). A leading `*.` stands for any one subdomain
+   * label, whoever runs it (`'https://*.example.com'`). A page of this server's own origin needs no entry, behind a
+   * proxy too where it forwards `X-Forwarded-Host`. `null` and `file:` can't be listed: any site can make its page send
+   * `null`, and one `file:` entry would stand for every local file.
    *
    * https://telefunc.com/transport#websocket
    *
    * @default []
    */
-  allowedOrigins?: string[]
+  allowedOrigins?: readonly string[]
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -151,7 +158,6 @@ type ChannelConfigUser = {
 
 type ChannelConfigResolved = {
   transports: ChannelTransports
-  allowedOrigins: string[]
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -246,6 +252,8 @@ const globalObject = getGlobalObject('node/server/serverConfig.ts', {
   defaultMaxMemory: undefined as number | undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
+  /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
+  allowedOrigins: [] as readonly AllowedOrigin[],
 })
 const configState = globalObject.config
 
@@ -370,7 +378,6 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
     transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
-    allowedOrigins: channel.allowedOrigins ?? [],
     reconnectTimeout,
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
@@ -400,6 +407,12 @@ function defaultMaxMemory(): number {
 function getChannelConfig(): ChannelConfigResolved {
   globalObject.channelConfigInUse = true
   return resolveChannelConfig(configState.channel)
+}
+
+/** The entries of `config.channel.allowedOrigins`, as a WebSocket upgrade reads them: reading them neither marks
+ *  `config.channel` as used nor resolves the rest of it, since a refused upgrade opens nothing. */
+function getAllowedOrigins(): readonly AllowedOrigin[] {
+  return globalObject.allowedOrigins
 }
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
@@ -551,6 +564,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
+  const allowedOrigins: AllowedOrigin[] = []
   for (const [key, value] of Object.entries(val)) {
     const configPath = `config.channel.${key}`
     switch (key) {
@@ -559,12 +573,14 @@ function applyChannelConfig(val: unknown): void {
         break
       case 'allowedOrigins': {
         assertUsage(Array.isArray(value), `\`${configPath}\` should be an array of origins`)
-        const wrong = value.find((entry: unknown) => typeof entry !== 'string' || parseAllowedOrigin(entry) === null)
-        assertUsage(
-          wrong === undefined,
-          `\`${configPath}\` lists ${JSON.stringify(wrong)}: an entry is an origin as a browser sends it, a scheme and a host with no path, such as 'https://app.example.com', where a leading '*.' stands for any one subdomain label, as in 'https://*.example.com'`,
-        )
-        next[key] = value
+        // `for…of` reads a hole as `undefined`, which is no origin.
+        for (const entry of value) {
+          const allowed = typeof entry === 'string' ? parseAllowedOrigin(entry) : NOT_AN_ORIGIN
+          assertUsage(typeof allowed !== 'string', `\`${configPath}\` lists ${JSON.stringify(entry)}: ${allowed}`)
+          allowedOrigins.push(allowed)
+        }
+        // Its own copy: a later change of the caller's array changes nothing, and reading it back can't change it.
+        next[key] = Object.freeze(value.slice())
         break
       }
       case 'pingInterval':
@@ -617,10 +633,12 @@ function applyChannelConfig(val: unknown): void {
   }
   assertUsage(
     !globalObject.channelConfigInUse ||
-      JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)),
-    "`config.channel` can't change once a channel exists, as those already open would keep the old values: set it before the server handles a request",
+      (JSON.stringify(resolveChannelConfig(next)) === JSON.stringify(resolveChannelConfig(configState.channel)) &&
+        JSON.stringify(allowedOrigins) === JSON.stringify(globalObject.allowedOrigins)),
+    "`config.channel` can't change once the server has used it, from its first channel or page connection on, as those already open would keep the old values: set it before the server handles a request",
   )
   configState.channel = next
+  globalObject.allowedOrigins = allowedOrigins
 }
 
 /** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */

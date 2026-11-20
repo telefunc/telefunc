@@ -1,4 +1,4 @@
-export { countWaitingPublishes, droppingPublishes, droppingFrom, overtakes }
+export { countWaitingPublishes, droppingLossy, droppingPublishes, droppingFrom, overtakes }
 export type { WireQueue }
 
 import { readU16 } from '../../wire/header.js'
@@ -12,6 +12,9 @@ interface WireQueue {
   dropWaitingPublishes(ix: number, keep: number): void
   /** Drops what of channel `ix` waits here, receipts too: from its oldest publish on, or from the start. */
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void
+  /** For an aborted channel: drops channel `ix`'s lossy sends and publishes of which the socket has been given no byte,
+   *  frames gathered for it included. A body whose head the socket has stays. Returns how many went. */
+  dropUngiven(ix: number): number
 }
 
 function isHeadOf(frame: Uint8Array, ix: number): boolean {
@@ -19,19 +22,17 @@ function isHeadOf(frame: Uint8Array, ix: number): boolean {
 }
 
 /** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
- *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. An abort
- *  and the answer to the page's close pass that channel's publishes too: the page reads no more of them. Any other frame
- *  of the channel, a close request or an error too, waits behind all of it, so the page gets what was sent before. */
+ *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. Any other
+ *  frame of the channel, one that ends or closes it too, waits behind all of it, so the page gets what was sent before. */
 function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
   const tag = frame[0]!
   if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
-  const passesPublishes = tag === TAG.ABORT || tag === TAG.CLOSE_ACK
   const ix = readU16(frame, 1)
   for (const other of ahead) {
     const otherTag = other[0]!
     // A body's index names no channel; its head does.
     if (!isSequencedTag(otherTag) || isPublishBody(otherTag) || readU16(other, 1) !== ix) continue
-    if (!passesPublishes || otherTag !== TAG.PUBLISH_TO) return false
+    return false
   }
   return true
 }
@@ -76,4 +77,15 @@ function droppingPublishes(ix: number, keep: number): (frame: Uint8Array) => boo
     bodyNext = true
     return true
   }
+}
+
+/** `WireQueue.dropUngiven`'s walk, as `droppingPublishes` with none kept; `count` then says how many went. */
+function droppingLossy(ix: number): { drops: (frame: Uint8Array) => boolean; count: () => number } {
+  const dropping = droppingPublishes(ix, 0)
+  let count = 0
+  const drops = (frame: Uint8Array): boolean => {
+    if (isHeadOf(frame, ix)) count++
+    return dropping(frame)
+  }
+  return { drops, count: () => count }
 }

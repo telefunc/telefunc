@@ -45,6 +45,7 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../../node/server/Abort.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -105,6 +106,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
   private overflowed: string | null = null
+  /** Its abort, owed to its page: an overflow takes its place where its page would miss a message (`shed`). */
+  private owesAbort = false
+  /** While it owes its page that abort, the page's channel on the wire it reads, which the overflow then goes on. */
+  private endedOn: IndexedPeer | null = null
   /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
    *  as one a silently dead wire lost does. */
   private lastPeer: IndexedPeer | null = null
@@ -305,8 +310,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.beforeAttach = []
   }
 
-  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest; an abort
-   *  drops it. */
+  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest. An abort
+   *  drops what waits for a lossy one's page, and goes behind it for a reliable one (`onAbortOwed`). */
   override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     this.endOverflowed()
     if (this._phase === 'open') this.sendNewestOnly()
@@ -335,6 +340,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.lossyPublishes?.mayGo()
   }
 
+  /** A reliable broadcast's publishes go ahead of its ABORT, as a channel's reliable sends do; a lossy one's go, with
+   *  what it held for its first attach. */
+  protected override onAbortOwed(): void {
+    this.owesAbort = true
+    this.endedOn = this.peer
+    if (!this.lossy) return
+    this.dropBeforeAttach()
+    super.onAbortOwed()
+  }
+
   /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
   protected override dropUnhanded(): void {
     if (this._phase === 'ended') return
@@ -353,9 +368,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     }
   }
 
-  /** How many of its newest publishes no wire has: all of them while it has no wire. */
+  /** How many of its newest publishes no wire has: all of them while it has no wire. Ended, those of the wire its page
+   *  reads its abort on. */
   private unhanded(): number {
-    return this.peer?.unhanded() ?? Number.POSITIVE_INFINITY
+    return (this.peer ?? this.endedOn)?.unhanded() ?? Number.POSITIVE_INFINITY
   }
 
   /** Its newest publish, where no wire has that yet: before its first attach, the newest it holds for that. */
@@ -380,18 +396,27 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
    *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
    *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once and the channel ends
-   *  after the call that cut it (`overflow`). */
+   *  after the call that cut it (`overflow`). Ended by its abort, it is cut the same way, and the overflow takes the
+   *  abort's place; the abort alone needs no memory, so without a gap it ends as it was going to. */
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
-    if (this._phase === 'ended' || !replay || (this.lossy && toBytes > 0)) return
+    const ended = this._phase === 'ended'
+    if (!replay || (ended && !this.owesAbort) || (this.lossy && toBytes > 0)) return
     if (toBytes === 0) this.lossyPublishes?.dispose()
     const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
+    const peer = this.peer ?? this.endedOn
     if (gap) {
-      this.peer?.sender.queue.dropWaitingFrom(this.peer.index, 'publish')
+      peer?.sender.queue.dropWaitingFrom(peer.index, 'publish')
       this.dropPendingFrames()
     }
-    if (toBytes === 0) this.overflow(NOT_EVEN_NEWEST, owner)
+    if (toBytes === 0 && !ended) this.overflow(NOT_EVEN_NEWEST, owner)
     else if (gap) this.overflow(FELL_BEHIND, owner)
+  }
+
+  /** What it held for its first attach goes with the frames it held for that. */
+  protected override dropPendingFrames(): void {
+    this.dropBeforeAttach()
+    super.dropPendingFrames()
   }
 
   /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
@@ -411,7 +436,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   private endOverflowed(): void {
     if (this.overflowed === null) return
-    this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
+    if (this._phase !== 'ended') {
+      this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
+      return
+    }
+    if (!this.owesAbort) return
+    this.owesAbort = false
+    this.replaceEnd(ERROR_REASON.OVERFLOW, this.endedOn)
+    this.endedOn = null
   }
 
   /** Applies a want newer than the one it has: the wire and a call can each bring the page's. A closing one takes none,
@@ -451,7 +483,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.onPeerWant(want)
     this._confirmWant()
     // A want a closing broadcast didn't take never takes effect: the call runs once the broadcast ended.
-    if (want.version > this.pageWant.version) return this.closed.catch(() => {})
+    if (want.version > this.pageWant.version) return this.closed.then(() => {})
     return this.pageWantInEffect() ? undefined : this.inEffectOrEnded(callAborted, waitAtMost)
   }
 
@@ -490,6 +522,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    if (this.owesAbort && this._phase === 'ended') this.endedOn = peer
     // Attached again, what its want brings goes to its new wire at once; on a first attach, behind what was held.
     if (this.lastPeer !== null && this._phase !== 'ended') this.lastPeer = peer
     super._attachPeer(peer, state)
@@ -499,6 +532,19 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   override _acknowledge(): void {
     super._acknowledge()
     this.endOverflowed()
+  }
+
+  /** @internal Its page needs nothing more of it: no overflow can take the abort's place, and it lets go of the wire. */
+  override _release(): void {
+    this.owesAbort = false
+    this.endedOn = null
+    super._release()
+  }
+
+  /** A wire that closed has none of its publishes: once ended, its page away is cut as an open one's (`unhanded`). */
+  override _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
+    if (this.endedOn?.sender === peer.sender) this.endedOn = null
+    super._onPeerDisconnect(peer, reconnectTimeout)
   }
 
   /** Where its close ran out, one that was cut ends with why, which its page reads; a close its page asked for or
@@ -514,20 +560,21 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super.endWithError(reason, err)
   }
 
-  override _release(): void {
-    this.dropBeforeAttach()
-    super._release()
+  /** Its close running out is an event that ends one that was cut with why, in the timeout's place. */
+  override _sendEnding(frame: EndingFrame): void {
+    if (frame.kind === 'timedOut' && this.overflowed !== null) return this.endOverflowed()
+    super._sendEnding(frame)
   }
 
-  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
-    if (options?.pageGone) this.dropBeforeAttach()
+  override _finalize(err: Error | undefined): void {
+    if (this.endsPageGone) this.dropBeforeAttach()
     this.lossyPublishes?.dispose()
     this.lastPeer = null
     this.textListening?.unsubscribe()
     this.textListening = null
     this.binaryListening?.unsubscribe()
     this.binaryListening = null
-    super.shutdown(err, options)
+    super._finalize(err)
     // What waits gets the end: one its close callbacks removed or added too.
     const endError = this.endError()
     settleAll(this.textWaiting, endError)
@@ -683,7 +730,7 @@ type BroadcastChannel<T = unknown> = {
   readonly id: string
   readonly isClosed: boolean
   readonly opened: Promise<void>
-  readonly closed: Promise<void>
+  readonly closed: Promise<ChannelCloseResult>
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
     ({ type: 'text'; data: ChannelData<T> } | { type: 'binary'; data: Uint8Array }) & { info: ChannelPublishInfo }
   >

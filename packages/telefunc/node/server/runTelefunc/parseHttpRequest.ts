@@ -4,11 +4,12 @@ import type { Readable } from 'node:stream'
 import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
-import { getUrlPathname } from '../../../utils/getUrlPathname.js'
+import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -34,6 +35,8 @@ type RunContext = {
    *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
    *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
   readable?: Readable
+  /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
+  clientLeft: ClientLeft
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -71,7 +74,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -82,7 +85,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable)
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
@@ -92,7 +95,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
+  const { text, registerFile, consumeFile } = await readBody(request, readable, clientLeft, requestKind)
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -171,6 +174,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
+  clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
@@ -180,7 +184,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new BodyReader(source)
+    const reader = new BodyReader(source, clientLeft)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
@@ -188,7 +192,7 @@ async function readBody(
     }
   }
   return {
-    text: await request.text(),
+    text: await readText(request, clientLeft),
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
@@ -196,6 +200,17 @@ async function readBody(
           controller.error(new Error('No binary frame'))
         },
       }),
+  }
+}
+
+/** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
+ *  call's is; any other failure, and one nothing explains (`noTransportEvidence`), is thrown as it is. */
+async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
+  try {
+    return await request.text()
+  } catch (err) {
+    if (clientLeft(err)) throw new StreamTruncatedError({ cause: err })
+    throw err
   }
 }
 
@@ -290,7 +305,7 @@ function isWrongMethod(runContext: { request: Request; logMalformedRequests: boo
 }
 
 function assertUrl(runContext: { request: Request; serverConfig: { telefuncUrl: string } }) {
-  const urlPathname = getUrlPathname(runContext.request.url)
+  const urlPathname = getRequestPathname(runContext.request.url)
   assertUsage(
     urlPathname === runContext.serverConfig.telefuncUrl,
     `serve({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,

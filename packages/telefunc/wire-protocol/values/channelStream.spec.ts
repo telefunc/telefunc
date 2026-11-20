@@ -36,13 +36,13 @@ function memoryChannel() {
       listener = callback
       return unsubscribeOf(() => {})
     },
-    onClose(callback: () => void) {
-      onClose = callback
+    onClose(callback: (err: Error | null) => void) {
+      onClose = () => callback(null)
       return () => {}
     },
     close: async () => {
       onClose?.()
-      return 0 as const
+      return null
     },
     abort() {},
     sendBinary: send,

@@ -405,7 +405,7 @@ function openChannel(transports: ('sse' | 'ws')[]) {
     connection: { telefuncUrl: world.telefuncUrl, transports, connectionKey: 'key' },
   })
   void channel.opened.catch(() => {})
-  const ended: { at: number; err: Error | undefined }[] = []
+  const ended: { at: number; err: Error | null }[] = []
   channel.onClose((err) => void ended.push({ at: performance.now(), err }))
   return { channel, ended }
 }

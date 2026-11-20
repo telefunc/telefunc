@@ -111,7 +111,7 @@ app.post('/api/server-close-trigger', async (c) => {
   const ackPromise: Promise<unknown> = channel.send('offline-close', { ack: true })
   // As long as the server keeps the channel for its page that went away (`reconnectTimeout`, 60 s): the page reconnects
   // once it is back, and a backoff step of up to 5 s later.
-  const closePromise: Promise<0 | 1> = channel.close({ timeout: 60_000 })
+  const closePromise: Promise<Error | null> = channel.close({ timeout: 60_000 })
   void ackPromise.then(
     (result) => {
       cleanupState[`serverClose_${channelId}_ackResult`] = String(result)
@@ -120,14 +120,9 @@ app.post('/api/server-close-trigger', async (c) => {
       cleanupState[`serverClose_${channelId}_ackResult`] = 'error'
     },
   )
-  void closePromise.then(
-    (result: 0 | 1) => {
-      cleanupState[`serverClose_${channelId}_closeResult`] = String(result)
-    },
-    () => {
-      cleanupState[`serverClose_${channelId}_closeResult`] = 'error'
-    },
-  )
+  void closePromise.then((outcome) => {
+    cleanupState[`serverClose_${channelId}_closeResult`] = outcome?.name ?? 'clean'
+  })
   return c.json({ ok: true })
 })
 

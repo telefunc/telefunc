@@ -22,13 +22,14 @@ import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
-import type { ReconcileOutcome, ServerTransport } from './ChannelMux.js'
+import type { ReconcileOutcome, ServerTransport, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
   droppingFrom,
+  droppingLossy,
   droppingPublishes,
   overtakes,
   type WireQueue,
@@ -54,6 +55,8 @@ type SseWire = {
   connId: string
   events: EventStream
   closed: boolean
+  /** It closed because the server refused a frame of it. */
+  rejected: boolean
   sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed. Data
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
@@ -146,6 +149,13 @@ class EventStream implements WireQueue {
     this.dropWaiting(droppingFrom(ix, from))
   }
 
+  /** The stream is given an event as it starts: what passes and what waits, it has no byte of. */
+  dropUngiven(ix: number): number {
+    const cut = droppingLossy(ix)
+    this.dropWaiting(cut.drops)
+    return cut.count()
+  }
+
   /** `drops` is asked in the order the stream takes the frames: what passes goes first. */
   private dropWaiting(drops: (frame: Uint8Array) => boolean): void {
     const goes = (frame: Uint8Array<ArrayBuffer>) => {
@@ -159,10 +169,15 @@ class EventStream implements WireQueue {
 
   /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
    *  channels' replay, and it could wait here for as long as the socket stays open taking nothing. */
-  close({ flush }: { flush: boolean }): void {
-    while (flush && (this.current !== null || this.waiting.length > 0)) {
+  /** `last`: the event that ends the stream, after all that waits, which it then flushes too. */
+  close({ flush, last }: { flush: boolean; last?: Uint8Array<ArrayBuffer> }): void {
+    while ((flush || last !== undefined) && (this.current !== null || this.waiting.length > 0)) {
       if (this.current !== null) this.pushChunks()
       else this.startEvent(this.waiting.shift()!)
+    }
+    if (last !== undefined) {
+      this.startEvent(last)
+      while (this.current !== null) this.pushChunks()
     }
     this.current = null
     this.passing = new Fifo()
@@ -262,7 +277,13 @@ class SseServerTransport {
     terminateWire: (wire, refused) => this.terminateWire(wire, refused),
   }
 
-  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+  /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
+   *  or null where it can't say. */
+  async handleRequest(
+    request: Request,
+    readable: Readable | undefined,
+    clientLeft: (err: unknown) => boolean | null,
+  ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return refuse(REFUSED.notServed)
     if (request.method !== 'POST') return refuse(REFUSED.notPost)
     if (!namesWireVersion(request)) return refuse(WIRE_VERSION_REFUSAL, STATUS_CODE_WIRE_VERSION)
@@ -273,7 +294,7 @@ class SseServerTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
-    const reader = new BodyReader(source)
+    const reader = new BodyReader(source, clientLeft)
     let metadata: SseRequestMetadata
     try {
       const rawMetadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
@@ -322,11 +343,11 @@ class SseServerTransport {
     request: Request,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
-    if (existing) this.closeWire(existing, { permanent: false })
+    if (existing) this.closeWire(existing, 'transient')
 
     const onCancel = () => {
       const wire = this.mux.getWireByConnId<SseWire>(connId)
-      if (wire) this.closeWire(wire, { permanent: false })
+      if (wire) this.closeWire(wire, 'transient')
     }
     const events = new EventStream({ useNodeStream, onCancel })
 
@@ -335,6 +356,7 @@ class SseServerTransport {
       connId,
       events,
       closed: false,
+      rejected: false,
       sessionId: null,
       ready,
       resolveReady,
@@ -388,7 +410,7 @@ class SseServerTransport {
   private handleClosePost(connId: string): SseChannelHttpResponse {
     const wire = this.mux.getWireByConnId<SseWire>(connId)
     if (wire) {
-      this.closeWire(wire, { permanent: true, pageLeft: true })
+      this.closeWire(wire, 'pageLeft')
       return okResponse()
     }
     const sessionId = this.closedWires.get(connId)?.sessionId
@@ -433,7 +455,7 @@ class SseServerTransport {
       // other request, its channel told on this stream or at its next attach.
       reportDispatchBug(err)
       if (err instanceof OversizeFrameError) this.mux.refuseFrame(wire, 'overLimit', channelOf(err.head))
-      else this.closeWire(wire, { permanent: false })
+      else this.closeWire(wire, 'transient')
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
       wire.resolveReady()
@@ -537,19 +559,22 @@ class SseServerTransport {
     })
   }
 
-  private closeWire(wire: SseWire, { permanent, pageLeft = false }: { permanent: boolean; pageLeft?: boolean }): void {
+  /** `rejected`: the server refused a frame of it; its stream sends what it holds, then says so last, as a WebSocket's
+   *  close code does. */
+  private closeWire(wire: SseWire, how: WireClose): void {
     if (wire.closed) return
     wire.closed = true
+    wire.rejected = how === 'rejected'
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
-    this.mux.onWireClosed(wire, { permanent })
-    wire.events.close({ flush: permanent && !pageLeft })
+    this.mux.onWireClosed(wire, how)
+    wire.events.close({ flush: wire.rejected, last: wire.rejected ? encode.rejected() : undefined })
   }
 
   private terminateWire(wire: SseWire, refused: Refusal | undefined): void {
     if (refused && !wire.closed) wire.refused = refused
-    this.closeWire(wire, { permanent: this.mux.readPermanentTermination(wire) })
+    this.closeWire(wire, this.mux.readRejection(wire) ? 'rejected' : 'transient')
   }
 }
 
@@ -602,7 +627,11 @@ function okResponse(): SseChannelHttpResponse {
   return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+async function handleSseChannelRequest(
+  request: Request,
+  readable: Readable | undefined,
+  clientLeft: (err: unknown) => boolean | null,
+): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable)
+  return globalObject.sseTransport.handleRequest(request, readable, clientLeft)
 }

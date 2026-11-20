@@ -100,9 +100,15 @@ import { config } from 'telefunc'
 config.channel.allowedOrigins = ['https://app.example.com']
 ```
 
-> A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`. A client that isn't a browser sends no `Origin` and isn't refused.
+> A leading `*.` stands for any one subdomain, whoever runs it, as in `'https://*.example.com'`: use it for a domain whose every subdomain is yours. A client that isn't a browser sends no `Origin` and isn't refused.
 
-> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin, and the browser's console shows the failed handshake.
+> An app shell's pages are listed by the origin the shell gives them: `'capacitor://localhost'` (Capacitor on iOS), `'tauri://localhost'` (Tauri on macOS and Linux), `'ionic://localhost'` (Ionic's web view on iOS). A page opened from a file, or in a sandboxed frame, can't be listed: it sends `null`, which any site can make its page send.
+
+> A page of your server's own host served over `http://` that opens `wss://`, as with `telefuncUrl` set to an `https://` URL, is refused in Firefox and Safari, which tell the server it is another site's page. Chrome and the other Chromium-based browsers send no such header on a WebSocket handshake ([WebKit bug 237550](https://bugs.webkit.org/show_bug.cgi?id=237550)), so there it opens. To have every browser alike, answer `http://` only with a redirect to `https://` and send `Strict-Transport-Security`, or list `'http://<your host>'`.
+
+> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin and for the first 20 origins it refuses in 10 minutes, and the browser's console shows the failed handshake.
+
+> On Node, `installWebSocket(server)` leaves every other request with `Upgrade` to your server: your other `upgrade` listeners take theirs, and a request none of them takes reaches your request handler, as on the same server without Telefunc. Node before 22.21 and 24.9 can't hand it to your request handler: there, such a request is answered 404 when no other `upgrade` listener is there.
 
 
 

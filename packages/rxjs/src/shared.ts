@@ -54,7 +54,7 @@ type WireChannel<T> = {
   readonly isClosed: boolean
   send(data: T): Promise<void>
   listen(callback: (data: T) => void): unknown
-  onClose(callback: (err?: Error) => void): unknown
+  onClose(callback: (err: Error | null) => void): unknown
   close(): Promise<unknown>
   abort(abortValue?: unknown, message?: string): void
 }

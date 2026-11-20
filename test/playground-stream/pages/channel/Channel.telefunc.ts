@@ -70,7 +70,7 @@ export {
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
-import { Channel, Abort, Broadcast, BroadcastChannel, config } from 'telefunc'
+import { Channel, Abort, Broadcast, BroadcastChannel, NetworkError, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 
@@ -106,8 +106,10 @@ function formatCloseError(err: CloseError): string {
 
 async function onChannelInit() {
   const ch = new Channel<ClientToServer, ServerToClient>({ ack: true })
+  // A send the channel's end rejects: closed, aborted, or its connection gone (its page left, or lost).
   const swallowClosedChannel = (err: any) => {
-    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort)) return
+    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort || err instanceof NetworkError))
+      return
     throw err
   }
 
@@ -923,7 +925,7 @@ async function onChannelPublishesBehind(
       setTimeout(cutWireSockets, 50)
       return 'cut'
     }
-    if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
+    if (msg === 'close') return (await broadcast.close({ timeout: 20_000 }))?.name ?? 'clean'
     if (msg === 'abort') {
       // In the same turn, so the abort comes while all but the first still wait for the wire.
       publish(3)
@@ -1270,9 +1272,7 @@ async function onChannelCreditFailure() {
     const sends = Array.from({ length: 300 }, () => ch.send('x'))
     ch.abort('capacity-failure')
     void Promise.allSettled(sends).then((results) => {
-      cleanupState[`credit_${ch.id}`] = String(
-        results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
-      )
+      cleanupState[`credit_${ch.id}`] = String(results.every((r) => r.status === 'fulfilled'))
     })
   })
   return { channel: ch.client }

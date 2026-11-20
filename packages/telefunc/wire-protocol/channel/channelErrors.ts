@@ -1,12 +1,20 @@
-export { ChannelClosedError, ChannelOverflowError, framesRefusedError, replayLossError, unconfirmedError }
+export {
+  ChannelClosedError,
+  ChannelOverflowError,
+  ChannelCloseUnknownError,
+  ChannelPageLeftError,
+  framesRefusedError,
+  replayLossError,
+  unconfirmedError,
+}
 
 import { NetworkError } from '../../shared/NetworkError.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
 class ChannelClosedError extends Error {
-  constructor(message = 'Channel is closed') {
-    super(message)
+  constructor(message = 'Channel is closed', options?: { cause?: unknown }) {
+    super(message, options)
     this.name = 'ChannelClosedError'
   }
 }
@@ -19,10 +27,34 @@ class ChannelOverflowError extends Error {
   }
 }
 
-/** How a channel ends, on both ends, when the server can't take a frame of it the page sent: `reason` is the cause's
- *  sentence (`FRAME_REFUSAL`). */
-function framesRefusedError(reason: string): NetworkError {
-  return new NetworkError(`Channel closed: the server refused what the page sent on it: ${reason}`, true)
+/** A channel whose connection was lost during its close, on either end: the verdict that both ends' cleanups finished
+ *  within the timeout couldn't cross, so whether they did can't be known. It is a channel `NetworkError`, so code that
+ *  handles a lost connection handles it; where a lost connection is why, `cause` is its error. */
+class ChannelCloseUnknownError extends NetworkError {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "Channel closed, but how its close ended can't be known: the connection was lost before both ends' verdict crossed",
+      true,
+      options,
+    )
+    this.name = 'ChannelCloseUnknownError'
+  }
+}
+
+/** How the server's channel ends when its page leaves for good (closed, reloaded or navigated away), during a close or
+ *  outside one: the page's side can't finish, and what the server still held for it reaches no one. A channel
+ *  `NetworkError`. */
+class ChannelPageLeftError extends NetworkError {
+  constructor() {
+    super('Channel ended: its page left (the tab was closed, reloaded or navigated away)', true)
+    this.name = 'ChannelPageLeftError'
+  }
+}
+
+/** How a channel ends, on both ends, when the server can't take a frame the page sent: `reason` is the cause's sentence
+ *  (`FRAME_REFUSAL`). Sending the same frame again fails again, so it is no `NetworkError`. */
+function framesRefusedError(reason: string): ChannelClosedError {
+  return new ChannelClosedError(`Channel closed: the server refused what the page sent on it: ${reason}`)
 }
 
 /** How a channel ends, on both ends, when its page hasn't confirmed what the server sent on it for over

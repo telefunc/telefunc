@@ -23,7 +23,6 @@ type BroadcastBackpressureState = {
     closeErr: string
     abortReceived: number
     abortErr: string
-    abortMs: number
   } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: {
@@ -60,9 +59,9 @@ type Show = (state: Partial<BroadcastBackpressureState>) => void
 function PublishesBehind({ show }: { show: Show }) {
   async function testPublishesBehind() {
     show({ publishesBehind: null })
-    /** A broadcast of 4 MiB bodies, how many of them the page got, and once it closed, why. */
-    const openBehind = async () => {
-      const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    /** A broadcast of bodies of `bytes`, 4 MiB unless given, how many of them the page got, and once it closed, why. */
+    const openBehind = async (bytes?: number) => {
+      const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(bytes))
       const got = { firstSeq: 0, received: 0 }
       const waiting: { count: number; resolve: () => void }[] = []
       broadcast.subscribeBinary((_, info) => {
@@ -89,11 +88,10 @@ function PublishesBehind({ show }: { show: Show }) {
     const { received, firstSeq } = closing.got
     closing.control.close()
 
-    const aborting = await openBehind()
-    const abortAt = performance.now()
+    // At 1 MiB the second and third body still wait for the wire at the abort, and they take seconds to arrive.
+    const aborting = await openBehind(1024 * 1024)
     await aborting.control.send('abort', { ack: true })
     const abortErr = await aborting.ended
-    const abortMs = Math.round(performance.now() - abortAt)
     const abortReceived = aborting.got.received
     aborting.control.close()
 
@@ -105,7 +103,6 @@ function PublishesBehind({ show }: { show: Show }) {
       closeErr,
       abortReceived,
       abortErr,
-      abortMs,
     }
     show({ publishesBehind })
   }

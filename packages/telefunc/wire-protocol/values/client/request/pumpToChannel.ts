@@ -24,11 +24,11 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
 
   let cancelled = false
   const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<null>()
-  const doCancel = (err?: Error) => {
+  const doCancel = (err: Error | null) => {
     if (cancelled) return
     cancelled = true
     resolveCancelled(null)
-    producer.cancel(err)
+    producer.cancel(err ?? undefined)
   }
 
   channel.onClose(doCancel)
@@ -48,7 +48,7 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
         channel.sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
       }
     } finally {
-      doCancel()
+      doCancel(null)
       // A server that is away gets the upload's end once back, as an open channel waits for it.
       channel.close({ timeout: channel._connection.reconnectWindow() })
     }

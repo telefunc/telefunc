@@ -2,12 +2,28 @@
 // the scripted server's rows (ClientConnection.marked.spec.ts): a page that breaks the protocol, and a proxy that
 // rewrites the URL or a refusal's `Content-Type`. Each spec file serves one set of transports (`useRealServer`).
 
-export { cutIn, findText, open, opens, pair, sends, textOf, until, delay, uploads, useRealServer, withoutWire, world }
+export {
+  cutIn,
+  findText,
+  open,
+  opens,
+  pair,
+  sends,
+  textOf,
+  until,
+  delay,
+  uploads,
+  useRealServer,
+  withholding,
+  withoutWire,
+  world,
+}
 
 import { afterAll, afterEach, beforeAll } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../../serve/node.js'
-import { config as serverConfig } from '../../../node/server/serverConfig.js'
+import { config as serverConfig, type ChannelConfigUser } from '../../../node/server/serverConfig.js'
+import { base64urlToUint8Array } from '../../wire/base64url.js'
 import { decodeU32 } from '../../wire/envelope.js'
 import { decode } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
@@ -25,6 +41,8 @@ type Hook = {
   body?: (bytes: Uint8Array<ArrayBuffer>) => BlobPart[]
   upload?: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>
   contentType?: (contentType: string) => string
+  /** The event stream as the page reads it. */
+  stream?: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>
 }
 const world: {
   hooks: Hook[]
@@ -97,6 +115,9 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   const response = await realFetch(hook.url ? hook.url(url) : url, { ...init, body: sent })
   const contentType = response.headers.get('content-type')
   world.requests.push({ kind, bytes: bytes?.byteLength ?? 0, status: response.status, contentType })
+  if (hook.stream && response.body) {
+    return new Response(hook.stream(response.body), { status: response.status, headers: response.headers })
+  }
   if (!hook.contentType || contentType === null) return response
   return new Response(response.body, {
     status: response.status,
@@ -115,8 +136,8 @@ class CountedWebSocket extends RealWebSocket {
 
 /** The real Node server for this spec file, serving `transports`, and the wrapper and the counted WebSocket in place;
  *  call it at the file's top, before any request: the server's channel config is set once. */
-function useRealServer(transports: ('sse' | 'ws')[]): void {
-  serverConfig.channel = { transports }
+function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfigUser, 'transports'> = {}): void {
+  serverConfig.channel = { ...channel, transports }
   let server: Server
   beforeAll(async () => {
     globalThis.fetch = proxyFetch
@@ -178,6 +199,34 @@ async function open(count: number) {
 const opens = () => world.started.filter((kind) => kind === 'open').length
 const uploads = () => world.started.filter((kind) => kind === 'upload').length
 const sends = (page: ClientChannel<string, string>, message: string) => void page.send(message).catch(() => {})
+
+/** An event stream hook that keeps from the page each event whose frame `withheld` names, and `cut()`, which ends the
+ *  stream as a dropped connection does. */
+function withholding(withheld: (frame: Uint8Array<ArrayBuffer>) => boolean) {
+  let cut = () => {}
+  const stream = (body: ReadableStream<Uint8Array>) => {
+    const decoder = new TextDecoder()
+    const encoder = new TextEncoder()
+    let partial = ''
+    return body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        start: (controller) => {
+          cut = () => controller.error(new TypeError('network error'))
+        },
+        transform: (chunk, controller) => {
+          const events = (partial + decoder.decode(chunk, { stream: true })).split('\n\n')
+          partial = events.pop() ?? ''
+          const kept = events.filter((event) => {
+            const data = event.split('\n').find((line) => line.startsWith('data: '))
+            return data === undefined || !withheld(base64urlToUint8Array(data.slice(6)))
+          })
+          if (kept.length > 0) controller.enqueue(encoder.encode(kept.map((event) => `${event}\n\n`).join('')))
+        },
+      }),
+    )
+  }
+  return { stream, cut: () => cut() }
+}
 
 /** The URL without its wire version, as a proxy that rewrites the query may leave it. */
 const withoutWire = (url: string) => url.replace(/([?&])wire=\d+&?/, '$1')

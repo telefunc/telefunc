@@ -118,7 +118,7 @@ async function errorSentToPage(
       behindAfter: () => Number.POSITIVE_INFINITY,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+      queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     }
     const replay = broadcast._replayBuffer
     if (!replay) throw new Error('A registered broadcast has its replay')
@@ -128,7 +128,7 @@ async function errorSentToPage(
     ])
     if (pastLimit) await vi.advanceTimersByTimeAsync(getChannelMux().connectTtl)
     await waiting
-    await broadcast.closed.catch(() => {})
+    await broadcast.closed
     const error = frames.find((frame) => decode(frame).tag === TAG.ERROR)
     if (!error) throw new Error(`The server sent its page no ERROR, only tags ${frames.map((frame) => frame[0])}`)
     return error
@@ -152,7 +152,8 @@ const SERVER_OPTIONS = {
 /** A page's POST, read as the server's SSE handler reads it: its metadata, then its frames. */
 async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames: DecodedFrame[] }> {
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
-  const reader = new BodyReader(body.stream())
+  // A `Blob`'s stream doesn't fail.
+  const reader = new BodyReader(body.stream(), () => false)
   const metadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
   if (metadata === null) return { streamResponse: false, frames: [] }
   const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))

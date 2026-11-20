@@ -53,6 +53,9 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
+  /** Server → client, an SSE stream's last event: the server refused a frame of no channel and closed the wire, as a
+   *  WebSocket's close with `WS_CLOSE_REJECTED` says. */
+  REJECTED: 0x0e as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -76,7 +79,8 @@ const TAG = {
   // ─── Per-channel control (carries ix) ───
   /** A close request. Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
-  /** Sequenced, as CLOSE is. */
+  /** The end that follows a close sends nothing more. Sent the moment the CLOSE arrives, so a CLOSE after it from the
+   *  same end asks for a shorter deadline. Sequenced, as CLOSE is. */
   CLOSE_ACK: 0x31 as const,
   /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
@@ -96,6 +100,10 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
+  /** "My side of the close is done": its acknowledged sends are answered and its `onClose()` cleanup settled. The end
+   *  that decides the close sends its own only once it has the other's, so from it, it means the channel closed.
+   *  Sequenced, as CLOSE is. */
+  CLOSE_DONE: 0x3a as const,
   /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
    *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
@@ -124,7 +132,7 @@ function passesData(tag: number): boolean {
 }
 
 function isClosingTag(tag: number): boolean {
-  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE || tag === TAG.ABORT || tag === TAG.ERROR
 }
 
 /** The replay queue of a sequenced frame; `closing` holds the frame that ends a channel, which no byte budget drops. */

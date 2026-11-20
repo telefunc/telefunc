@@ -93,7 +93,7 @@ async function onWireEnd(before: number) {
   })
   onServerAction(`wireEnd_${ch.id}_close`, async () => {
     sendBefore()
-    cleanupState[`wireEnd_${ch.id}_close`] = String(await ch.close())
+    cleanupState[`wireEnd_${ch.id}_close`] = (await ch.close())?.name ?? 'clean'
   })
   onServerAction(`wireEnd_${ch.id}_abort`, () => {
     sendBefore()
@@ -102,7 +102,7 @@ async function onWireEnd(before: number) {
   return { channel: ch.client, channelId: ch.id }
 }
 
-function describeEnd(err: Error | undefined): string {
+function describeEnd(err: Error | null): string {
   if (!err) return 'none'
   if (err instanceof Abort) return `abort:${JSON.stringify(err.abortValue)}`
   return err.name

@@ -4,6 +4,7 @@ export { withNetworkConditions }
 export { newCDPSession }
 export { sendRefusedWarning }
 export { upgradeStatus }
+export { rawRequestStatus }
 
 import {
   page,
@@ -20,6 +21,8 @@ import {
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { randomBytes } from 'node:crypto'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 
 const sendRefusedWarning = 'A channel refused a `send()`'
 
@@ -54,6 +57,20 @@ function upgradeStatus(origin: string): Promise<number | undefined | 'no answer'
     })
     req.end()
   })
+}
+
+/**
+ * The status the server answers a request written byte for byte with, for a request line or a `Host` no HTTP client
+ * sends (`GET //_telefunc`, `Host: a b`); `head` holds the request line and the headers, without the blank line.
+ */
+async function rawRequestStatus(head: string[]): Promise<number> {
+  const { hostname, port } = new URL(getServerUrl())
+  const socket = connect(Number(port), hostname)
+  await once(socket, 'connect')
+  socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
+  const [first] = (await once(socket, 'data')) as [Buffer]
+  socket.destroy()
+  return Number(first.toString('latin1').split(' ')[1])
 }
 
 function newCDPSession() {

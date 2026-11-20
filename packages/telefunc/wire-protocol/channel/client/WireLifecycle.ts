@@ -5,6 +5,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { ChannelClosedError, ChannelOverflowError, framesRefusedError, unconfirmedError } from '../channelErrors.js'
+import { closeTimedOutError } from '../ChannelEnding.js'
 import { FRAME_REFUSAL } from '../../refusal.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
@@ -424,11 +425,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     transport.detachHeartbeat()
     // No reconnect reaches a server that speaks this page's wire.
     if (otherWireVersion) {
-      this.closeAll(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
       return
     }
     if (final !== undefined) {
-      this.closeAll(new NetworkError(`Connection closed: the server refused the page's own frames: ${final}`, true))
+      this.closeAll(framesRefusedError(final))
       return
     }
     if (route !== undefined && transport === this.transport) {
@@ -679,13 +680,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
 
     if (rejected && this.recovery === null) {
-      this.closeAll(err)
+      this.loseConnection(err)
       return
     }
     const now = performance.now()
     // At once with the recovery's timer, its end wins: every channel is told its cause.
     if (this.recovery !== null && now >= this.recovery.deadline) {
-      this.closeAll(this.recovery.lost)
+      this.loseConnection(this.recovery.lost)
       return
     }
     // Data that has waited since an earlier loss: the attempts go on from where they were, at no less than their step.
@@ -768,7 +769,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private onRecoveryDeadline(): void {
     const recovery = this.recovery
     if (this.closed || !recovery) return
-    this.closeAll(recovery.lost)
+    this.loseConnection(recovery.lost)
   }
 
   private endRecovery(): void {
@@ -837,6 +838,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     record.channel._onEnded(err)
   }
 
+  /** No wire can reach the server again: its channels' connection is lost for good. */
+  private loseConnection(err: Error): void {
+    for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
+    this.dispose()
+  }
+
   private closeAll(err: Error): void {
     for (const { channel } of this.channels.values()) {
       channel._onEnded(err)
@@ -875,6 +882,7 @@ function channelErrorFor(reason: number, reconnectTimeoutMs: number): Error {
       `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
     )
   }
+  if (reason === ERROR_REASON.CLOSE_TIMED_OUT) return closeTimedOutError()
   if (reason === ERROR_REASON.NOT_IN_EFFECT) {
     return new ChannelClosedError(
       'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',

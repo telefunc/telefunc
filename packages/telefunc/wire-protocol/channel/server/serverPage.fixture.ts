@@ -10,7 +10,7 @@ import { encodeSseRequest } from '../../wire/envelope.js'
 import { decode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
-import { getChannelMux, type ServerTransport } from './ChannelMux.js'
+import { getChannelMux, type ServerTransport, type WireClose } from './ChannelMux.js'
 import { handleSseChannelRequest } from './sse.js'
 
 type ServePath = 'web' | 'node'
@@ -21,10 +21,11 @@ async function openStream(path: ServePath, reconcile: Uint8Array<ArrayBuffer>) {
   const body = encodeSseRequest({ connId: crypto.randomUUID(), streamResponse: true }, [reconcile])
   const opened =
     path === 'web'
-      ? await handleSseChannelRequest(new Request(url, { method: 'POST', body }))
+      ? await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
       : await handleSseChannelRequest(
           new Request(url, { method: 'POST' }),
           Readable.from([new Uint8Array(await body.arrayBuffer())]),
+          () => false,
         )
   const stream = opened.body
   if (typeof stream === 'string') throw new Error(`no event stream: ${opened.statusCode} ${stream}`)
@@ -100,7 +101,7 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
     wire,
     frames,
     state,
-    /** The page's connection drops: the server's wire closes, transiently unless `permanent`. */
-    close: (permanent = true) => mux.onWireClosed(wire, { permanent }),
+    /** The page's connection ends: the server's wire closes as `how` says, as the page leaving unless told. */
+    close: (how: WireClose = 'pageLeft') => mux.onWireClosed(wire, how),
   }
 }

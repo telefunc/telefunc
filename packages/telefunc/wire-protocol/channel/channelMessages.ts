@@ -11,7 +11,7 @@ import type { ChannelPublishInfo } from './channel.js'
 interface MessageSource<T> {
   listen(callback: (data: T) => any, options: { signal: AbortSignal }): () => void
   listenBinary(callback: (data: Uint8Array) => any, options: { signal: AbortSignal }): () => void
-  readonly closed: Promise<void>
+  readonly closed: Promise<Error | null>
 }
 
 interface BroadcastSource<T> {
@@ -20,7 +20,7 @@ interface BroadcastSource<T> {
     callback: (data: Uint8Array, info: ChannelPublishInfo) => any,
     options: { signal: AbortSignal },
   ): () => void
-  readonly closed: Promise<void>
+  readonly closed: Promise<Error | null>
 }
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
@@ -70,7 +70,7 @@ function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?
 /** Without a `budget`, what the loop holds is bounded by its source: a channel holds each message until its listener's
  *  promise settles, within the most it may hold. */
 async function* iterateMessages<M extends Message<unknown>>(
-  source: { readonly closed: Promise<void> },
+  source: { readonly closed: Promise<Error | null> },
   subscribe: (
     receive: (message: M, bytes?: number) => Promise<void> | undefined,
     options: { signal: AbortSignal },
@@ -171,11 +171,8 @@ async function* iterateMessages<M extends Message<unknown>>(
 }
 
 // A pending close promise keeps its callbacks; their scope must release the iterator when it returns.
-function observeClose(closed: Promise<void>, callback?: (err?: unknown) => void): () => void {
-  void closed.then(
-    () => callback?.(),
-    (err) => callback?.(err),
-  )
+function observeClose(closed: Promise<Error | null>, callback?: (err?: unknown) => void): () => void {
+  void closed.then((outcome) => callback?.(outcome ?? undefined))
   return () => {
     callback = undefined
   }

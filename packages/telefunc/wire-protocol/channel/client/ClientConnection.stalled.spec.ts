@@ -265,9 +265,9 @@ test('a channel closed behind its stuck data is judged as an open one: it ends w
   const sentAt = performance.now()
   void page.channel.send('never through').catch(() => {})
   await advance(1_000)
-  let closed: number | 'pending' = 'pending'
+  let settled = false
   // Its own timeout past the verdict: the verdict settles it.
-  void page.channel.close({ timeout: 4 * RECONNECT_TIMEOUT_MS }).then((result) => (closed = result))
+  void page.channel.close({ timeout: 4 * RECONNECT_TIMEOUT_MS }).then(() => (settled = true))
   await advance(30_000)
   const { at, err } = defined(page.ended[0], 'the channel ending')
   expect(err?.message).toMatch(
@@ -275,7 +275,7 @@ test('a channel closed behind its stuck data is judged as an open one: it ends w
   )
   expect(at - sentAt).toBeGreaterThan(RECONNECT_TIMEOUT_MS)
   expect(at - sentAt).toBeLessThan(RECONNECT_TIMEOUT_MS + MOST_BACKOFF_MS + 1_000)
-  expect(closed).not.toBe('pending')
+  expect(settled).toBe(true)
   expect(gotOf(0)).toEqual([])
 })
 

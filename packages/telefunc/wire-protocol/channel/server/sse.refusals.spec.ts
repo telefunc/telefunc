@@ -20,7 +20,7 @@ const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit, { at = url, method = 'POST' } = {}) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method, body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(at, init))
+  return handleSseChannelRequest(new Request(at, init), undefined, () => false)
 }
 
 /** A stream whose chunks the server reads as they come, ending after the last. */
@@ -60,8 +60,8 @@ afterEach(() => {
 })
 
 test.each([
-  ['a GET', () => handleSseChannelRequest(new Request(url))],
-  ['a POST with no body', () => handleSseChannelRequest(new Request(url, { method: 'POST' }))],
+  ['a GET', () => handleSseChannelRequest(new Request(url), undefined, () => false)],
+  ['a POST with no body', () => handleSseChannelRequest(new Request(url, { method: 'POST' }), undefined, () => false)],
   ['metadata it cannot read', () => post(bodyOf(encodeU32(2), new TextEncoder().encode('{]')))],
   [
     'a server that serves no SSE',

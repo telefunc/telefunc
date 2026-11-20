@@ -100,7 +100,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
-  testUpgrade()
+  testUpgrade(isDev)
 
   testFunction(isDev)
 

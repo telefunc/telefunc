@@ -12,6 +12,7 @@ import type { Deliveries } from '../../flowControl/Deliveries.js'
 import {
   countWaitingPublishes,
   droppingFrom,
+  droppingLossy,
   droppingPublishes,
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
@@ -151,6 +152,15 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     const fromStart = from === 'start' || this.wireQueue.waitingPublishes(ix) > 0
     this.wireQueue.dropWaitingFrom(ix, from)
     this.dropHeld(droppingFrom(ix, fromStart ? 'start' : 'publish'))
+  }
+
+  /** The socket has no byte of what the transport holds, nor of what the wire holds for a RECONCILED, which is newer. */
+  dropUngiven(ix: number): number {
+    const dropped = this.wireQueue.dropUngiven(ix)
+    if (this.held.length === 0) return dropped
+    const cut = droppingLossy(ix)
+    this.dropHeld(cut.drops)
+    return dropped + cut.count()
   }
 
   /** `drops` is asked in the order the frames were held. */

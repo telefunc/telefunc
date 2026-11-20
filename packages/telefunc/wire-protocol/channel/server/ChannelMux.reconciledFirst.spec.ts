@@ -75,7 +75,7 @@ test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then 
   if (sessionId === undefined) throw new Error('no session on the first wire')
   void channel.send('a')
   void channel.send('b')
-  first.close(false)
+  first.close('transient')
 
   const sendReconciled = mux.sendReconciled.bind(mux)
   vi.spyOn(mux, 'sendReconciled').mockImplementationOnce((outcome) => {
@@ -156,7 +156,7 @@ test('a reconcile that throws a bug ends its wire, transiently: nothing stays he
   await Promise.resolve()
   expect(page.state.terminated).toBe(true)
   // The server's bug, not the page's fault: the page's channels keep their reconnect grace.
-  expect(page.mux.readPermanentTermination(page.wire)).toBe(false)
+  expect(page.mux.readRejection(page.wire)).toBe(false)
   vi.restoreAllMocks()
   page.close()
 })

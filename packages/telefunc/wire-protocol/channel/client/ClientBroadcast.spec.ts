@@ -8,6 +8,7 @@ import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 import { ChannelClosedError } from '../channelErrors.js'
+import { closeTimedOutError } from '../ChannelEnding.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 
@@ -55,7 +56,7 @@ describe('a listener added once its channel ended on the page', () => {
     page.subscribe(() => {})
     page._dispatchFrame(received(encode.wanted(0, 1)))
     page.abort('gone')
-    const closedWith = await page.closed.catch((err: unknown) => err)
+    const closedWith = await page.closed
     await expect(page.subscribe(() => {}).opened).rejects.toBe(closedWith)
     await expect(page.subscribeBinary(() => {}).opened).rejects.toBe(closedWith)
   })
@@ -63,7 +64,7 @@ describe('a listener added once its channel ended on the page', () => {
   it('of a plain channel never takes effect', async () => {
     const page = new ClientChannel(channelOptions())
     page.abort('gone')
-    const closedWith = await page.closed.catch((err: unknown) => err)
+    const closedWith = await page.closed
     await expect(page.listen(() => {}).opened).rejects.toBe(closedWith)
     await expect(page.listenBinary(() => {}).opened).rejects.toBe(closedWith)
   })
@@ -71,7 +72,7 @@ describe('a listener added once its channel ended on the page', () => {
   it('an `onOpen()` callback added to a channel that ended unopened registers nothing on its signal and never runs', async () => {
     const page = new ClientChannel(channelOptions())
     page.abort('gone')
-    await page.closed.catch(() => {})
+    await page.closed
     const signal = new AbortController().signal
     const opened = vi.fn()
     page.onOpen(opened, { signal })
@@ -95,7 +96,7 @@ describe("a page's broadcast that ends while a subscriber waits, its `onClose()`
         () => 'resolved',
         (err: unknown) => err,
       )
-      expect(opened).toBe(await page.closed.catch((err: unknown) => err))
+      expect(opened).toBe(await page.closed)
     })
   }
 })
@@ -112,7 +113,9 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
           return new Promise<void>(() => {})
         })
         page._dispatchFrame(received(encode.close(0, 10, 1)))
-        const ended = await page.closed.catch((err: unknown) => err)
+        // The server decides: its deadline passes, and its ERROR ends the page's end.
+        setTimeout(() => page._onEnded(closeTimedOutError()), 10)
+        const ended = await page.closed
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
         const opened = await stop.opened.then(
           () => 'resolved',
@@ -199,7 +202,10 @@ describe("a page's subscriber a close callback removes before the server confirm
       })
       const closed = page.closed
       page._dispatchFrame(received(encode.close(0, 50, 1)))
-      await expect(closed).resolves.toBeUndefined()
+      // The server's verdict once the page said it is done.
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      page._dispatchFrame(received(encode.closeDone(0, 2)))
+      await expect(closed).resolves.toBeNull()
     })
   }
 })
@@ -237,6 +243,7 @@ describe("a page subscriber's `opened` around its broadcast's close", () => {
       page._dispatchFrame(received(encode.wanted(0, 2)))
       const subscribedOutcome = await outcome(subscribed.opened)
       cleanup.resolve()
+      page._dispatchFrame(received(encode.closeDone(0, 2)))
       await page.closed
       expect({ removed: await removedOutcome, subscribed: subscribedOutcome }).toEqual({
         removed: 'Channel is closed',
@@ -248,7 +255,7 @@ describe("a page subscriber's `opened` around its broadcast's close", () => {
       const page = new ClientBroadcast(channelOptions())
       const subscriber = page[kind](() => {})
       page.abort('gone')
-      const ended = await page.closed.catch((err: unknown) => err)
+      const ended = await page.closed
       expect(await subscriber.opened.catch((err: unknown) => err)).toBe(ended)
     })
 
@@ -259,7 +266,7 @@ describe("a page subscriber's `opened` around its broadcast's close", () => {
       await subscriber.opened
       page.onClose(() => subscriber())
       page.abort('gone')
-      await page.closed.catch(() => {})
+      await page.closed
       expect(await outcome(subscriber.opened)).toBe('resolved')
     })
   }
