@@ -23,6 +23,12 @@ async function onReadAroundAwait() {
   return { before, after: readUser() }
 }
 
+async function onReadTwiceAroundAwait() {
+  const before = [readUser(), readUser()]
+  await Promise.resolve()
+  return { before, after: readUser() }
+}
+
 const usersAfterYield: Record<string, string> = {}
 async function* onReadAfterYield() {
   const { user } = getContext<{ user: string }>()
@@ -84,4 +90,41 @@ test('a call never reads the context another caller gives provideTelefuncContext
     // Whether this throws is not what is checked here: the other call's read is.
   }
   expect(await userAfterWait).toBe('throws')
+})
+
+test('provideTelefuncContext(context, fn) returns what `fn` returns', () => {
+  expect(provideTelefuncContext({ user: 'A' }, readUser)).toBe('A')
+  const promise = Promise.resolve(true)
+  const returned: Promise<boolean> = provideTelefuncContext({ user: 'A' }, () => promise)
+  expect(returned).toBe(promise)
+})
+
+test('provideTelefuncContext(context, fn) gives each of two callers started together its own context until the first `await`', async () => {
+  const returns = await Promise.all([
+    provideTelefuncContext({ user: 'A' }, onReadTwiceAroundAwait),
+    provideTelefuncContext({ user: 'B' }, onReadTwiceAroundAwait),
+  ])
+  expect(returns).toEqual([
+    { before: ['A', 'A'], after: 'throws' },
+    { before: ['B', 'B'], after: 'throws' },
+  ])
+})
+
+test('provideTelefuncContext(context, fn) gives the previous context back when `fn` returns or throws', () => {
+  const failure = new Error()
+  const users = provideTelefuncContext({ user: 'A' }, () => {
+    const nested = provideTelefuncContext({ user: 'B' }, readUser)
+    const afterReturn = readUser()
+    let thrown: unknown
+    try {
+      provideTelefuncContext({ user: 'B' }, () => {
+        throw failure
+      })
+    } catch (err) {
+      thrown = err
+    }
+    return { nested, afterReturn, thrown, afterThrow: readUser() }
+  })
+  expect(users).toEqual({ nested: 'B', afterReturn: 'A', thrown: failure, afterThrow: 'A' })
+  expect(readUser()).toBe('throws')
 })

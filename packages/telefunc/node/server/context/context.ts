@@ -8,7 +8,6 @@ export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { restoreContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
-import type { Telefunc } from './TelefuncNamespace.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
 type Context = {
@@ -19,7 +18,7 @@ type Context = {
 
 type ContextGetter = () => Context | null
 type RestoreContext = <T>(context: Context, fn: () => T) => T
-type ProvideTelefuncContext = (context: Telefunc.Context) => void
+type ProvideTelefuncContext = (context: Context, fn?: () => unknown) => unknown
 
 const globalObject = getGlobalObject<{
   getContext: ContextGetter
@@ -66,8 +65,8 @@ function restoreContextInSyncMode<T>(context: Context, fn: () => T): T {
   return globalObject.isAsyncMode ? fn() : restoreContext(context, fn)
 }
 
-function provideContext(context: Telefunc.Context): void {
-  globalObject.provideTelefuncContext(context)
+function provideContext(context: Context, fn?: () => unknown): unknown {
+  return globalObject.provideTelefuncContext(context, fn)
 }
 
 // ── Async mode ─────────────────────────────────────────────────────

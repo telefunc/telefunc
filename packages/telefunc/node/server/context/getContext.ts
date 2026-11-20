@@ -4,6 +4,7 @@ export { PROVIDED_CONTEXT }
 export type { Telefunc }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
+import { isCallable } from '../../../utils/isCallable.js'
 import { isObject } from '../../../utils/isObject.js'
 import { objectAssign } from '../../../utils/objectAssign.js'
 import { getRawContext, provideContext, isAsyncMode } from './context.js'
@@ -44,10 +45,16 @@ type TelefuncBuiltins = {
   signal: AbortSignal
 }
 
-function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {
+function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void
+function provideTelefuncContext<Context extends object, Result>(context: Context, fn: () => Result): Result
+function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
   /* TO-DO/eventually: check whether it's possible to deprecate Async Hooks for Nuxt.
   assertWarning(false, 'provideTelefuncContext() is deprecated', { onlyOnce: true })
   */
   assertUsage(isObject(context), '[provideTelefuncContext()] Argument `context` should be an object')
-  provideContext(context as Telefunc.Context)
+  assertUsage(
+    fn === undefined || isCallable(fn),
+    '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
+  )
+  return provideContext({ [PROVIDED_CONTEXT]: context }, fn)
 }
