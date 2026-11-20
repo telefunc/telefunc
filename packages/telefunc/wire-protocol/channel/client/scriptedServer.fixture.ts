@@ -125,7 +125,11 @@ class FakeWebSocket {
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
       if (this.script === 'mute' && frame.tag === TAG.RECONCILE) continue
-      for (const down of world.server.answer(frame)) setTimeout(() => this.deliver(down), 0)
+      for (const down of world.server.answer(frame)) {
+        const deliver = () => this.deliver(down)
+        if (frame.tag === TAG.PREPARE && world.holdReady) world.heldReady.push(deliver)
+        else setTimeout(deliver, 0)
+      }
       if (isSequencedFrame(frame) && world.server.cuts.has(frame.index)) setTimeout(() => this.drop(), 0)
     }
   }
@@ -203,6 +207,10 @@ const world = {
   controlAnswers: [] as PostAnswer[],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
+  /** While set, the server's READY to a WebSocket's PREPARE waits in `heldReady`, which a test calls to send it: the
+   *  page stays on SSE meanwhile. */
+  holdReady: false,
+  heldReady: [] as (() => void)[],
   /** Each batch POST: its body's size, its status (0 for none), whether it carried data, and the wire it went on. */
   posts: [] as { bytes: number; status: number; data: boolean; wire: number }[],
 }
@@ -233,6 +241,13 @@ function serveSse(): void {
       })
     }
     const stream = world.streams.at(-1)
+    const answer = (data ? world.postAnswers.shift() : world.controlAnswers.shift()) ?? { tag: 'taken' }
+    if (answer.tag === 'refused') {
+      post.status = answer.status
+      const { pongAfterMs } = answer
+      if (pongAfterMs !== undefined) setTimeout(() => stream?.frame(encode.pong()), pongAfterMs)
+      return new Response('<h1>Refused</h1>', { status: answer.status, headers: { 'Content-Type': 'text/html' } })
+    }
     for (const frame of frames) {
       if (frame.tag !== TAG.BARRIER) continue
       // The upgrade commits: the channels attach on the new wire, and the old one's FIN ends its data.
@@ -240,13 +255,6 @@ function serveSse(): void {
       const ixes = open.map(({ ix }) => ix)
       setTimeout(() => FakeWebSocket.open?.deliver(server.reconciled(ixes, upgradeId)), 0)
       setTimeout(() => stream?.frame(encode.fin()), 0)
-    }
-    const answer = (data ? world.postAnswers.shift() : world.controlAnswers.shift()) ?? { tag: 'taken' }
-    if (answer.tag === 'refused') {
-      post.status = answer.status
-      const { pongAfterMs } = answer
-      if (pongAfterMs !== undefined) setTimeout(() => stream?.frame(encode.pong()), pongAfterMs)
-      return new Response('<h1>Refused</h1>', { status: answer.status, headers: { 'Content-Type': 'text/html' } })
     }
     if (answer.tag === 'slow') await new Promise((resolve) => setTimeout(resolve, answer.ms))
     for (const frame of frames) for (const down of server.answer(frame)) stream?.frame(down)
@@ -287,6 +295,8 @@ function useScriptedServer(): void {
     world.postAnswers = []
     world.controlAnswers = []
     world.postLimit = Infinity
+    world.holdReady = false
+    world.heldReady = []
     world.posts = []
     FakeWebSocket.made = []
     FakeWebSocket.scripts = []

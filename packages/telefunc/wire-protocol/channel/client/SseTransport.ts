@@ -112,8 +112,6 @@ class SseTransport implements UpgradeSource {
   private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
-  /** The most a batch POST carries: half of what something in front refused with a 413. */
-  private postLimit = Infinity
   /** The body of the batch POST out, 0 with none. */
   private postOutBytes = 0
   /** The frames in `outbox`. */
@@ -506,15 +504,15 @@ class SseTransport implements UpgradeSource {
 
   /** Takes what the next POST carries from the head of the outbox, in bytes as its body goes on the wire (its metadata,
    *  and four bytes of length before each frame): entries while the body comes to less than `postBytes`, which one may
-   *  pass, and never past `postLimit`, except a first entry larger alone, which goes alone. A replay that refills the
-   *  outbox goes so too. */
+   *  pass, and never past the connection's `ssePostLimit`, except a first entry larger alone, which goes alone. A replay
+   *  that refills the outbox goes so too. */
   private takeOutboxHead(): OutboxEntry[] {
     let count = 0
     let bytes = 0
     let body = encodeSseRequestMetadata({ connId: this.connId }).byteLength
     for (const { frame } of this.outbox) {
       const size = U32_SIZE + frame.byteLength
-      if (count > 0 && (body >= this.postBytes || body + size > this.postLimit)) break
+      if (count > 0 && (body >= this.postBytes || body + size > this.owner.ssePostLimit)) break
       body += size
       bytes += frame.byteLength
       count++
@@ -562,9 +560,8 @@ class SseTransport implements UpgradeSource {
         return
       }
       if (answer?.tag === 'tooLarge') {
-        // A lone frame's body may be larger than what the page learned: it never raises that.
-        this.postLimit = Math.min(this.postLimit, Math.floor(body.size / 2))
-        this.postBytes = Math.min(this.postBytes, this.postLimit)
+        this.owner.onTransportTooLarge(body.size)
+        this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
         // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
         if (queued.length > 1) {
           this.requeue(queued)
@@ -599,7 +596,7 @@ class SseTransport implements UpgradeSource {
   private sizePosts(bytes: number, ms: number): void {
     if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
     this.postBytes = Math.min(
-      this.postLimit,
+      this.owner.ssePostLimit,
       SSE_POST_MAX_BYTES,
       Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
     )

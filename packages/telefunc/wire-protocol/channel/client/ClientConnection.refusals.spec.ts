@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from 'vitest'
 import { SSE_POST_MIN_BYTES, SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
-import { advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
+import { FakeWebSocket, advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
 import type { PostAnswer } from './scriptedServer.fixture.js'
 
 useScriptedServer()
@@ -127,4 +127,33 @@ test("a late answer to a POST of a wire the page left doesn't size the POSTs of 
   await advance(2_000)
   const next = world.posts.slice(before).find(({ data }) => data)
   expect(next?.bytes).toBeGreaterThan(2 * SSE_POST_MIN_BYTES)
+})
+
+test('the size the page learned outlives a move to WebSocket and the fallback to SSE after it', async () => {
+  serveSse()
+  // Something in front of the server takes no body larger than this, on every SSE request of the page.
+  world.postLimit = 18_120
+  world.holdReady = true
+  const page = openChannel(['sse', 'ws'])
+  await advance(SSE_RECONCILE_DEADLINE_MS + 500)
+  sendTexts(page.channel, 12, 3_000)
+  await advance(2_000)
+  const refused = defined(
+    world.posts.find(({ status }) => status === 413),
+    'the 413 that taught the page its size',
+  )
+  const learned = Math.floor(refused.bytes / 2)
+  // The move to WebSocket fails at its barrier, which a gateway refuses: the page falls back to a new SSE wire, behind
+  // the same proxy, and stays on it.
+  world.controlAnswers = [{ tag: 'refused', status: 503 }]
+  defined(world.heldReady.shift(), "the WebSocket's READY")()
+  await advance(5_000)
+  const from = world.posts.length
+  sendTexts(page.channel, 10, 3_000)
+  await advance(2_000)
+  const after = world.posts.slice(from).filter(({ data }) => data)
+  expect(after.length).toBeGreaterThan(0)
+  expect(after.filter(({ status }) => status === 413)).toEqual([])
+  expect(Math.max(...after.map(({ bytes }) => bytes))).toBeLessThanOrEqual(learned)
+  expect(page.ended).toEqual([])
 })

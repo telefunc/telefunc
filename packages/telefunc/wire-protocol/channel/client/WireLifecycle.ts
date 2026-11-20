@@ -64,6 +64,10 @@ interface TransportOwner {
   onTransportBatched(transport: ClientChannelTransport): void
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void
+  /** The most a batch POST carries, which a 413 taught the connection: `Infinity` before one. */
+  readonly ssePostLimit: number
+  /** A batch POST of `bodyBytes` was refused with a 413: none carries more than half of it from now on. */
+  onTransportTooLarge(bodyBytes: number): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
@@ -106,6 +110,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private handshakeMs = 0
   /** The wire on which a request carrying only the connection's own frames was refused, until a PONG came. */
   private ownFramesRefusedOn: number | null = null
+  /** Half of the least batch POST a 413 refused. The connection's, not a transport's: an upgrade to WebSocket and the
+   *  fallback after it make new transports, behind the same proxy. */
+  private postLimit = Infinity
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -346,6 +353,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
     this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
+  }
+
+  get ssePostLimit(): number {
+    return this.postLimit
+  }
+
+  onTransportTooLarge(bodyBytes: number): void {
+    // A lone frame's body may be larger than what the page learned: it never raises that.
+    this.postLimit = Math.min(this.postLimit, Math.floor(bodyBytes / 2))
   }
 
   onTransportPong(ended: PongEntry[]): void {
