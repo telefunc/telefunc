@@ -4,7 +4,7 @@ import { inspect } from 'node:util'
 import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
-import { addressOf, createSubscriberSocket } from './ioredis.js'
+import { addressOf, createSubscriberSocket, deploymentOf } from './ioredis.js'
 import { redisFailure } from './redisFailure.js'
 
 const clients: Array<Redis | Cluster> = []
@@ -365,4 +365,18 @@ describe("a Cluster's subscriber socket, opened before the Cluster is ready", ()
       for (const failure of failures) expect(failure).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
     })
   }
+})
+
+describe("a Cluster's deployment, which installRedis() keys its backend by", () => {
+  it('a Cluster of the same startup nodes is the same deployment; one of other nodes is another', () => {
+    const cluster = (port: number) => {
+      const redis = new Cluster([{ host: '127.0.0.1', port }], { lazyConnect: true })
+      clients.push(redis)
+      return redis
+    }
+    const first = cluster(7000)
+    expect(deploymentOf(first)).toBe(deploymentOf(first))
+    expect(deploymentOf(cluster(7000))).toBe(deploymentOf(first))
+    expect(deploymentOf(cluster(7001))).not.toBe(deploymentOf(first))
+  })
 })

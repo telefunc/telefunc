@@ -70,8 +70,7 @@ function isCluster(redis: RedisClient): redis is Cluster {
 
 /** What a client connects to: a Cluster's startup nodes, or a server's address, database and Sentinel name. */
 function deploymentOf(redis: RedisClient): string {
-  // ioredis keeps a Cluster's startup nodes private; its own duplicate() reads the same field.
-  if (isCluster(redis)) return JSON.stringify((redis as unknown as { startupNodes: unknown }).startupNodes)
+  if (isCluster(redis)) return JSON.stringify(startupNodesOf(redis))
   const { path, host, port, db, sentinels, name } = redis.options
   return JSON.stringify({ path, host, port, db, sentinels, name })
 }
@@ -107,12 +106,17 @@ function connectsAlike(a: RedisClient, b: RedisClient): boolean {
   return CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name]))
 }
 
+/** A Cluster's startup nodes, as the app gave them: ioredis keeps them private, and its own duplicate() reads the same
+ *  field. */
+function startupNodesOf(cluster: Cluster): unknown {
+  return cluster['startupNodes']
+}
+
 /** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port, and never
  *  a credential its URL holds. */
 function addressOf(redis: RedisClient): string {
   if (isCluster(redis)) {
-    // ioredis keeps a Cluster's startup nodes private, as they were given.
-    const nodes: unknown = redis['startupNodes']
+    const nodes = startupNodesOf(redis)
     return Array.isArray(nodes) ? nodes.map(nodeAddress).join(', ') : 'a Redis Cluster'
   }
   const { path, host, port, sentinels, name } = redis.options
