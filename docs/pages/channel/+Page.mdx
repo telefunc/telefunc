@@ -668,12 +668,14 @@ A call that can't start throws instead of rejecting: `send()` or `sendBinary()` 
 To drop a send's failure once its channel has stopped taking sends, check `isClosed`. It is `true` from the start of a close, however the channel then ends:
 
 ```ts
-try {
-  await channel.send(reply)
-} catch (err) {
-  // The channel stopped taking sends: `closed` tells how it ends
-  if (channel.isClosed) return
-  throw err
+async function sendReply(reply: string) {
+  try {
+    await channel.send(reply)
+  } catch (err) {
+    // The channel stopped taking sends: `closed` tells how it ends
+    if (channel.isClosed) return
+    throw err
+  }
 }
 ```
 
