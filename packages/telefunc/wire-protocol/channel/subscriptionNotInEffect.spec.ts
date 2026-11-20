@@ -152,7 +152,8 @@ const SERVER_OPTIONS = {
 /** A page's POST, read as the server's SSE handler reads it: its metadata, then its frames. */
 async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames: DecodedFrame[] }> {
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
-  const reader = new BodyReader(body.stream())
+  // A `Blob`'s stream doesn't fail.
+  const reader = new BodyReader(body.stream(), () => false)
   const metadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
   if (metadata === null) return { streamResponse: false, frames: [] }
   const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))

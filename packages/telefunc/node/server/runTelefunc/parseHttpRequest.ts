@@ -179,7 +179,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new BodyReader(source)
+    const reader = new BodyReader(source, (err) => clientLeft(err, request, readable))
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
