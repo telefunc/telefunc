@@ -410,6 +410,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     this.tail = new TailHold({ owner: this, seed })
   }
 
+  get roomId(): string {
+    return this.room.id
+  }
+
   /** Its expiry ends only this stub's want of all text. */
   tailExpired(): void {
     this.tail = null

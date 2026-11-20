@@ -551,7 +551,7 @@ Adding another listener while the same room is already listening to that publish
 
 ## Load chat history
 
-Save each message in `onAfterPublish()`, and return the history with the room:
+Save each message in `onBeforePublish()`, before it is sent, and load the history in a telefunction the page calls after `subscribe()`:
 
 ```js
 // Chat.telefunc.js
@@ -562,32 +562,44 @@ import { Room } from '@telefunc/room'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
-  const room = await Room.getOrCreate(roomId, { tail: true }) // the client also gets the messages published after the history you load
+  const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
-    onAfterPublish: async (from, message, info) => {
-      await db.messages.insert({ ...message, roomId, authorId: user.id, seq: info.seq })
+    // Saved before it is sent, so that a history loaded once it was sent has it.
+    onBeforePublish: async (from, message) => {
+      await db.messages.insert({ ...message, roomId, authorId: from.identity })
     },
   })
-  const history = await db.messages.latest(roomId, 50) // ordered by seq
   const me = await room.join({ meta: { name: user.name }, identity: user.id })
-  return { room, me, history }
+  return { room, me }
+}
+
+export async function onLoadHistory(roomId) {
+  return await db.messages.latest(roomId, 50) // oldest first
 }
 ```
 ```js
 // Chat.js
 // Environment: client
 
-import { onJoinChat } from './Chat.telefunc'
+import { onJoinChat, onLoadHistory } from './Chat.telefunc'
 
-const { room, me, history } = await onJoinChat('lobby')
+const { room, me } = await onJoinChat('lobby')
 
-const shown = new Set(history.map((message) => message.seq))
-for (const message of history) render(message)
-room.subscribe((message, info) => {
-  if (!shown.has(info.seq)) render(message) // skip what history already shows
-})
+const shown = new Set()
+const show = (message) => {
+  if (shown.has(message.id)) return // the history and the room can both bring it
+  shown.add(message.id)
+  render(message)
+}
+let arrived = [] // what the room brings before the history is shown
+room.subscribe((message) => (arrived ? arrived.push(message) : show(message)))
+// Runs once the subscription is in effect: a message sent before is in the history, one sent after reaches subscribe().
+const history = await onLoadHistory('lobby')
+for (const message of history) show(message)
+for (const message of arrived) show(message)
+arrived = null
 
-await me.publish({ text: 'hello' }) // saved by onAfterPublish()
+await me.publish({ id: crypto.randomUUID(), text: 'hello' }) // saved by onBeforePublish()
 ```
 
 > Add your other hooks, such as the ones in <Link href="#control-who-can-join-and-post" />, to this same `Room.guard()` call.
@@ -658,7 +670,7 @@ Server-side.
 | Method | Description |
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
-| `Room.get(id, { tail? }?)` | Read a room: as it is now, and current from then on while you listen to it or have joined it. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
+| `Room.get(id, { tail? }?)` | Read a room: as it is now, and current from then on while you listen to it or have joined it. Throws if it doesn't exist. With `tail: true`, the room also holds the messages published after this call for the client's first `subscribe()`: a bounded suffix, at most the last 256 of them and 1 Mi UTF-16 code units, kept 60 seconds. Room logs on your server the ones it drops. |
 | `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room, once, and say who may join it from the client. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |

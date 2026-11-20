@@ -865,6 +865,22 @@ function testRoom() {
       expect(r.order).deep.equal([...Array.from({ length: 10 }, (_, i) => `live-${i + 1}`), 'end'])
     },
   )
+  testRoomScenario<{ rendered: string[]; saved: string[] }>(
+    'chat-history-lost',
+    "room: the guide's chat example shows a message sent while the page loads whose save waits until it has loaded",
+    (r) => {
+      expect(r.saved).deep.equal(['hello', 'before', 'control'])
+      expect(r.rendered).deep.equal(r.saved)
+    },
+  )
+  testRoomScenario<{ rendered: string[]; saved: string[] }>(
+    'chat-history-burst',
+    "room: the guide's chat example shows the latest 50 of 257 messages sent between onJoinChat() and subscribe(), and every message after them",
+    (r) => {
+      expect(r.saved.length).toBe(259)
+      expect(r.rendered).deep.equal([...Array.from({ length: 50 }, (_, n) => `burst-${n + 208}`), 'hello', 'control'])
+    },
+  )
   testRoomScenario<{ snapshot: unknown; getParticipants: unknown }>(
     'meta-read-only',
     "room: a Map, Set, Date, typed array or nested object a page changes in a participant's meta, read from snapshot(), shows in neither the next snapshot() nor getParticipants()",
@@ -1619,10 +1635,14 @@ function testRoom() {
   })
   testRoomScenario<{ received: string[]; kept: string[] }>(
     'tail-order',
-    "room: a tail hands its first subscriber what it held in order, the server's messages too, and only the latest 256",
+    "room: a tail hands its first subscriber what it held in order, the server's messages too, and only the latest 256, and the server logs that it dropped the others",
     (r) => {
       expect(r.received).deep.equal(['a', 'system', 'b'])
       expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
+      expectLog(
+        'lost: its tail dropped its oldest message, to hold at most the last 256 messages and 1048576 UTF-16 code units of them until a page subscribes',
+        { filter: (log) => log.logSource === 'stderr' },
+      )
     },
   )
   test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
@@ -2161,7 +2181,7 @@ function testRoomRedisPublishLimit() {
 }
 
 function testRoomLongWaits() {
-  test('room: a tail nobody subscribes to within 60 seconds drops what it held', async () => {
+  test('room: a tail nobody subscribes to within 60 seconds drops what it held, and the server logs it', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-tail-lease')
     await autoRetry(
@@ -2170,6 +2190,9 @@ function testRoomLongWaits() {
       },
       { timeout: 75_000 },
     )
+    expectLog('lost: its tail dropped the message it held, as no page subscribed within 60 s', {
+      filter: (log) => log.logSource === 'stderr',
+    })
   })
 
   test("room: a store write that fails once heals at the next heartbeat: a page's view keeps its room open, and a failed join leaves no member", async () => {

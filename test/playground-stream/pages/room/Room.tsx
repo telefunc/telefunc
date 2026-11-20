@@ -127,6 +127,15 @@ import {
   onRenameWatcher,
   onWatcherLeaves,
 } from './Room.telefunc'
+import {
+  onJoinChat,
+  onLoadHistory,
+  onJoinChatWriter,
+  onWriterPublishes,
+  onHoldSave,
+  onReleaseSave,
+  onSavedTexts,
+} from './Room.chatHistory.telefunc'
 import { defineParticipantField, watchersOf } from '@telefunc/room/__internal'
 import { RoomError, type LocalParticipant } from '@telefunc/room/client'
 import { demandNames, type NamedDemand } from './demandNames'
@@ -2209,6 +2218,53 @@ function Room() {
         )
         releaseRoom()
       })}
+
+      {(['lost', 'burst'] as const).map((form) => (
+        <React.Fragment key={form}>
+          {scenario(`chat-history-${form}`, null, `The guide's chat example, ${form}`, async () => {
+            const roomId = `e2e-chat-history-${form}:${crypto.randomUUID()}`
+            await onJoinChatWriter(roomId)
+            // The check's lost case: a message sent as the page loads, whose save waits until it has loaded.
+            if (form === 'lost') {
+              await onHoldSave('before')
+              await onWriterPublishes(roomId, ['before'])
+            }
+            const rendered: string[] = []
+            const render = (message: { text: string }) => rendered.push(message.text)
+
+            // The guide's `Chat.js`, `render()` above.
+            const { room, me } = await onJoinChat(roomId, { id: 'reader', name: 'Reader' })
+            // The check's burst: 257 messages between `onJoinChat()` returning and `subscribe()`.
+            if (form === 'burst')
+              await onWriterPublishes(
+                roomId,
+                Array.from({ length: 257 }, (_, n) => `burst-${n + 1}`),
+              )
+            const shown = new Set<string>()
+            const show = (message: { id: string; text: string }) => {
+              if (shown.has(message.id)) return // the history and the room can both bring it
+              shown.add(message.id)
+              render(message)
+            }
+            let arrived: Array<{ id: string; text: string }> | null = [] // what the room brings before the history is shown
+            room.subscribe((message) => (arrived ? arrived.push(message) : show(message)))
+            // Runs once the subscription is in effect: a message sent before is in the history, one sent after reaches subscribe().
+            const history = await onLoadHistory(roomId)
+            for (const message of history) show(message)
+            for (const message of arrived) show(message)
+            arrived = null
+
+            await me.publish({ id: crypto.randomUUID(), text: 'hello' }) // saved by onBeforePublish()
+
+            if (form === 'lost') await onReleaseSave('before')
+            await onWriterPublishes(roomId, ['control'])
+            await pollUntil(async () => ({
+              result: { rendered, saved: await onSavedTexts(roomId) },
+              done: rendered.includes('control'),
+            }))
+          })}
+        </React.Fragment>
+      ))}
 
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
         const [roomId, observer] = await createRoom('dmhold')

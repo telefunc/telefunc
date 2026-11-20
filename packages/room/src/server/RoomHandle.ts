@@ -269,6 +269,10 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     await withinRoomHorizon(this.replica.tailChanged(this))
   }
 
+  get roomId(): string {
+    return this.id
+  }
+
   tailExpired(): void {
     this.teardownTail()
   }
