@@ -563,11 +563,11 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
-      const answer = await answerOf(this.postWithDeadline(body, wire.signal))
-      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch), and its
-      // answer, however late, says nothing of the wire after it.
-      if (wire !== this.transportAbort) {
-        if (answer?.tag !== 'expected') this.requeue(queued.filter(isWindowRefresh))
+      const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
+      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
+      // refresh goes again whatever it was answered: its limit is cumulative.
+      if (answer === 'left') {
+        this.requeue(queued.filter(isWindowRefresh))
         return
       }
       if (answer?.tag === 'expected') {
@@ -693,6 +693,14 @@ class SseTransport implements UpgradeSource {
     })
   }
 
+  /** The answer to a POST that went on `wire`, read; null where none came. `left` where the page left that wire
+   *  meanwhile: an answer, however late, says nothing of the wire after it, so this is where it stops, before the size
+   *  it would teach, the refusal it would count and the round trip it would sample. */
+  private async answerOn(request: Promise<Response>, wire: AbortController): Promise<HttpAnswer | null | 'left'> {
+    const answer = await answerOf(request)
+    return wire === this.transportAbort ? answer : 'left'
+  }
+
   /** Chrome reports a POST whose response is left unread as canceled. */
   private async postAndRead(body: BodyInit, signal: AbortSignal, extra?: { duplex: 'half' }): Promise<Response> {
     const response = await this.post(body, signal, extra)
@@ -707,8 +715,11 @@ class SseTransport implements UpgradeSource {
     if (!this.hasWire()) return
     const wire = this.transportAbort
     assert(wire)
-    const answer = await answerOf(this.postAndRead(encodeSseRequest({ connId: this.connId }, [frame]), wire.signal))
-    if (wire !== this.transportAbort || answer === null || answer.tag === 'expected') return
+    const answer = await this.answerOn(
+      this.postAndRead(encodeSseRequest({ connId: this.connId }, [frame]), wire.signal),
+      wire,
+    )
+    if (answer === 'left' || answer === null || answer.tag === 'expected') return
     if (answer.tag !== 'otherWireVersion' && !this.owner.onTransportRefused([frame], answer.answer)) return
     this.abandonActiveTransport()
     this.owner.onTransportClosed(this, endOf(answer))
