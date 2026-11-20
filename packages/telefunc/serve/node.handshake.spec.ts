@@ -75,6 +75,13 @@ test.each([
   expect(crashes).toEqual([])
 })
 
+test('a WebSocket handshake with no Host header is answered 400, and the server goes on', async () => {
+  const { crashes } = recordCrashes()
+  expect(await handshake(`/_telefunc?wire=${WIRE_VERSION}`, null)).toBe(400)
+  expect(await handshake(`/_telefunc?wire=${WIRE_VERSION}`, host)).toBe(101)
+  expect(crashes).toEqual([])
+})
+
 test('a WebSocket handshake whose request target is a whole URL opens, read by its path', async () => {
   const { crashes } = recordCrashes()
   expect(await handshake(`http://other.example/_telefunc?wire=${WIRE_VERSION}`, host)).toBe(101)

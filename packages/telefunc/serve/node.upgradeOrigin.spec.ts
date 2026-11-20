@@ -223,6 +223,15 @@ test("refused handshakes with long Origin headers that aren't origins print one 
   expect(namesKept).toEqual(['a page whose Origin header names no origin'])
 })
 
+test('a refused page whose origin is opaque is named as such, not by what its Origin header says', async () => {
+  // `data:` parses, and its origin is the opaque `null`.
+  const { lines, namesKept } = await refuseAll(['data:,x'])
+  expect(namesKept).toEqual(['a page whose Origin header names no origin'])
+  expect(lines).toEqual([
+    expect.stringContaining('A WebSocket upgrade from a page whose Origin header names no origin was refused'),
+  ])
+})
+
 test('refused handshakes from many origins name the first 20 origins, then say once that the rest are not logged', async () => {
   const origins = Array.from({ length: 40 }, (_, i) => `https://site-${i}.example`)
   const { lines, onceKeysAdded, namesKept } = await refuseAll([...origins, ...origins])
