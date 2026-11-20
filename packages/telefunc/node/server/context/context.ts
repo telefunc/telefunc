@@ -7,7 +7,7 @@ export { isAsyncMode }
 export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { restoreContext_sync, withoutContext_sync, provideTelefuncContext_sync, getSyncContext } from './sync.js'
+import { restoreContext_sync, withoutContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
@@ -30,7 +30,7 @@ const globalObject = getGlobalObject<{
   neverRestored: boolean
   isAsyncMode: boolean
 }>('context.ts', {
-  getContext: getSyncContext,
+  getContext: getContext_sync,
   restoreContext: restoreContext_sync,
   withoutContext: withoutContext_sync,
   provideTelefuncContext: provideTelefuncContext_sync,
@@ -63,20 +63,20 @@ function provideContext(context: Telefunc.Context): void {
 // ── Async mode ─────────────────────────────────────────────────────
 
 function installAsyncMode({
+  getContext_async,
   provideTelefuncContext_async,
   restoreContext_async,
   withoutContext_async,
-  getContextStore,
 }: {
+  getContext_async: ContextGetter
   provideTelefuncContext_async: ProvideTelefuncContext
   restoreContext_async: RestoreContext
   withoutContext_async: WithoutContext
-  getContextStore: ContextGetter
 }): void {
-  globalObject.getContext = getContextStore
+  globalObject.getContext = getContext_async
+  globalObject.provideTelefuncContext = provideTelefuncContext_async
   globalObject.restoreContext = restoreContext_async
   globalObject.withoutContext = withoutContext_async
-  globalObject.provideTelefuncContext = provideTelefuncContext_async
   globalObject.isAsyncMode = true
 }
 
