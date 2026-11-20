@@ -187,10 +187,11 @@ function serializeTelefunctionResult(runContext: {
   }
 }
 
-/** Every call into a generator or stream the telefunction returned runs with its request's context. */
+/** The pumps pull and cancel a generator or stream the telefunction returned with its request's context. */
 function producerInContext(producer: StreamingProducer, context: Context): StreamingProducer {
+  let chunks: StreamingProducer['chunks'] | undefined
   return {
-    chunks: { next: () => restoreContextInSyncMode(context, () => producer.chunks.next()) },
+    chunks: { next: () => restoreContextInSyncMode(context, () => (chunks ??= producer.chunks).next()) },
     cancel: (reason) => restoreContext(context, () => producer.cancel(reason)),
   }
 }
