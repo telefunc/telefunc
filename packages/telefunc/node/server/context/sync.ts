@@ -1,5 +1,6 @@
-export { restoreContext_sync }
+export { getContext_sync }
 export { provideTelefuncContext_sync }
+export { restoreContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
@@ -12,13 +13,8 @@ const syncState = getGlobalObject<{ context: Context | null }>('context/sync.ts'
   context: null,
 })
 
-function restoreContext_sync<T>(context: Context, fn: () => T): T {
-  syncState.context = context
-  // We don't use process.nextTick() to avoid dependency on Node.js
-  setTimeout(() => {
-    syncState.context = null
-  }, 0)
-  return fn()
+function getContext_sync(): Context | null {
+  return syncState.context
 }
 
 function provideTelefuncContext_sync(context: Telefunc.Context) {
@@ -29,7 +25,11 @@ function provideTelefuncContext_sync(context: Telefunc.Context) {
   }, 0)
 }
 
-/** @internal — Read sync context. Used by context.ts as the default getter. */
-export function getSyncContext(): Context | null {
-  return syncState.context
+function restoreContext_sync<T>(context: Context, fn: () => T): T {
+  syncState.context = context
+  // We don't use process.nextTick() to avoid dependency on Node.js
+  setTimeout(() => {
+    syncState.context = null
+  }, 0)
+  return fn()
 }
