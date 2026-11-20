@@ -7,13 +7,16 @@ import { concatAll, decodeU32 } from './envelope.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
-const DISCONNECT_MSG = 'The client disconnected before the end of the request body'
 
 class OversizeFrameError extends Error {}
 
-/** The request body ended early: mid-frame, or a read of it failed, as when the client disconnects. Typed so error sinks
+/** The request body stopped short: mid-frame, or a read of it failed, as when the client leaves. Typed so error sinks
  *  discriminate an expected client truncation from a real server bug by class, not message text. */
-class StreamTruncatedError extends Error {}
+class StreamTruncatedError extends Error {
+  constructor(options?: ErrorOptions) {
+    super('The client disconnected before the end of the request body', options)
+  }
+}
 
 /**
  * Pull-based byte-counting reader of a request body in the binary frame protocol.
@@ -40,8 +43,6 @@ class BodyReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
-  /** A read of the source failed, rather than reaching its end. */
-  private failed = false
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
@@ -59,14 +60,6 @@ class BodyReader {
     const length = await this.readU32()
     if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
-  }
-
-  /** Read the whole body as UTF-8 text. */
-  async readText() {
-    const parts: Uint8Array<ArrayBuffer>[] = []
-    for (let chunk = await this.pullChunk(); chunk; chunk = await this.pullChunk()) parts.push(chunk)
-    if (this.failed) throw new StreamTruncatedError(DISCONNECT_MSG)
-    return new TextDecoder().decode(concatAll(parts))
   }
 
   /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
@@ -132,7 +125,7 @@ class BodyReader {
           const chunk = await this.pullChunk()
           if (!chunk) {
             remaining = 0
-            controller.error(new StreamTruncatedError(DISCONNECT_MSG))
+            controller.error(new StreamTruncatedError())
             return
           }
           const take = Math.min(chunk.length, remaining)
@@ -175,7 +168,6 @@ class BodyReader {
       return value
     } catch {
       this.disconnected = true
-      this.failed = true
       return null
     }
   }
@@ -200,7 +192,7 @@ class BodyReader {
     let length = this.buffer.length
     while (length < n) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
+      if (!chunk) throw new StreamTruncatedError()
       parts ??= this.buffer.length > 0 ? [this.buffer] : []
       parts.push(chunk)
       length += chunk.length
@@ -228,7 +220,7 @@ class BodyReader {
     if (buffered) remaining -= buffered.length
     while (remaining > 0) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
+      if (!chunk) throw new StreamTruncatedError()
       remaining -= chunk.length
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }

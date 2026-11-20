@@ -8,7 +8,8 @@ import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import { clientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -175,11 +176,10 @@ async function readBody(
   registerFile: ServerReviverContext['registerFile']
   consumeFile: ServerReviverContext['consumeFile']
 }> {
-  const source = readable ?? request.body
-  // A failed read, as when the client leaves mid-body, is the reader's `StreamTruncatedError`, which isn't printed.
-  const reader = source && new BodyReader(source)
   if (requestKind === REQUEST_KIND.BINARY) {
-    assert(reader)
+    const source = readable ?? request.body
+    assert(source)
+    const reader = new BodyReader(source)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
@@ -187,7 +187,7 @@ async function readBody(
     }
   }
   return {
-    text: reader ? await reader.readText() : '',
+    text: await readText(request, readable),
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
@@ -195,6 +195,17 @@ async function readBody(
           controller.error(new Error('No binary frame'))
         },
       }),
+  }
+}
+
+/** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
+ *  call's is; any other failure is thrown as it is. */
+async function readText(request: Request, readable: Readable | undefined): Promise<string> {
+  try {
+    return await request.text()
+  } catch (err) {
+    if (clientLeft(err, request, readable)) throw new StreamTruncatedError({ cause: err })
+    throw err
   }
 }
 
