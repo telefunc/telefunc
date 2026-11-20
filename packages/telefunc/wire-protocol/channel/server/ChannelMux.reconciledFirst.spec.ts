@@ -18,6 +18,12 @@ import { SessionRegistry } from './SessionRegistry.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
+// The send backlog's base at 1 MiB, not 64 MiB: the rows that pass it build what passes it in milliseconds.
+vi.mock('../../constants.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../constants.js')>()),
+  WIRE_SEND_BACKLOG_BASE_BYTES: 2 ** 20,
+}))
+
 type ServePath = 'web' | 'node'
 
 /** A page's event stream: what its frames carried so far, read as the page reads them. */
@@ -193,8 +199,8 @@ test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then 
 /** A PING listing as many channels as a page may have, none of them open: its PONG answers each, about 28 KB. */
 const widePing = () => encode.ping(Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({ ix, lastSeq: 0 })))
 
-/** More wide PINGs than the send backlog's base allows PONGs for. */
-const PINGS_PAST_THE_LIMIT = 3_000
+/** More wide PINGs than the send backlog's base (mocked above) allows PONGs for. */
+const PINGS_PAST_THE_LIMIT = 100
 
 test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONCILE out at a time', async () => {
   const page = openWebSocket()
@@ -301,8 +307,8 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
   )
   expect(opened.statusCode).toBe(200)
   let status = 200
-  for (let post = 0; post < PINGS_PAST_THE_LIMIT / 100 && status === 200; post++) {
-    const pings = Array.from({ length: 100 }, widePing)
+  for (let post = 0; post < PINGS_PAST_THE_LIMIT / 10 && status === 200; post++) {
+    const pings = Array.from({ length: 10 }, widePing)
     const answered = await handleSseChannelRequest(
       new Request(url, { method: 'POST', body: encodeSseRequest({ connId }, pings) }),
     )
@@ -323,10 +329,10 @@ test("over SSE, a reconnect whose replay passes the backlog base is not ended by
   const [reconciled] = await first.readUntil((frame) => frame[0] === TAG.RECONCILED)
   const answer = reconciled === undefined ? undefined : decode(reconciled)
   if (answer?.tag !== TAG.RECONCILED) throw new Error('no RECONCILED on the first wire')
-  // 100 MiB the page never confirms, past what the backlog allows a wire beside its channels' (64 MiB and its largest
-  // frame).
+  // 2.5 MiB the page never confirms, past what the backlog allows a wire beside its channels' (its base, mocked to
+  // 1 MiB, and its largest frame).
   const names = ['m1', 'm2', 'm3', 'm4', 'm5']
-  for (const name of names) void channel.send(name + 'x'.repeat(20 * 2 ** 20))
+  for (const name of names) void channel.send(name + 'x'.repeat(2 ** 19))
   /** The frame of the last message, read from its header alone. */
   const last = (frame: Uint8Array) => frame[0] === TAG.TEXT && readU32(frame, SEQ_OFFSET) === names.length
   await first.readUntil(last)
@@ -341,4 +347,4 @@ test("over SSE, a reconnect whose replay passes the backlog base is not ended by
     ...names.map((name, i) => `${i + 1}:${name}`),
   ])
   await second.drop()
-}, 60_000)
+})
