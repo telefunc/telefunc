@@ -44,6 +44,8 @@ interface MemoryHolder {
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
   released?: boolean
   shed?(toBytes: number, owner?: string): void
+  /** Lets go of all it holds, where its page may well have it already: reclaiming asks it before anything sheds. */
+  letGoKept?(): void
   readonly newestUnhanded?: PublishBody | undefined
 }
 
@@ -198,9 +200,14 @@ function queueMemory(): QueueMemory {
   }
 }
 
-/** Everyone above the level comes down to it. A body shared goes only with its last holder, so the level drops until the
- *  total does. A holder that can't reach it, its bytes on the wire, leaves this pass; 1, not 0, as its newest stays. */
+/** What its page may already have goes first (`letGoKept`). Then everyone above the level comes down to it. A body shared
+ *  goes only with its last holder, so the level drops until the total does. A holder that can't reach it, its bytes on the
+ *  wire, leaves this pass; 1, not 0, as its newest stays. */
 function reclaim(need: number, target: number): void {
+  for (const holder of [...memory.holders]) {
+    if (memory.total + need <= target) return
+    holder.letGoKept?.()
+  }
   const stuck = new Set<MemoryHolder>()
   while (memory.total + need > target) {
     const largest = largestSheddable(stuck)

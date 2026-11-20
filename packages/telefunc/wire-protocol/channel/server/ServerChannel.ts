@@ -1129,6 +1129,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.answering.clear()
   }
 
+  /** @internal `MemoryHolder`: ended after a close whose CLOSE its page confirmed, it keeps only the close's tail, its
+   *  verdict among it, which a page that has it loses nothing of. */
+  letGoKept(): void {
+    if (this._phase === 'ended' && this.closeRequestSeq !== 0 && this.pageLastSeq >= this.closeRequestSeq)
+      this.mux?.letGoEnded(this.id)
+  }
+
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
   _release(): void {
     this._replayBuffer?.dispose()

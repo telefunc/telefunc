@@ -78,41 +78,49 @@ for (const transport of ['sse', 'ws'] as const) {
 }
 
 for (const transport of ['sse', 'ws'] as const) {
-  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after a close the page decided, with no frame from the page since`, () => {
-    for (const [text, sent, expected] of [
-      [FITS, 'maxMemory to the byte', 'answered'],
-      [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
-    ] as const) {
-      test(`a send of ${sent} on another channel of its connection is ${expected === 'answered' ? 'answered' : 'refused with ChannelOverflowError'}`, async () => {
-        const [first, firstPage] = pair(transport)
-        const [other, otherPage] = pair(transport)
-        await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
-        otherPage.listen(() => 'answered')
-        await firstPage.close()
-        await first.closed
+  for (const decider of ['server', 'page'] as const) {
+    describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after a close the ${decider} decided, with no frame from the page since`, () => {
+      for (const [text, sent, expected] of [
+        [FITS, 'maxMemory to the byte', 'answered'],
+        [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
+      ] as const) {
+        test(`a send of ${sent} on another channel of its connection is ${expected === 'answered' ? 'answered' : 'refused with ChannelOverflowError'}`, async () => {
+          const [first, firstPage] = pair(transport)
+          const [other, otherPage] = pair(transport)
+          await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
+          otherPage.listen(() => 'answered')
+          if (decider === 'server') {
+            await first.close()
+            await firstPage.closed
+          } else {
+            await firstPage.close()
+            await first.closed
+          }
 
-        expect(await other.send(text, { ack: true }).then(String, (err: Error) => err.name)).toBe(expected)
-        // The RECONCILE that declares one more lets go of what the close kept, so the next row has all of `maxMemory`.
-        const [last, lastPage] = pair(transport)
-        await Promise.all([last.opened, lastPage.opened])
-      })
-    }
+          expect(await other.send(text, { ack: true }).then(String, (err: Error) => err.name)).toBe(expected)
+          // The RECONCILE that declares one more lets go of what the close kept, so the next row has all of `maxMemory`.
+          const [last, lastPage] = pair(transport)
+          await Promise.all([last.opened, lastPage.opened])
+        })
+      }
 
-    test('its verdict again, as a replay after a reconnect would bring it, changes nothing: the close stays clean, and a send of maxMemory to the byte on another channel is answered', async () => {
-      const [first, firstPage] = pair(transport)
-      const [other, otherPage] = pair(transport)
-      await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
-      otherPage.listen(() => 'answered')
-      await firstPage.close()
-      await first.closed
+      if (decider === 'page')
+        test('its verdict again, as a replay after a reconnect would bring it, changes nothing: the close stays clean, and a send of maxMemory to the byte on another channel is answered', async () => {
+          const [first, firstPage] = pair(transport)
+          const [other, otherPage] = pair(transport)
+          await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
+          otherPage.listen(() => 'answered')
+          await firstPage.close()
+          await first.closed
 
-      const verdict = decode(encode.closeDone(0, first._lastClientSeq))
-      if (verdict.tag !== TAG.CLOSE_DONE) throw new Error('Expected CLOSE_DONE frame')
-      first._dispatchFrame(verdict)
-      expect(await first.closed).toBe(null)
-      expect(await other.send(FITS, { ack: true }).then(String, (err: Error) => err.name)).toBe('answered')
-      const [last, lastPage] = pair(transport)
-      await Promise.all([last.opened, lastPage.opened])
+          const verdict = decode(encode.closeDone(0, first._lastClientSeq))
+          if (verdict.tag !== TAG.CLOSE_DONE) throw new Error('Expected CLOSE_DONE frame')
+          first._dispatchFrame(verdict)
+          expect(await first.closed).toBe(null)
+          expect(await other.send(FITS, { ack: true }).then(String, (err: Error) => err.name)).toBe('answered')
+          const [last, lastPage] = pair(transport)
+          await Promise.all([last.opened, lastPage.opened])
+        })
     })
-  })
+  }
 }

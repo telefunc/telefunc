@@ -211,6 +211,12 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** An ended channel its page may still need (`keep`) stays attachable; the mux forgets any other. */
+  /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
+  letGoEnded(id: string): void {
+    const channel = this.channels.get(id)
+    if (channel) this.ended.release(channel)
+  }
+
   onChannelEnded(
     channel: ServerChannel<any, any>,
     { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
