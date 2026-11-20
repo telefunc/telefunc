@@ -266,9 +266,16 @@ function callDefinedCommand(
   command: string,
   keysAndArgs: ReadonlyArray<string | Uint8Array>,
 ): Promise<unknown> {
-  const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
-  assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
+  const method: unknown = Reflect.get(redis, command)
+  assert(isDefinedCommand(method), command)
   // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
   // arguments.
-  return fn.call(redis, keysAndArgs)
+  return method.call(redis, keysAndArgs)
+}
+
+/** A method `defineCommand` attached: a function, called on its client with the keys and arguments. */
+function isDefinedCommand(
+  method: unknown,
+): method is (this: RedisClient, keysAndArgs: ReadonlyArray<string | Uint8Array>) => Promise<unknown> {
+  return typeof method === 'function'
 }
