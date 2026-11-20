@@ -46,7 +46,8 @@ function testRunDocker() {
   }
 
   run('pnpm test:docker', {
-    serverUrl: 'https://localhost:8443',
+    // Where the browser reaches Caddy: elsewhere than 8443 where the host port is Docker's to assign (compose.yaml).
+    serverUrl: process.env.TELEFUNC_DOCKER_SERVER_URL ?? 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
     tolerateExitCode: [130],
     tolerateError(log) {
