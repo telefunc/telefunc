@@ -61,7 +61,8 @@ function getTelefuncChannelOptions({
   const sameVersion = new WeakMap<Request, boolean>()
 
   /** crossws calls a hook with no catch: on Node a hook's throw would end the process. A throw is printed as a call's
-   *  error is, and ends the hook's peer where it isn't ending already (`ends`). */
+   *  error is, and ends the hook's peer where it isn't ending already (`ends`). The upgrade hook has no guard: what it
+   *  reads is parsed behind `URL.canParse`, and the adapters' own `upgrade` builds the peer's context. */
   function guard<Args extends unknown[]>(hook: (peer: Peer, ...args: Args) => unknown, ends = true) {
     const onError = (peer: Peer, err: unknown) => {
       handleError(err)
@@ -79,17 +80,12 @@ function getTelefuncChannelOptions({
 
   const hooks = defineHooks({
     // The one place that reads a handshake: `open` acts on what it decided.
-    upgrade: async (request) => {
-      try {
-        if (!isReadable(request)) return new Response(null, { status: 400 })
-        const refusal = upgradeRefusal(request)
-        if (refusal) return refusal
-        sameVersion.set(request, namesWireVersion(request))
-        return await upgrade?.(request)
-      } catch (err) {
-        handleError(err)
-        return new Response(null, { status: 500 })
-      }
+    upgrade: (request) => {
+      if (!isReadable(request)) return new Response(null, { status: 400 })
+      const refusal = upgradeRefusal(request)
+      if (refusal) return refusal
+      sameVersion.set(request, namesWireVersion(request))
+      return upgrade?.(request)
     },
     open: guard((peer) => {
       const request = wireRequest(peer)
