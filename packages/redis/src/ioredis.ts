@@ -12,7 +12,7 @@ export {
   redisFailure,
   isRefusal,
 }
-export type { RedisClient, SubscriberSocket, Dispatch, RawCommand }
+export type { RedisClient, SubscriberSocket, RawCommand }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -23,9 +23,6 @@ import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
-
-/** A command that only reads, or one that may write. */
-type Dispatch = 'read' | 'write'
 
 /** The client's commands the backend sends without a script, by their method's name: `getBuffer` is GET, its reply
  *  bytes. */
@@ -182,25 +179,25 @@ const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
 /** ioredis's rejection of a command it didn't write, as the backend's command client keeps no offline queue. */
 const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQueue options is false$/
 
-/** What one dispatch of a command proves when it fails: a read changes nothing, and a write didn't run only where it was
- *  never written or Redis refused it before running it. */
-function outcomeOf(error: unknown, dispatch: Dispatch): BackendError['outcome'] {
-  if (dispatch === 'read') return 'not-run'
+/** What one dispatch of a command proves when it fails: one that can't write changed nothing, and one that may write
+ *  didn't run only where it was never written or Redis refused it before running it. */
+function outcomeOf(error: unknown, writes: boolean): BackendError['outcome'] {
+  if (!writes) return 'not-run'
   if (!(error instanceof Error)) return 'may-have-run'
   if (isReplyError(error) && GUARD_REFUSAL.test(error.message)) return 'not-run'
   const proof = isReplyError(error) ? REFUSED_BEFORE_RUNNING : UNSENT
   return proof.test(error.message) ? 'not-run' : 'may-have-run'
 }
 
-/** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that reads or one that
- *  may write: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what failed and what to do,
+/** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that may write
+ *  (`writes`) or one that can't: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what failed and what to do,
  *  with Redis's error code (the first word of its reply) or the connection's, and holds nothing of ioredis' error: not
  *  the command, its arguments (a password, a message's bytes) or a nested error. An error the backend's own `assert()`
  *  threw passes as it is, and so does one this made. */
-function redisFailure(error: unknown, redis: RedisClient, dispatch: Dispatch): unknown {
+function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unknown {
   if (error instanceof BackendError || isBug(error)) return error
   const where = addressOf(redis)
-  const outcome = outcomeOf(error, dispatch)
+  const outcome = outcomeOf(error, writes)
   if (!isReplyError(error)) {
     const code = connectionCode(error)
     return new BackendError({

@@ -9,7 +9,6 @@ import {
   isCluster,
   rawWrites,
   redisFailure,
-  type Dispatch,
   type RawCommand,
   type RedisClient,
   type SubscriberSocket,
@@ -66,26 +65,23 @@ class RedisConnection {
     name: Name,
     call: (client: Pick<RedisClient, Name>) => Promise<Output>,
   ): Promise<Output> {
-    return this.dispatch(rawWrites(name) ? 'write' : 'read', call)
+    return this.dispatch(rawWrites(name), call)
   }
 
   /** Sends `command` on the command client once it is ready; a failure of Redis rejects as the backend reports it, with
-   *  what this dispatch proves (`redisFailure()`). */
-  private async dispatch<Output>(
-    dispatch: Dispatch,
-    command: (client: RedisClient) => Promise<Output>,
-  ): Promise<Output> {
+   *  what this dispatch proves of a command that `writes`, or can't (`redisFailure()`). */
+  private async dispatch<Output>(writes: boolean, command: (client: RedisClient) => Promise<Output>): Promise<Output> {
     const client = this.commands
     try {
       if (client.status !== 'ready') await this.ready(client)
     } catch (error) {
-      // Never written: as for a read, it ran nowhere.
-      throw redisFailure(error, client, 'read')
+      // Never handed over, it wrote nothing.
+      throw redisFailure(error, client, false)
     }
     try {
       return await command(client)
     } catch (error) {
-      throw redisFailure(error, client, dispatch)
+      throw redisFailure(error, client, writes)
     }
   }
 
@@ -164,9 +160,8 @@ class RedisConnection {
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    const dispatch = command.writes ? 'write' : 'read'
     return command.parse(
-      await this.dispatch(dispatch, (client) => callDefinedCommand(client, name, keysAndArgs)),
+      await this.dispatch(command.writes, (client) => callDefinedCommand(client, name, keysAndArgs)),
       input,
     )
   }

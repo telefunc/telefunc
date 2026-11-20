@@ -97,7 +97,7 @@ describe('a client of a replica', () => {
 
   it('a command a replica refuses with READONLY is an error that names the replica and READONLY, and no cause', () => {
     const readOnly = replyError("READONLY You can't write against a read only replica.")
-    const failure = redisFailure(readOnly, client(), 'write')
+    const failure = redisFailure(readOnly, client(), true)
     expect(failure).toMatchObject({
       name: 'BackendError',
       message:
@@ -115,7 +115,7 @@ describe('a failure of Redis, as the backend reports it', () => {
       name: 'auth',
       args: ['tf', 'pw-SECRET'],
     })
-    const failure = redisFailure(refused, client(), 'write')
+    const failure = redisFailure(refused, client(), true)
     expect(failure).toMatchObject({
       message:
         "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
@@ -133,7 +133,7 @@ describe('a failure of Redis, as the backend reports it', () => {
         args: ['06f79f6ab4', '2', 'tf:0:seq:{k}', 'tf:0:t:{k}', Buffer.from('body-SECRET')],
       },
     )
-    const failure = redisFailure(failed, client(), 'write')
+    const failure = redisFailure(failed, client(), true)
     expect(failure).toMatchObject({
       message:
         "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
@@ -167,7 +167,7 @@ describe('a write whose connection failed, as ioredis rejects it', () => {
       maxRetriesPerRequest: null,
       retryStrategy: () => 50,
     })
-    expect(redisFailure(unsent, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+    expect(redisFailure(unsent, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
   })
 
   it('in the queue when the connection closed for good: it may have run', async () => {
@@ -177,7 +177,7 @@ describe('a write whose connection failed, as ioredis rejects it', () => {
       retryStrategy: () => null,
     })
     expect(closed).toMatchObject({ message: 'Connection is closed.' })
-    expect(redisFailure(closed, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+    expect(redisFailure(closed, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
   })
 
   it('in the queue when ioredis gave up retrying it: it may have run', async () => {
@@ -187,7 +187,7 @@ describe('a write whose connection failed, as ioredis rejects it', () => {
       retryStrategy: () => 50,
     })
     expect(gaveUp).toMatchObject({ name: 'MaxRetriesPerRequestError' })
-    expect(redisFailure(gaveUp, client(), 'write')).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+    expect(redisFailure(gaveUp, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
   })
 })
 
@@ -251,7 +251,7 @@ describe('the address a failure names', () => {
         name: 'evalsha',
         args: [],
       })
-      expect(inspect(redisFailure(refused, redis, 'write'))).not.toContain('SECRET')
+      expect(inspect(redisFailure(refused, redis, true))).not.toContain('SECRET')
     },
   )
 
@@ -271,7 +271,7 @@ describe('the address a failure names', () => {
 describe('a state of Redis that a later call may get past', () => {
   it('NOREPLICAS: unavailable, saying the replicas are behind', () => {
     const behind = replyError('NOREPLICAS Not enough good replicas to write.')
-    expect(redisFailure(behind, client(), 'write')).toMatchObject({
+    expect(redisFailure(behind, client(), true)).toMatchObject({
       name: 'BackendError',
       message:
         "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (NOREPLICAS): fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do",
@@ -282,7 +282,7 @@ describe('a state of Redis that a later call may get past', () => {
 
   it('OOM: unavailable, saying it may pass and what it needs if it lasts', () => {
     const full = replyError("OOM command not allowed when used memory > 'maxmemory'.")
-    expect(redisFailure(full, client(), 'write')).toMatchObject({
+    expect(redisFailure(full, client(), true)).toMatchObject({
       name: 'BackendError',
       message:
         "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (OOM): Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction",
@@ -297,21 +297,21 @@ describe("a write script's refusal before its first write", () => {
     const refused = replyError(
       'TFNOTRUN WRONGTYPE tf:0:seq:{k} holds a hash where Telefunc keeps a string script: 06f79f6ab4, on @user_script:9.',
     )
-    expect(redisFailure(refused, client(), 'write')).toMatchObject({
+    expect(redisFailure(refused, client(), true)).toMatchObject({
       name: 'BackendError',
       message:
         "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing (WRONGTYPE): keep that prefix to Telefunc",
       code: 'failed',
       outcome: 'not-run',
     })
-    expect(inspect(redisFailure(refused, client(), 'write'), { depth: 8 })).not.toContain('tf:0:seq:{k}')
+    expect(inspect(redisFailure(refused, client(), true), { depth: 8 })).not.toContain('tf:0:seq:{k}')
   })
 
   it("a refused value: ERR, in Telefunc's words", () => {
     const refused = replyError(
       "TFNOTRUN ERR counter n isn't the JSON Telefunc writes script: 06f79f6ab4, on @user_script:9.",
     )
-    expect(redisFailure(refused, client(), 'write')).toMatchObject({
+    expect(redisFailure(refused, client(), true)).toMatchObject({
       message:
         "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a value Telefunc didn't write, so Telefunc's Redis backend changed nothing (ERR): keep that prefix to Telefunc",
       outcome: 'not-run',
@@ -325,6 +325,6 @@ describe("a write script's refusal before its first write", () => {
     ' TFNOTRUN WRONGTYPE forged',
     'TFNOTRUNWRONGTYPE forged',
   ])('TFNOTRUN anywhere else, as in %j: it may have run', (message) => {
-    expect(redisFailure(replyError(message), client(), 'write')).toMatchObject({ outcome: 'may-have-run' })
+    expect(redisFailure(replyError(message), client(), true)).toMatchObject({ outcome: 'may-have-run' })
   })
 })

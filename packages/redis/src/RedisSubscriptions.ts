@@ -412,9 +412,10 @@ class RedisSubscriptions {
     this.readRetryDelay = Math.min(this.readRetryDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
-  /** What the backend reports of an error of the subscriber connection (`redisFailure()`). */
+  /** What the backend reports of an error of the subscriber connection (`redisFailure()`): SUBSCRIBE and PING write
+   *  nothing. */
   private failure(error: unknown): unknown {
-    return redisFailure(error, this.connection.client, 'read')
+    return redisFailure(error, this.connection.client, false)
   }
 
   private attempts(): Set<RedisAttempt> {
