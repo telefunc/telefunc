@@ -1,7 +1,10 @@
-export { getTelefuncChannelHooks }
+export { getTelefuncChannelOptions }
 
-import { defineHooks, type Hooks, type Peer } from 'crossws'
+import { defineHooks, type Hooks, type Message, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
+import { handleError } from '../../../node/server/runTelefunc/handleError.js'
+import { assert } from '../../../utils/assert.js'
+import { readRequestUrl } from '../../../utils/getUrlPathname.js'
 import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
@@ -14,8 +17,10 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. */
-function getTelefuncChannelHooks({
+/** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's: `undefined` on workerd, whose
+ *  WebSocket has none. `wireRequest` is the request the upgrade hook got, which crossws's peer carries as `peer.request`
+ *  on every runtime but Node. */
+function getTelefuncChannelOptions({
   upgrade,
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
@@ -27,7 +32,7 @@ function getTelefuncChannelHooks({
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
-  wireRequest?: (peer: Peer) => Request
+  wireRequest?: (peer: Peer) => Request | undefined
   copiesOnSend?: boolean
 } = {}) {
   enableChannelTransports(['ws'])
@@ -52,20 +57,71 @@ function getTelefuncChannelHooks({
       mux.onWireClosed(peer, { permanent })
     },
   }
+  /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
+  const sameVersion = new WeakMap<Request, boolean>()
 
-  return defineHooks({
-    upgrade: (request) => upgradeRefusal(request) ?? upgrade?.(request),
-    open: (peer) => {
-      const request = wireRequest(peer)
-      // A page on another version reloads: none of its frames could be read.
-      if (!namesWireVersion(request)) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
-      mux.onWireOpen(peer, transport, request)
+  /** crossws calls a hook with no catch: on Node a hook's throw would end the process. A throw is printed as a call's
+   *  error is, and ends the hook's peer where it isn't ending already (`ends`). */
+  function guard<Args extends unknown[]>(hook: (peer: Peer, ...args: Args) => unknown, ends = true) {
+    const onError = (peer: Peer, err: unknown) => {
+      handleError(err)
+      if (ends) terminate(peer)
+    }
+    return (peer: Peer, ...args: Args): void => {
+      try {
+        const result = hook(peer, ...args)
+        if (result instanceof Promise) result.catch((err: unknown) => onError(peer, err))
+      } catch (err) {
+        onError(peer, err)
+      }
+    }
+  }
+
+  const hooks = defineHooks({
+    // The one place that reads a handshake: `open` acts on what it decided.
+    upgrade: async (request) => {
+      try {
+        if (!isReadable(request)) return new Response(null, { status: 400 })
+        const refusal = upgradeRefusal(request)
+        if (refusal) return refusal
+        sameVersion.set(request, namesWireVersion(request))
+        return await upgrade?.(request)
+      } catch (err) {
+        handleError(err)
+        return new Response(null, { status: 500 })
+      }
     },
-    message: (peer, message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
-    close: (peer, details) => {
+    open: guard((peer) => {
+      const request = wireRequest(peer)
+      const named = request && sameVersion.get(request)
+      assert(request && named !== undefined)
+      // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
+      // learns nothing from a refused handshake.
+      if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
+      mux.onWireOpen(peer, transport, request)
+    }),
+    message: guard((peer, message: Message) =>
+      mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+    ),
+    close: guard((peer, details: Parameters<Hooks['close']>[1]) => {
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === WS_CLOSE_PAGE_LEFT
       mux.onWireClosed(peer, { permanent: isPermanent })
-    },
-    error: (peer) => mux.onWireClosed(peer, { permanent: false }),
+    }, false),
+    error: guard((peer) => mux.onWireClosed(peer, { permanent: false }), false),
   })
+  return {
+    hooks,
+    // One namespace for every wire. crossws would take it from `new URL(request.url)`, which throws before the upgrade
+    // hook runs on the path alone that Bun gives a request whose `Host` it can't read.
+    getNamespace: () => 'telefunc',
+  }
+}
+
+/** A handshake Telefunc can read: its URL is one, and its `Host` names an authority (a host, and a port where it has
+ *  one) and nothing else, as a WebSocket handshake's must (RFC 6455, 4.2.1). Answered 400 otherwise (4.2.2). */
+function isReadable(request: Request): boolean {
+  const host = request.headers.get('host')
+  return (
+    readRequestUrl(request.url) !== null && host !== null && !/[/\\?#@]/.test(host) && URL.canParse(`http://${host}`)
+  )
 }

@@ -5,7 +5,7 @@ export type { CloudflareOptions }
 
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
-import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAdapter.js'
@@ -25,7 +25,7 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
-import { isTelefuncRequest } from './shared.js'
+import { getTelefuncRequestUrl } from './shared.js'
 import { REQUEST_KIND, getRequestKind, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
@@ -82,8 +82,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const hooks = getTelefuncChannelHooks({ copiesOnSend: true })
-  const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
+  const crosswsAdapter = crossws({
+    bindingName,
+    instanceName: baseInstanceName,
+    ...getTelefuncChannelOptions({ copiesOnSend: true }),
+  })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
   const broadcast = installBroadcastAdapter(
@@ -176,7 +179,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      if (!isTelefuncRequest(request)) return undefined
+      const url = getTelefuncRequestUrl(request)
+      if (url === null) return undefined
       const config = getServerConfig()
 
       const binding = getBinding(env)
@@ -200,7 +204,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
       const kv = getKVBinding(env)
       assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
-      const { searchParams } = new URL(request.url)
+      const { searchParams } = url
       const token = searchParams.get('session') || crypto.randomUUID()
       // No lookup and nothing shared: each request names the home its session's responses gave its page.
       const { sessionInstanceName, locationBucket } = resolveSessionRoutingTarget(

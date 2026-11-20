@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream'
 import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
-import { getUrlPathname } from '../../../utils/getUrlPathname.js'
+import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
@@ -288,7 +288,7 @@ function isWrongMethod(runContext: { request: Request; logMalformedRequests: boo
 }
 
 function assertUrl(runContext: { request: Request; serverConfig: { telefuncUrl: string } }) {
-  const urlPathname = getUrlPathname(runContext.request.url)
+  const urlPathname = getRequestPathname(runContext.request.url)
   assertUsage(
     urlPathname === runContext.serverConfig.telefuncUrl,
     `serve({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,
