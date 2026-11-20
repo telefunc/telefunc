@@ -44,7 +44,7 @@ async function openWire() {
     ]),
   )
   expect(opened.statusCode).toBe(200)
-  return { connId, opened }
+  return { connId, opened, channel }
 }
 
 async function cancel(answer: SseChannelHttpResponse): Promise<void> {
@@ -135,8 +135,10 @@ test("a channel's frame the server refuses is refused `frames`, naming the chann
   await cancel(opened)
 })
 
-test('a streaming upload whose wire closes under it is answered `retry`, not 200', async () => {
-  const { connId, opened } = await openWire()
+test('a streaming upload whose wire closes under it is answered `retry`, not 200, and the frame it read after the close is not dispatched', async () => {
+  const { connId, opened, channel } = await openWire()
+  const got: unknown[] = []
+  channel.listen((message) => void got.push(message))
   // The page's events: the RECONCILED, which also lets the upload's frames through.
   const events = opened.body instanceof ReadableStream ? opened.body.getReader() : null
   if (events === null) throw new Error('no Web event stream')
@@ -156,11 +158,12 @@ test('a streaming upload whose wire closes under it is answered `retry`, not 200
   const controller = await reading.promise
   // The event stream ends, closing the wire, while the upload's next frame is on its way.
   await events.cancel()
-  const ping = encode.ping([])
-  controller.enqueue(encodeU32(ping.byteLength))
-  controller.enqueue(ping)
+  const text = encode.text(0, JSON.stringify('after the close'), 1)
+  controller.enqueue(encodeU32(text.byteLength))
+  controller.enqueue(text)
   controller.close()
   const answered = await answer
   expect(answered.statusCode).toBe(400)
   expect(answered.contentType).toMatch(refusal('retry'))
+  expect(got).toEqual([])
 })
