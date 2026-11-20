@@ -1,8 +1,10 @@
+import { createServer, type Server } from 'node:net'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { inspect } from 'node:util'
 import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
-import { addressOf } from './ioredis.js'
+import { addressOf, createSubscriberSocket } from './ioredis.js'
 import { redisFailure } from './redisFailure.js'
 
 const clients: Array<Redis | Cluster> = []
@@ -328,4 +330,39 @@ describe("a write script's refusal before its first write", () => {
   ])('TFNOTRUN anywhere else, as in %j: it may have run', (message) => {
     expect(redisFailure(replyError(message), client(), true)).toMatchObject({ outcome: 'may-have-run' })
   })
+})
+
+/** A port that takes connections and never answers: a Cluster's startup node there never gets its slots. */
+async function silentNode(): Promise<{ port: number; server: Server }> {
+  const server = createServer(() => {})
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the silent node has no port')
+  return { port: address.port, server }
+}
+
+describe("a Cluster's subscriber socket, opened before the Cluster is ready", () => {
+  for (const lazyConnect of [true, false]) {
+    it(`${lazyConnect ? 'a lazy' : 'a connecting'} Cluster: each opening waits on one wait for the Cluster, and fails as unreachable once it closes`, async () => {
+      const { port, server } = await silentNode()
+      const cluster = new Cluster([{ host: '127.0.0.1', port }], { lazyConnect, slotsRefreshTimeout: 10_000 })
+      cluster.on('error', () => {})
+      clients.push(cluster)
+      const readyListeners = cluster.listenerCount('ready')
+      const openings = [1, 2, 3].map(() =>
+        createSubscriberSocket(cluster).then(
+          () => 'opened',
+          (error: unknown) => redisFailure(error, cluster, false),
+        ),
+      )
+      const settledFirst = await Promise.race([...openings, sleep(200).then(() => 'still waiting')])
+      const waits = cluster.listenerCount('ready') - readyListeners
+      cluster.disconnect()
+      const failures = await Promise.all(openings)
+      server.close()
+
+      expect({ settledFirst, waits }).toEqual({ settledFirst: 'still waiting', waits: 1 })
+      for (const failure of failures) expect(failure).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+    })
+  }
 })

@@ -5,6 +5,7 @@ export {
   createCommandClient,
   createSubscriberSocket,
   callDefinedCommand,
+  nextReady,
   isCluster,
   rawWrites,
   deploymentOf,
@@ -151,8 +152,8 @@ function isReplyError(error: unknown): error is Error {
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
- *  it can't write yet (`RedisConnection.send()` waits for it to be ready instead), and reads masters
- *  only (Room reads are strongly consistent). */
+ *  it can't write yet (`nextReady()` waits for it to be ready instead), and reads masters only (Room reads are strongly
+ *  consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
@@ -188,9 +189,8 @@ function createCommandClient(redis: RedisClient): RedisClient {
 async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSocket> {
   let source: Redis
   if (isCluster(redis)) {
-    // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
-    if (redis.status === 'wait') await redis.connect()
-    else if (redis.status === 'connecting') await clusterReady(redis)
+    // A Cluster fills its node pool just before it is ready.
+    if (redis.status !== 'ready') await nextReady(redis)
     // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled
     // until the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after
     // the last node used.
@@ -211,32 +211,49 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
+const { subscriberNodes, readyWaits } = getGlobalObject('ioredis.ts', () => ({
   /** The node each Cluster's subscriber was last duplicated from. */
   subscriberNodes: new WeakMap<Cluster, Redis>(),
-  /** One wait per connecting Cluster, however often subscribers reopen during it. */
-  clusterWaits: new WeakMap<Cluster, Promise<void>>(),
+  /** Each client's wait for its next `ready` (`nextReady()`). */
+  readyWaits: new WeakMap<RedisClient, Promise<void>>(),
 }))
 
-function clusterReady(cluster: Cluster): Promise<void> {
-  let wait = clusterWaits.get(cluster)
-  if (wait) return wait
-  wait = new Promise((resolve, reject) => {
-    const settle = (error?: Error) => {
-      clusterWaits.delete(cluster)
-      cluster.off('ready', onReady)
-      cluster.off('close', onClose)
-      if (error) reject(error)
-      else resolve()
+/** The client's next `ready`, one wait for everything that waits meanwhile: the commands made while it reconnects, and
+ *  the subscriber sockets a Cluster opens before it is ready. It rejects with the client's last error once the
+ *  connection closes first, which is when ioredis would fail a command it held; every failed connect of a Cluster
+ *  closes, whether it retries or ends. A client made with `lazyConnect` connects here. */
+function nextReady(client: RedisClient): Promise<void> {
+  const waiting = readyWaits.get(client)
+  if (waiting !== undefined) return waiting
+  if (client.status === 'end') return Promise.reject(new Error('Connection is closed.'))
+  const promise = new Promise<void>((resolve, reject) => {
+    let lastError: unknown = new Error('Connection is closed.')
+    const onError = (error: unknown) => {
+      lastError = error
     }
-    const onReady = () => settle()
-    // Every failed connect closes, whether the Cluster retries it or ends.
-    const onClose = () => settle(new Error('Redis Cluster connection closed'))
-    cluster.once('ready', onReady)
-    cluster.once('close', onClose)
+    const settle = () => {
+      client.off('error', onError)
+      client.off('ready', onReady)
+      client.off('close', onClose)
+      client.off('end', onClose)
+      if (readyWaits.get(client) === promise) readyWaits.delete(client)
+    }
+    const onReady = () => {
+      settle()
+      resolve()
+    }
+    const onClose = () => {
+      settle()
+      reject(lastError)
+    }
+    client.on('error', onError)
+    client.once('ready', onReady)
+    client.once('close', onClose)
+    client.once('end', onClose)
   })
-  clusterWaits.set(cluster, wait)
-  return wait
+  readyWaits.set(client, promise)
+  if (client.status === 'wait') void client.connect().catch(() => {})
+  return promise
 }
 
 /** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */
