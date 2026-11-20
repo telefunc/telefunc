@@ -19,8 +19,10 @@ const globalObject = getGlobalObject('wire-protocol/channel/server/upgradeOrigin
 })
 
 /** The answer to a WebSocket upgrade that a page of another origin, which the app didn't allow, makes; undefined where
- *  it may open. A request with neither `Origin` nor `Sec-Fetch-Site` comes from no browser, and goes on. */
-function upgradeRefusal(request: Request): Response | undefined {
+ *  it may open. A request with neither `Origin` nor `Sec-Fetch-Site` comes from no browser, and goes on. `host` is the
+ *  handshake's `Host`, which the caller validated. Never throws: the upgrade hook that calls it has no catch, and on Node
+ *  a throw there would end the process. */
+function upgradeRefusal(request: Request, host: string): Response | undefined {
   const origin = request.headers.get('origin')
   const site = request.headers.get('sec-fetch-site')
   if (site === 'same-origin') return undefined
@@ -30,7 +32,7 @@ function upgradeRefusal(request: Request): Response | undefined {
     return refused()
   }
   const url = URL.canParse(origin) ? new URL(origin) : null
-  if (url !== null && isServersHost(origin, url.protocol, request)) return undefined
+  if (url !== null && isServersHost(origin, url.protocol, request, host)) return undefined
   // A browser writes a page's origin in one form (`originOf()`): a header written any other way names none.
   const page = url !== null && originOf(url) === origin ? url : null
   if (page !== null && isAllowed(page, origin)) return undefined
@@ -73,12 +75,11 @@ function warnRefusal(name: string, noOrigin?: string): void {
 }
 
 /** Whether `origin`, the `Origin` header, is the origin of the host the client reached, on the page's `protocol`: the
- *  first `X-Forwarded-Host`, which a proxy sets to the public one, else `Host`. A page of an app shell's own scheme
+ *  first `X-Forwarded-Host`, which a proxy sets to the public one, else `host`. A page of an app shell's own scheme
  *  never is: the URL standard gives that scheme no origin to compare. */
-function isServersHost(origin: string, protocol: string, request: Request): boolean {
-  const host = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || request.headers.get('host')
-  const reached = `${protocol}//${host}`
-  return host !== null && URL.canParse(reached) && new URL(reached).origin === origin
+function isServersHost(origin: string, protocol: string, request: Request, host: string): boolean {
+  const reached = `${protocol}//${request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() || host}`
+  return URL.canParse(reached) && new URL(reached).origin === origin
 }
 
 /** Whether `config.channel.allowedOrigins` lists the page at `page`, whose origin is `origin`. */

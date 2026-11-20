@@ -61,8 +61,8 @@ function getTelefuncChannelOptions({
   const sameVersion = new WeakMap<Request, boolean>()
 
   /** crossws calls a hook with no catch: on Node a hook's throw would end the process. A throw is printed as a call's
-   *  error is, and ends the hook's peer where it isn't ending already (`ends`). The upgrade hook has no guard: what it
-   *  reads is parsed behind `URL.canParse`, and the adapters' own `upgrade` builds the peer's context. */
+   *  error is, and ends the hook's peer where it isn't ending already (`ends`). The upgrade hook has no guard: neither
+   *  `readableHost()` nor `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context. */
   function guard<Args extends unknown[]>(hook: (peer: Peer, ...args: Args) => unknown, ends = true) {
     const onError = (peer: Peer, err: unknown) => {
       handleError(err)
@@ -81,8 +81,9 @@ function getTelefuncChannelOptions({
   const hooks = defineHooks({
     // The one place that reads a handshake: `open` acts on what it decided.
     upgrade: (request) => {
-      if (!isReadable(request)) return new Response(null, { status: 400 })
-      const refusal = upgradeRefusal(request)
+      const host = readableHost(request)
+      if (host === null) return new Response(null, { status: 400 })
+      const refusal = upgradeRefusal(request, host)
       if (refusal) return refusal
       sameVersion.set(request, namesWireVersion(request))
       return upgrade?.(request)
@@ -113,11 +114,12 @@ function getTelefuncChannelOptions({
   }
 }
 
-/** A handshake Telefunc can read: its URL is one, and its `Host` names an authority (a host, and a port where it has
- *  one) and nothing else, as a WebSocket handshake's must (RFC 6455, 4.2.1). Answered 400 otherwise (4.2.2). */
-function isReadable(request: Request): boolean {
+/** The `Host` of a handshake Telefunc can read: its URL is one, and its `Host` names an authority (a host, and a port
+ *  where it has one) and nothing else, as a WebSocket handshake's must (RFC 6455, 4.2.1). Null otherwise, which is
+ *  answered 400 (4.2.2). Never throws. */
+function readableHost(request: Request): string | null {
   const host = request.headers.get('host')
-  return (
+  const readable =
     readRequestUrl(request.url) !== null && host !== null && !/[/\\?#@]/.test(host) && URL.canParse(`http://${host}`)
-  )
+  return readable ? host : null
 }
