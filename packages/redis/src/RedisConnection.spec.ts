@@ -201,3 +201,25 @@ describe('the address a failure names', () => {
     expect(addressOf(standalone(make()))).toBe(address)
   })
 })
+
+describe('a state of Redis that a later call may get past', () => {
+  it('NOREPLICAS: unavailable, saying the replicas are behind', async () => {
+    const connection = installed(client())
+    const behind = replyError('NOREPLICAS Not enough good replicas to write.')
+    const rejection = connection.send(() => Promise.reject(behind))
+    await expect(rejection).rejects.toMatchObject({ name: 'BackendError', code: 'unavailable' })
+    await expect(rejection).rejects.toThrow(
+      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (NOREPLICAS): fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do",
+    )
+  })
+
+  it('OOM: unavailable, saying it may pass and what it needs if it lasts', async () => {
+    const connection = installed(client())
+    const full = replyError("OOM command not allowed when used memory > 'maxmemory'.")
+    const rejection = connection.send(() => Promise.reject(full))
+    await expect(rejection).rejects.toMatchObject({ name: 'BackendError', code: 'unavailable' })
+    await expect(rejection).rejects.toThrow(
+      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (OOM): Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction",
+    )
+  })
+})

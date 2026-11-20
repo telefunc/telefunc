@@ -127,12 +127,13 @@ const LOGIN_REFUSAL = /^(?:WRONGPASS |NOAUTH |ERR invalid password)/
 const WHAT_TO_DO: Record<string, string> = {
   BUSY: "another client's script keeps Redis busy; end it with SCRIPT KILL",
   LOADING: 'Redis is loading its data; the backend can use it once that ends',
-  OOM: 'Redis reached its maxmemory; raise it, with maxmemory-policy noeviction',
+  NOREPLICAS: 'fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do',
+  OOM: 'Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction',
   WRONGTYPE: "a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
 }
 
-/** Redis's codes for a state it leaves by itself. */
-const PASSING = new Set(['LOADING', 'BUSY', 'MASTERDOWN', 'TRYAGAIN', 'CLUSTERDOWN', 'OOM'])
+/** Redis's codes for a state in which it can't serve this now, and a later call may succeed. */
+const PASSING = new Set(['LOADING', 'BUSY', 'MASTERDOWN', 'TRYAGAIN', 'CLUSTERDOWN', 'NOREPLICAS', 'OOM'])
 
 /** A command Redis doesn't know: disabled or renamed by its operator. */
 const UNKNOWN_COMMAND = /^ERR unknown (?:sub)?command /

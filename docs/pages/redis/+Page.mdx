@@ -83,7 +83,7 @@ try {
 | `code` | When | What to do |
 |---|---|---|
 | `'unreachable'` | The connection to Redis failed or closed | Call again once Redis is reachable |
-| `'unavailable'` | Redis can't serve it now: it is loading its data, busy, out of memory, or a replica | Call again once it passes; for a replica, give `installRedis()` a client of the primary |
+| `'unavailable'` | Redis can't serve it now, and a later call may succeed: it is loading its data, busy, out of memory, a replica, or its replicas are behind | Call again later. If it lasts, see the message: out of memory, Redis needs a higher `maxmemory`; for a replica, give `installRedis()` a client of the primary |
 | `'denied'` | Redis refuses it until you change its ACL, the password, or a command its operator disabled | Change that, then call again |
 | `'failed'` | Redis failed it otherwise | See the message |
 
