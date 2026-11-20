@@ -1,6 +1,5 @@
 export { getRawContext }
 export { restoreContext }
-export { restoreContextInSyncMode }
 export { provideContext }
 export { installAsyncMode }
 export { isAsyncMode }
@@ -52,19 +51,14 @@ function getRawContext(): Context | null {
  *
  * When: Telefunc wraps the telefunction, an extension's `onTelefunctionResult()` hook, a `getContext().onClose()`
  * callback, the `fn` of `provideTelefuncContext(context, fn)`, and the loop that reads a generator or stream the
- * telefunction returned and the call that cancels it. Without AsyncLocalStorage it also wraps each pull of that loop
- * (`restoreContextInSyncMode()`) and `useData()` during a server render.
+ * telefunction returned, each pull of that loop and the call that cancels it. Without AsyncLocalStorage it also wraps
+ * `useData()` during a server render.
  *
  * With `telefunc/async_hooks` it is `AsyncLocalStorage.run()`, and the context also follows `fn` across its `await`s.
  */
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
   return globalObject.restoreContext(context, fn)
-}
-
-/** Without AsyncLocalStorage the context ends with the synchronous call, so a call made after an `await` restores it. */
-function restoreContextInSyncMode<T>(context: Context, fn: () => T): T {
-  return globalObject.isAsyncMode ? fn() : restoreContext(context, fn)
 }
 
 function provideContext(context: Telefunc.Context): void {

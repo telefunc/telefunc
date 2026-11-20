@@ -24,7 +24,7 @@ import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
-import { restoreContext, restoreContextInSyncMode } from '../context/context.js'
+import { restoreContext } from '../context/context.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
 import { getServerExtensionTypes } from '../serverConfig.js'
@@ -191,7 +191,7 @@ function serializeTelefunctionResult(runContext: {
 function producerInContext(producer: StreamingProducer, context: Context): StreamingProducer {
   let chunks: StreamingProducer['chunks'] | undefined
   return {
-    chunks: { next: () => restoreContextInSyncMode(context, () => (chunks ??= producer.chunks).next()) },
+    chunks: { next: () => restoreContext(context, () => (chunks ??= producer.chunks).next()) },
     cancel: (reason) => restoreContext(context, () => producer.cancel(reason)),
   }
 }
