@@ -9,7 +9,7 @@ import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
 import { isAbort } from '../../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
-import { restoreContext, restoreContextInSyncMode } from '../../../../node/server/context/context.js'
+import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
@@ -68,7 +68,7 @@ function pumpProducerToChannel(
     if (cancelled) return
     cancelled = true
     resolveCancelled({ done: true, value: undefined as never })
-    restoreContext(runContext.context, () => producer.cancel())
+    producer.cancel()
   }
 
   channel.onClose(doCancel)
@@ -81,7 +81,7 @@ function pumpProducerToChannel(
           const { done, value } = await Promise.race([
             responseAbort.errorPromise,
             cancelledPromise,
-            restoreContextInSyncMode(runContext.context, () => producer.chunks.next()),
+            producer.chunks.next(),
           ])
           if (cancelled) break
           if (done) {

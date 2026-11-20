@@ -14,7 +14,7 @@ import {
 } from '../../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../../node/server/context/requestContext.js'
 import type { TelefuncId } from '../../../../node/server/runTelefunc/serializeTelefunctionResult.js'
-import { restoreContext, restoreContextInSyncMode } from '../../../../node/server/context/context.js'
+import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
@@ -79,9 +79,7 @@ function buildInlineResponseBody(runContext: {
   // `reader.read()` inside a producer — `iter.return()` alone can't.
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
   const flow = flowId
-    ? new StreamFlow(flowId, (index) =>
-        restoreContext(context, () => producers.find((p) => p.index === index)?.producer.cancel()),
-      )
+    ? new StreamFlow(flowId, (index) => producers.find((p) => p.index === index)?.producer.cancel())
     : null
 
   let cancelled = false
@@ -101,9 +99,7 @@ function buildInlineResponseBody(runContext: {
   const cancelProducers = () => {
     if (producersStopped) return
     producersStopped = true
-    for (const { producer, index } of producers) {
-      if (!flow?.cancelled.has(index)) restoreContext(context, () => producer.cancel())
-    }
+    for (const { producer, index } of producers) if (!flow?.cancelled.has(index)) producer.cancel()
     // Unblock any emit awaiting drain so the IIFE can progress to its catch/finally.
     wakeDrain()
   }
@@ -129,8 +125,7 @@ function buildInlineResponseBody(runContext: {
     pending: Promise<{ type: 'chunk'; entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
   }
   const advance = (entry: RaceEntry) => {
-    const next = restoreContextInSyncMode(context, () => entry.iter.next())
-    entry.pending = next.then((result) => ({ type: 'chunk', entry, result }))
+    entry.pending = entry.iter.next().then((result) => ({ type: 'chunk', entry, result }))
     // While paused nothing races it, so its failure waits for the resume without counting as unhandled.
     if (flow) entry.pending.catch(() => {})
   }
