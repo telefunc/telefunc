@@ -62,8 +62,8 @@ function installAsyncMode({
   restoreContext_async: RestoreContext
 }): void {
   globalObject.getContext = getContext_async
-  globalObject.restoreContext = restoreContext_async
   globalObject.provideTelefuncContext = provideTelefuncContext_async
+  globalObject.restoreContext = restoreContext_async
   globalObject.isAsyncMode = true
 }
 
