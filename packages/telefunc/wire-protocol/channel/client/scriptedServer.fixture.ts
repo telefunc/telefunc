@@ -10,6 +10,7 @@ export {
   serveSse,
   openChannel,
   advance,
+  holdPage,
   windowOf,
   useScriptedServer,
 }
@@ -34,8 +35,12 @@ class Server {
   readonly confirmed = new Map<number, number>()
   /** The channels whose data it takes and never confirms, as when something in front of it answers for it. */
   readonly drops = new Set<number>()
-  /** The channels whose data cuts the wire it comes on, as a proxy that cuts a request at its limit does. */
+  /** The channels whose data cuts the wire it comes on, as a proxy that cuts a request at its limit does, before the
+   *  server reads it: over SSE the POST that carries it fails as a network error, and over WebSocket the socket goes. */
   readonly cuts = new Set<number>()
+  /** The channels whose POSTs something in front of it answers 413 only after it dropped the wire they went on: the
+   *  page reads the refusal for a wire already lost. */
+  readonly lateRefusals = new Set<number>()
   /** The channels a RECONCILED leaves out, as when the server dropped them. */
   readonly omits = new Set<number>()
   /** How many seqs behind what it got it confirms, as when the page's newest frames are still on their way. */
@@ -127,12 +132,16 @@ class FakeWebSocket {
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
       if (this.script === 'mute' && frame.tag === TAG.RECONCILE) continue
+      // Cut before the server reads it, as over SSE: the socket goes, and the server never has the frame.
+      if (isSequencedFrame(frame) && world.server.cuts.has(frame.index)) {
+        setTimeout(() => this.drop(), 0)
+        return
+      }
       for (const down of world.server.answer(frame)) {
         const deliver = () => this.deliver(down)
         if (frame.tag === TAG.PREPARE && world.holdReady) world.heldReady.push(deliver)
         else setTimeout(deliver, 0)
       }
-      if (isSequencedFrame(frame) && world.server.cuts.has(frame.index)) setTimeout(() => this.drop(), 0)
     }
   }
   close(): void {
@@ -211,6 +220,8 @@ type World = {
   postAnswers: PostAnswer[]
   controlAnswers: PostAnswer[]
   postLimit: number
+  holdOpens: boolean
+  heldOpens: (() => void)[]
   holdReady: boolean
   heldReady: (() => void)[]
   posts: { bytes: number; status: number; data: boolean; wire: number }[]
@@ -227,6 +238,9 @@ const world: World = {
   controlAnswers: [],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
+  /** While set, the server answers no open: each waits in `heldOpens`, which a test calls to answer it. */
+  holdOpens: false,
+  heldOpens: [],
   /** While set, the server's READY to a WebSocket's PREPARE waits in `heldReady`, which a test calls to send it: the
    *  page stays on SSE meanwhile. */
   holdReady: false,
@@ -247,12 +261,26 @@ function serveSse(): void {
     if (metadata.kind === 'streamResponse') {
       const stream = eventStream()
       world.streams.push(stream)
-      for (const frame of frames) for (const down of server.answer(frame)) stream.frame(down)
+      const answer = () => {
+        for (const frame of frames) for (const down of server.answer(frame)) stream.frame(down)
+      }
+      if (world.holdOpens) world.heldOpens.push(answer)
+      else answer()
       return stream.response
     }
     const data = frames.some((frame) => isSequencedFrame(frame))
     const post = { bytes, status: 0, data, wire: world.streams.length }
     world.posts.push(post)
+    if (frames.some((frame) => isSequencedFrame(frame) && server.cuts.has(frame.index)))
+      throw new TypeError('Failed to fetch')
+    if (frames.some((frame) => isSequencedFrame(frame) && server.lateRefusals.has(frame.index))) {
+      world.streams.at(-1)?.end()
+      post.status = 413
+      return new Response('<h1>413 Request Entity Too Large</h1>', {
+        status: 413,
+        headers: { 'Content-Type': 'text/html' },
+      })
+    }
     if (bytes > world.postLimit) {
       post.status = 413
       return new Response('<h1>413 Request Entity Too Large</h1>', {
@@ -301,6 +329,19 @@ async function advance(ms: number): Promise<void> {
   for (let left = ms; left > 0; left -= 100) await vi.advanceTimersByTimeAsync(Math.min(100, left))
 }
 
+/** The page's event loop is held for `ms`, as a tab whose script ran that long or that the browser paused: no timer
+ *  runs meanwhile, then each that came due runs once (the fake clock's `jump`). */
+async function holdPage(ms: number): Promise<void> {
+  const clock: unknown = Reflect.get(globalThis.setTimeout, 'clock')
+  if (!canJump(clock)) throw new Error('holdPage needs the fake timers installed')
+  clock.jump(ms)
+  await vi.advanceTimersByTimeAsync(0)
+}
+
+function canJump(clock: unknown): clock is { jump(ms: number): number } {
+  return typeof clock === 'object' && clock !== null && typeof Reflect.get(clock, 'jump') === 'function'
+}
+
 const windowOf = (transport: 'sse' | 'ws', reconnectTimeout = RECONNECT_TIMEOUT_MS) =>
   reconnectWindowOf(PING_INTERVAL_MS, reconnectTimeout, transport)
 
@@ -315,9 +356,11 @@ function useScriptedServer(): void {
     world.postAnswers = []
     world.controlAnswers = []
     world.postLimit = Infinity
+    world.posts = []
+    world.holdOpens = false
+    world.heldOpens = []
     world.holdReady = false
     world.heldReady = []
-    world.posts = []
     FakeWebSocket.made = []
     FakeWebSocket.scripts = []
     vi.stubGlobal('WebSocket', FakeWebSocket)

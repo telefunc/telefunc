@@ -1,4 +1,4 @@
-export { readAnswer }
+export { readAnswer, asksLater }
 export type { HttpAnswer }
 
 import { STATUS_CODE_WIRE_VERSION } from '../../constants.js'
@@ -33,6 +33,13 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
     answer: describeAnswer(response),
     retryAfterMs: retryAfterMsOf(response),
   }
+}
+
+/** Whether a refusal asks the page to come back later rather than refusing what it sent (RFC 9110 sections 15.5.9 and
+ *  15.6, RFC 8470 section 5.2, RFC 6585 section 4): a 408, 425, 429 or 5xx. Such an answer is a loss, judged by the time
+ *  the data waits (`WireLifecycle.endStalled`) and never by its count. */
+function asksLater(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status <= 599)
 }
 
 /** The media type a response carries, without its parameters (`text/event-stream; charset=utf-8` is

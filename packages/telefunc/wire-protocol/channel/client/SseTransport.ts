@@ -44,7 +44,7 @@ import type { TransportEnd, TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { readAnswer, type HttpAnswer } from './readAnswer.js'
+import { asksLater, readAnswer, type HttpAnswer } from './readAnswer.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -532,14 +532,24 @@ class SseTransport implements UpgradeSource {
   /** Takes what the next POST carries from the head of the outbox, in bytes as its body goes on the wire (its metadata,
    *  and four bytes of length before each frame): entries while the body comes to less than `postBytes`, which one may
    *  pass, and never past the connection's `ssePostLimit`, except a first entry larger alone, which goes alone. A replay
-   *  that refills the outbox goes so too. */
+   *  that refills the outbox goes so too. The data of a channel the server hasn't confirmed since a loss goes in POSTs
+   *  of its own, so that a refusal or a cut of it takes no other channel's data with it. */
   private takeOutboxHead(): OutboxEntry[] {
     let count = 0
     let bytes = 0
     let body = encodeSseRequestMetadata({ connId: this.connId }).byteLength
+    const stalled = this.owner.stalledChannels
+    let carries: number | 'others' | null = null
     for (const { frame } of this.outbox) {
       const size = U32_SIZE + frame.byteLength
       if (count > 0 && (body >= this.postBytes || body + size > this.owner.ssePostLimit)) break
+      const tag = frame[0]
+      if (stalled.size > 0 && tag !== undefined && isSequencedTag(tag)) {
+        const ix = readU16(frame, 1)
+        const of = stalled.has(ix) ? ix : 'others'
+        if (carries !== null && carries !== of) break
+        carries = of
+      }
       body += size
       bytes += frame.byteLength
       count++
@@ -597,7 +607,7 @@ class SseTransport implements UpgradeSource {
           return
         }
       }
-      if (answer?.tag === 'refused' || answer?.tag === 'tooLarge') {
+      if ((answer?.tag === 'refused' && !asksLater(answer.status)) || answer?.tag === 'tooLarge') {
         // Every channel whose data it refused ended: the wire goes on without that data.
         if (
           !this.owner.onTransportRefused(
@@ -733,7 +743,8 @@ class SseTransport implements UpgradeSource {
       wire,
     )
     if (answer === 'left' || answer === null || answer.tag === 'expected') return
-    if (answer.tag !== 'otherWireVersion' && !this.owner.onTransportRefused([frame], answer.answer)) return
+    const counted = answer.tag === 'tooLarge' || (answer.tag === 'refused' && !asksLater(answer.status))
+    if (counted && !this.owner.onTransportRefused([frame], answer.answer)) return
     this.abandonActiveTransport()
     this.owner.onTransportClosed(this, endOf(answer))
   }

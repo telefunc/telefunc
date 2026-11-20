@@ -9,6 +9,8 @@ import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { ReconcileOpenEntry, ReconcilePayload, ReconciledPayload } from '../../wire/payloads.js'
 import { RECONCILE_TIMEOUT_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
+import { readU16 } from '../../wire/header.js'
+import { isSequencedTag } from '../../wire/tags.js'
 import { replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
@@ -175,7 +177,7 @@ class AttachExchange {
     const serverHas = this.settleAnswers(ctrl, inFlight)
     // Channels registered after this RECONCILE was built wait for the next one.
     const hasNewChannels = this.channels.hasUndeclared
-    const { frames, channelsToOpen, omitted } = this.attachNamed(inFlight, serverHas)
+    const { frames: replays, channelsToOpen, omitted } = this.attachNamed(inFlight, serverHas)
     // Before the drain: what their close sends queues behind the replays.
     if (!deferOmitted) this.closeUnacknowledged(omitted)
 
@@ -185,7 +187,14 @@ class AttachExchange {
       const record = this.channels.get(ix)
       return record !== undefined && !this.channels.isUndeclared(ix) && !record.awaited
     }
-    for (const frame of this.gate.drain(attached)) frames.push(frame)
+    const queued = this.gate.drain(attached)
+    // The data of channels the server hasn't confirmed since a loss goes after the others', the one dated last first,
+    // each channel's own order kept (the server orders each channel alone, and the sort is stable): what may not get
+    // through doesn't hold up what may.
+    const frames = [...replays, ...queued]
+      .map((frame) => ({ frame, datedAt: this.datedAt(frame) }))
+      .sort((a, b) => (a.datedAt === b.datedAt ? 0 : a.datedAt > b.datedAt ? -1 : 1))
+      .map(({ frame }) => frame)
 
     if (hasNewChannels && !upgradeReady) {
       appendReconcileBatch(frames, this.stageReconcileBatch())
@@ -196,6 +205,14 @@ class AttachExchange {
     }
 
     return { frames, channelsToOpen, omitted: deferOmitted ? omitted : [], reconcileComplete: !hasNewChannels }
+  }
+
+  /** Since when the server hasn't confirmed the data of `frame`'s channel, `Infinity` where it has it all or `frame` is
+   *  no channel's sequenced data. */
+  private datedAt({ frame }: OutboundFrame): number {
+    const tag = frame[0]
+    if (tag === undefined || !isSequencedTag(tag)) return Number.POSITIVE_INFINITY
+    return this.channels.get(readU16(frame, 1))?.replay.stall?.since ?? Number.POSITIVE_INFINITY
   }
 
   /** Settles what `inFlight` asked with the RECONCILED that answers it: its probes, the ATTACH_RESULT frames that came

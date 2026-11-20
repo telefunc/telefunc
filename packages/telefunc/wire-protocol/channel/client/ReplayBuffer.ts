@@ -1,4 +1,5 @@
 export { ReplayBuffer }
+export type { Stall }
 
 import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import { replayKindOf, type ReplayKind } from '../../wire/tags.js'
@@ -16,6 +17,24 @@ class ReplayBuffer {
   private pushedSeq = 0
   /** The highest seq the peer acknowledged. */
   private acknowledgedSeq = 0
+  private stallDate: Stall | null = null
+
+  /** Since when what was handed out past what the peer acknowledged has waited for it: dated at a loss, and only the
+   *  peer acknowledging more clears it. */
+  get stall(): Stall | null {
+    return this.stallDate
+  }
+
+  /** The highest seq the peer acknowledged. */
+  get acknowledged(): number {
+    return this.acknowledgedSeq
+  }
+
+  /** A wire was lost at `at`, after the `reconciles`th accepted RECONCILED: what the peer hasn't acknowledged is dated
+   *  from then, unless it is already. */
+  dateStall(at: number, reconciles: number): void {
+    if (this.stallDate === null && this.acknowledgedSeq < this.issuedSeq) this.stallDate = { since: at, reconciles }
+  }
 
   /** The last seq handed out (see `nextSeq`). */
   get seq(): number {
@@ -48,6 +67,7 @@ class ReplayBuffer {
     // Nothing new: its queues dropped through it.
     if (lastSeq <= this.acknowledgedSeq) return
     this.acknowledgedSeq = lastSeq
+    this.stallDate = null
     for (const kind of REPLAY_KINDS) this.queues[kind]?.acknowledge(lastSeq)
   }
 
@@ -73,8 +93,13 @@ class ReplayBuffer {
     this.issuedSeq = 0
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
+    this.stallDate = null
   }
 }
+
+/** When a channel's unacknowledged data was dated, and how many RECONCILEDs the page had accepted then: one accepted
+ *  after it shows a server that could have acknowledged it. */
+type Stall = { since: number; reconciles: number }
 
 const REPLAY_KINDS: readonly ReplayKind[] = ['text', 'binary', 'closing']
 
