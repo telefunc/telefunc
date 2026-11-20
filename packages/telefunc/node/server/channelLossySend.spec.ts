@@ -531,9 +531,16 @@ describe('a large lossy send near the memory budget', () => {
   })
 
   /** The page of `channel` over SSE, reading nothing of its event stream unless asked. `waiting()` counts the channel's
-   *  publishes in the wire's queue. */
-  async function overSse(channel: ServerChannel<unknown, string>) {
-    getChannelMux().registerChannel(channel)
+   *  publishes in the wire's queue. With `reconciledOwed`, the server's RECONCILED waits until `reconcile()`. */
+  async function overSse(channel: ServerChannel<unknown, string>, { reconciledOwed = false } = {}) {
+    const mux = getChannelMux()
+    mux.registerChannel(channel)
+    const sendReconciled = mux.sendReconciled.bind(mux)
+    const deferred = vi.spyOn(mux, 'sendReconciled')
+    onTestFinished(() => deferred.mockRestore())
+    const owed = new Promise<() => void>((resolve) => {
+      if (reconciledOwed) deferred.mockImplementationOnce((outcome) => resolve(() => sendReconciled(outcome)))
+    })
     const connId = crypto.randomUUID()
     const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
     const post = (frames: Uint8Array<ArrayBuffer>[], extra = {}) =>
@@ -553,18 +560,19 @@ describe('a large lossy send near the memory budget', () => {
     assert(peer)
     assert(response.body instanceof ReadableStream)
     const reader = response.body.getReader()
-    const wire = getChannelMux().getWireByConnId<{ events: WireQueue; ready: Promise<void> }>(connId)
+    const wire = mux.getWireByConnId<{ events: WireQueue; ready: Promise<void> }>(connId)
     assert(wire)
     // The channel opens as its attach runs; what it sends goes to the stream once the RECONCILED went, which the page
     // reads as it opens: from there it reads nothing unless asked.
     await wire.ready
     const opening = new SseEvents()
-    for (let reconciled = false; !reconciled; ) {
+    for (let reconciled = reconciledOwed; !reconciled; ) {
       const read = await reader.read()
       if (read.done) throw new Error('the event stream ended before its RECONCILED')
       opening.push(read.value, (frame) => (reconciled ||= frame[0] === TAG.RECONCILED))
     }
     const { events } = wire
+    let asked: Promise<ReadableStreamReadResult<Uint8Array>> | undefined
     return {
       /** The page reads and confirms the channel's first send. */
       async readFirst() {
@@ -579,7 +587,26 @@ describe('a large lossy send near the memory budget', () => {
       },
       /** The page asks for more and reads no further: the next event starts, and what follows waits for it. */
       askOnce() {
-        void reader.read()
+        asked = reader.read()
+      },
+      /** The server sends the RECONCILED it owes; the page reads on until a binary send starting with `last`. Returns
+       *  `RECONCILED` and each binary send's first character, in the order the page read them. */
+      async reconcile(last: string): Promise<string[]> {
+        ;(await owed)()
+        const sse = new SseEvents()
+        const read: string[] = []
+        const label = (frame: Uint8Array) => {
+          const decoded = decode(frame)
+          if (decoded.tag === TAG.RECONCILED) read.push('RECONCILED')
+          if (decoded.tag === TAG.BINARY) read.push(String.fromCharCode(decoded.data[0] ?? 0))
+        }
+        while (!read.includes(last)) {
+          const chunk = await (asked ?? reader.read())
+          asked = undefined
+          if (chunk.done) break
+          sse.push(chunk.value, label)
+        }
+        return read
       },
       waiting: () => events.waitingPublishes(0),
       /** Past what its wire takes to confirm a send, after the one the page confirmed: the page is then behind. */
@@ -660,6 +687,25 @@ describe('a large lossy send near the memory budget', () => {
       // Dropping `b` gave its credit back, so `c` goes in its place: `a` and `c` are kept to replay.
       expect(page.waiting()).toBe(1)
       expect(channel.heldBytes).toBe(half + 7 + 200 + half / 2 + 7 + 200)
+    } finally {
+      free()
+      await page.leave()
+    }
+  })
+
+  test('on SSE, while the page is owed its RECONCILED no send is handed to the wire: a send that would not fit takes the place of every lossy send before it', async () => {
+    const channel = new ServerChannel<unknown, string>()
+    const page = await overSse(channel, { reconciledOwed: true })
+    const half = CREDIT_WINDOW_INITIAL_BYTES / 2
+    page.askOnce()
+    await sendLossy(channel, true, 'a'.repeat(half))
+    await sendLossy(channel, true, 'b'.repeat(half))
+    const free = leaveRoom(100_000)
+    try {
+      await expect(sendLossy(channel, true, 'c'.repeat(half / 2))).resolves.toBeUndefined()
+      // `c` alone is kept to replay: its frame and 200 bytes.
+      expect(channel.heldBytes).toBe(half / 2 + 7 + 200)
+      expect(await page.reconcile('c')).toEqual(['RECONCILED', 'c'])
     } finally {
       free()
       await page.leave()
