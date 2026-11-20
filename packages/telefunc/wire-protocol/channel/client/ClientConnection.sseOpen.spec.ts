@@ -4,6 +4,8 @@
 
 import { afterEach, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 import { ClientChannel } from './ClientChannel.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -25,10 +27,15 @@ let holdUploads: boolean
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** The request's body as its frames: the metadata first. */
-async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[]> {
+/** The request's body as its frames, the metadata first; null where its page left before sending all of it. */
+async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[] | null> {
   const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(chunk as Buffer)
+  try {
+    for await (const chunk of req) chunks.push(chunk as Buffer)
+  } catch (err) {
+    if (req.readableAborted) return null
+    throw err
+  }
   const buf = new Uint8Array(Buffer.concat(chunks))
   const frames: Uint8Array<ArrayBuffer>[] = []
   for (let off = 0; off + 4 <= buf.length; ) {
@@ -76,6 +83,7 @@ beforeEach(async () => {
     // The upload POST that would stream: ended at once, its frames go in batch POSTs.
     if (req.headers['transfer-encoding'] === 'chunked') return holdUploads ? undefined : void res.end()
     void framesOf(req).then((frames) => {
+      if (frames === null) return
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
       if (!metadata.streamResponse) return void res.end()
       opens++
@@ -123,6 +131,27 @@ function closingOf(channel: ClientChannel) {
     (err: unknown) => err,
   )
 }
+
+// A page that goes away sends the rest of no request it started: the fixture then has no request to answer.
+test('a request whose page leaves in the middle of its body is left unanswered, with no error', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (err: unknown) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  onTestFinished(() => {
+    process.off('unhandledRejection', onUnhandled)
+  })
+  const closed = new Promise<void>((resolve) => server.once('connection', (socket) => socket.once('close', resolve)))
+  const { port } = new URL(url)
+  const page = connect(Number(port), '127.0.0.1')
+  await once(page, 'connect')
+  page.write(`POST /_telefunc HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 1000\r\n\r\n`)
+  page.write(new Uint8Array(10))
+  await delay(100)
+  page.destroy()
+  await closed
+  await delay(100)
+  expect(unhandled).toEqual([])
+})
 
 test('a first open answered with a page of HTML ends the channel at once, naming what it got', async () => {
   answers.push(html(200))
