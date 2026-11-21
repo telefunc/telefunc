@@ -40,6 +40,7 @@ import { reportRoomError } from './reportRoomError.js'
 import { Admission } from './Admission.js'
 import { Admissions, type AdmissionsOwner } from './lifecycle/admit.js'
 import { evictMember } from './store/members.js'
+import { getRoomPlane } from '../backend/plane.js'
 import type { JoinOptions, LeaveCause, LocalParticipant } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
 import { ServerLocalParticipant } from './ServerLocalParticipant.js'
@@ -179,7 +180,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
 
   async removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this.model.closed) return // close() already removed everyone
-    await evictMember(this.incarnation, id, cause)
+    await getRoomPlane().call((store) => evictMember(store, this.incarnation, id, cause))
     this.model.applyLeave(id, cause)
   }
 

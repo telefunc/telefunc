@@ -1,6 +1,7 @@
 export { DemandExchange }
 export type { DemandExchangeOptions }
 
+import { getRoomPlane } from '../../backend/plane.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
 import { Slice } from '../../shared/Slice.js'
@@ -69,9 +70,11 @@ class DemandExchange implements DemandReportOwner {
     const ask: DemandAsk = { __r: 'demand-ask', instance: this.outgoingDemand.instance }
     if (of) ask.of = of
     // A stale commit is a closed room's, which has no demand.
-    void commitLane(controlLane(this.incarnation.id, this.incarnation.inc), encodeRoomRecord(ask)).catch(
-      reportRoomError,
-    )
+    void commitLane(
+      getRoomPlane().direct,
+      controlLane(this.incarnation.id, this.incarnation.inc),
+      encodeRoomRecord(ask),
+    ).catch(reportRoomError)
   }
 
   /** The demand lane stopped: what the other processes told lapses unread. */

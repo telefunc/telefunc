@@ -47,7 +47,8 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
-import { deleteCells, eachInFlight, readOpenCells } from './cellStore.js'
+import { deleteCells, readOpenCells } from './cellStore.js'
+import { eachInFlight, failingAfter } from './inFlight.js'
 import { runOperation } from './operations.js'
 import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 
@@ -210,8 +211,9 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
   const { inc } = config
   const plane = getRoomPlane()
   await BackendCall.run(async (call) => {
+    const store = plane.storeOf(call)
     const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof EXCHANGE_CONFLICT> => {
-      const read = await call.read(() => readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY]))
+      const read = await call.read(() => readOpenCells(store, roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY]))
       const seq = read.cells.get(META_SEQ_CELL_KEY)
       if (seq === undefined) {
         const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
@@ -241,7 +243,8 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
       }
       const prefix = roomMetaGenPrefix(gen)
       const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-      const merging = keys.length === 0 ? new Map() : (await call.read(() => readOpenCells(roomId, inc, keys))).cells
+      const merging =
+        keys.length === 0 ? new Map() : (await call.read(() => readOpenCells(store, roomId, inc, keys))).cells
       const changes = metaChanges(write.merge, prefix, count, merging)
       const mutations = changes.map((change) => changeMutation(prefix, change))
       const result = await call.write(() =>
@@ -250,9 +253,15 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
       return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
     })
     if (update === null) return
+    // A failed drop is told once the commit, which waits for its handoff, settled.
+    const committing = commitLane(store, controlLane(roomId, inc), encodeRoomRecord(update))
     const [commit] = await Promise.all([
-      call.write(() => commitLane(controlLane(roomId, inc), encodeRoomRecord(update))),
-      'replace' in write && call.write(() => dropReplacedMetaGenerations(roomId, inc)),
+      committing,
+      'replace' in write &&
+        failingAfter(
+          committing,
+          call.write(() => dropReplacedMetaGenerations(roomId, inc)),
+        ),
     ])
     acceptedOrThrow(roomId, commit)
   })
@@ -276,6 +285,7 @@ async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise
   const plane = getRoomPlane()
   // A page read that fails after a page's delete fails the drop as the delete may have.
   await BackendCall.run(async (call) => {
+    const store = plane.storeOf(call)
     const marks = await plane.driver.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
     if (marks.kind === 'stale-incarnation') return
     const slice = new Slice()
@@ -288,12 +298,12 @@ async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise
       )) {
         if (page.kind === 'stale-incarnation') return
         const dropping = held
-        if (dropping.length > 0 && !(await call.write(() => deleteCells(roomId, inc, dropping)))) return
+        if (dropping.length > 0 && !(await deleteCells(store, roomId, inc, dropping))) return
         held = [...page.cells.keys()]
         if (slice.over) await slice.next()
       }
       const dropping = [...held, mark]
-      if (!(await call.write(() => deleteCells(roomId, inc, dropping)))) return
+      if (!(await deleteCells(store, roomId, inc, dropping))) return
     }
   })
 }
@@ -354,7 +364,7 @@ const SET_MEMBER_META: RoomOperation<SetMemberMetaArgs, MemberMetaWritten | 'gon
 
 /** Writes member `id`'s meta with its event. */
 async function setMemberMeta(room: RoomIncarnation, id: string, write: MemberMetaWrite): Promise<MemberMetaWritten> {
-  const { value } = await runOperation(room, SET_MEMBER_META, { id, write })
+  const { value } = await runOperation(getRoomPlane().direct, room, SET_MEMBER_META, { id, write })
   if (value === 'gone') throw participantGoneError(id)
   return value
 }
@@ -389,7 +399,7 @@ async function setMemberConnection(
   id: string,
   connected: boolean,
 ): Promise<MemberMetaWritten | null> {
-  const { value } = await runOperation(room, SET_MEMBER_CONNECTION, { id, connected })
+  const { value } = await runOperation(getRoomPlane().direct, room, SET_MEMBER_CONNECTION, { id, connected })
   if (value === 'gone') throw participantGoneError(id)
   return value
 }
@@ -452,7 +462,9 @@ async function settleMemberMetaCells(
 ): Promise<MemberMetaCells> {
   const memberKey = memberCellKey(id)
   for (let reads = 0; ; reads++) {
-    const now = metaSeqOf((await readOpenCells(room.id, room.inc, [memberKey])).cells.get(memberKey))
+    const now = metaSeqOf(
+      (await readOpenCells(getRoomPlane().direct, room.id, room.inc, [memberKey])).cells.get(memberKey),
+    )
     if (now === seq) return cells
     if (reads === META_PAGED_READS) break
     seq = now

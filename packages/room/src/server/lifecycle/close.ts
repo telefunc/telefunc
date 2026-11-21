@@ -59,7 +59,8 @@ async function finishClose(plane: RoomPlane, roomId: string, closing: RoomHead):
   assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
   return await BackendCall.run(async (call) => {
     const closed = encodeRoomRecord({ __r: 'closed' })
-    const closedEvent = await call.write(() => commitLane(controlLane(roomId, inc), closed, { closingLease: lease.id }))
+    const store = getRoomPlane().storeOf(call)
+    const closedEvent = await commitLane(store, controlLane(roomId, inc), closed, { closingLease: lease.id })
     if (closedEvent.kind !== 'accepted') return false
     const finalized = await call.write(() =>
       plane.compareExchangeHead(

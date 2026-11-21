@@ -1,8 +1,7 @@
 export { JOIN, LEAVE, joinMember, evictMember }
 
-import { BackendCall } from 'telefunc/__internal'
-import { getRoomPlane } from '../../backend/plane.js'
 import type { OperationOptions, RoomOperation } from '../../backend/contract.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
 import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
@@ -86,29 +85,26 @@ const identityTextEncoder = new TextEncoder()
 
 /** Joins a member under the lease, once its inbox delivers (`options.inbox`). */
 async function joinMember(
+  store: RoomStore,
   room: RoomIncarnation,
   lease: RoomLease,
   member: Omit<JoinArgs, 'lease' | 'hold'>,
   options: OperationOptions,
 ): Promise<void> {
-  const joined = await runHosted(room, lease, JOIN, { ...member, hold: room.hold }, options)
+  const joined = await runHosted(store, room, lease, JOIN, { ...member, hold: room.hold }, options)
   afterHoldChange(room, holdDelta(member.record.hidden ? null : room.hold, 1, { joining: true }).after(joined.counters))
 }
 
 /** Removes a member with its leave; false once it was gone. */
-async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
-  return await BackendCall.run(async (call) => {
-    try {
-      const left = await call.write(() =>
-        runOperation(room, LEAVE, { id, cause: leaveCauseToWire(cause), hold: room.hold }),
-      )
-      if (left.value === null) return false
-      afterHoldChange(room, holdDelta(left.value.hidden ? null : room.hold, -1).after(left.counters))
-      return true
-    } catch (error) {
-      // A room that closed under the eviction ended the member with everyone else.
-      if (!isOpenIncarnation(await call.read(() => getRoomPlane().driver.readHead(room.id)), room.inc)) return true
-      throw error
-    }
-  })
+async function evictMember(store: RoomStore, room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
+  try {
+    const left = await runOperation(store, room, LEAVE, { id, cause: leaveCauseToWire(cause), hold: room.hold })
+    if (left.value === null) return false
+    afterHoldChange(room, holdDelta(left.value.hidden ? null : room.hold, -1).after(left.counters))
+    return true
+  } catch (error) {
+    // A room that closed under the eviction ended the member with everyone else.
+    if (!isOpenIncarnation(await store.reads.readHead(room.id), room.inc)) return true
+    throw error
+  }
 }

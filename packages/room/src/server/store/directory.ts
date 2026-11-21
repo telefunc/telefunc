@@ -12,7 +12,7 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { configFromHead, openConfig } from '../lanes/lanes.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { eachInFlight } from './cellStore.js'
+import { eachInFlight } from './inFlight.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 /** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room

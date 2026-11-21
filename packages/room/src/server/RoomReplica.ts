@@ -30,7 +30,7 @@ import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
-import { eachInFlight } from './store/cellStore.js'
+import { eachInFlight } from './store/inFlight.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { RoomHosting } from './lifecycle/RoomHosting.js'
 import type { StoredRoomMeta } from './store/meta.js'

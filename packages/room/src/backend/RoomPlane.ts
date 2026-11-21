@@ -2,6 +2,7 @@ export { RoomPlane }
 
 import {
   assertDriverOrdering,
+  BackendCall,
   SharedSubscriptions,
   type BackendListener,
   type BackendSubscription,
@@ -26,7 +27,7 @@ import type {
   RoomSubscriptionSource,
 } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
-import { assert } from '../utils/assert.js'
+import { RoomStore, type RoomReads } from './RoomStore.js'
 
 type RoomPlaneOptions = { driver: RoomDriver }
 
@@ -36,50 +37,76 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
   deliveryKind: () => 'binary',
 }
 
-/** What Room's server code calls: the driver's writes and orderings checked, its lane subscriptions shared by source
- *  and host. Room reads the rest from `driver` itself. */
+/** What Room's server code reaches the store by: `call(work)` for a public call, whose writes are counted in its
+ *  account, and `direct` for work that tells no answer; and the lane subscriptions, shared by source and host. */
 class RoomPlane {
   readonly driver: RoomDriver
+  /** The store with no account: background work, and a call whose only write is its last step. */
+  readonly direct: RoomStore
+  private readonly reads: RoomReads
   private readonly subscriptions: SharedSubscriptions<RoomSubscriptionSource>
 
   constructor({ driver }: RoomPlaneOptions) {
     this.driver = driver
+    this.reads = {
+      readHead: (roomId) => driver.readHead(roomId),
+      readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
+      readExpiringCells: (roomId, inc, keys) => driver.readExpiringCells(roomId, inc, keys),
+      readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
+      listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
+      directoryGet: (roomId) => driver.directoryGet(roomId),
+      directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
+      directoryDue: () => driver.directoryDue(),
+      readLaneOrder: async (roomId, inc, lane) => {
+        const order = await driver.readLaneOrder(roomId, inc, lane)
+        if (order !== null) assertDriverOrdering(order)
+        return order
+      },
+      readRetained: async (roomId, inc, lane) => {
+        const retained = await driver.readRetained(roomId, inc, lane)
+        if (retained !== null) assertDriverOrdering(retained)
+        return retained
+      },
+    }
+    this.direct = new RoomStore(driver, this.reads, null)
     this.subscriptions = new SharedSubscriptions({ driver, sources: laneSources })
   }
 
-  async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
-    assertHeadNextWellFormed(next)
-    return this.driver.compareExchangeHead(roomId, expected, next)
+  /** The value of `work`, a public call whose steps go through `store`; its answer is read at its close
+   *  (`BackendCall.run`). */
+  call<T>(work: (store: RoomStore) => Promise<T>): Promise<T> {
+    return BackendCall.run((account) => work(new RoomStore(this.driver, this.reads, account)))
   }
 
-  async commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const result = await this.driver.commitLane(target, payload, opts)
-    if (result.kind === 'accepted') assertDriverOrdering(result)
-    return result
+  /** The store on `account`, for code that still holds an account rather than a store. */
+  storeOf(account: BackendCall): RoomStore {
+    return new RoomStore(this.driver, this.reads, account)
   }
 
-  async runOperation<Args, Value>(
+  compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
+    return this.direct.compareExchangeHead(roomId, expected, next)
+  }
+
+  commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    return this.direct.commitLane(target, payload, opts)
+  }
+
+  runOperation<Args, Value>(
     roomId: string,
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
     options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
-    const result = await this.driver.runOperation(roomId, inc, operation, args, options)
-    if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
-    return result
+    return this.direct.runOperation(roomId, inc, operation, args, options)
   }
 
-  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const order = await this.driver.readLaneOrder(roomId, inc, lane)
-    if (order !== null) assertDriverOrdering(order)
-    return order
+  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+    return this.reads.readLaneOrder(roomId, inc, lane)
   }
 
-  async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const retained = await this.driver.readRetained(roomId, inc, lane)
-    if (retained !== null) assertDriverOrdering(retained)
-    return retained
+  readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
+    return this.reads.readRetained(roomId, inc, lane)
   }
 
   subscribeLane(
@@ -95,31 +122,4 @@ class RoomPlane {
   dispose(): void {
     this.subscriptions.dispose()
   }
-}
-
-/** Every head write is checked here; drivers only compare-exchange. */
-function assertHeadNextWellFormed(next: HeadNext): void {
-  const { head, ttlMs } = next
-  if (head.state === 'closing') {
-    assert(head.closeLease !== undefined, 'head exchange: a head entering closing must carry a close lease')
-    const { durationMs } = head.closeLease
-    assert(
-      Number.isFinite(durationMs) && durationMs > 0,
-      `head exchange: close lease durationMs ${durationMs} must be finite and positive`,
-    )
-  } else {
-    assert(head.closeLease === undefined, `head exchange: a '${head.state}' head must not carry a close lease`)
-  }
-  assert(
-    ttlMs === undefined || head.state !== 'closing',
-    'head exchange: a closing head lapses with its close lease, not a ttl',
-  )
-  assert(
-    head.state !== 'closed' || head.currentInc === null,
-    'head exchange: a closed tombstone must clear currentInc to null',
-  )
-  assert(
-    head.state === 'closed' || head.currentInc !== null,
-    `head exchange: a '${head.state}' head must name an incarnation`,
-  )
 }

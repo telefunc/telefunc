@@ -23,13 +23,13 @@ async function heldRoom() {
     { head: { currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
   )
   const lease = new RoomLease()
-  await holdViews(room, lease, ['page'])
+  await holdViews(plane.direct, room, lease, ['page'])
   const model = { closed: false }
   let renewedAt = 0
   const hosting = {
     maintain: vi.fn(async () => {
       renewedAt = Date.now()
-      await renewLease(room, lease)
+      await renewLease(plane.direct, room, lease)
     }),
   }
   const authority = {

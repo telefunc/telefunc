@@ -3,7 +3,8 @@ export { RoomHosting }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { reportRoomError } from '../reportRoomError.js'
-import { eachInFlight } from '../store/cellStore.js'
+import { getRoomPlane } from '../../backend/plane.js'
+import { eachInFlight } from '../store/inFlight.js'
 import { holdViews, removeView, renewLease, RoomLease } from '../store/lease.js'
 import { evictMember } from '../store/members.js'
 import type { RoomStub } from '../RoomStub.js'
@@ -37,7 +38,7 @@ class RoomHosting {
     this.views.delete(stub)
     try {
       const key = await view
-      if (key) await removeView(this.incarnation, key)
+      if (key) await removeView(getRoomPlane().direct, this.incarnation, key)
     } catch (error) {
       reportRoomError(error)
     }
@@ -67,11 +68,11 @@ class RoomHosting {
   }
 
   private async renewOrMarkViewsLost(): Promise<void> {
-    if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
+    if (!(await renewLease(getRoomPlane().direct, this.incarnation, this.lease))) this.viewsLost = true
   }
 
   private async evictAgain(id: string): Promise<void> {
-    await evictMember(this.incarnation, id, { type: 'disconnected' })
+    await getRoomPlane().call((store) => evictMember(store, this.incarnation, id, { type: 'disconnected' }))
     this.unevicted.delete(id)
   }
 
@@ -79,6 +80,7 @@ class RoomHosting {
   private async writeViews(stubs: RoomStub[]): Promise<(string | null)[]> {
     try {
       const keys = await holdViews(
+        getRoomPlane().direct,
         this.incarnation,
         this.lease,
         stubs.map((stub) => stub.end.id),

@@ -3,6 +3,8 @@ export type { RoomWritesOptions, RoomWritesOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import type { CommitAccepted } from '../backend/contract.js'
+import { getRoomPlane } from '../backend/plane.js'
+import type { RoomStore } from '../backend/RoomStore.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { BackendCall, type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
 import { publicTrack, type BinaryFrame } from '../shared/binary.js'
@@ -118,7 +120,7 @@ class RoomWrites {
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
       const opts = { retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitLane(target, record, opts)
+      const committing = commitLane(getRoomPlane().direct, target, record, opts)
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
@@ -136,7 +138,16 @@ class RoomWrites {
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
       const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitLane({ roomId: this.incarnation.id, inc: this.incarnation.inc, lane }, framed, opts)
+      const committing = commitLane(
+        getRoomPlane().direct,
+        {
+          roomId: this.incarnation.id,
+          inc: this.incarnation.inc,
+          lane,
+        },
+        framed,
+        opts,
+      )
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
@@ -252,7 +263,8 @@ class RoomWrites {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     // One account of the call's writes: the reap that finding the recipient may do, and the send.
     return await BackendCall.run(async (call) => {
-      const target = await this.resolveMember(to, call)
+      const store = getRoomPlane().storeOf(call)
+      const target = await this.resolveMember(to, store)
       if (!target) throw participantGoneError(to)
       const sender = this.memberSender(from)
       const stamp = this.stampedSender(from, sender)
@@ -262,10 +274,11 @@ class RoomWrites {
       if (ackId) envelope.ackId = ackId
       if (field !== undefined) envelope.field = field
       const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-      const committed = await call.write(() =>
-        commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
-          requiredCellKeys,
-        }),
+      const committed = await commitLane(
+        store,
+        inboxOf(this.incarnation.id, this.incarnation.inc, to),
+        encodeRoomRecord(envelope),
+        { requiredCellKeys },
       )
       const receipt = acceptedOrThrow(this.incarnation.id, committed)
       if (receipt.lost !== undefined) throw messageLostError()
@@ -282,15 +295,17 @@ class RoomWrites {
     const { id, inc } = this.incarnation
     const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
     const requiredCellKeys = [memberCellKey(to)]
-    const acked = await commitLane(inboxOf(id, inc, to), encodeRoomRecord(envelope), { requiredCellKeys })
+    const acked = await commitLane(getRoomPlane().direct, inboxOf(id, inc, to), encodeRoomRecord(envelope), {
+      requiredCellKeys,
+    })
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
-  /** Its reads and writes, a reap of a lapsed lease among them, are steps of `call`. */
-  private async resolveMember(id: string, call: BackendCall): Promise<Sender | null> {
+  /** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of. */
+  private async resolveMember(id: string, store: RoomStore): Promise<Sender | null> {
     const entry = this.model.entry(id)
     if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
-    const [member] = await reapAndReadMembersById(this.incarnation, [id], call)
+    const [member] = await reapAndReadMembersById(store, this.incarnation, [id])
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
   }
 }

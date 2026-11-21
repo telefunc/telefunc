@@ -286,11 +286,12 @@ class AuthoritySync {
     // The events grow while the roster is read and reconciled.
     const events = this.model.recordMembership()
     try {
-      const roster = await reapAndReadRoster(this.incarnation, call)
+      const store = getRoomPlane().storeOf(call)
+      const roster = await reapAndReadRoster(store, this.incarnation)
       const listed = new Set(roster.members.map((member) => member.id))
       const unlisted = [...this.model.memberIds()].filter((id) => !listed.has(id))
       const [departing, behind] = await Promise.all([
-        readLeaveCauses(this.incarnation, unlisted),
+        readLeaveCauses(store, this.incarnation, unlisted),
         this.deliveryBehind(),
       ])
       if (this.model.closed || !(await this.roster.reconcile({ ...roster, departing, behind }, events))) return

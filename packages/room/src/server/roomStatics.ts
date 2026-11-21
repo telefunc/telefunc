@@ -6,6 +6,7 @@ import { BackendCall, isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
 import type { RoomPlane } from '../backend/RoomPlane.js'
+import type { RoomStore } from '../backend/RoomStore.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
   assertKnownOptions,
@@ -38,7 +39,7 @@ import type {
 } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
-import { eachInFlight } from './store/cellStore.js'
+import { eachInFlight } from './store/inFlight.js'
 import { evictMember } from './store/members.js'
 import {
   reapAndCountPresence,
@@ -173,7 +174,7 @@ async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord, call: B
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await held.sharedHandle(call)
   const [roster, meta] = await call.all([
-    reapAndReadRoster(incarnation, call),
+    reapAndReadRoster(getRoomPlane().storeOf(call), incarnation),
     call.read(() => requireRoomMeta(id, incarnation)),
   ])
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
@@ -320,7 +321,7 @@ async function countListedRoom(
   config: RoomConfigRecord,
 ): Promise<number | null> {
   try {
-    return await reapAndCountPresence({ id: roomId, ...config }, call)
+    return await reapAndCountPresence(plane.storeOf(call), { id: roomId, ...config })
   } catch (error) {
     if (isRoomError(error) && openConfig(await call.read(() => plane.driver.readHead(roomId)), config.inc) === null)
       return null
@@ -360,12 +361,12 @@ async function resolveParticipantRef(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const members = await reapAndReadMembersById(incarnation, [target.id], call)
+    const members = await reapAndReadMembersById(getRoomPlane().storeOf(call), incarnation, [target.id])
     if (members.length === 0) throw participantGoneError(target.id)
     return members
   }
   assertParticipantIdentity(target.identity, 'The participant ref { identity }')
-  return await reapAndResolveIdentity(incarnation, target.identity, call)
+  return await reapAndResolveIdentity(getRoomPlane().storeOf(call), incarnation, target.identity)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
@@ -381,18 +382,20 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
     const members = await resolveParticipantRef(incarnation, target, call)
     const cause = removedCause(target.reason)
     // Each eviction goes on after another failed, so the failure is told once every one settled.
-    await eachInFlight(members, (member) => call.write(() => evictMember(incarnation, member.id, cause)))
+    const store = getRoomPlane().storeOf(call)
+    await eachInFlight(members, (member) => evictMember(store, incarnation, member.id, cause))
   })
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
   // One account of the call's writes: the reap of a lapsed lease that reading the members may do.
   const members = await BackendCall.run(async (call) => {
+    const store = getRoomPlane().storeOf(call)
     const incarnation = await call.read(() => requireRoom(id))
-    if (target === undefined) return (await reapAndReadRoster(incarnation, call)).members
+    if (target === undefined) return (await reapAndReadRoster(store, incarnation)).members
     assertUsage(isObject(target), 'Room.getParticipants() target should be { identity }')
     assertParticipantIdentity(target.identity, 'Room.getParticipants() target identity')
-    return await reapAndResolveIdentity(incarnation, target.identity, call)
+    return await reapAndResolveIdentity(store, incarnation, target.identity)
   })
   return members
     .filter((member) => !member.hidden)
@@ -408,7 +411,10 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const record = encodeRoomRecord({ __r: 'data', from: '', data } satisfies RoomDataEnvelope)
   const config = await requireRoom(id)
-  const commit = acceptedOrThrow(id, await commitLane({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record))
+  const commit = acceptedOrThrow(
+    id,
+    await commitLane(getRoomPlane().direct, { roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record),
+  )
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
@@ -423,14 +429,14 @@ async function sendToParticipant(
   const message = ownMessage(data)
   // One account of the call's writes: the reap that finding the participant may do, and the sends.
   return await BackendCall.run(async (call) => {
+    const store = getRoomPlane().storeOf(call)
     const incarnation = await call.read(() => requireRoom(id))
     const members = await resolveParticipantRef(incarnation, target, call)
-    if ('id' in target)
-      return deliveredOrThrow(id, await call.write(() => sendDm(id, incarnation.inc, target.id, message)))
+    if ('id' in target) return deliveredOrThrow(id, await sendDm(store, id, incarnation.inc, target.id, message))
     const receipts: RoomSendReceipt[] = []
     // Each send goes on after another failed, so the failure is told once every one settled.
     await eachInFlight(members, async (member) => {
-      const commit = await call.write(() => sendDm(id, incarnation.inc, member.id, message))
+      const commit = await sendDm(store, id, incarnation.inc, member.id, message)
       // A tab that left since the user's tabs were read is skipped: the others still get the message.
       if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
     })
@@ -438,10 +444,16 @@ async function sendToParticipant(
   })
 }
 
-async function sendDm(id: string, inc: string, member: string, message: unknown): Promise<LaneCommit> {
+async function sendDm(
+  store: RoomStore,
+  id: string,
+  inc: string,
+  member: string,
+  message: unknown,
+): Promise<LaneCommit> {
   const envelope = { __r: 'dm', to: member, from: '', fromMeta: null, data: message } as const
   const requiredCellKeys = [memberCellKey(member)]
-  return await commitLane(inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
+  return await commitLane(store, inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
 }
 
 /** The delivered message's receipt; a member that left, a closed room or a lost handoff throws. */

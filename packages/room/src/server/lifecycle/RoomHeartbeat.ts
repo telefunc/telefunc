@@ -1,5 +1,6 @@
 export { RoomHeartbeat }
 
+import { getRoomPlane } from '../../backend/plane.js'
 import { unrefTimer } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
@@ -87,7 +88,10 @@ class RoomHeartbeat {
       const head = reconciled.status === 'fulfilled' ? reconciled.value : null
       if (head !== null) {
         const { id, inc } = this.incarnation
-        await Promise.all([dropReplacedMetaGenerations(id, inc), reapLapsedLeases(this.incarnation)])
+        await Promise.all([
+          dropReplacedMetaGenerations(id, inc),
+          getRoomPlane().call((store) => reapLapsedLeases(store, this.incarnation)),
+        ])
         // Each reads what the reap left.
         if (!this.checkingCoverage) void this.checkCoverage().catch(reportRoomError)
         await maintainHold(this.incarnation, head)

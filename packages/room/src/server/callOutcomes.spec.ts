@@ -64,6 +64,7 @@ async function otherServersMember(
   const member = crypto.randomUUID()
   const joinedAt = Date.now()
   await joinMember(
+    plane.direct,
     room,
     lease,
     {
@@ -100,8 +101,8 @@ function refuseMetaReads(): void {
 
 /** The store refuses each removal of a member. */
 function refuseLeaves(): void {
-  const plane = getRoomPlane()
-  const runOperation = plane.runOperation.bind(plane)
+  const { driver } = getRoomPlane()
+  const runOperation = driver.runOperation.bind(driver)
   async function refusingLeaves<Args, Value>(
     roomId: string,
     inc: string,
@@ -112,7 +113,7 @@ function refuseLeaves(): void {
     if (operation.name === 'leave') throw refused()
     return await runOperation(roomId, inc, operation, args, options)
   }
-  vi.spyOn(plane, 'runOperation').mockImplementation(refusingLeaves)
+  vi.spyOn(driver, 'runOperation').mockImplementation(refusingLeaves)
 }
 
 /** How `call` ends: its error's code and outcome, or `'resolved'`. */
@@ -222,7 +223,7 @@ describe('a Room call whose later step the store refuses after the call reaped a
       const room = await Room.create(`outcome-${crypto.randomUUID()}`)
       const participant = await room.join({ identity: 'u1' })
       const leaseStays = await lapsedLease(room.id)
-      vi.spyOn(getRoomPlane(), 'commitLane').mockRejectedValueOnce(refused())
+      vi.spyOn(getRoomPlane().driver, 'commitLane').mockRejectedValueOnce(refused())
       const sending =
         by === 'id' ? Room.send(room.id, { id: participant.id }, 'hi') : Room.send(room.id, { identity: 'u1' }, 'hi')
 
@@ -241,6 +242,47 @@ describe('a Room call whose later step the store refuses after the call reaped a
     expect(await outcomeOf(Room.removeParticipant(room.id, { id: participant.id }))).toEqual({
       code: 'denied',
       outcome: 'not-run',
+    })
+  })
+})
+
+describe('a Room call whose eviction found the room closed meanwhile', () => {
+  it("Room.removeParticipant() by identity: told 'not-run' where every leave was refused and the store kept everything", async () => {
+    const room = await Room.create(`outcome-${crypto.randomUUID()}`)
+    const tabs = [await room.join({ identity: 'u1' }), await room.join({ identity: 'u1' })]
+    const { driver } = getRoomPlane()
+    const runOperation = driver.runOperation.bind(driver)
+    const readHead = driver.readHead.bind(driver)
+    let leavesRefused = 0
+    async function refusingLeaves<Args, Value>(
+      roomId: string,
+      inc: string,
+      operation: RoomOperation<Args, Value>,
+      args: Args,
+      options?: OperationOptions,
+    ): Promise<OperationResult<Value>> {
+      if (operation.name !== 'leave') return await runOperation(roomId, inc, operation, args, options)
+      leavesRefused++
+      throw refused()
+    }
+    vi.spyOn(driver, 'runOperation').mockImplementation(refusingLeaves)
+    // After its refused leave, one tab's eviction reads no open head, as once the room closed; the other's read is
+    // refused.
+    let headsAfterLeaves = 0
+    vi.spyOn(driver, 'readHead').mockImplementation(async (roomId) => {
+      if (leavesRefused === 0) return await readHead(roomId)
+      if (++headsAfterLeaves === 1) return null
+      throw refused()
+    })
+
+    const removed = await outcomeOf(Room.removeParticipant(room.id, { identity: 'u1' }))
+    vi.restoreAllMocks()
+    const listed = (await Room.getParticipants(room.id)).map(({ id }) => id).sort()
+
+    expect({ removed, leavesRefused, listed }).toEqual({
+      removed: { code: 'denied', outcome: 'not-run' },
+      leavesRefused: 2,
+      listed: tabs.map(({ id }) => id).sort(),
     })
   })
 })

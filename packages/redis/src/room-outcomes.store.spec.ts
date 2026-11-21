@@ -310,7 +310,7 @@ async function hostingLease(admin: Redis, id: string, member: string): Promise<{
 
 describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the reap still writes', () => {
   for (const [i, store] of STORES.entries()) {
-    it(`${store.name}: rejects once every write it started ended`, async () => {
+    it(`${store.name}: rejects once every write it started ended, handing over no more; the next reap removes the rest once`, async () => {
       const admin = await reached(store)
       const room = await Room.create(`drained-${i}`)
       const member = await joinedByAnotherServer(String(admin.options.host), room.id)
@@ -330,6 +330,12 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
       // The store refuses the read that plans the member's removal; the views' removals go on beside it.
       await admin.call('ACL', 'SETUSER', 'telefunc', '-hkeys')
+      // The removals the views' sibling still hands over after the close are refused inside it, never unhandled.
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason)
+      }
+      process.on('unhandledRejection', onUnhandled)
       const refused = await Room.getParticipants(room.id).then(
         () => 'resolved',
         (error: unknown) => error,
@@ -337,13 +343,43 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       const atRejection = await snapshot(admin)
       await sleep(2_000)
       const unchanged = isDeepStrictEqual(await snapshot(admin), atRejection)
-      const viewsLeft = (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length
+      process.off('unhandledRejection', onUnhandled)
+      const viewsLeft = async () => (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length
+      // The failed call handed over no removal after its close: the views not yet removed stay, the lease claimed.
+      const leftAtRejection = await viewsLeft()
+      // How long the claim keeps other reapers off, by the store's clock: a lease's length.
+      const claim = (await admin.hget(values, `session:${lease}`)) ?? ''
+      const [seconds, micros] = await admin.time()
+      const claimMs =
+        Number(/"until":(\d+)/.exec(claim)?.[1]) - (Number(seconds) * 1000 + Math.floor(Number(micros) / 1000))
+      // Once the store allows the read and the claim lapses, two reapers come at once: one removes the rest.
+      await admin.call('ACL', 'SETUSER', 'telefunc', '+hkeys')
+      await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
+      await Promise.all([Room.getParticipants(room.id), Room.getParticipants(room.id)])
+      const afterNextReap = {
+        viewsLeft: await viewsLeft(),
+        leaseLeft: await admin.hexists(values, `session:${lease}`),
+        memberListed: (await Room.getParticipants(room.id)).some(({ id }) => id === member),
+        // Each view's hold and the member's left the count once: it is the count before the views, less the member.
+        holds: /"value":(\d+)/.exec((await admin.hget(values, 'holds')) ?? '')?.[1],
+      }
       admin.disconnect()
+      console.log(`${store.name}: the failed call's claim on the lease lasts ${claimMs} ms`)
 
-      expect({ refused, unchanged, viewsLeft }).toMatchObject({
+      expect({
+        refused,
+        unchanged,
+        unhandled,
+        someLeftAtRejection: leftAtRejection > 0,
+        claimedForALease: claimMs > 110_000 && claimMs <= 120_000,
+        afterNextReap,
+      }).toMatchObject({
         refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
         unchanged: true,
-        viewsLeft: 0,
+        unhandled: [],
+        someLeftAtRejection: true,
+        claimedForALease: true,
+        afterNextReap: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: String(Number(held) - 1) },
       })
     }, 60_000)
   }

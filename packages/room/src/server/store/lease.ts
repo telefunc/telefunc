@@ -18,9 +18,9 @@ export type { LeaseState }
 // A server's lease in one room incarnation, on the store's clock: the members it joined and the pages' views it holds
 // name it, its server renews it, and once it lapses one other server claims it and removes them.
 
-import { BackendCall } from 'telefunc/__internal'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { CellCounter, CellMutation, OperationOptions, RoomOperation } from '../../backend/contract.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import { ROOM_LEASE_TTL_MS } from '../constants.js'
 import { decodeRoomText } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
@@ -33,7 +33,8 @@ import {
   memberIdOfLeaseMemberKey,
   viewCellKey,
 } from './cells.js'
-import { eachInFlight, readPrefix, readPrefixAt, type CellsAt } from './cellStore.js'
+import { readPrefix, readPrefixAt, type CellsAt } from './cellStore.js'
+import { eachInFlight, failingAfter } from './inFlight.js'
 import { evictMember } from './members.js'
 import { runOperation } from './operations.js'
 assertIsNotBrowser()
@@ -95,6 +96,7 @@ function leaseHosting({ id, created }: LeaseState, raw: Uint8Array | undefined, 
 /** Runs `operation`, which hosts something under the lease it takes as `lease`. A lease found lost is replaced, and the
  *  operation runs again under the replacement, whose cell it writes. */
 async function runHosted<Args, Value>(
+  store: RoomStore,
   room: RoomIncarnation,
   lease: RoomLease,
   operation: RoomOperation<Args & { lease: LeaseState }, Value | 'lease-lost'>,
@@ -104,7 +106,7 @@ async function runHosted<Args, Value>(
   for (;;) {
     const id = lease.id
     const hosted = { ...args, lease: { id, created: lease.created } }
-    const { value, counters } = await runOperation(room, operation, hosted, options)
+    const { value, counters } = await runOperation(store, room, operation, hosted, options)
     if (value !== 'lease-lost') {
       lease.hosted(id)
       return { value: value as Value, counters }
@@ -178,73 +180,64 @@ const REMOVE_LEASE: RoomOperation<LeaseCleanArgs, void> = {
 
 /** Writes pages' views under the lease in one write, and returns their cells' keys; a room without hold timeouts keeps
  *  none. */
-async function holdViews(room: RoomIncarnation, lease: RoomLease, ids: string[]): Promise<string[]> {
+async function holdViews(store: RoomStore, room: RoomIncarnation, lease: RoomLease, ids: string[]): Promise<string[]> {
   const { hold } = room
   if (hold === null) return []
-  const { value, counters } = await runHosted(room, lease, HOLD_VIEWS, { ids, hold })
+  const { value, counters } = await runHosted(store, room, lease, HOLD_VIEWS, { ids, hold })
   if (value.added > 0) afterHoldChange(room, holdDelta(hold, value.added).after(counters))
   return value.keys
 }
 
 /** Removes a view by the key `holdViews` returned. */
-async function removeView(room: RoomIncarnation, key: string): Promise<void> {
-  const { value: removed, counters } = await runOperation(room, REMOVE_VIEW, { key, hold: room.hold })
+async function removeView(store: RoomStore, room: RoomIncarnation, key: string): Promise<void> {
+  const { value: removed, counters } = await runOperation(store, room, REMOVE_VIEW, { key, hold: room.hold })
   if (removed) afterHoldChange(room, holdDelta(room.hold, -1).after(counters))
 }
 
 /** Renews the lease once a write created its cell; false once the lease was lost. */
-async function renewLease(room: RoomIncarnation, lease: RoomLease): Promise<boolean> {
+async function renewLease(store: RoomStore, room: RoomIncarnation, lease: RoomLease): Promise<boolean> {
   if (!lease.created) return true
   const id = lease.id
-  const { value: renewed } = await runOperation(room, RENEW_LEASE, { id })
+  const { value: renewed } = await runOperation(store, room, RENEW_LEASE, { id })
   if (!renewed) lease.lost(id)
   return renewed
 }
 
 /** Claims each lapsed lease and removes what it hosted: its members, each leaving `'disconnected'`, and its pages'
  *  views; then the lease. A claim lapses as a lease does, so a claimant that stops leaves the rest to the next. */
-async function reapLapsedLeases(room: RoomIncarnation): Promise<void> {
-  const leases = await readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)
-  await BackendCall.run((call) => reapLeases(room, leases, call))
+async function reapLapsedLeases(store: RoomStore, room: RoomIncarnation): Promise<void> {
+  await reapLeases(store, room, await readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX))
 }
 
-/** False once none of the leases read had lapsed. Each reap is a write of `call`, which a read that found none lapsed
- *  doesn't mark as having written. */
-async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt, call: BackendCall): Promise<boolean> {
+/** False once none of the leases read had lapsed. */
+async function reapLeases(store: RoomStore, room: RoomIncarnation, { cells, now }: CellsAt): Promise<boolean> {
   const lapsed = Array.from(cells.keys()).filter((key) => decodeLeaseRecord(cells.get(key)!).until < now)
   const cleaner = crypto.randomUUID()
-  // The first lease's failure, told once every reap ended: one that went through may have come before it.
-  await call.read(() => eachInFlight(lapsed, (key) => call.write(() => reapLease(room, key, cleaner))))
+  await eachInFlight(lapsed, (key) => reapLease(store, room, key, cleaner))
   return lapsed.length > 0
 }
 
-async function reapLease(room: RoomIncarnation, key: string, cleaner: string): Promise<void> {
-  await BackendCall.run(async (call) => {
-    const { value: claimed } = await call.write(() => runOperation(room, CLAIM_LEASE, { key, cleaner }))
-    if (claimed) await call.write(() => cleanLease(room, key.slice(LEASE_CELL_PREFIX.length), cleaner))
-  })
+async function reapLease(store: RoomStore, room: RoomIncarnation, key: string, cleaner: string): Promise<void> {
+  const { value: claimed } = await runOperation(store, room, CLAIM_LEASE, { key, cleaner })
+  if (claimed) await cleanLease(store, room, key.slice(LEASE_CELL_PREFIX.length), cleaner)
 }
 
-async function evictLeaseMembers(room: RoomIncarnation, lease: string): Promise<void> {
-  const marks = await readPrefix(room.id, room.inc, leaseMemberCellPrefix(lease))
-  await BackendCall.run((call) =>
-    eachInFlight(marks.keys(), (key) =>
-      call.write(() => evictMember(room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' })),
-    ),
+async function evictLeaseMembers(store: RoomStore, room: RoomIncarnation, lease: string): Promise<void> {
+  const marks = await readPrefix(store, room.id, room.inc, leaseMemberCellPrefix(lease))
+  await eachInFlight(marks.keys(), (key) =>
+    evictMember(store, room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' }),
   )
 }
 
-async function removeLeaseViews(room: RoomIncarnation, lease: string): Promise<void> {
-  const views = await readPrefix(room.id, room.inc, leaseViewCellPrefix(lease))
-  await BackendCall.run((call) => eachInFlight(views.keys(), (key) => call.write(() => removeView(room, key))))
+async function removeLeaseViews(store: RoomStore, room: RoomIncarnation, lease: string): Promise<void> {
+  const views = await readPrefix(store, room.id, room.inc, leaseViewCellPrefix(lease))
+  await eachInFlight(views.keys(), (key) => removeView(store, room, key))
 }
 
-async function cleanLease(room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
-  await BackendCall.run(async (call) => {
-    await Promise.all([
-      call.write(() => evictLeaseMembers(room, lease)),
-      call.write(() => removeLeaseViews(room, lease)),
-    ])
-    await call.write(() => runOperation(room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner }))
-  })
+async function cleanLease(store: RoomStore, room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
+  // A failed eviction is told at once, and the store refuses the removals the views would still hand over; a failed
+  // removal is told once the evictions, which wait for each leave's handoff, settled.
+  const evicting = evictLeaseMembers(store, room, lease)
+  await Promise.all([evicting, failingAfter(evicting, removeLeaseViews(store, room, lease))])
+  await runOperation(store, room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner })
 }
