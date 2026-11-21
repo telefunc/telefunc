@@ -243,6 +243,15 @@ test("a page opened after the app removed Telefunc's upgrade listener is offered
   expect(webSockets.get(app.host)?.length).toBe(opened)
 })
 
+test("a page opened after the app removed Telefunc's upgrade listener, with no `removeListener` listener left to see it, is offered SSE alone", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  app.server.removeAllListeners('removeListener')
+  app.server.removeAllListeners('upgrade')
+  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+})
+
 // Node has it from 22.21 and 24.9; its typings here don't.
 const nodeHasTheCallback = hasProp(createServer(), 'shouldUpgradeCallback', 'function')
 /** The app's own `shouldUpgradeCallback`, which upgrades only its own WebSocket server's path. */

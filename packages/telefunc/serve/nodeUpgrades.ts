@@ -1,4 +1,4 @@
-export { takeUpgrades }
+export { takeUpgrades, takeUpgradesOfNewServer }
 export type { HttpServer }
 
 import crossws from 'crossws/adapters/node'
@@ -62,12 +62,24 @@ function upgradeOthersOnlyForTheirListeners(
   return () => Reflect.set(server, 'shouldUpgradeCallback', own)
 }
 
+const { seenServers } = getGlobalObject('serve/nodeUpgrades.ts', {
+  /** The servers `serve({ req, res })` has taken, or found taken, once. */
+  seenServers: new WeakSet<HttpServer>(),
+})
+
+/** `serve({ req, res })`'s take, of a server it hasn't seen before: one whose listener the app removed stays as the app
+ *  left it, until the app's own `installWebSocket()`. */
+function takeUpgradesOfNewServer(httpServer: HttpServer): void {
+  if (seenServers.has(httpServer)) return
+  seenServers.add(httpServer)
+  takeUpgrades(httpServer)
+}
+
 /** Telefunc's `upgrade` listener on `httpServer`, once: its pages are offered WebSocket while the listener is there. A
  *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or, for
  *  `serve({ request })`, off the header an app's own `installWebSocket()` adds (serve/requestServer.ts). */
 function takeUpgrades(httpServer: HttpServer): void {
   if (upgradeServers.has(httpServer) || registeredServers.has(httpServer)) return
-  upgradeServers.add(httpServer)
   registeredServers.add(httpServer)
   const adapter = (ws ??= crossws(
     getTelefuncChannelOptions({
@@ -105,8 +117,9 @@ function takeUpgrades(httpServer: HttpServer): void {
     adapter.handleUpgrade(req, socket, head, request)
   }
   httpServer.on('upgrade', onUpgrade)
+  upgradeServers.set(httpServer, { server: httpServer, listener: onUpgrade })
   const putBackCallback = upgradeOthersOnlyForTheirListeners(httpServer, handshakes)
-  // Its pages are offered WebSocket while Telefunc's listener is there.
+  // Frees the server for the next take, of this copy or of another.
   const onRemoved = (event: string | symbol, removed: unknown) => {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)

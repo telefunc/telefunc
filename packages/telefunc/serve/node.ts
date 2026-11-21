@@ -5,7 +5,7 @@ import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
 import { noUpgrades, upgradesOfServer } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
-import { takeUpgrades, type HttpServer } from './nodeUpgrades.js'
+import { takeUpgrades, takeUpgradesOfNewServer, type HttpServer } from './nodeUpgrades.js'
 import { markRequestsOfServer, serverOfRequest } from './requestServer.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
 import { getRequestPathname } from '../utils/getUrlPathname.js'
@@ -82,7 +82,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
 
     const { req, res, context } = input
     const server = inferServer(req)
-    if (server) takeUpgrades(server)
+    if (server) takeUpgradesOfNewServer(server)
 
     if (res.headersSent) return false
 

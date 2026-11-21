@@ -18,14 +18,23 @@ const noUpgrades: TakesUpgrades = () => false
  *  `telefunc/deno`, a Cloudflare Durable Object. */
 const upgradesTakenHere: TakesUpgrades = () => true
 
+/** A Node server Telefunc took, with the `upgrade` listener it put on it. */
+type TakenServer = { server: { listeners(event: 'upgrade'): unknown[] }; listener: unknown }
+
 const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrades.ts', {
-  /** The Node servers that have Telefunc's `upgrade` listener (`installWebSocket()`). */
-  upgradeServers: new WeakSet<object>(),
+  /** The Node servers Telefunc put its `upgrade` listener on (serve/nodeUpgrades.ts). */
+  upgradeServers: new WeakMap<object, TakenServer>(),
 })
 
 /** A server that has begun to close takes no new connection, so no upgrade, though it still serves those it has. */
 function upgradesOfServer(server: object): TakesUpgrades {
-  return () => upgradeServers.has(server) && 'listening' in server && server.listening === true
+  return () => hasTelefuncsListener(server) && 'listening' in server && server.listening === true
+}
+
+/** Asked of the server itself, so that it holds however the app removed the listener. */
+function hasTelefuncsListener(server: object): boolean {
+  const taken = upgradeServers.get(server)
+  return taken !== undefined && taken.server.listeners('upgrade').includes(taken.listener)
 }
 
 /** Node, through the request's socket: the server it arrived on. */
