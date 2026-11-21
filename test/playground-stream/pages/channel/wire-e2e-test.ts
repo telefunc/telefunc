@@ -208,9 +208,9 @@ function testWire(isDev: boolean) {
         settle = undefined
       }
       ws.onclose = () => answered('closed')
-      ws.onmessage = (event) => {
+      ws.onmessage = ({ data }: MessageEvent<ArrayBuffer>) => {
         // RECONCILED, alone or among the frames of a message of several; its JSON after the 7-byte header.
-        const frames = Array.from(messageFrames(new Uint8Array(event.data as ArrayBuffer)))
+        const frames = Array.from(messageFrames(new Uint8Array(data)))
         const reconciled = frames.find((frame) => frame[0] === TAG.RECONCILED)
         if (reconciled === undefined) return
         sessionId = JSON.parse(new TextDecoder().decode(reconciled.subarray(7))).sessionId

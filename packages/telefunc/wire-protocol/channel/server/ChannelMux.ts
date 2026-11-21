@@ -495,7 +495,7 @@ class ChannelMux implements UpgradeStagesOwner {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
       if (!isProtocolViolationError(err)) handleTelefunctionBug(err)
       else {
-        const fault = { scope: 'channel', ix: channelOf(rawFrame), cause: 'frameRefused', wire: 'loss' } as const
+        const fault: Fault = { scope: 'channel', ix: channelOf(rawFrame), cause: 'frameRefused', wire: 'loss' }
         this.endFault(err.target ?? entry.wire, fault)
       }
       return null
