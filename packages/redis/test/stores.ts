@@ -1,5 +1,5 @@
 // The stores the store specs (`pnpm run test:redis-stores`) run against, each in Docker, and what they share.
-export { STORES, runs, docker, pullImage, startStore, removeStores, forwarder, type Store }
+export { STORES, runs, docker, pullImage, startStore, hostOf, removeStores, forwarder, type Store }
 
 import { execFileSync } from 'node:child_process'
 import { connect, createServer, type Socket } from 'node:net'
@@ -64,10 +64,12 @@ async function startStore(store: Store, ...options: string[]): Promise<{ name: s
     'no',
     '--save',
     '',
+    '--appendonly',
+    'no',
     ...options,
   )
   containers.push(name)
-  const host = docker('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name)
+  const host = hostOf(name)
   const admin = new Redis({ host, retryStrategy: () => 50, maxRetriesPerRequest: null })
   admin.on('error', () => {})
   for (let tries = 0; (await admin.ping().catch(() => null)) !== 'PONG'; tries++) {
@@ -75,6 +77,11 @@ async function startStore(store: Store, ...options: string[]): Promise<{ name: s
     await sleep(25)
   }
   return { name, host, admin }
+}
+
+/** The address of the store's container, which a restart can change. */
+function hostOf(name: string): string {
+  return docker('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name)
 }
 
 /** Removes every store this process started. */

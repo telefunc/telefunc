@@ -1,7 +1,6 @@
 // Every write script, on the oldest and the newest Redis and Valkey Telefunc supports: a call that finds a key holding
 // another type, or a value Telefunc didn't write, is refused before its first write and says it didn't run. Each store
 // runs in Docker; a machine without Docker skips them, as the Docker e2e tests do, and CI runs them.
-import { execFileSync } from 'node:child_process'
 import { Redis } from 'ioredis'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { BackendError, Broadcast } from 'telefunc'
@@ -10,25 +9,7 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { DEFAULT_PREFIX } from './keys.js'
 import { RedisConnection } from './RedisConnection.js'
-import { pullImage } from '../test/stores.js'
-
-const STORES = [
-  { name: 'Redis 7.0.0', image: 'redis:7.0.0', server: 'redis-server' },
-  { name: 'Redis 7.4.12', image: 'redis:7.4.12', server: 'redis-server' },
-  { name: 'Valkey 7.2.5', image: 'valkey/valkey:7.2.5', server: 'valkey-server' },
-  { name: 'Valkey 8.1.1', image: 'valkey/valkey:8.1.1', server: 'valkey-server' },
-]
-
-const docker = (...args: string[]) =>
-  execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-const hasDocker = (() => {
-  try {
-    docker('version', '--format', '{{.Server.Version}}')
-    return true
-  } catch {
-    return false
-  }
-})()
+import { removeStores, runs, STORES, startStore } from '../test/stores.js'
 
 type Value = { type: string; content: string[]; pttl: number }
 type Snapshot = Map<string, Value>
@@ -101,28 +82,11 @@ async function connected(host: string): Promise<Redis> {
 
 /** The store's container, once its server answers; it's removed after the tests, even when it never answered. */
 async function start(store: (typeof STORES)[number]): Promise<Store> {
-  pullImage(store.image)
-  // No protected mode: the tests connect from outside the container, without a password.
-  const container = docker(
-    'run',
-    '--detach',
-    '--rm',
-    store.image,
-    store.server,
-    '--protected-mode',
-    'no',
-    '--save',
-    '',
-    '--appendonly',
-    'no',
-  )
-  containers.push(container)
-  const host = docker('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', container)
-  return { name: store.name, admin: await connected(host), trialClient: await connected(host) }
+  const { host, admin } = await startStore(store)
+  return { name: store.name, admin, trialClient: await connected(host) }
 }
 
 let prefix = ''
-const containers: string[] = []
 const stores: Store[] = []
 /** Each store's connection for the trials, made once the recording knows the backend's prefix. */
 const trials = new Map<Store, RedisConnection>()
@@ -257,10 +221,6 @@ async function trial(store: Store, call: Recorded, fault: Fault): Promise<'ran' 
   }
 }
 
-// Without Docker, they skip here and fail on CI.
-const runs = hasDocker || process.env.CI !== undefined
-if (!runs) console.log('Skipping the Redis and Valkey store tests: Docker is not running here.')
-
 describe.runIf(runs)('every write script, on a key or value it does not expect', () => {
   beforeAll(async () => {
     for (const store of STORES) stores.push(await start(store))
@@ -280,7 +240,7 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       store.admin.disconnect()
       store.trialClient.disconnect()
     }
-    for (const container of containers) docker('rm', '--force', container)
+    removeStores()
   })
 
   it('the scenario makes every write script', () => {
