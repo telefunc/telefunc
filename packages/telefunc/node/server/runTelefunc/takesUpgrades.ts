@@ -18,8 +18,13 @@ const noUpgrades: TakesUpgrades = () => false
  *  `telefunc/deno`, a Cloudflare Durable Object. */
 const upgradesTakenHere: TakesUpgrades = () => true
 
-/** A Node server Telefunc took, with the `upgrade` listener it put on it. */
-type TakenServer = { server: { listeners(event: 'upgrade'): unknown[] }; listener: unknown }
+/** A Node server Telefunc took, with the `upgrade` listener it put on it and, where Node reads one, the
+ *  `shouldUpgradeCallback` it put in front of the server's own. */
+type TakenServer = {
+  server: { listeners(event: 'upgrade'): unknown[]; shouldUpgradeCallback?: unknown }
+  listener: unknown
+  callback: unknown
+}
 
 const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrades.ts', {
   /** The Node servers Telefunc put its `upgrade` listener on (serve/nodeUpgrades.ts). */
@@ -28,13 +33,15 @@ const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrade
 
 /** A server that has begun to close takes no new connection, so no upgrade, though it still serves those it has. */
 function upgradesOfServer(server: object): TakesUpgrades {
-  return () => hasTelefuncsListener(server) && 'listening' in server && server.listening === true
+  return () => upgradesReachTelefunc(server) && 'listening' in server && server.listening === true
 }
 
-/** Asked of the server itself, so that it holds however the app removed the listener. */
-function hasTelefuncsListener(server: object): boolean {
+/** Asked of the server itself, so that it holds however the app removed the listener or replaced the callback: an
+ *  app's own callback in place of Telefunc's decides for Telefunc's handshake too. */
+function upgradesReachTelefunc(server: object): boolean {
   const taken = upgradeServers.get(server)
-  return taken !== undefined && taken.server.listeners('upgrade').includes(taken.listener)
+  if (taken === undefined || !taken.server.listeners('upgrade').includes(taken.listener)) return false
+  return taken.callback === undefined || taken.server.shouldUpgradeCallback === taken.callback
 }
 
 /** Node, through the request's socket: the server it arrived on. */

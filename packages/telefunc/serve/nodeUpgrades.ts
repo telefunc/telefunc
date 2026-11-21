@@ -42,30 +42,39 @@ function readHandshake(req: IncomingMessage): Handshake {
   return { url: readRequestUrl(req.url ?? ''), config: getServerConfig() }
 }
 
+const { seenServers, handshakes, ownCallbacks } = getGlobalObject('serve/nodeUpgrades.ts', {
+  /** The servers `serve({ req, res })` has taken, or found taken, once. */
+  seenServers: new WeakSet<HttpServer>(),
+  /** What Telefunc's `shouldUpgradeCallback` read of a request, for its `upgrade` listener. */
+  handshakes: new WeakMap<IncomingMessage, Handshake>(),
+  /** The server's own callback, by the callback of Telefunc's that stands in front of it. */
+  ownCallbacks: new WeakMap<object, (req: IncomingMessage) => unknown>(),
+})
+
 /** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), a request with `Upgrade` that isn't
  *  Telefunc's is upgraded only where another `upgrade` listener is there to take it and the server's own callback (the
  *  app's, or Node's default) accepts it; any other goes to the app's `request` listeners, as on the same server without
- *  Telefunc's WebSocket. What the callback reads of a request is kept in `handshakes`. Returns what puts the server's
- *  own callback back. */
-function upgradeOthersOnlyForTheirListeners(
-  server: HttpServer,
-  handshakes: WeakMap<IncomingMessage, Handshake>,
-): () => void {
-  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return () => {}
+ *  Telefunc's WebSocket. Returns Telefunc's callback, put in front of the server's current one. */
+function upgradeOthersOnlyForTheirListeners(server: HttpServer): unknown {
+  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return undefined
   const own = server.shouldUpgradeCallback
-  Reflect.set(server, 'shouldUpgradeCallback', (req: IncomingMessage) => {
+  const callback = (req: IncomingMessage) => {
     const handshake = readHandshake(req)
     handshakes.set(req, handshake)
     if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
     return server.listenerCount('upgrade') > 1 && Boolean(own.call(server, req))
-  })
-  return () => Reflect.set(server, 'shouldUpgradeCallback', own)
+  }
+  server.shouldUpgradeCallback = callback
+  ownCallbacks.set(callback, own)
+  return callback
 }
 
-const { seenServers } = getGlobalObject('serve/nodeUpgrades.ts', {
-  /** The servers `serve({ req, res })` has taken, or found taken, once. */
-  seenServers: new WeakSet<HttpServer>(),
-})
+/** Puts the server's own callback back where Telefunc's is still the server's: one the app set since stays. */
+function putBackOwnCallback(server: HttpServer, callback: unknown): void {
+  if (!hasProp(server, 'shouldUpgradeCallback', 'function') || server.shouldUpgradeCallback !== callback) return
+  const own = ownCallbacks.get(server.shouldUpgradeCallback)
+  if (own !== undefined) server.shouldUpgradeCallback = own
+}
 
 /** `serve({ req, res })`'s take, of a server it hasn't seen before: one whose listener the app removed stays as the app
  *  left it, until the app's own `installWebSocket()`. */
@@ -79,7 +88,15 @@ function takeUpgradesOfNewServer(httpServer: HttpServer): void {
  *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or, for
  *  `serve({ request })`, off the header an app's own `installWebSocket()` adds (serve/requestServer.ts). */
 function takeUpgrades(httpServer: HttpServer): void {
-  if (upgradeServers.has(httpServer) || registeredServers.has(httpServer)) return
+  const taken = upgradeServers.get(httpServer)
+  if (taken !== undefined) {
+    // The app put its own `shouldUpgradeCallback` in place of Telefunc's: Telefunc's goes in front of it again.
+    const replaced =
+      hasProp(httpServer, 'shouldUpgradeCallback', 'function') && httpServer.shouldUpgradeCallback !== taken.callback
+    if (taken.callback !== undefined && replaced) taken.callback = upgradeOthersOnlyForTheirListeners(httpServer)
+    return
+  }
+  if (registeredServers.has(httpServer)) return
   registeredServers.add(httpServer)
   const adapter = (ws ??= crossws(
     getTelefuncChannelOptions({
@@ -89,14 +106,12 @@ function takeUpgrades(httpServer: HttpServer): void {
     }),
   ))
 
-  // Read by the server's `shouldUpgradeCallback` where it has one; on a Node without it, by `onUpgrade`.
-  const handshakes = new WeakMap<IncomingMessage, Handshake>()
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { url, config } = handshakes.get(req) ?? readHandshake(req)
     if (url?.pathname !== config.telefuncUrl) {
-      // Here only on a Node that doesn't read `shouldUpgradeCallback` (before 22.21 and 24.9), which hands every
-      // request with `Upgrade` to the `upgrade` listeners: one that no other listener is there to take is answered as
-      // a page the server doesn't have.
+      // Here on a Node that doesn't read `shouldUpgradeCallback` (before 22.21 and 24.9), which hands every request
+      // with `Upgrade` to the `upgrade` listeners, or where the app's own callback is in place of Telefunc's: one that
+      // no other listener is there to take is answered as a page the server doesn't have.
       if (httpServer.listenerCount('upgrade') === 1) {
         socket.once('finish', socket.destroy)
         socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
@@ -117,13 +132,13 @@ function takeUpgrades(httpServer: HttpServer): void {
     adapter.handleUpgrade(req, socket, head, request)
   }
   httpServer.on('upgrade', onUpgrade)
-  upgradeServers.set(httpServer, { server: httpServer, listener: onUpgrade })
-  const putBackCallback = upgradeOthersOnlyForTheirListeners(httpServer, handshakes)
+  const callback = upgradeOthersOnlyForTheirListeners(httpServer)
+  upgradeServers.set(httpServer, { server: httpServer, listener: onUpgrade, callback })
   // Frees the server for the next take, of this copy or of another.
   const onRemoved = (event: string | symbol, removed: unknown) => {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)
-    putBackCallback()
+    putBackOwnCallback(httpServer, upgradeServers.get(httpServer)?.callback)
     upgradeServers.delete(httpServer)
     registeredServers.delete(httpServer)
   }
