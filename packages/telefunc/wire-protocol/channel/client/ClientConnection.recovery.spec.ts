@@ -11,6 +11,8 @@ const RECONNECT_TIMEOUT_MS = 20_000
 /** How long the server may hold the page's channels after the page lost its wire: until its ping deadline notices,
  *  then `reconnectTimeout` (wire/pingDeadline.ts `reconnectWindowOf`). */
 const RECOVERY_WINDOW_MS = 2 * PING_INTERVAL_MS + RECONNECT_TIMEOUT_MS
+/** The same before any RECONCILED said the server's settings: from the defaults, 5 s and 60 s. */
+const DEFAULT_RECOVERY_WINDOW_MS = 2 * 5_000 + 60_000
 
 /** What a socket the page makes does: reconciles `afterMs` after it opens; opens `afterMs` after it was made, then
  *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); fails at once as a refused
@@ -339,6 +341,81 @@ describe("a page's recovery", () => {
     expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - startedAt))).toEqual([0, 1_000])
     expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([true, false])
     expect(ended).toEqual([])
+  })
+
+  /** A page's first channel, whose connection makes sockets as `scripts` say; what ended the channel. */
+  function firstConnect(scripts: Script[]) {
+    ScriptedWebSocket.scripts = scripts
+    const ended: unknown[] = []
+    ClientConnection.getOrCreate(
+      'http://test.local/_telefunc',
+      fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) }),
+      { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey: crypto.randomUUID() },
+    )
+    return ended
+  }
+
+  test.each(['hangs', 'refused'] as const)(
+    'ends a first connect whose every socket %s at the deadline from its start: the connection was never established',
+    async (script) => {
+      const ended = firstConnect(Array<Script>(40).fill(script))
+      await vi.advanceTimersByTimeAsync(DEFAULT_RECOVERY_WINDOW_MS - 1)
+      expect(ended).toEqual([])
+      await vi.advanceTimersByTimeAsync(2)
+      expect(ended).toHaveLength(1)
+      expect(ended[0]).toMatchObject({ name: 'NetworkError', message: 'Connection not established' })
+      expect(ScriptedWebSocket.made.every((ws) => ws.closedByPage || ws.readyState === 3)).toBe(true)
+    },
+  )
+
+  test('keeps a first connect that reconciles late inside its deadline, and the deadline goes with the RECONCILED', async () => {
+    // Sockets at 0, 1, 3, 7, 15 and 31 s hang; the one at 63 s reconciles.
+    const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+    const ended = firstConnect([...Array<Script>(6).fill('hangs'), { reconcile: { afterMs: 0 } }])
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECOVERY_WINDOW_MS + 1)
+    const wire = ScriptedWebSocket.made.at(-1)
+    expect(ScriptedWebSocket.made).toHaveLength(7)
+    expect([wire?.readyState, wire?.closedByPage]).toEqual([1, false])
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(ended).toEqual([])
+  })
+
+  /** The page's clock reads `at` from now on while its timers run as they were due, as for a page that slept or
+   *  blocked its loop past `at`: the deadline's timer hasn't run yet. */
+  const clockPast = (at: number) => vi.spyOn(performance, 'now').mockReturnValue(at)
+
+  test('starts no attempt its backoff runs past the deadline, as after the page slept, and ends the channels', async () => {
+    const { lostAt, ended } = await lostWire({ then: [{ reconcile: { afterMs: 0 } }] })
+    clockPast(lostAt + RECOVERY_WINDOW_MS)
+    // The backoff's 450 ms runs; the deadline's timer, 30 s on by the timers, doesn't.
+    await vi.advanceTimersByTimeAsync(460)
+    expect(ScriptedWebSocket.made).toHaveLength(1)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ name: 'NetworkError', message: 'Connection dropped' })
+  })
+
+  test("takes a RECONCILED handled past the deadline before the deadline's timer ran: the server still holds the channels", async () => {
+    const { lostAt, ended } = await lostWire({ then: [{ reconcile: { afterMs: 100 } }] })
+    await vi.advanceTimersByTimeAsync(460)
+    expect(ScriptedWebSocket.made).toHaveLength(2)
+    const clock = clockPast(lostAt + RECOVERY_WINDOW_MS)
+    await vi.advanceTimersByTimeAsync(100)
+    const wire = ScriptedWebSocket.made[1]
+    expect([wire?.readyState, wire?.closedByPage]).toEqual([1, false])
+    clock.mockRestore()
+    // The deadline's timer comes due: the RECONCILED ended the recovery.
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 560 + 1)
+    expect(ended).toEqual([])
+  })
+
+  test('takes nothing from an attempt it gave up on at the deadline: its socket opening and reconciling late ends nothing twice', async () => {
+    // The socket at 450 ms opens past the deadline, after the page closed it, as a runtime may.
+    const { ended } = await lostWire({
+      then: [{ opens: { afterMs: RECOVERY_WINDOW_MS, despiteClose: true } }],
+    })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1_000)
+    expect(ended).toHaveLength(1)
+    expect([ScriptedWebSocket.made[1]?.closedByPage, ScriptedWebSocket.made[1]?.sent]).toEqual([true, 0])
   })
 
   test("starts no attempt that couldn't reconcile before the deadline, as long as the last handshake took", async () => {

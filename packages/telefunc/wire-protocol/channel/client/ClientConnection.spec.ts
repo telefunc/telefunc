@@ -201,3 +201,32 @@ describe('a wire the server refused for a frame it could not read', () => {
     expect(downstreams).toHaveLength(1)
   })
 })
+
+describe("a first connect's deadline", () => {
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  test("ends a first connect at the deadline from its start, with a later attempt's refusal after a first open got no answer", async () => {
+    vi.useFakeTimers()
+    let opens = 0
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if (new Headers(init?.headers).get('Accept') !== 'text/event-stream') return new Response(null, { status: 200 })
+      if (++opens === 1) throw new TypeError('fetch failed')
+      return new Response('<!doctype html>', { status: 502, headers: { 'Content-Type': 'text/html' } })
+    }
+    const ended: unknown[] = []
+    ClientConnection.getOrCreate(
+      'http://test.local/_telefunc',
+      fakeMuxChannel({ _onConnectionLost: (err) => ended.push(err) }),
+      { transports: [CHANNEL_TRANSPORT.SSE], fetchImpl, connectionKey: crypto.randomUUID() },
+    )
+    // The defaults' window over SSE: 2.5 pings of 5 s, then 60 s.
+    await vi.advanceTimersByTimeAsync(2.5 * 5_000 + CHANNEL_RECONNECT_TIMEOUT_MS + 1)
+    expect(opens).toBeGreaterThan(2)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toBeInstanceOf(NetworkError)
+    expect(ended[0]).toHaveProperty('message', 'Server rejected SSE connection with 502 text/html')
+  })
+})

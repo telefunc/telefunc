@@ -33,8 +33,9 @@ afterAll(() => {
 
 /** A forwarder between one row's page and the server. Its connections forward until `drop`, which cuts them and does
  *  with the next one what `next` says: destroy it as it accepts it, hold it connected to nothing, or forward it and hold
- *  the server's answer until `release`. Closed with the row, so no other row's page reconnects through it. */
-async function link() {
+ *  the server's answer until `release`; where `holdsAll`, it holds every connection. Closed with the row, so no other
+ *  row's page reconnects through it. */
+async function link(holdsAll = false) {
   const sockets = new Set<Socket>()
   let next: 'forward' | 'destroy' | 'hold' | 'late' = 'forward'
   const late: Array<{ page: Socket; upstream: Socket; answer: Buffer[] }> = []
@@ -42,7 +43,7 @@ async function link() {
     page.on('error', () => {})
     sockets.add(page)
     page.on('close', () => sockets.delete(page))
-    const take = next
+    const take = holdsAll ? 'hold' : next
     next = 'forward'
     if (take === 'destroy') return void page.destroy()
     if (take === 'hold') return
@@ -95,6 +96,29 @@ async function pair(transport: 'sse' | 'ws') {
   channel.listen((message) => void received.resolve(message))
   return { network, page, received: received.promise }
 }
+
+test("over a WebSocket, a page whose every connection the network takes and never answers ends its channel at the defaults' window from its first connect: the connection was never established", async () => {
+  const network = await link(true)
+  const startedAt = performance.now()
+  const page = new ClientChannel<string, string>({
+    channelId: crypto.randomUUID(),
+    connection: { telefuncUrl: network.telefuncUrl, transports: ['ws'], connectionKey: crypto.randomUUID() },
+  })
+  try {
+    // The defaults, before any RECONCILED said the server's: two pings of 5 s, then 60 s.
+    const [opened, closed] = await Promise.allSettled([page.opened, page.closed])
+    const elapsed = performance.now() - startedAt
+    expect(opened).toMatchObject({ status: 'rejected' })
+    expect(closed).toMatchObject({
+      status: 'fulfilled',
+      value: { name: 'NetworkError', message: 'Connection not established' },
+    })
+    expect(elapsed).toBeGreaterThan(69_000)
+    expect(elapsed).toBeLessThan(75_000)
+  } finally {
+    network.close()
+  }
+}, 80_000)
 
 for (const transport of ['sse', 'ws'] as const)
   for (const attempt of ['destroy', 'hold'] as const) {

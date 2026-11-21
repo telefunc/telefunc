@@ -67,7 +67,7 @@ type ConnectionState =
   | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> | null }
   | { tag: 'closed' }
 
-type Recovery = { attempt: number; deadline: number; lost: Error; timer: ReturnType<typeof setTimeout> }
+type Recovery = { attempt: number; deadline: number; lost: Error | null; timer: ReturnType<typeof setTimeout> }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
 interface WireLifecycleOwner {
@@ -89,8 +89,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
-  /** From the first wire lost since the last RECONCILED: the attempts made (a wire that opens and never reconciles
-   *  counts), why the last wire went, and the deadline whose timer ends the channels if no wire reconciled by then. */
+  /** From a first connect's start, or the first wire lost since the last RECONCILED: the attempts made (a wire that
+   *  opens and never reconciles counts), why the last wire went, and the deadline whose timer ends the channels if no
+   *  wire reconciled by then. */
   private recovery: Recovery | null = null
   /** When the wire being opened started, until its RECONCILED. */
   private attemptStartedAt: number | null = null
@@ -151,7 +152,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.state.tag === 'reconnecting' && this.state.timer) clearTimeout(this.state.timer)
   }
 
+  /** Starts an attempt, and the recovery it belongs to where none is under way: a first connect reports no loss. Past
+   *  the recovery's deadline by the clock, the deadline's timer not yet run (a page that slept or blocked its loop),
+   *  the channels end instead. */
   private startWire(): void {
+    if (performance.now() >= this.recoveryFrom().deadline) return this.onRecoveryDeadline()
     this.attemptStartedAt = performance.now()
     this.transport.start()
   }
@@ -388,8 +393,16 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     this.upgrade.abortAttempt()
-    const err = new NetworkError(refusal ?? 'Connection dropped', true)
+    const err = refusal === undefined ? this.unansweredLoss() : new NetworkError(refusal, true)
     this.handleTransportLoss(err, refusal !== undefined)
+  }
+
+  /** A wire lost with no answer that says why: before the page's first RECONCILED, none was ever established. */
+  private unansweredLoss(): NetworkError {
+    return new NetworkError(
+      this.exchange.sessionId === null ? 'Connection not established' : 'Connection dropped',
+      true,
+    )
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
@@ -549,7 +562,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
-    const recovery = this.recoveryFrom(err)
+    const recovery = this.recoveryFrom()
     recovery.lost = err
     recovery.attempt = attempt + 1
     // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
@@ -560,11 +573,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** The recovery under way, or one from now: the server holds the page's channels until its ping deadline noticed
    *  the loss, then `reconnectTimeout`, so the page tries until then and not past it. */
-  private recoveryFrom(err: Error): Recovery {
+  private recoveryFrom(): Recovery {
     if (this.recovery) return this.recovery
     const windowMs = this.reconnectWindow()
     const timer = setTimeout(() => this.onRecoveryDeadline(), windowMs)
-    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, lost: err, timer }
+    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, lost: null, timer }
     return this.recovery
   }
 
@@ -572,7 +585,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private onRecoveryDeadline(): void {
     const recovery = this.recovery
     if (this.closed || !recovery) return
-    this.loseConnection(recovery.lost)
+    this.loseConnection(recovery.lost ?? this.unansweredLoss())
   }
 
   private endRecovery(): void {
