@@ -243,7 +243,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
-    if (this.closed) return
     if (transport !== this.transport) return
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
