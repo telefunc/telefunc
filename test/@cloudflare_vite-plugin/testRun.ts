@@ -3,7 +3,15 @@ export { testCloudflareBindings }
 
 import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { sendRefusedWarning, testCounter, testRunClassic, upgradeStatus, withNetworkConditions } from '../../test/utils'
+import {
+  exposeSendUnreadable,
+  sendRefusedWarning,
+  sessionEndedByUnreadable,
+  testCounter,
+  testRunClassic,
+  upgradeStatus,
+  withNetworkConditions,
+} from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
@@ -26,6 +34,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testTodolist()
   testChannel()
   testChannelOversized()
+  testSessionEnd()
   testBacklog()
   testChat()
   testChatMembers()
@@ -161,6 +170,49 @@ function testChannel() {
       },
       { timeout: 5000 },
     )
+  })
+}
+
+function testSessionEnd() {
+  test('Channel: a session the server ends tells the channel its cause before the WebSocket closes, and the page opens no other WebSocket', async () => {
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('no browser')
+    // A page of its own: its WebSocket stays wrapped for as long as it lives.
+    const context = await browser.newContext()
+    try {
+      const own = await context.newPage()
+      await own.addInitScript(exposeSendUnreadable)
+      const sockets: string[] = []
+      // The channel's data comes on the WebSocket once the page moved to it: the move is over.
+      let dataOnWebSocket = false
+      own.on('websocket', (socket) => {
+        sockets.push(socket.url())
+        socket.on('framereceived', ({ payload }) => {
+          if (typeof payload !== 'string' && payload.includes('"tick"')) dataOnWebSocket = true
+        })
+      })
+      await own.goto(getServerUrl() + '/channel')
+      await autoRetry(async () => {
+        expect(await own.locator('#hydrated').count()).toBe(1)
+      })
+      await own.click('#connect-btn')
+      await autoRetry(
+        async () => {
+          expect(dataOnWebSocket).toBe(true)
+        },
+        { timeout: 10000 },
+      )
+      const opened = sockets.length
+      expect(await own.evaluate(() => window.sendUnreadable?.() ?? false)).toBe(true)
+      await autoRetry(async () => {
+        expect(await own.textContent('#log')).toContain(`Closed: ${sessionEndedByUnreadable}`)
+      })
+      // A channel told its end needs no other wire.
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      expect(sockets.length).toBe(opened)
+    } finally {
+      await context.close()
+    }
   })
 }
 

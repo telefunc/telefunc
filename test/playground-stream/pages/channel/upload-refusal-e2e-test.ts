@@ -1,4 +1,5 @@
-export { testUploadRefusal }
+export { testUploadRefusal, cardOf }
+export type { UploadRefused }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getCleanupState } from '../../e2e-utils'

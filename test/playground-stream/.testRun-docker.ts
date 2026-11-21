@@ -18,6 +18,7 @@ import { testPublish } from './pages/publish/e2e-test'
 import { testRedisReconnect } from './pages/publish/redis-e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUploadRefusal } from './pages/channel/upload-refusal-e2e-test'
+import { testSessionEnd } from './pages/channel/session-end-e2e-test'
 import { parseChannelTransports } from './channelTransports'
 
 // Caddy serves https://localhost:8443 with its own internal CA — skip cert validation.
@@ -122,6 +123,7 @@ function testRunDocker() {
   testRedisReconnect()
   testRefIdentity()
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') testUploadRefusal()
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testSessionEnd()
 }
 
 // `docker info` fails both when the CLI is missing and when the daemon is not running;

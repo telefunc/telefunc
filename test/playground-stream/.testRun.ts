@@ -19,6 +19,8 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
 import { testSlowLink } from './pages/channel/slow-link-e2e-test'
+import { testSessionEnd } from './pages/channel/session-end-e2e-test'
+import { parseChannelTransports } from './channelTransports'
 
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
@@ -97,6 +99,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testWire(isDev)
 
   testSlowLink(isDev)
+
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testSessionEnd()
 
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.

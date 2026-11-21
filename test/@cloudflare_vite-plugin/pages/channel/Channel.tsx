@@ -40,6 +40,9 @@ function ChannelDemo() {
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
     })
+    channel.onClose((err) => {
+      if (err) addLog('system', `Closed: ${err.message}`)
+    })
 
     channel.send({ type: 'ping' })
     addLog('out', JSON.stringify({ type: 'ping' }))
