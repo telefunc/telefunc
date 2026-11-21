@@ -133,7 +133,8 @@ type ClientChannelTransport = {
   readonly uplink: Uplink
   readonly downlink: Downlink
   start(): void
-  /** Lets the attempt under way go, through its own socket or request: it opens nothing, and reports nothing more. */
+  /** Lets the attempt under way go, opened or not, through its own socket or request: it delivers nothing, and reports
+   *  nothing more. */
   cancelAttempt(): void
   hasWire(): boolean
   isConnecting(): boolean

@@ -291,6 +291,11 @@ class AttachExchange {
     this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
   }
 
+  /** The RECONCILE's deadline runs from now: the server answered the request that carried it. */
+  restartReconcileDeadline(): void {
+    if (this.isReconciling) this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+  }
+
   private armReconcileDeadline(ms: number): void {
     if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
     this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), ms)

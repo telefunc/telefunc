@@ -87,7 +87,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
    *  back/forward cache keeps them. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
-    this.cancelAttempt()
+    this.letGoConnecting()
     try {
       this.ws?.close(WS_CLOSE_PAGE_LEFT)
     } catch {}
@@ -155,16 +155,25 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   cancelAttempt(): void {
+    this.letGoConnecting()
+    if (!this.ws) return
+    assert(this.pieces)
+    this.letGo({ ws: this.ws, pieces: this.pieces })
+    this.ws = null
+    this.settleDrained()
+  }
+
+  private letGoConnecting(): void {
     this.letGo(this.connecting)
     this.connecting = null
   }
 
   /** A socket the attempt no longer needs: closed, and closed again should it open all the same, before any frame. */
-  private letGo(socket: Connecting | null): void {
+  private letGo(socket: { ws: WebSocket; pieces: WirePieces } | null): void {
     if (!socket) return
     const { ws } = socket
     ws.onopen = () => ws.close()
-    ws.onclose = ws.onerror = null
+    ws.onmessage = ws.onclose = ws.onerror = null
     socket.pieces.headroom.close()
     try {
       ws.close()
@@ -359,7 +368,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   dispose(): void {
     globalThis.removeEventListener?.('pagehide', this.onPageHide)
-    this.cancelAttempt()
+    this.letGoConnecting()
     // A socket sends what it was handed before its close.
     this.probed?.discard()
     if (this.ws) this.pieces?.sender.flush()

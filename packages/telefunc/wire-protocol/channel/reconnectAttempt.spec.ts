@@ -33,19 +33,23 @@ afterAll(() => {
 
 /** A forwarder between one row's page and the server. Its connections forward until `drop`, which cuts them and does
  *  with the next what `next` says: destroy the next connection as it accepts it; or, by the next request that opens a
- *  connection, an event stream's or a WebSocket's, hold it connected to nothing (an SSE upload beside it too), or
- *  forward it and hold the server's answer until `release`. Where `holdsAll`, it holds every request; after
- *  `answerLate(ms)`, it holds each answer `ms` from its request. `requests`: when each connection's request came, and
- *  when the page closed it; Node 22's fetch may open a connection well before the request it carries. Closed with the
- *  row, so no other row's page reconnects through it. */
+ *  connection, an event stream's or a WebSocket's, hold it connected to nothing (an SSE upload beside it too), forward
+ *  it and hold the server's answer until `release`, or forward it and give the page the head of the server's answer
+ *  alone. Where `holdsAll`, it holds every request; after `answerLate(ms)`, it holds each answer `ms` from its request;
+ *  after `holdUntil(at)`, it holds every request that comes before `at`. `requests`: when each connection's request
+ *  came, what it did with it, and when the page closed it; Node 22's fetch may open a connection well before the
+ *  request it carries. Closed with the row, so no other row's page reconnects through it. */
+type Take = 'forward' | 'destroy' | 'hold' | 'late' | 'head'
+
 async function link(holdsAll = false) {
   let lateMs = 0
+  let holdsBefore = 0
   const sockets = new Set<Socket>()
-  let next: 'forward' | 'destroy' | 'hold' | 'late' = 'forward'
+  let next: Take = 'forward'
   /** Whether the last connection's open was held: an upload beside it is too. */
   let openHeld = false
   const late: Array<{ page: Socket; upstream: Socket; answer: Buffer[] }> = []
-  const requests: Array<{ at: number; closedAt: number | null }> = []
+  const requests: Array<{ at: number; take: Take; closedAt: number | null }> = []
   const forwarder = net.createServer((page) => {
     page.on('error', () => {})
     sockets.add(page)
@@ -55,11 +59,12 @@ async function link(holdsAll = false) {
       return void page.destroy()
     }
     page.once('data', (request: Buffer) => {
+      const at = performance.now()
       const opens = /text\/event-stream|upgrade: websocket/i.test(request.toString('latin1'))
-      const held = holdsAll || next === 'hold' || (!opens && openHeld)
+      const held = holdsAll || at < holdsBefore || next === 'hold' || (!opens && openHeld)
       const take = held ? 'hold' : opens ? next : 'forward'
       if (opens) [next, openHeld] = ['forward', held]
-      const connection: { at: number; closedAt: number | null } = { at: performance.now(), closedAt: null }
+      const connection: { at: number; take: Take; closedAt: number | null } = { at, take, closedAt: null }
       requests.push(connection)
       page.on('close', () => void (connection.closedAt = performance.now()))
       // Read and dropped: a socket left unread would never see the page's end.
@@ -73,6 +78,16 @@ async function link(holdsAll = false) {
         const answer: Buffer[] = []
         upstream.on('data', (chunk: Buffer) => void answer.push(chunk))
         late.push({ page, upstream, answer })
+      } else if (take === 'head') {
+        let answer = Buffer.alloc(0)
+        const untilHead = (chunk: Buffer) => {
+          answer = Buffer.concat([answer, chunk])
+          const end = answer.indexOf('\r\n\r\n')
+          if (end === -1) return
+          upstream.off('data', untilHead)
+          page.write(answer.subarray(0, end + 4))
+        }
+        upstream.on('data', untilHead)
       } else if (lateMs > 0) {
         const answer: Buffer[] = []
         const hold = (chunk: Buffer) => void answer.push(chunk)
@@ -96,7 +111,10 @@ async function link(holdsAll = false) {
     answerLate(ms: number) {
       lateMs = ms
     },
-    drop(then: typeof next) {
+    holdUntil(at: number) {
+      holdsBefore = at
+    },
+    drop(then: Take) {
       next = then
       for (const socket of sockets) socket.destroy()
     },
@@ -240,6 +258,56 @@ for (const transport of ['sse', 'ws'] as const)
       network.close()
     }
   }, 15_000)
+
+test("over SSE, a page whose opens after a drop the network holds cuts the third at its 12 s allowance, not at its RECONCILE's 10 s, before the next, and sends on that", async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0.9)
+  const { network, page, received } = await pair('sse')
+  try {
+    const droppedAt = performance.now()
+    // The first three attempts: 0.9 of 500, then 0.9 of 1,000 and of 2,000 after cuts at 3 s and 6 s.
+    network.holdUntil(droppedAt + 20_000)
+    network.drop('forward')
+    void page.send('after')
+    expect(await received).toBe('after')
+    const since = network.requests.filter(({ at }) => at >= droppedAt)
+    // The third attempt's connections, its event stream's and its upload's.
+    const third = since.filter(({ at }) => at > droppedAt + 11_000 && at < droppedAt + 13_000)
+    expect(third.length).toBeGreaterThan(0)
+    for (const { at, closedAt } of third) {
+      expect((closedAt ?? Infinity) - at).toBeGreaterThan(11_500)
+      expect((closedAt ?? Infinity) - at).toBeLessThan(13_000)
+    }
+    const cutAt = Math.max(...third.map(({ closedAt }) => closedAt ?? Infinity))
+    expect(since.some(({ at }) => at > cutAt)).toBe(true)
+    page.abort()
+  } finally {
+    vi.restoreAllMocks()
+    network.close()
+  }
+}, 40_000)
+
+for (const transport of ['sse', 'ws'] as const)
+  test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page whose next connection after a drop gets the server's head and never its RECONCILED closes that connection at its RECONCILE's 10 s, before the next, and sends on that`, async () => {
+    const { network, page, received } = await pair(transport)
+    try {
+      const droppedAt = performance.now()
+      network.drop('head')
+      void page.send('after')
+      expect(await received).toBe('after')
+      const since = network.requests.filter(({ at }) => at >= droppedAt)
+      const headOnly = since.find(({ take }) => take === 'head')
+      const closedAt = headOnly?.closedAt ?? Infinity
+      expect(closedAt - (headOnly?.at ?? 0)).toBeGreaterThan(9_500)
+      expect(closedAt - (headOnly?.at ?? 0)).toBeLessThan(11_000)
+      // The attempt's other connections, an SSE upload's, closed with it at the latest; the next attempt's came after.
+      const attempt = since.filter(({ at }) => at < closedAt)
+      expect(attempt.every(({ closedAt: end }) => end !== null && end < closedAt + 100)).toBe(true)
+      expect(since.some(({ at }) => at > closedAt)).toBe(true)
+      page.abort()
+    } finally {
+      network.close()
+    }
+  }, 20_000)
 
 test('over a WebSocket, a page whose next socket after a drop the server answers late cuts it at its allowance and sends on the next; the late one sends nothing, and the server lets it go and logs nothing', async () => {
   const { network, page, received } = await pair('ws')

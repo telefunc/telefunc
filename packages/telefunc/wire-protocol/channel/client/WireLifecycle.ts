@@ -194,6 +194,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.clearAllowance()
     this.answeredMs = performance.now() - this.allowanceFrom
     this.cuts = 0
+    this.exchange.restartReconcileDeadline()
   }
 
   private clearAllowance(): void {
@@ -395,12 +396,16 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onReconcileLate(transport: ClientChannelTransport): void {
+    // Till the server answered the request that carries it, the attempt's allowance bounds it.
+    if (this.allowanceTimer !== null) return
     this.dropWire(transport)
   }
 
   private dropWire(transport: ClientChannelTransport): void {
     transport.detachHeartbeat()
-    transport.abandonActiveTransport()
+    // A wire that never reconciled has delivered nothing the next one's RECONCILED won't replay.
+    if (this.exchange.boundsWire) transport.cancelAttempt()
+    else transport.abandonActiveTransport()
     this.onTransportClosed(transport)
   }
 
