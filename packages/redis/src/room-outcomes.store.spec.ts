@@ -15,8 +15,8 @@
 //   removals ended: the store doesn't change after the rejection.
 // - `Room.removeParticipant()` whose room closed after it planned the leave: the leave reaches the store, which
 //   changes nothing, and the call resolves, as the close ended the participant.
-// - `Room.removeParticipant()` by identity whose two leaves are refused, where one tab's eviction then reads no open
-//   head, as once the room closed, and the other's head read is refused: it didn't run, and the store keeps everything.
+// - `Room.removeParticipant()` by identity whose two leaves the store refuses, the second still on its way when the
+//   first tab's eviction reads the head after its refusal: it didn't run, and the store keeps everything.
 import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -24,7 +24,6 @@ import { isDeepStrictEqual, promisify } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
-import { BackendError as StoreRefusal } from 'telefunc/__internal'
 import { Room } from '@telefunc/room'
 import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
@@ -468,7 +467,7 @@ describe.runIf(runs)('Room.removeParticipant() whose room closed after it planne
   }
 })
 
-describe.runIf(runs)('a Room call whose eviction found the room closed meanwhile', () => {
+describe.runIf(runs)('a Room call whose leaves the store refuses, one still on its way after the other', () => {
   for (const [i, store] of STORES.entries()) {
     it(`${store.name}: Room.removeParticipant() by identity is told 'not-run' where every leave was refused, and the store keeps everything`, async () => {
       const admin = await reached(store)
@@ -483,11 +482,19 @@ describe.runIf(runs)('a Room call whose eviction found the room closed meanwhile
         .filter((line) => line.startsWith('tab:'))
         .map((line) => line.slice('tab:'.length))
         .sort()
-      const refused = () =>
-        new StoreRefusal({ code: 'denied', outcome: 'not-run', message: 'the store refused the step (NOPERM)' })
+      const before = await snapshot(admin)
+      // The store refuses each leave itself, before its first write: the leave's script deletes with HDEL, which the
+      // app's user may no longer run.
+      await admin.call('ACL', 'SETUSER', 'telefunc', '-hdel')
+      // The first leave reaches the store once both are in the driver. The second reaches it only once the first
+      // tab's eviction, after that refusal, has read the head of the room, which is still open: the eviction is
+      // answered while the other leave is still on its way.
       const { runOperation, readHead } = RedisRoomDriver.prototype
-      let leavesRefused = 0
-      async function refusingLeaves<Args, Value>(
+      const bothIn = Promise.withResolvers<void>()
+      const firstEvictionRead = Promise.withResolvers<void>()
+      let leavesIn = 0
+      const refusals: unknown[] = []
+      async function leavesInOrder<Args, Value>(
         this: RedisRoomDriver,
         roomId: string,
         inc: string,
@@ -498,22 +505,27 @@ describe.runIf(runs)('a Room call whose eviction found the room closed meanwhile
         if (roomId !== room.id || operation.name !== 'leave') {
           return await runOperation.bind(this)(roomId, inc, operation, args, options)
         }
-        leavesRefused++
-        throw refused()
+        if (++leavesIn === 1) await bothIn.promise
+        else {
+          bothIn.resolve()
+          await firstEvictionRead.promise
+        }
+        try {
+          return await runOperation.bind(this)(roomId, inc, operation, args, options)
+        } catch (error) {
+          refusals.push(error instanceof BackendError ? { code: error.code, outcome: error.outcome } : error)
+          throw error
+        }
       }
-      vi.spyOn(RedisRoomDriver.prototype, 'runOperation').mockImplementation(refusingLeaves)
-      // After its refused leave, one tab's eviction reads no open head, as once the room closed; the other's read is
-      // refused.
-      let headsAfterLeaves = 0
+      vi.spyOn(RedisRoomDriver.prototype, 'runOperation').mockImplementation(leavesInOrder)
       vi.spyOn(RedisRoomDriver.prototype, 'readHead').mockImplementation(async function (
         this: RedisRoomDriver,
         roomId,
       ) {
-        if (roomId !== room.id || leavesRefused === 0) return await readHead.call(this, roomId)
-        if (++headsAfterLeaves === 1) return null
-        throw refused()
+        const head = await readHead.call(this, roomId)
+        if (roomId === room.id && refusals.length === 1) firstEvictionRead.resolve()
+        return head
       })
-      const before = await snapshot(admin)
       const removed = await Room.removeParticipant(room.id, { identity: 'u1' }).then(
         () => 'resolved',
         (error: unknown) => (error instanceof BackendError ? { code: error.code, outcome: error.outcome } : error),
@@ -523,9 +535,12 @@ describe.runIf(runs)('a Room call whose eviction found the room closed meanwhile
       const listed = (await Room.getParticipants(room.id)).map(({ id }) => id).sort()
       admin.disconnect()
 
-      expect({ removed, leavesRefused, unchanged, listed }).toEqual({
+      expect({ removed, refusals, unchanged, listed }).toEqual({
         removed: { code: 'denied', outcome: 'not-run' },
-        leavesRefused: 2,
+        refusals: [
+          { code: 'denied', outcome: 'not-run' },
+          { code: 'denied', outcome: 'not-run' },
+        ],
         unchanged: true,
         listed: tabs,
       })
