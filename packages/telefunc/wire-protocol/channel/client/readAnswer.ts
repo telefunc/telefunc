@@ -2,6 +2,7 @@ export { readAnswer, asksLater, endOfWire, telefuncAnswer, telefuncEndOf }
 export type { HttpAnswer, TelefuncAnswer }
 
 import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
+import { endCauseOf } from '../endCause.js'
 import type { TransportEnd } from './WireLifecycle.js'
 
 /** What the answer to a request of the page's SSE transport means. */
@@ -65,13 +66,18 @@ function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
 }
 
 /** The end the server decided for a wire, as the wire's own end carries it (a WebSocket's close reason, the event
- *  stream's last event: `refusal.ts`'s `wireEnd`), read as an answer's refusal is; undefined where it carries none this
- *  page reads, and the wire ends as a loss. A told end is a `frames` refusal, which an answer carries with 400. */
+ *  stream's last event: `refusal.ts`'s `wireEnd`): a `frames` refusal whose cause is one of `END_CAUSE`'s, naming a
+ *  channel's index or none. Undefined for anything else, such as a reason cut short, and the wire ends as a loss, which
+ *  the server's kept end answers at the page's reopen. */
 function endOfWire(value: string): TransportEnd | undefined {
   const type = parseMimeType(value)
-  if (type?.essence !== REFUSAL_MEDIA_TYPE) return undefined
-  const answer = readRefusal(400, type.parameters)
-  return telefuncAnswer(answer) ? telefuncEndOf(answer) : undefined
+  if (type?.essence !== REFUSAL_MEDIA_TYPE || type.parameters.get('kind') !== 'frames') return undefined
+  const cause = decimalOf(type.parameters.get('cause'))
+  if (cause === null || endCauseOf(cause) === undefined) return undefined
+  const named = type.parameters.get('channel')
+  if (named === undefined) return { sessionEnded: cause }
+  const channel = indexOf(named)
+  return channel === null ? undefined : { framesRefused: { channel, cause } }
 }
 
 /** Whether a refusal asks the page to come back later rather than refusing what it sent (RFC 9110 sections 15.5.9 and
@@ -93,6 +99,11 @@ function readRefusal(status: number, parameters: ReadonlyMap<string, string>): H
     return { tag: 'frames', channel: decimalOf(parameters.get('channel')), cause }
   if (kind === 'route') return { tag: 'route', reason }
   return { tag: 'route', reason: `${reason} (refused with ${status}, of a kind this page doesn't know)` }
+}
+
+/** A channel's index, a u16 as `wireEnd` writes it; null where `value` isn't one. */
+function indexOf(value: string): number | null {
+  return /^(?:0|[1-9]\d{0,4})$/.test(value) && Number(value) <= 0xffff ? Number(value) : null
 }
 
 /** A parameter's value read as a decimal number; null where it isn't one, or there is none. */

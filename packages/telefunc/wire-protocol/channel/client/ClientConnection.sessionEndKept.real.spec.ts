@@ -1,12 +1,14 @@
-// A session the server ended, whose last word never reached the page: on the real Node server and the real page. On a
-// WebSocket the page's first close comes as 1006 with no reason, as where the connection dies before the close frame;
-// on SSE the event stream's last event (or a channel's ERROR, where one carried it) and the batch POST's answer never
-// reach the page, and the stream is cut. The page then reopens, naming its session, and the server answers that reopen
-// with the session's end.
+// A session the server ended, whose last word never reached the page, or reached it as what it can't read: on the real
+// Node server and the real page. On a WebSocket the page's first close comes as 1006 with no reason, as where the
+// connection dies before the close frame, or as 4002 with another reason; on SSE the event stream's last event (or a
+// channel's ERROR, where one carried it) and the batch POST's answer never reach the page, and the stream is cut, or the
+// last event carries another reason. The page then reopens, naming its session, and the server answers that reopen with
+// the session's end.
 
 import { expect, test } from 'vitest'
 import { encodeU32 } from '../../wire/envelope.js'
 import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
 import { ServerChannel } from '../server/ServerChannel.js'
@@ -16,11 +18,11 @@ import {
   findText,
   opens,
   pair,
+  rewriting,
   sends,
   textOf,
   until,
   useRealServer,
-  withholding,
   world,
 } from './realServer.fixture.js'
 
@@ -58,9 +60,9 @@ function carriesError(data: unknown): boolean {
   return frames.some((frame) => frame[0] === TAG.ERROR)
 }
 
-/** The page's WebSockets, whose first close reaches the page as 1006 with no reason, and whose first socket's messages
- *  carrying a channel's ERROR (where one carried the end) never reach it. */
-function losingFirstClose(): () => void {
+/** The page's WebSockets, whose first close reaches the page as 1006 with no reason, or as 4002 with the reason `told`,
+ *  and whose first socket's messages carrying a channel's ERROR (where one carried the end) never reach it. */
+function losingFirstClose(told: string | null): () => void {
   const Counted = globalThis.WebSocket
   let lost = false
   globalThis.WebSocket = class LostClose extends Counted {
@@ -78,7 +80,9 @@ function losingFirstClose(): () => void {
         const first = !lost
         lost = true
         // Node 22 has no `CloseEvent`: an `Event` with its fields.
-        handler?.(first ? Object.assign(new Event('close'), { code: 1006, reason: '', wasClean: false }) : event)
+        const firstClose =
+          told === null ? { code: 1006, reason: '', wasClean: false } : { code: 4002, reason: told, wasClean: true }
+        handler?.(first ? Object.assign(new Event('close'), firstClose) : event)
       }
     }
     override get onclose() {
@@ -91,11 +95,16 @@ function losingFirstClose(): () => void {
 const transports: ('ws' | 'sse')[] = ['ws', 'sse']
 
 /** Ends the session over `transport` with a frame of an index it holds in no form, after the text `a1`, and keeps the
- *  end's last word from the page; resolves once the server's channel ended, with how many wires the page opened. */
-async function endLosingLastWord(transport: 'sse' | 'ws', awaited: boolean) {
+ *  end's last word from the page, or hands it `told` in its place; resolves once the server's channel ended, with how
+ *  many wires the page opened. */
+async function endLosingLastWord(transport: 'sse' | 'ws', awaited: boolean, told: string | null = null) {
   const key = crypto.randomUUID()
-  const restore = transport === 'ws' ? losingFirstClose() : () => {}
-  const cutter = withholding((frame) => frame[0] === TAG.END || frame[0] === TAG.ERROR)
+  const restore = transport === 'ws' ? losingFirstClose(told) : () => {}
+  const lastWord = told === null ? null : encode.end(told)
+  const cutter = rewriting((frame) => {
+    if (frame[0] === TAG.ERROR) return null
+    return frame[0] === TAG.END ? lastWord : frame
+  })
   if (transport === 'sse') {
     world.hooks = [
       { kind: 'open', stream: cutter.stream },
@@ -122,7 +131,8 @@ async function endLosingLastWord(transport: 'sse' | 'ws', awaited: boolean) {
     const serverEnds = endsOf(live.channel)
     sends(live.page, 'a1')
     await until(() => serverEnds.length > 0)
-    cutter.cut()
+    // A last word handed in place of the server's ends its stream as the server's did.
+    if (told === null) cutter.cut()
     // Within the test's own limit, so a page that reads nothing is seen as such.
     await until(() => live.ended.length > 0 && (waiting === null || waiting.pageEnds.length > 0), 3_000).catch(() => {})
     await delay(300)
@@ -150,5 +160,34 @@ test.each(transports)(
     getChannelMux().registerChannel(waiting.channel)
     await until(() => waiting.serverEnds.length > 0, 500).catch(() => {})
     expect([waiting.pageEnds, waiting.serverEnds, wires]).toEqual([sessionEnd, sessionEnd, 2])
+  },
+)
+
+const media = REFUSAL_MEDIA_TYPE
+/** What the page can't read as the end the server decided: the session's end (`kind=frames; cause=8`) cut short at each
+ *  of its parts, a refusal of each other kind, a cause no end has, and a channel that is no index. */
+const unread = [
+  media.slice(0, -3),
+  media,
+  `${media}; kind=fra`,
+  `${media}; kind=frames`,
+  `${media}; kind=frames; cause=`,
+  `${media}; kind=retry`,
+  `${media}; kind=route; cause=8`,
+  `${media}; kind=reload; cause=8`,
+  `${media}; kind=frames; cause=99`,
+  `${media}; kind=frames; channel=x; cause=8`,
+  `${media}; kind=frames; channel=-1; cause=8`,
+  `${media}; kind=frames; channel=01; cause=8`,
+  `${media}; kind=frames; channel=65536; cause=8`,
+]
+const unreadRows = transports.flatMap((transport) => unread.map((told): ['sse' | 'ws', string] => [transport, told]))
+
+test.each(unreadRows)(
+  "a session the server ended whose last word reaches the page on %s as `%s`: the page reads it as a loss, and its reopen is answered with the session's end",
+  async (transport, told) => {
+    const { live, serverEnds, wires } = await endLosingLastWord(transport, false, told)
+    const pageEnds = live.ended.map(({ name, message }) => [name, message])
+    expect([pageEnds, serverEnds, wires]).toEqual([sessionEnd, sessionEnd, 2])
   },
 )

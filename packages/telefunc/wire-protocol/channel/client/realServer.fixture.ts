@@ -15,6 +15,7 @@ export {
   delay,
   uploads,
   useRealServer,
+  rewriting,
   withholding,
   withoutWire,
   world,
@@ -24,7 +25,7 @@ import { afterAll, afterEach, beforeAll } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { Telefunc } from '../../../serve/node.js'
 import { config as serverConfig, type ChannelConfigUser } from '../../../node/server/serverConfig.js'
-import { base64urlToUint8Array } from '../../wire/base64url.js'
+import { base64urlToUint8Array, uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { decodeU32 } from '../../wire/envelope.js'
 import { decode } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
@@ -302,6 +303,12 @@ const sends = (page: ClientChannel<string, string>, message: string) => void pag
 /** An event stream hook that keeps from the page each event whose frame `withheld` names, and `cut()`, which ends the
  *  stream as a dropped connection does. */
 function withholding(withheld: (frame: Uint8Array<ArrayBuffer>) => boolean) {
+  return rewriting((frame) => (withheld(frame) ? null : frame))
+}
+
+/** An event stream hook that hands the page, for each event, the frame `handed` gives for its frame, or none for null,
+ *  and `cut()`, which ends the stream as a dropped connection does. */
+function rewriting(handed: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer> | null) {
   let cut = () => {}
   const stream = (body: ReadableStream<Uint8Array>) => {
     const decoder = new TextDecoder()
@@ -315,9 +322,11 @@ function withholding(withheld: (frame: Uint8Array<ArrayBuffer>) => boolean) {
         transform: (chunk, controller) => {
           const events = (partial + decoder.decode(chunk, { stream: true })).split('\n\n')
           partial = events.pop() ?? ''
-          const kept = events.filter((event) => {
+          const kept = events.flatMap((event) => {
             const data = event.split('\n').find((line) => line.startsWith('data: '))
-            return data === undefined || !withheld(base64urlToUint8Array(data.slice(6)))
+            if (data === undefined) return [event]
+            const frame = handed(base64urlToUint8Array(data.slice(6)))
+            return frame === null ? [] : [`data: ${uint8ArrayToBase64url(frame)}`]
           })
           if (kept.length > 0) controller.enqueue(encoder.encode(kept.map((event) => `${event}\n\n`).join('')))
         },
