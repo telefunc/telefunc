@@ -90,9 +90,11 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     return url.href
   }
 
-  /** A page that leaves for good says so in its sockets' close code; one kept in the back/forward cache keeps them. */
+  /** A page that leaves for good says so in its sockets' close code, and opens none it was opening; one kept in the
+   *  back/forward cache keeps them. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
+    this.cancelAttempt()
     try {
       this.ws?.close(WS_CLOSE_PAGE_LEFT)
     } catch {}
@@ -178,6 +180,13 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     }
     this.endAttempt()
     this.owner.onTransportClosed(this)
+  }
+
+  /** Lets the attempt's sockets go, and starts no other. */
+  private cancelAttempt(): void {
+    this.letGo(this.connecting)
+    this.letGo(this.racing)
+    this.endAttempt()
   }
 
   private endAttempt(): void {
@@ -386,9 +395,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   dispose(): void {
     globalThis.removeEventListener?.('pagehide', this.onPageHide)
-    this.letGo(this.connecting)
-    this.letGo(this.racing)
-    this.endAttempt()
+    this.cancelAttempt()
     // A socket sends what it was handed before its close.
     this.probed?.discard()
     if (this.ws) this.pieces?.sender.flush()

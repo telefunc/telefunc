@@ -326,6 +326,29 @@ describe("a page's recovery", () => {
     expect(ended).toHaveLength(1)
   })
 
+  test('a page that leaves while it reconnects lets every socket it was opening go, and opens none after', async () => {
+    const page = new EventTarget()
+    vi.stubGlobal('addEventListener', page.addEventListener.bind(page))
+    vi.stubGlobal('removeEventListener', page.removeEventListener.bind(page))
+    try {
+      const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+      await lostWire({ then: [{ opens: { afterMs: 2_500, despiteClose: true } }, 'hangs', 'hangs'] })
+      await vi.advanceTimersByTimeAsync(1_500)
+      expect(ScriptedWebSocket.made).toHaveLength(3)
+      page.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: false }))
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The first would open 2.5 s after it was made, closed or not: it closes again before any frame.
+      expect(ScriptedWebSocket.made.slice(1).map((ws) => [ws.closedByPage, ws.sent])).toEqual([
+        [true, 0],
+        [true, 0],
+      ])
+      expect(ScriptedWebSocket.made).toHaveLength(3)
+      expect(open).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('a channel registered while a reconnect waits starts no attempt sooner', async () => {
     const { lostAt, register } = await lostWire({ then: [] })
     await vi.advanceTimersByTimeAsync(100)
