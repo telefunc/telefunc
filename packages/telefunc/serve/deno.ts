@@ -2,6 +2,7 @@ export { Telefunc }
 
 import crossws from 'crossws/adapters/deno'
 import { serveRuntimeRequest } from '../node/server/telefunc.js'
+import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import { hasProp } from '../utils/hasProp.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
@@ -63,7 +64,11 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, info) as Response | Promise<Response>
       }
 
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
+      const httpResponse = await serveRuntimeRequest(
+        context ? { request, context } : { request },
+        clientLeft,
+        upgradesTakenHere,
+      )
       return toResponse(httpResponse)
     },
   }

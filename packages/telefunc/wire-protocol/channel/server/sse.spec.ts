@@ -6,6 +6,7 @@ import { encode } from '../../wire/frame.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // A ping deadline of 2.5 s: two intervals, after the half interval the page may hold its PING for a POST.
 config.channel = { pingInterval: 1000 }
@@ -16,6 +17,7 @@ function post(body: BodyInit) {
     new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit),
     undefined,
     () => false,
+    noUpgrades,
   )
 }
 

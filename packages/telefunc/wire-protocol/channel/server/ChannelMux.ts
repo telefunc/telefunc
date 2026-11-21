@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
@@ -15,7 +16,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
-  type ChannelTransports,
+  CHANNEL_TRANSPORT,
   type ChannelTransport,
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
@@ -97,7 +98,6 @@ type MuxServerOptions = {
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
-  transports: ChannelTransports
 }
 
 /** How a wire closed: lost (its page may reconnect), its page left for good, or refused by the server. */
@@ -133,6 +133,8 @@ type WireEntry = {
   sender: WireSender
   /** The request that opened the wire, where one did. */
   request: Request | undefined
+  /** Whether the server that opened the wire takes WebSocket upgrades: its page is offered `'ws'` only where it does. */
+  takesUpgrades: TakesUpgrades
 }
 
 function getChannelMux(): ChannelMux {
@@ -228,7 +230,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
 
-  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
+  onWireOpen<TWire>(
+    wire: TWire,
+    transport: ServerTransport<TWire>,
+    takesUpgrades: TakesUpgrades,
+    request?: Request,
+  ): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
     const attaching = new Set<ServerChannel>()
@@ -258,6 +265,7 @@ class ChannelMux implements UpgradeStagesOwner {
         attaching,
       }),
       request,
+      takesUpgrades,
     }
     this.wires.set(wire, entry)
     const connId = transport.getConnId(wire)
@@ -271,7 +279,10 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
-    this.wires.get(outcome.deliverTo)?.sender.dropProbes()
+    const entry = this.wires.get(outcome.deliverTo)
+    entry?.sender.dropProbes()
+    // What the app's config allows, read at each RECONCILED, less `'ws'` where the wire's server takes no upgrades.
+    const { transports } = getChannelConfig()
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -285,7 +296,7 @@ class ChannelMux implements UpgradeStagesOwner {
         creditWindow: this.options.creditWindow,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-        transports: this.options.transports,
+        transports: entry?.takesUpgrades() ? transports : transports.filter((t) => t !== CHANNEL_TRANSPORT.WS),
       }),
     )
     for (const { channel } of outcome.attached) channel._confirmWant()
@@ -952,7 +963,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
-    transports: c.transports,
   }
 }
 

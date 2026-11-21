@@ -1,7 +1,7 @@
 export { getTelefuncChannelOptions }
 
 import { defineHooks, type Hooks, type Message, type Peer } from 'crossws'
-import { enableChannelTransports } from '../../../node/server/serverConfig.js'
+import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { assert } from '../../../utils/assert.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
@@ -41,7 +41,6 @@ function getTelefuncChannelOptions({
   wireRequest?: (peer: Peer) => Request | undefined
   copiesOnSend?: boolean
 } = {}) {
-  enableChannelTransports(['ws'])
   const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,
@@ -103,7 +102,7 @@ function getTelefuncChannelOptions({
       // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
       // learns nothing from a refused handshake.
       if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
-      mux.onWireOpen(peer, transport, request)
+      mux.onWireOpen(peer, transport, upgradesTakenHere, request)
     }),
     message: guard((peer, message: Message) =>
       mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),

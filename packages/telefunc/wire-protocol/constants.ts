@@ -107,8 +107,8 @@ export function validateChannelTransports(val: unknown, configPath: string, exam
 
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
-/** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
-export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
+/** Default transports the server allows. A page is offered `'ws'` only where its server takes upgrades. */
+export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
 
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000

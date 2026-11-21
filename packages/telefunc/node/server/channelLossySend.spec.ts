@@ -16,6 +16,7 @@ import { TAG } from '../../wire-protocol/wire/tags.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 import { WireSender } from '../../wire-protocol/channel/server/WireSender.js'
 import { handleSseChannelRequest } from '../../wire-protocol/channel/server/sse.js'
+import { noUpgrades } from './runTelefunc/takesUpgrades.js'
 import { SseEvents } from '../../wire-protocol/wire/SseEvents.js'
 import type { WireQueue } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 import { encodeSseRequest } from '../../wire-protocol/wire/envelope.js'
@@ -550,6 +551,7 @@ describe('a large lossy send near the memory budget', () => {
         new Request(url, { method: 'POST', body: encodeSseRequest({ connId, ...extra }, frames) }),
         undefined,
         () => false,
+        noUpgrades,
       )
     const open = [{ id: channel.id, ix: 0, lastSeq: 0, initial: true as const }]
     // The peer the mux attaches it with says how long its wire takes to confirm a send.

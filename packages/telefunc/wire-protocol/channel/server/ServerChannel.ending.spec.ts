@@ -30,6 +30,7 @@ import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades, upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // The least it may be, the credit window a channel starts with: a test can bring one channel to hold the most it may. The
 // server may hold 32 MiB in all, far more than these tests leave held.
@@ -104,7 +105,12 @@ async function overSse(channels: ServerChannel[]) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   const connId = crypto.randomUUID()
   const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
-  const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
+  const opened = await handleSseChannelRequest(
+    new Request(url, { method: 'POST', body }),
+    undefined,
+    () => false,
+    noUpgrades,
+  )
   await Promise.all(channels.map((channel) => channel.opened))
   const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
   const events = new SseEvents()
@@ -131,6 +137,7 @@ async function overSse(channels: ServerChannel[]) {
         new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) }),
         undefined,
         () => false,
+        noUpgrades,
       ),
     /** Ends the page's event stream. */
     close: () => reader.cancel(),
@@ -607,6 +614,7 @@ async function muxWebSocket(channels: ServerChannel[], request: Request) {
       bufferedAmount: () => 0,
       terminateWire() {},
     },
+    upgradesTakenHere,
     request,
   )
   for (const channel of channels) mux.registerChannel(channel)

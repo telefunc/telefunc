@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
 import { STATUS_CODE_REJECTED, WIRE_REJECTED_REASON, WIRE_VERSION } from '../../constants.js'
@@ -9,7 +10,7 @@ import { SseEvents } from '../../wire/SseEvents.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 const post = (body: BodyInit) =>
-  handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
+  handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false, noUpgrades)
 
 test("a frame the server cannot read is refused with its POST's status and reason, ends the page's event stream with a REJECTED event, and ends its channels with it", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })

@@ -1,7 +1,10 @@
 export { Telefunc }
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import crossws from 'crossws/adapters/node'
-import { serve as serveTelefunc, serveNode } from '../node/server/telefunc.js'
+import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
+import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
+import { noUpgrades, upgradeServers, upgradesOfServer } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
@@ -46,8 +49,10 @@ interface TelefuncServe<Req extends NodeRequest, Res extends ServerResponse> {
   serve(input: ServeInputRequest): Promise<Response | undefined>
 }
 
-const { registeredServers } = getGlobalObject('serve/node.ts', {
-  registeredServers: new WeakSet<HttpServer>(),
+const { requestServer, serversWithRequestStore } = getGlobalObject('serve/node.ts', {
+  /** The server whose `request` event is running, for `serve({ request })`, which gets a `Request` without it. */
+  requestServer: new AsyncLocalStorage<HttpServer>(),
+  serversWithRequestStore: new WeakSet<HttpServer>(),
 })
 
 interface Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>
@@ -68,14 +73,13 @@ function readHandshake(req: IncomingMessage): Handshake {
 /** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), a request with `Upgrade` that isn't
  *  Telefunc's is upgraded only where another `upgrade` listener is there to take it and the server's own callback (the
  *  app's, or Node's default) accepts it; any other goes to the app's `request` listeners, as on the same server without
- *  Telefunc's WebSocket. What the callback reads of a request is kept in `handshakes`, for `listener`. The server's own
- *  callback is put back when `listener` is removed. */
+ *  Telefunc's WebSocket. What the callback reads of a request is kept in `handshakes`. Returns what puts the server's
+ *  own callback back. */
 function upgradeOthersOnlyForTheirListeners(
   server: HttpServer,
-  listener: (...args: never[]) => void,
   handshakes: WeakMap<IncomingMessage, Handshake>,
-): void {
-  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
+): () => void {
+  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return () => {}
   const own = server.shouldUpgradeCallback
   Reflect.set(server, 'shouldUpgradeCallback', (req: IncomingMessage) => {
     const handshake = readHandshake(req)
@@ -83,13 +87,19 @@ function upgradeOthersOnlyForTheirListeners(
     if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
     return server.listenerCount('upgrade') > 1 && Boolean(own.call(server, req))
   })
-  const putBack = (event: string | symbol, removed: unknown) => {
-    if (event !== 'upgrade' || removed !== listener) return
-    server.off('removeListener', putBack)
-    Reflect.set(server, 'shouldUpgradeCallback', own)
-    registeredServers.delete(server)
-  }
-  server.on('removeListener', putBack)
+  return () => Reflect.set(server, 'shouldUpgradeCallback', own)
+}
+
+/** Runs the server's `request` event in `requestServer`'s store, once per server: every other event, and the event's
+ *  arguments and return value, pass through as they are. */
+function storeServerOfRequests(server: HttpServer): void {
+  if (serversWithRequestStore.has(server)) return
+  serversWithRequestStore.add(server)
+  const emit = server.emit
+  Reflect.set(server, 'emit', function (this: unknown, event: unknown, ...args: unknown[]): unknown {
+    const pass = () => Reflect.apply(emit, this, [event, ...args])
+    return event === 'request' ? requestServer.run(server, pass) : pass()
+  })
 }
 
 function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>(): TelefuncServe<
@@ -110,8 +120,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         'installWebSocket() received an unsupported server object. Pass a Node.js `http.Server` or a srvx-compatible wrapper.',
       )
     }
-    if (registeredServers.has(httpServer)) return
-    registeredServers.add(httpServer)
+    if (upgradeServers.has(httpServer)) return
+    upgradeServers.add(httpServer)
     const adapter = (ws ??= crossws(
       getTelefuncChannelOptions({
         upgrade: (request) => ({ context: { socket: sockets.get(request), request } }),
@@ -148,7 +158,16 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       adapter.handleUpgrade(req, socket, head, request)
     }
     httpServer.on('upgrade', onUpgrade)
-    upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade, handshakes)
+    const putBackCallback = upgradeOthersOnlyForTheirListeners(httpServer, handshakes)
+    storeServerOfRequests(httpServer)
+    // Its pages are offered WebSocket while Telefunc's listener is there.
+    const onRemoved = (event: string | symbol, removed: unknown) => {
+      if (event !== 'upgrade' || removed !== onUpgrade) return
+      httpServer.off('removeListener', onRemoved)
+      putBackCallback()
+      upgradeServers.delete(httpServer)
+    }
+    httpServer.on('removeListener', onRemoved)
   }
 
   function inferServer(req: Req): HttpServer | undefined {
@@ -164,8 +183,11 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
     if (!isNodeServeInput(input)) {
       if (getTelefuncRequestUrl(input.request) === null) return undefined
-      const httpResponse = await serveTelefunc(
+      const server = requestServer.getStore()
+      const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
+        noTransportEvidence,
+        server ? upgradesOfServer(server) : noUpgrades,
       )
       return toResponse(httpResponse)
     }

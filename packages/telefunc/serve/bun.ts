@@ -3,6 +3,7 @@ export { Telefunc }
 import crossws from 'crossws/adapters/bun'
 import type { Peer } from 'crossws'
 import { serveRuntimeRequest } from '../node/server/telefunc.js'
+import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
@@ -67,7 +68,11 @@ function telefunc(): TelefuncServe {
 
       // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails.
       const clientLeft = () => request.signal.aborted
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
+      const httpResponse = await serveRuntimeRequest(
+        context ? { request, context } : { request },
+        clientLeft,
+        upgradesTakenHere,
+      )
       return toResponse(httpResponse)
     },
   }
