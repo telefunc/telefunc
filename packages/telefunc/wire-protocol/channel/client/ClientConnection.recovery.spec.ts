@@ -331,6 +331,41 @@ describe("a page's recovery", () => {
     expect(ended).toHaveLength(1)
   })
 
+  for (const [closes, lives] of [
+    ['older', 'newer'],
+    ['newer', 'older'],
+  ] as const)
+    test(`goes on racing when the ${closes} of two connecting sockets closes, and reports no loss for it`, async () => {
+      const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+      const { lostAt, ended } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
+      await vi.advanceTimersByTimeAsync(1_500)
+      const [, older, newer] = ScriptedWebSocket.made
+      ;(closes === 'older' ? older : newer)?.drop()
+      // The first wire's loss alone.
+      expect(closed).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(3_500)
+      // The race goes on from the one that lives: the next socket 2 s after the second.
+      expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
+      const survivor = lives === 'older' ? older : newer
+      expect([survivor?.closedByPage, survivor?.sent]).toEqual([true, 0])
+      expect(ScriptedWebSocket.made[3]?.sent).toBeGreaterThan(0)
+      expect(closed).toHaveBeenCalledTimes(1)
+      expect(ended).toEqual([])
+    })
+
+  test('reports one loss once both connecting sockets closed, and backs off from it', async () => {
+    const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    const { lostAt } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(1_500)
+    for (const ws of ScriptedWebSocket.made.slice(1)) ws.drop()
+    expect(closed).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(5_000)
+    // 0.9 of the second delay, 1,000, from the last close at 1,500; no race socket after either.
+    expect(madeSince(lostAt)).toEqual([450, 1450, 2400])
+    expect(ScriptedWebSocket.made[3]?.sent).toBeGreaterThan(0)
+    expect(closed).toHaveBeenCalledTimes(2)
+  })
+
   test('ends the attempt with a socket it could not make, the one still connecting too, and backs off from it', async () => {
     const { lostAt, ended } = await lostWire({ then: ['hangs', 'throws', { reconcile: { afterMs: 0 } }] })
     await vi.advanceTimersByTimeAsync(5_000)
