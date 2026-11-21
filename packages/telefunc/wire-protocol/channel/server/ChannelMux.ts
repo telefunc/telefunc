@@ -362,8 +362,9 @@ class ChannelMux implements UpgradeStagesOwner {
     return session === null ? null : { sessionId: session.id, attempt: session.high }
   }
 
-  /** Drops what the closed wire held: its timer, what it awaits, its sender, its stage, and its session, whose
-   *  channels detach as `reason` says, the app's callbacks running there. */
+  /** Drops what the closed wire held: its timer, what it awaits, its sender, its stage, its session, whose channels
+   *  detach as `reason` says, the app's callbacks running there, and last the probe its page was moving to, whose
+   *  transport may throw as it closes. */
   private dispose(entry: WireEntry, reason: WireClose): void {
     const { wire } = entry
     this.clearPingTimer(entry.state)
@@ -374,10 +375,10 @@ class ChannelMux implements UpgradeStagesOwner {
     const session = entry.holds
     if (session === null) return
     const stagedProbe = this.stages.probeFor(session.id)
-    if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
     this.sessions.release(entry)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace); the others end them.
     this.detachSession(session, reason)
+    if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
   }
 
   /** The page of a session that no wire holds left, `hold` naming the wire its leaving came for: ends its channels as

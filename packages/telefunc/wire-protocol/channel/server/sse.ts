@@ -582,10 +582,15 @@ class SseServerTransport {
   }
 
   /** The page's side of the wire went (its stream cancelled, its close POST, its body cut): the mux forgets the wire,
-   *  then its stream ends. */
+   *  then its stream ends, also where the mux throws, as from the close of a WebSocket the page was moving to. */
   private onWireGone(wire: SseWire, how: WireClose): void {
     if (wire.closed) return
-    this.endStream(wire, null, this.mux.onWireClosed(wire, how) ?? null)
+    let held: SessionHold | null = null
+    try {
+      held = this.mux.onWireClosed(wire, how) ?? null
+    } finally {
+      this.endStream(wire, null, held)
+    }
   }
 
   /** The wire's stream ends, and the server keeps what the page's later requests for it are answered. `refused`: what
