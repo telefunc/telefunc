@@ -65,11 +65,9 @@ class ReplayBuffer {
     return length
   }
 
+  /** Lets go of every frame it holds; its seqs stay. */
   dispose(): void {
     for (const kind of REPLAY_KINDS) this.queues[kind]?.dispose()
-    this.issuedSeq = 0
-    this.pushedSeq = 0
-    this.acknowledgedSeq = 0
   }
 }
 

@@ -161,9 +161,10 @@ class ChannelTable {
     if (lastSeq >= replay.seq) state.delivered = true
   }
 
-  /** The server ended the closed channel. */
-  serverEnded(state: ClosedState): void {
+  /** The server ended the closed channel: none of what the page sent on it goes again. */
+  serverEnded({ replay }: ChannelRecord, state: ClosedState): void {
     state.delivered = true
+    replay.dispose()
   }
 
   /** A PING named the closed channel. */

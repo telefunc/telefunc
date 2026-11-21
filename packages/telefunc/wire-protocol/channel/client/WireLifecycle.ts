@@ -641,10 +641,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (record !== undefined) this.endedByServer(record)
   }
 
+  /** The page owes nothing more on a channel the server ended: nothing of it is replayed or sent. */
   private endedByServer(record: ChannelRecord): void {
     this.unregister(record.channel)
     assert(record.state.tag === 'closed')
-    this.channels.serverEnded(record.state)
+    this.channels.serverEnded(record, record.state)
+    this.gate.dropQueue(record.ix)
   }
 
   /** No wire can reach the server again: its channels' connection is lost for good. */

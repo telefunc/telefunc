@@ -2,7 +2,7 @@
 // page's reconnect, and nothing else is. Memory running short first lets go of a verdict, never of a message. Over a real
 // server and page, on SSE and on a WebSocket, with a network the spec can lose bytes on and cut.
 
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
@@ -11,8 +11,11 @@ import { ChannelCloseUnknownError } from './channelErrors.js'
 import { isAbort } from '../../shared/Abort.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { WireLifecycle } from './client/WireLifecycle.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { queueMemory } from './server/channelMemory.js'
+import { TAG } from '../wire/tags.js'
+import type { ChannelFrame } from '../wire/frame.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000, maxMemory: '2m' }
 
@@ -184,6 +187,65 @@ for (const transport of ['sse', 'ws'] as const) {
       expect(await late).toBe(null)
       expect(channel.heldBytes).toBe(0)
     })
+
+    for (const away of [false, true])
+      test(`a page that follows and asks for a shorter deadline after its CLOSE_DONE${away ? ', while it is away,' : ''} sends nothing more once its verdict comes on its reconnect`, async () => {
+        let pageHasVerdict = false
+        let closeAfterVerdict = false
+        const pageDone = Promise.withResolvers<void>()
+        class ServerReading extends ServerChannel<string, string> {
+          override _dispatchFrame(frame: ChannelFrame): void {
+            if (frame.tag === TAG.CLOSE && pageHasVerdict) closeAfterVerdict = true
+            super._dispatchFrame(frame)
+            if (frame.tag === TAG.CLOSE_DONE) pageDone.resolve()
+          }
+        }
+        const channel = new ServerReading()
+        getChannelMux().registerChannel(channel)
+        const register = vi.spyOn(WireLifecycle.prototype, 'register')
+        const connection = {
+          telefuncUrl,
+          transports: [transport],
+          idleTimeout: 60_000,
+          connectionKey: crypto.randomUUID(),
+        }
+        const page = new ClientChannel<string, string>({ channelId: channel.id, connection })
+        const lifecycle = register.mock.contexts[register.mock.calls.findIndex(([registered]) => registered === page)]
+        register.mockRestore()
+        if (!(lifecycle instanceof WireLifecycle)) throw new Error('the page registered on no connection')
+        void page.closed.then(() => (pageHasVerdict = true))
+        await Promise.all([channel.opened, page.opened])
+        // The server's cleanup holds its verdict until the server reads nothing more of the page, and the network loses
+        // the verdict.
+        const cleanup = Promise.withResolvers<void>()
+        channel.onClose(() => cleanup.promise)
+        void channel.close({ timeout: 10_000 })
+        await pageDone.promise
+        deafenServer()
+        network.losing = true
+        if (!away) void page.close({ timeout: 5_000 })
+        cleanup.resolve()
+        expect(await channel.closed).toBe(null)
+        const connections = dropConnections()
+        if (away) {
+          await vi.waitFor(() => expect(lifecycle.reconnecting).toBe(true))
+          void page.close({ timeout: 5_000 })
+        }
+        connections.reconnect()
+        expect(await page.closed).toBe(null)
+
+        // What the page sends after its reconnect's replay, on the same connection, arrives after it.
+        const next = new ServerChannel<string, string>()
+        getChannelMux().registerChannel(next)
+        const nextPage = new ClientChannel<string, string>({ channelId: next.id, connection })
+        const received = Promise.withResolvers<string>()
+        next.listen((message) => void received.resolve(message))
+        await nextPage.opened
+        void nextPage.send('after')
+        expect(await received.promise).toBe('after')
+        expect(closeAfterVerdict).toBe(false)
+        nextPage.abort()
+      })
 
     test("a page that follows and asks for a shorter deadline after its CLOSE_DONE shortens the deciding server's", async () => {
       const [channel, page] = await pair(transport)
