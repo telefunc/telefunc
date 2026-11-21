@@ -6,6 +6,7 @@ export {
   isWant,
   isCallWant,
   isChannelId,
+  MAX_U32,
   WIDEST_ENTRY,
   WIRE_MAX_CTRL_FRAME_BYTES,
 }
@@ -76,7 +77,7 @@ const WIDEST_ENTRY_BYTES = JSON.stringify(WIDEST_ENTRY).length + UPGRADE_MAX_ID_
 const WIDEST_ISSUED_ID = 'x'.repeat(ISSUED_ID_BYTES)
 /** What a RECONCILE or a barrier carries besides its entries: its ids at their widest, and every index released. */
 const WIDEST_HEAD_BYTES = Math.max(
-  JSON.stringify({ sessionId: WIDEST_ISSUED_ID, open: [], released: [] }).length +
+  JSON.stringify({ sessionId: WIDEST_ISSUED_ID, attempt: MAX_U32, open: [], released: [] }).length +
     MAX_CHANNELS_PER_CONNECTION * (String(0xffff).length + 1),
   JSON.stringify({ sessionId: WIDEST_ISSUED_ID, upgradeId: WIDEST_ISSUED_ID, open: [] }).length,
 )
@@ -90,6 +91,9 @@ const WIRE_MAX_CTRL_FRAME_BYTES = HEADER + MAX_CHANNELS_PER_CONNECTION * WIDEST_
  *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */
 type ReconcilePayload = {
   sessionId?: string
+  /** The page's number for the wire it comes on, one more for each wire the page opens: what orders its attempts, on a
+   *  wire that doesn't hold the session yet, where it is required. */
+  attempt?: number
   open: ReconcileOpenEntry[]
   released?: number[]
 }
@@ -105,6 +109,8 @@ type BarrierPayload = {
 type PreparePayload = {
   upgradeId: string
   sessionId: string
+  /** The page's number for the probe, as a RECONCILE's `attempt` numbers its wire. */
+  attempt: number
 }
 
 type ReadyPayload = {
@@ -166,10 +172,11 @@ function isIssuedId(value: unknown): value is string {
 }
 
 function parsePreparePayload(value: unknown): PreparePayload {
-  const { upgradeId, sessionId } = asObject(value)
+  const { upgradeId, sessionId, attempt } = asObject(value)
   assertProtocol(isIssuedId(upgradeId), 'PREPARE upgradeId')
   assertProtocol(isIssuedId(sessionId), 'PREPARE sessionId')
-  return { upgradeId, sessionId }
+  assertProtocol(isUint(attempt, MAX_U32), 'PREPARE attempt')
+  return { upgradeId, sessionId, attempt }
 }
 
 /** Checks the open list JSON.parse built, where it stands: no entry is copied. */
@@ -212,6 +219,7 @@ function assertReconcilePayload(value: unknown): asserts value is ReconcilePaylo
   // A barrier's ids are checked as it is admitted, so that one over the cap ends its probe alone.
   for (const { id } of payload.open) assertProtocol(isChannelId(id), 'open entry id over the cap')
   assertProtocol(payload.sessionId === undefined || isIssuedId(payload.sessionId), 'RECONCILE sessionId')
+  assertProtocol(payload.attempt === undefined || isUint(payload.attempt, MAX_U32), 'RECONCILE attempt')
   if (payload.released === undefined) return
   assertProtocol(isIssuedId(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
   assertProtocol(payload.released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')

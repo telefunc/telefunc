@@ -584,7 +584,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const end = await this.upgrade.run(
       from,
       to,
-      { sessionId, pingInterval: this.liveness.pingInterval },
+      { sessionId, pingInterval: this.liveness.pingInterval, attempt: this.exchange.nextAttempt() },
       {
         reconcileSettled: (signal) => this.exchange.reconcileSettled(signal),
         barrier: (session) => this.exchange.buildBarrierFrame(session),

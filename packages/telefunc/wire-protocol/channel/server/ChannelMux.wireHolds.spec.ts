@@ -68,10 +68,10 @@ function channel() {
 const entry = (id: string, ix: number): ReconcileOpenEntry => ({ id, ix, lastSeq: 0, initial: true })
 /** A RECONCILE carrying the page's attempt number. */
 const reconcile = (payload: Parameters<typeof encode.reconcile>[0], attempt: number) =>
-  encode.reconcile(Object.assign({ attempt }, payload))
+  encode.reconcile({ ...payload, attempt })
 /** A PREPARE carrying its probe's attempt number, which the stage keeps: the BARRIER carries none. */
-const prepare = (payload: Parameters<typeof encode.prepare>[0], attempt: number) =>
-  encode.prepare(Object.assign({ attempt }, payload))
+const prepare = (payload: { sessionId: string; upgradeId: string }, attempt: number) =>
+  encode.prepare({ ...payload, attempt })
 
 test('a reopen naming a session the old wire still holds keeps its id, and the old wire then holds nothing', async () => {
   const a = channel()
@@ -187,10 +187,7 @@ test('a RECONCILE whose wire was lost before its turn attaches nothing and leave
   const next = wire()
   try {
     // The tail is unframeable: it ends the wire before the RECONCILE's turn, and the wire holds nothing yet.
-    const message = new Uint8Array([
-      ...encode.reconcile(Object.assign({ attempt: 1 }, { open: [entry(pending.id, 0)] })),
-      0xff,
-    ])
+    const message = new Uint8Array([...encode.reconcile({ attempt: 1, open: [entry(pending.id, 0)] }), 0xff])
     await first.send(message)
     await next.send(reconcile({ open: [entry(pending.id, 0)] }, 2))
     getChannelMux().registerChannel(pending)
@@ -204,5 +201,161 @@ test('a RECONCILE whose wire was lost before its turn attaches nothing and leave
     first.leave()
     next.leave()
     pending.abort()
+  }
+})
+
+test('a PREPARE older than the stage it meets closes its own probe as a loss and leaves the stage, which commits', async () => {
+  const a = channel()
+  const source = wire()
+  const newer = wire()
+  const older = wire()
+  const open = [entry(a.c.id, 0)]
+  try {
+    await source.send(reconcile({ open }, 1))
+    const sessionId = source.sessionId() ?? ''
+    await newer.send(prepare({ sessionId, upgradeId: 'newer' }, 3))
+    await older.send(prepare({ sessionId, upgradeId: 'older' }, 2))
+    await source.send(encode.barrier({ sessionId, upgradeId: 'newer', open }))
+    expect({
+      olderEnds: older.hows(),
+      newerEnds: newer.hows(),
+      newerId: newer.sessionId() === sessionId,
+      aEnds: [...a.ends],
+    }).toEqual({ olderEnds: ['transient'], newerEnds: [], newerId: true, aEnds: [] })
+  } finally {
+    older.leave()
+    newer.leave()
+    source.leave()
+  }
+})
+
+test('a BARRIER naming another upgrade is refused silently and leaves the stage; the matching BARRIER still commits', async () => {
+  const a = channel()
+  const source = wire()
+  const target = wire()
+  const open = [entry(a.c.id, 0)]
+  try {
+    await source.send(reconcile({ open }, 1))
+    const sessionId = source.sessionId() ?? ''
+    await target.send(prepare({ sessionId, upgradeId: 'prepared' }, 2))
+    await source.send(encode.barrier({ sessionId, upgradeId: 'different', open }))
+    const afterMismatch = { sourceEnds: source.hows(), targetEnds: target.hows() }
+    await source.send(encode.barrier({ sessionId, upgradeId: 'prepared', open }))
+    expect({
+      afterMismatch,
+      targetId: target.sessionId() === sessionId,
+      targetEnds: target.hows(),
+      aEnds: [...a.ends],
+    }).toEqual({ afterMismatch: { sourceEnds: [], targetEnds: [] }, targetId: true, targetEnds: [], aEnds: [] })
+  } finally {
+    source.leave()
+    target.leave()
+  }
+})
+
+test("an older attempt's reopen read after the newer one's takes nothing, ends nothing, and goes as a loss", async () => {
+  const a = channel()
+  const b = channel()
+  const first = wire()
+  try {
+    await first.send(reconcile({ open: [entry(a.c.id, 0)] }, 1))
+    const sessionId = first.sessionId()
+    first.lose()
+    const older = wire()
+    const newer = wire()
+    try {
+      await newer.send(reconcile({ sessionId, open: [entry(a.c.id, 0)] }, 3))
+      await newer.send(reconcile({ sessionId: newer.sessionId(), open: [entry(b.c.id, 1)], released: [] }, 3))
+      const newerBefore = newer.frames.length
+      await older.send(reconcile({ sessionId, open: [entry(a.c.id, 0)] }, 2))
+      void a.c.send('after the late reopen').catch(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const text = (frames: Uint8Array[]) => frames.some((frame) => frame[0] === TAG.TEXT)
+      expect({
+        bEnds: [...b.ends],
+        aEnds: [...a.ends],
+        olderEnds: older.hows(),
+        olderReconciled: older.tags().includes(TAG.RECONCILED),
+        aOnNewer: text(newer.frames.slice(newerBefore)),
+        aOnOlder: text(older.frames),
+      }).toEqual({
+        bEnds: [],
+        aEnds: [],
+        olderEnds: ['transient'],
+        olderReconciled: false,
+        aOnNewer: true,
+        aOnOlder: false,
+      })
+    } finally {
+      older.leave()
+      newer.leave()
+    }
+  } finally {
+    first.leave()
+  }
+})
+
+test("a stale BARRIER from a wire a newer reopen took the session from goes as a loss with its own stage, and the newer wire's stage commits", async () => {
+  const a = channel()
+  const source = wire()
+  const oldProbe = wire()
+  const newer = wire()
+  const newProbe = wire()
+  const open = [entry(a.c.id, 0)]
+  try {
+    await source.send(reconcile({ open }, 1))
+    const sessionId = source.sessionId() ?? ''
+    await oldProbe.send(prepare({ sessionId, upgradeId: 'old' }, 2))
+    await newer.send(reconcile({ sessionId, open }, 3))
+    await newProbe.send(prepare({ sessionId, upgradeId: 'new' }, 4))
+    await source.send(encode.barrier({ sessionId, upgradeId: 'old', open }))
+    const afterStale = { sourceEnds: source.hows(), oldProbeEnds: oldProbe.hows(), newProbeEnds: newProbe.hows() }
+    await newer.send(encode.barrier({ sessionId, upgradeId: 'new', open }))
+    expect({ afterStale, committed: newProbe.sessionId() === sessionId, aEnds: [...a.ends] }).toEqual({
+      afterStale: { sourceEnds: ['transient'], oldProbeEnds: ['transient'], newProbeEnds: [] },
+      committed: true,
+      aEnds: [],
+    })
+  } finally {
+    source.leave()
+    oldProbe.leave()
+    newer.leave()
+    newProbe.leave()
+  }
+})
+
+test('a reopen whose RECONCILED never reached the page is taken over by the next attempt, which gets what the channel sent meanwhile', async () => {
+  const a = channel()
+  const first = wire()
+  const second = wire()
+  const third = wire()
+  try {
+    await first.send(reconcile({ open: [entry(a.c.id, 0)] }, 1))
+    const sessionId = first.sessionId()
+    first.lose()
+    // The page never reads this wire's RECONCILED, so it names its channel from seq 0 again on the next one.
+    await second.send(reconcile({ sessionId, open: [entry(a.c.id, 0)] }, 2))
+    void a.c.send('sent while the page waited').catch(() => {})
+    await third.send(reconcile({ sessionId, open: [entry(a.c.id, 0)] }, 3))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect({
+      thirdId: third.sessionId() === sessionId,
+      thirdText: third.tags().includes(TAG.TEXT),
+      aEnds: [...a.ends],
+    }).toEqual({ thirdId: true, thirdText: true, aEnds: [] })
+  } finally {
+    first.leave()
+    second.leave()
+    third.leave()
+  }
+})
+
+test('a RECONCILE without its attempt on a wire that holds no session goes as a loss', async () => {
+  const unnumbered = wire()
+  try {
+    await unnumbered.send(encode.reconcile({ open: [] }))
+    expect([unnumbered.hows(), unnumbered.tags().includes(TAG.RECONCILED)]).toEqual([['transient'], false])
+  } finally {
+    unnumbered.leave()
   }
 })

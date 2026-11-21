@@ -103,7 +103,7 @@ async function overSse(channels: ServerChannel[]) {
   const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, want }))
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   const connId = crypto.randomUUID()
-  const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
+  const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open })])
   const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
   await Promise.all(channels.map((channel) => channel.opened))
   const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
@@ -618,7 +618,7 @@ async function muxWebSocket(channels: ServerChannel[], request: Request) {
   for (const channel of channels) mux.registerChannel(channel)
   const want = { version: 1, text: true, binary: true }
   const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, want }))
-  await mux.onWireMessage(wire, encode.reconcile({ open }))
+  await mux.onWireMessage(wire, encode.reconcile({ attempt: 1, open }))
   await new Promise((resolve) => setTimeout(resolve))
   return { close: () => mux.onWireClosed(wire, 'transient') }
 }

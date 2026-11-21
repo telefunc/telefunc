@@ -32,6 +32,9 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /** A page's wire whose RECONCILE names `sessionId`, or none: the session the RECONCILED gives it, or the close that ends
  *  it first; `socket` to go on with it. */
+/** The page's number for each wire it opens. */
+let attempts = 0
+
 async function reopen(sessionId?: string) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/_telefunc?wire=${WIRE_VERSION}`)
   socket.binaryType = 'arraybuffer'
@@ -46,7 +49,7 @@ async function reopen(sessionId?: string) {
     socket.addEventListener('close', ({ code, reason }) => resolve({ code, reason }))
   })
   await new Promise((resolve) => socket.addEventListener('open', resolve))
-  socket.send(encode.reconcile(sessionId === undefined ? { open: [] } : { open: [], sessionId }))
+  socket.send(encode.reconcile({ open: [], attempt: ++attempts, ...(sessionId === undefined ? {} : { sessionId }) }))
   return { socket, answer: await answer }
 }
 

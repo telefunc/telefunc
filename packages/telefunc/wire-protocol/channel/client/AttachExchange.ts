@@ -6,7 +6,7 @@ import type { ClientChannelTransport, MuxChannel, OutboundFrame } from './Client
 import type { SendGate } from './SendGate.js'
 import type { ProbeSession } from './Upgrade.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
-import type { ReconcileOpenEntry, ReconcilePayload, ReconciledPayload } from '../../wire/payloads.js'
+import { MAX_U32, type ReconcileOpenEntry, type ReconcilePayload, type ReconciledPayload } from '../../wire/payloads.js'
 import { RECONCILE_TIMEOUT_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import { readU16 } from '../../wire/header.js'
@@ -14,6 +14,7 @@ import { isSequencedTag } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
+import { assert } from '../../../utils/assert.js'
 
 type ReconcileOutcome = {
   frames: OutboundFrame[]
@@ -79,6 +80,9 @@ class AttachExchange {
   private isReconcileOwed = false
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
   private session: string | null = null
+  /** The wires the connection opened, probes included: each one's first RECONCILE or PREPARE carries its number, which
+   *  orders the page's attempts at the server. */
+  private attempts = 0
   /** The wire the last RECONCILED came on. */
   private reconciledWire = -1
 
@@ -99,6 +103,13 @@ class AttachExchange {
   /** The server's, from the last RECONCILED. */
   get sessionId(): string | null {
     return this.session
+  }
+
+  /** The number of a wire the connection opens now. Every wire is an attempt the reconnect delay paces, so it can't
+   *  pass a u32. */
+  nextAttempt(): number {
+    assert(this.attempts < MAX_U32)
+    return ++this.attempts
   }
 
   /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
@@ -352,7 +363,9 @@ class AttachExchange {
     const released = this.channels.takeReleased()
     const reconcile: ReconcilePayload = { open }
     if (this.session) reconcile.sessionId = this.session
+    // What changed goes on the wire that holds the session; a wire's first RECONCILE numbers it.
     if (changes) reconcile.released = released
+    else reconcile.attempt = this.nextAttempt()
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 

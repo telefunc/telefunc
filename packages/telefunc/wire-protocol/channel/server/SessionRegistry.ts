@@ -14,6 +14,9 @@ type Session = {
   readonly id: string
   readonly channels: Map<number, ChannelHandle>
   holder: WireEntry | null
+  /** The page's number for the newest of its wires that took the session: an older attempt's RECONCILE or PREPARE,
+   *  read later, takes nothing. */
+  high: number
 }
 
 /** Each session by id, and the sessions each channel is in: a frame finds its channel by session and index, and an
@@ -29,7 +32,7 @@ class SessionRegistry {
 
   /** A new session under `sessionId`, which no wire holds yet. */
   create(sessionId: string): Session {
-    const session: Session = { id: sessionId, channels: new Map(), holder: null }
+    const session: Session = { id: sessionId, channels: new Map(), holder: null, high: 0 }
     this.bySession.set(sessionId, session)
     return session
   }
@@ -39,11 +42,13 @@ class SessionRegistry {
     return this.byChannel.get(channelId)?.get(sessionId)
   }
 
-  /** `entry` holds the session from now on; the wire that held it holds nothing, and is returned. */
-  handOver(session: Session, entry: WireEntry): WireEntry | null {
+  /** `entry`, the page's wire numbered `attempt`, holds the session from now on; the wire that held it holds nothing,
+   *  and is returned. */
+  handOver(session: Session, entry: WireEntry, attempt: number): WireEntry | null {
     const previous = session.holder
     if (previous !== null) previous.holds = null
     session.holder = entry
+    session.high = Math.max(session.high, attempt)
     entry.holds = session
     return previous
   }

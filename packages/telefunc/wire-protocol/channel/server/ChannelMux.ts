@@ -601,6 +601,10 @@ class ChannelMux implements UpgradeStagesOwner {
         this.endSessionOn(entry, frame.payload.sessionId, ended)
         return null
       }
+      if (this.isStale(entry, frame.payload)) {
+        this.endFault(entry.wire, { scope: 'loss' })
+        return null
+      }
       this.claimSessionForReconcile(frame.payload, entry)
       return this.reconcile(entry, frame.payload)
     }
@@ -615,6 +619,15 @@ class ChannelMux implements UpgradeStagesOwner {
     }
     this.dispatchChannelFrame(session, channelFrame)
     return null
+  }
+
+  /** Whether a RECONCILE on a wire that doesn't hold the session comes from an older attempt of the page's than the one
+   *  that took the session: read after it, it takes nothing, claims no stage, and its wire goes as a loss. */
+  private isStale(entry: WireEntry, ctrl: ReconcilePayload): boolean {
+    if (entry.holds !== null) return false
+    assertProtocol(ctrl.attempt !== undefined, 'RECONCILE without its attempt on a wire that holds no session')
+    const named = ctrl.sessionId === undefined ? undefined : this.sessions.get(ctrl.sessionId)
+    return named !== undefined && ctrl.attempt <= named.high
   }
 
   /** Answers each closed channel the page lists on its session's wire: the last seq the server has from it, or null
@@ -666,34 +679,48 @@ class ChannelMux implements UpgradeStagesOwner {
     assertProtocol(entry.holds === null, 'PREPARE on a wire that holds a session')
     const session = this.sessions.get(payload.sessionId)
     assertProtocol(session, 'PREPARE for an unknown session')
-    this.stages.stage(wire, payload, rawByteLength)
+    // An older attempt's than the session's wire or its stage: the probe goes as a loss, and nothing else is touched.
+    if (payload.attempt <= session.high || !this.stages.stage(wire, payload, rawByteLength)) {
+      this.endFault(wire, { scope: 'loss' })
+      return null
+    }
     // From the READY on, the page holds back what it would send on its old wire, its confirmations included.
     for (const { channel } of session.channels.values()) channel._onPageMoving()
     entry.sender.send(encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
 
+  /** A barrier is admitted before any stage or channel is touched: its wire holds the session it names, and that
+   *  session's stage is staged under its `upgradeId`, for an attempt newer than the session's. */
   private handleBarrier(entry: WireEntry, ctrl: BarrierPayload): Promise<ReconcileOutcome> | null {
     const probe = this.stages.probeFor(ctrl.sessionId)
     const stage = probe === undefined ? undefined : this.stages.get(probe)
-    // A barrier for an unknown or already-committing stage is refused SILENTLY (the client's attempt
-    // deadline is the only watchdog) — erroring would tear down a wire this frame has no claim on.
-    if (probe === undefined || stage?.phase !== 'staged') return null
+    const session = entry.holds
+    // A newer reopen took the session from the barrier's wire: the barrier is stale. Its own stage goes, and so does
+    // its wire, which holds nothing; a stage under another `upgradeId` is another attempt's.
+    if (session === null || session.id !== ctrl.sessionId) {
+      if (probe !== undefined && stage?.upgradeId === ctrl.upgradeId) this.stages.abandon(probe)
+      this.endFault(entry.wire, { scope: 'loss' })
+      return null
+    }
+    // A barrier for no stage, a committing one or another upgrade's is refused SILENTLY (the page's attempt deadline is
+    // its only watchdog): its wire still holds the session, and the stage waits for its own barrier.
+    if (probe === undefined || stage?.phase !== 'staged' || stage.upgradeId !== ctrl.upgradeId) return null
 
     try {
       // Admission policy — `decodeClientFrame` has already established the frame's shape.
       for (const channel of ctrl.open) {
         assertProtocol(isChannelId(channel.id), 'channel id over byte cap')
       }
-      assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', probe)
-      assertProtocol(entry.holds?.id === stage.prevSessionId, 'barrier session mismatch', probe)
+      // A page numbers its probe after the wire it moves off.
+      assertProtocol(stage.attempt > session.high, "staged attempt not above the session's", probe)
 
       const wsEntry = this.wires.get(probe)
       assert(wsEntry, 'staged probe has no wire entry')
 
       this.stages.commit(probe)
       this.moveAwaited(entry, wsEntry, ctrl.open)
-      return this.attachBarrier(wsEntry, ctrl, stage.upgradeId)
+      return this.attachBarrier(wsEntry, { ...ctrl, attempt: stage.attempt }, stage.upgradeId)
     } catch (err) {
       this.stages.clear(probe)
       throw retargetToProbe(err, probe)
@@ -701,7 +728,11 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** Attaches the channels a barrier names to the WebSocket it commits. */
-  private async attachBarrier(wsEntry: WireEntry, ctrl: BarrierPayload, upgradeId: string): Promise<ReconcileOutcome> {
+  private async attachBarrier(
+    wsEntry: WireEntry,
+    ctrl: ReconcilePayload,
+    upgradeId: string,
+  ): Promise<ReconcileOutcome> {
     const probe = wsEntry.wire
     try {
       // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`. Awaited: the stage
@@ -747,7 +778,7 @@ class ChannelMux implements UpgradeStagesOwner {
     // The page names what changed only on the wire that holds its session: elsewhere it can't know what the server holds.
     assertProtocol(released === undefined || held !== null, 'RECONCILE released on another wire')
     // The wire that held the session holds nothing from now on: what it reads later is a loss of its own.
-    const previous = this.sessions.handOver(session, entry)
+    const previous = this.sessions.handOver(session, entry, ctrl.attempt ?? session.high)
     const retiredWire = isBarrier ? (previous?.wire ?? null) : null
     const attached =
       released === undefined

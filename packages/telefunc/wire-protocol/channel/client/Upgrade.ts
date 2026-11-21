@@ -407,13 +407,13 @@ class Upgrade implements ProbeOwner {
   async run(
     from: UpgradeSource,
     to: UpgradeTarget,
-    { sessionId, pingInterval }: { sessionId: string; pingInterval: number },
+    { sessionId, pingInterval, attempt: probeAttempt }: { sessionId: string; pingInterval: number; attempt: number },
     hooks: AttemptHooks,
   ): Promise<AttemptEnd> {
     const attempt = this.start()
     let adopted = false
     try {
-      const session = await this.stage(to, sessionId, pingInterval, attempt)
+      const session = await this.stage(to, { sessionId, attempt: probeAttempt }, pingInterval, attempt)
       if (session === 'no-probe') return { tag: 'aborted' }
       if (session === 'not-ready') return { tag: 'not-ready' }
       await hooks.reconcileSettled(attempt.signal)
@@ -448,7 +448,7 @@ class Upgrade implements ProbeOwner {
    *  attempt is aborted. */
   private async stage(
     to: UpgradeTarget,
-    sessionId: string,
+    { sessionId, attempt: probeAttempt }: { sessionId: string; attempt: number },
     pingInterval: number,
     attempt: AbortController,
   ): Promise<ProbeSession | 'no-probe' | 'not-ready'> {
@@ -468,7 +468,7 @@ class Upgrade implements ProbeOwner {
       attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
     })
     this.armAttemptDeadline(attempt)
-    probe.send(encode.prepare({ upgradeId, sessionId }))
+    probe.send(encode.prepare({ upgradeId, sessionId, attempt: probeAttempt }))
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()

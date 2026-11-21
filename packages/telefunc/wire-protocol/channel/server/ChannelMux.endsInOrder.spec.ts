@@ -22,7 +22,7 @@ const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 async function sseWire(channel: ServerChannel) {
   const connId = crypto.randomUUID()
   const body = encodeSseRequest({ connId, streamResponse: true }, [
-    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
   ])
   const init = { method: 'POST', body, duplex: 'half' }
   const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false)
@@ -84,7 +84,7 @@ test("a channel's end held behind a RECONCILED owed on a WebSocket when the sess
   // The RECONCILE is taken and its RECONCILED owed: what the wire sends meanwhile is held behind it.
   await mux.dispatchWireMessage(
     wire,
-    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
   )
   mux.endFault(wire, { scope: 'channel', ix: 0, cause: 'frameRefused', wire: 'kept' })
   mux.endFault(wire, { scope: 'session', cause: 'unreadable' })

@@ -32,7 +32,7 @@ test.each(['web', 'node'] as const)(
     // The page attaches the channel; the app sends two messages, which the page doesn't confirm.
     const first = await openStream(
       path,
-      encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+      encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
     )
     const [reconciled] = await first.readUntil((frame) => frame[0] === TAG.RECONCILED)
     const answer = reconciled === undefined ? undefined : decode(reconciled)
@@ -54,7 +54,11 @@ test.each(['web', 'node'] as const)(
     })
     const second = await openStream(
       path,
-      encode.reconcile({ sessionId: answer.payload.sessionId, open: [{ id: channel.id, ix: 0, lastSeq: 0 }] }),
+      encode.reconcile({
+        sessionId: answer.payload.sessionId,
+        attempt: 2,
+        open: [{ id: channel.id, ix: 0, lastSeq: 0 }],
+      }),
     )
     expect(order(await second.readUntil(carries('l2')))).toEqual(['RECONCILED', '1:a', '2:b', '3:c', '4:l1', '5:l2'])
     await second.drop()
@@ -69,7 +73,7 @@ test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then 
   const first = openWebSocket({ reads: true })
   await mux.onWireMessage(
     first.wire,
-    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
   )
   const { sessionId } = first.wire
   if (sessionId === undefined) throw new Error('no session on the first wire')
@@ -85,15 +89,18 @@ test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then 
     sendReconciled(outcome)
   })
   const second = openWebSocket({ reads: true })
-  await mux.onWireMessage(second.wire, encode.reconcile({ sessionId, open: [{ id: channel.id, ix: 0, lastSeq: 0 }] }))
+  await mux.onWireMessage(
+    second.wire,
+    encode.reconcile({ sessionId, attempt: 2, open: [{ id: channel.id, ix: 0, lastSeq: 0 }] }),
+  )
   expect(order(second.frames)).toEqual(['RECONCILED', '1:a', '2:b', '3:c', '4:l1', '5:l2'])
   vi.restoreAllMocks()
   second.close()
 })
 test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONCILE out at a time', async () => {
   const page = openWebSocket()
-  const first = encode.reconcile({ open: [] })
-  const second = encode.reconcile({ open: [] })
+  const first = encode.reconcile({ attempt: 1, open: [] })
+  const second = encode.reconcile({ attempt: 1, open: [] })
   await page.mux.onWireMessage(
     page.wire,
     encode.message([first, second], first.byteLength + HEADER + second.byteLength),
@@ -109,12 +116,12 @@ test("a BARRIER riding behind a PING in one WebSocket message gets its RECONCILE
   old.mux.registerChannel(channel)
   await old.mux.onWireMessage(
     old.wire,
-    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
   )
   const sessionId = old.wire.sessionId
   if (sessionId === undefined) throw new Error('no session on the old wire')
   const upgraded = openWebSocket({ reads: true })
-  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ upgradeId: 'u1', sessionId }))
+  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ attempt: 2, upgradeId: 'u1', sessionId }))
   const ping = encode.ping([])
   const barrier = encode.barrier({ sessionId, upgradeId: 'u1', open: [{ id: channel.id, ix: 0, lastSeq: 0 }] })
   await old.mux.onWireMessage(old.wire, encode.message([ping, barrier], ping.byteLength + HEADER + barrier.byteLength))
@@ -130,11 +137,11 @@ test('a WebSocket message of a RECONCILE and a BARRIER ends its wire: a page has
   const channel = new ServerChannel()
   old.mux.registerChannel(channel)
   const attach = { id: channel.id, ix: 0, lastSeq: 0 }
-  await old.mux.onWireMessage(old.wire, encode.reconcile({ open: [{ ...attach, initial: true }] }))
+  await old.mux.onWireMessage(old.wire, encode.reconcile({ attempt: 1, open: [{ ...attach, initial: true }] }))
   const sessionId = old.wire.sessionId
   if (sessionId === undefined) throw new Error('no session on the old wire')
   const upgraded = openWebSocket({ reads: true })
-  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ upgradeId: 'u1', sessionId }))
+  await upgraded.mux.onWireMessage(upgraded.wire, encode.prepare({ attempt: 2, upgradeId: 'u1', sessionId }))
   const reconcile = encode.reconcile({ sessionId, open: [attach] })
   const barrier = encode.barrier({ sessionId, upgradeId: 'u1', open: [attach] })
   await old.mux.onWireMessage(
@@ -152,7 +159,7 @@ test('a reconcile that throws a bug ends its wire, transiently: nothing stays he
     throw new Error('a bug in reconcile')
   })
   vi.spyOn(console, 'error').mockImplementation(() => {})
-  await page.mux.onWireMessage(page.wire, encode.reconcile({ open: [] }))
+  await page.mux.onWireMessage(page.wire, encode.reconcile({ attempt: 1, open: [] }))
   await Promise.resolve()
   expect(page.state.terminated).toBe(true)
   // The server's bug, not the page's fault: the page's channels keep their reconnect grace.

@@ -1,11 +1,13 @@
-// Which wire holds a page's session, on the real Node server with the real page: a reopen keeps the session's id, and a
-// wire that holds nothing ends only as a loss.
+// Which wire holds a page's session, on the real Node server with the real page: a reopen keeps the session's id, a wire
+// that holds nothing ends only as a loss, and an older attempt's open read late takes nothing.
 
 import { expect, test } from 'vitest'
 import { encodeU32 } from '../../wire/envelope.js'
 import { decode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { framesStart, opens, pair, rewriting, until, useRealServer, world } from './realServer.fixture.js'
+import { getWireUrl } from './getSessionUrl.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
+import { delay, framesStart, opens, pair, rewriting, sends, until, useRealServer, world } from './realServer.fixture.js'
 
 useRealServer(['sse', 'ws'], { reconnectTimeout: 1_500 })
 
@@ -121,3 +123,60 @@ for (const transport of ['ws', 'sse'] satisfies ('ws' | 'sse')[]) {
     }
   }, 30_000)
 }
+
+test(
+  'an older SSE open the page gave up, read after its newer reopen, takes nothing: no channel ends and every message arrives once',
+  { timeout: 15_000 },
+  async () => {
+    const first = rewriting((frame) => frame)
+    let olderOpen: Uint8Array<ArrayBuffer> | null = null
+    const garbled = Uint8Array.from([0xff, 0xff, 0xff])
+    world.hooks = [
+      { kind: 'open', stream: first.stream },
+      // The older reopen is held on the way: the server reads something it can't, and the page reopens again.
+      {
+        kind: 'open',
+        body: (bytes) => {
+          olderOpen = bytes
+          return [bytes.subarray(0, framesStart(bytes)), encodeU32(3), garbled]
+        },
+      },
+    ]
+    const connectionKey = crypto.randomUUID()
+    const a = pair(connectionKey, ['sse'])
+    try {
+      await a.page.opened
+      first.cut()
+      await until(() => opens() === 3)
+      const b = pair(connectionKey, ['sse'])
+      try {
+        await b.page.opened
+        sends(b.page, 'b1')
+        // The older reopen reaches the server now, as from a proxy that held it.
+        const held = olderOpen
+        if (held === null) throw new Error('no older open')
+        const pageOpens = opens()
+        const late = await fetch(getMarkedRequestUrl(getWireUrl(world.telefuncUrl), REQUEST_KIND.SSE), {
+          method: 'POST',
+          headers: { accept: 'text/event-stream', [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE },
+          body: held,
+        })
+        await late.body?.cancel()
+        sends(a.page, 'a1')
+        await until(() => a.got.length > 0 && b.got.length > 0)
+        await delay(300)
+        // The late request is the one open since: the page opened no other wire.
+        expect({ a: a.got, b: b.got, ended: [...a.ended, ...b.ended], opensSince: opens() - pageOpens }).toEqual({
+          a: ['a1'],
+          b: ['b1'],
+          ended: [],
+          opensSince: 1,
+        })
+      } finally {
+        b.page.abort()
+      }
+    } finally {
+      a.page.abort()
+    }
+  },
+)

@@ -17,7 +17,9 @@ function post(body: BodyInit) {
 }
 
 async function open(connId: string): Promise<ReadableStream> {
-  const answer = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const answer = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+  )
   if (!(answer.body instanceof ReadableStream)) throw new Error('No event stream')
   return answer.body
 }

@@ -17,7 +17,7 @@ import { framesStart, pair, useRealServer, world } from './realServer.fixture.js
 
 useRealServer(['sse', 'ws'])
 
-/** 4,096 entries, each at the longest id and the widest values the server's checks admit. */
+/** 4,096 entries, each at the longest id and the widest values the server's checks admit, under the widest attempt. */
 function widestReconcile(): Uint8Array<ArrayBuffer> {
   const open: ReconcileOpenEntry[] = Array.from({ length: 4_096 }, (_, at) => ({
     id: String(at).padStart(256, 'x'),
@@ -27,7 +27,7 @@ function widestReconcile(): Uint8Array<ArrayBuffer> {
     want: { version: 0xffffffff, text: false, binary: false },
     probe: 0xffffffff,
   }))
-  return encode.reconcile({ sessionId: crypto.randomUUID(), open })
+  return encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 0xffffffff, open })
 }
 
 /** The tag of each frame the server's answer carries, to its RECONCILED or its end. */

@@ -30,7 +30,7 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
 
 describe('upgrade wire vocabulary', () => {
   test('PREPARE and READY round-trip', () => {
-    const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0' }
+    const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0', attempt: 2 }
     expect(decode(encode.prepare(prepare))).toEqual({ tag: TAG.PREPARE, payload: prepare })
     expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
   })
@@ -164,8 +164,8 @@ describe('decodeClientFrame — direction', () => {
 
   const clientLegal: [string, Uint8Array<ArrayBuffer>][] = [
     ['PING', encode.ping()],
-    ['RECONCILE', encode.reconcile({ open: goodOpen })],
-    ['PREPARE', encode.prepare({ upgradeId: 'u', sessionId: 's' })],
+    ['RECONCILE', encode.reconcile({ attempt: 1, open: goodOpen })],
+    ['PREPARE', encode.prepare({ attempt: 2, upgradeId: 'u', sessionId: 's' })],
     ['BARRIER', encode.barrier({ upgradeId: 'u', sessionId: 's', open: goodOpen })],
     ['TEXT', encode.text(0, '"hi"', 1)],
     ['BINARY', encode.binary(0, new Uint8Array([1]), 1)],

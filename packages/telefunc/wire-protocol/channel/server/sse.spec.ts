@@ -21,7 +21,9 @@ function post(body: BodyInit) {
 
 test('a batch POST whose wire closed before its frames ran is refused', async () => {
   const connId = crypto.randomUUID()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+  )
   expect(opened.statusCode).toBe(200)
 
   // The batch's metadata arrives at once, its frame only once the handler reads for it.
@@ -51,7 +53,9 @@ test('a batch POST whose wire closed before its frames ran is refused', async ()
 
 test('a page whose upload POST is read only after server code held the event loop past the ping deadline keeps its wire', async () => {
   const connId = crypto.randomUUID()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+  )
   expect(opened.statusCode).toBe(200)
   // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
   expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
@@ -85,7 +89,9 @@ test('a page whose upload POST is read only after server code held the event loo
 
 test('a page that held its PING for a POST, then stalled for most of an interval, keeps its wire', async () => {
   const connId = crypto.randomUUID()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+  )
   expect(opened.statusCode).toBe(200)
   // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
   expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
@@ -98,7 +104,9 @@ test('a page that held its PING for a POST, then stalled for most of an interval
 test('a page that stays silent past the ping deadline loses its wire', async () => {
   const connId = crypto.randomUUID()
   const openedAt = performance.now()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+  )
   expect(opened.statusCode).toBe(200)
 
   const events = (opened.body as ReadableStream<Uint8Array>).getReader()
@@ -127,7 +135,9 @@ test('a ping deadline judged while its timer runs ahead of the performance clock
   }) as typeof setTimeout)
   try {
     const connId = crypto.randomUUID()
-    const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+    const opened = await post(
+      encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+    )
     expect(opened.statusCode).toBe(200)
     const events = (opened.body as ReadableStream<Uint8Array>).getReader()
     // The open's RECONCILE arms the deadline again once the server read the POST's body, some turns after it answered:

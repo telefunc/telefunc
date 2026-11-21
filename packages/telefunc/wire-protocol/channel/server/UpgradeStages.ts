@@ -21,6 +21,8 @@ type StagedUpgrade = {
   upgradeId: string
   /** The session the upgrade moves off, which its barrier retires. */
   prevSessionId: string
+  /** The page's number for the probe, from its PREPARE. */
+  attempt: number
   /** The PREPARE's bytes, which count in the staged byte budget. */
   bytes: number
   timer: ReturnType<typeof setTimeout>
@@ -48,12 +50,14 @@ class UpgradeStages {
     return this.byPrevSession.get(sessionId)
   }
 
-  /** Stages `probe` for the PREPARE's session. A page stages one attempt at a time, so a newer PREPARE replaces what
-   *  an earlier attempt left staged. */
-  stage(probe: Wire, payload: PreparePayload, bytes: number): void {
+  /** Stages `probe` for the PREPARE's session; false, staging nothing, where the session's stage is a newer attempt's.
+   *  A page stages one attempt at a time, so a newer PREPARE replaces what an earlier attempt left staged. */
+  stage(probe: Wire, payload: PreparePayload, bytes: number): boolean {
     const staged = this.byPrevSession.get(payload.sessionId)
     if (staged !== undefined) {
-      assertProtocol(this.byProbe.get(staged)?.phase === 'staged', 'session already committing')
+      const stage = this.byProbe.get(staged)
+      assertProtocol(stage?.phase === 'staged', 'session already committing')
+      if (payload.attempt <= stage.attempt) return false
       this.abandon(staged)
     }
     assertProtocol(this.byProbe.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
@@ -63,12 +67,14 @@ class UpgradeStages {
     this.byProbe.set(probe, {
       upgradeId: payload.upgradeId,
       prevSessionId: payload.sessionId,
+      attempt: payload.attempt,
       bytes,
       timer,
       phase: 'staged',
     })
     this.byPrevSession.set(payload.sessionId, probe)
     this.stagedBytes += bytes
+    return true
   }
 
   /** Marks the probe's stage committing: from now on a claim of its session is refused and `abandon` is a no-op. */

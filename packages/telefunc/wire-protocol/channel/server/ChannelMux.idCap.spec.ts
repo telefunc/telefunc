@@ -55,7 +55,7 @@ test("an app's channel id over 256 bytes as JSON writes it is a usage error at i
 test('a first RECONCILE entry naming an id over the bound ends its wire as a loss: the wire holds no session yet', async () => {
   const wire = page()
   try {
-    await wire.send(encode.reconcile({ open: [{ id: 'x'.repeat(257), ix: 0, lastSeq: 0, initial: true }] }))
+    await wire.send(encode.reconcile({ attempt: 1, open: [{ id: 'x'.repeat(257), ix: 0, lastSeq: 0, initial: true }] }))
     expect([wire.ends.map(({ how }) => how), wire.wire.id]).toEqual([['transient'], undefined])
   } finally {
     wire.end()
@@ -68,10 +68,10 @@ test('a barrier entry naming an id over the bound as JSON writes it ends the pro
   try {
     const channel = new ServerChannel()
     getChannelMux().registerChannel(channel)
-    await source.send(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+    await source.send(encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
     const sessionId = source.wire.id
     if (sessionId === undefined) throw new Error('No session')
-    await target.send(encode.prepare({ sessionId, upgradeId: 'upgrade' }))
+    await target.send(encode.prepare({ attempt: 2, sessionId, upgradeId: 'upgrade' }))
     const open: ReconcileOpenEntry[] = [{ id: quotes, ix: 1, lastSeq: 0, initial: true }]
     await source.send(encode.barrier({ sessionId, upgradeId: 'upgrade', open }))
     expect([source.ends, target.ends.length]).toEqual([[], 1])

@@ -58,7 +58,7 @@ async function openWire() {
   const connId = crypto.randomUUID()
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [
-      encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+      encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
     ]),
   )
   expect(opened.statusCode).toBe(200)
@@ -243,6 +243,7 @@ test("a receive backlog past what the server holds for the page's connection end
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [
       encode.reconcile({
+        attempt: 1,
         open: [
           { id: attached.id, ix: 0, lastSeq: 0, initial: true },
           { id: new ServerChannel().id, ix: 1, lastSeq: 0, initial: true },

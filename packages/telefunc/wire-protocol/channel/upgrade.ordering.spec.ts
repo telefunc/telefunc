@@ -50,10 +50,10 @@ async function setupUpgrade() {
   const h = createHarness()
   const old = h.wire()
   const probe = h.wire()
-  await old.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  await old.deliver(encode.reconcile({ attempt: 1, open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
   const sessionId = old.sessionId()
   expect(sessionId).toBeTypeOf('string')
-  await probe.deliver(encode.prepare({ sessionId: sessionId!, upgradeId: 'upgrade-1' }))
+  await probe.deliver(encode.prepare({ attempt: 2, sessionId: sessionId!, upgradeId: 'upgrade-1' }))
   const barrier = encode.barrier({
     sessionId: sessionId!,
     upgradeId: 'upgrade-1',
@@ -78,7 +78,7 @@ test('a concurrent ordinary claim of the old session loses to the barrier commit
   const claimant = h.wire()
   await Promise.all([
     h.old.deliver(h.barrier),
-    claimant.deliver(encode.reconcile({ sessionId: h.sessionId, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })),
+    claimant.deliver(encode.reconcile({ sessionId: h.sessionId, attempt: 3, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })),
   ])
   expect(h.probe.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(1)
   expect(claimant.terminated()).toBe(true)
@@ -96,7 +96,7 @@ test('a control frame is bounded by what the protocol can describe, a data frame
     ix,
     lastSeq: 0,
   }))
-  const oversize = encode.reconcile({ open })
+  const oversize = encode.reconcile({ attempt: 1, open })
   expect(oversize.byteLength).toBeGreaterThan(WIRE_MAX_CTRL_FRAME_BYTES)
   await wire.deliver(oversize)
   expect(wire.terminated()).toBe(true)
@@ -105,7 +105,7 @@ test('a control frame is bounded by what the protocol can describe, a data frame
   // The same byte count on the data plane is ordinary traffic: user payloads are why that limit
   // is 64 MiB, and applying it to control frames is what let a peer make the server parse one.
   const data = h.wire()
-  await data.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  await data.deliver(encode.reconcile({ attempt: 1, open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
   const big = encode.text(0, `"${'x'.repeat(oversize.byteLength)}"`, 1)
   expect(big.byteLength).toBeGreaterThan(WIRE_MAX_CTRL_FRAME_BYTES)
   expect(big.byteLength).toBeLessThan(WIRE_MAX_RAW_FRAME_BYTES)
@@ -118,6 +118,7 @@ test("a RECONCILE that names a channel at a second index of the page's session e
   const twice = h.wire()
   await twice.deliver(
     encode.reconcile({
+      attempt: 1,
       open: [
         { id: 'A', ix: 0, lastSeq: 0, initial: true },
         { id: 'A', ix: 1, lastSeq: 0, initial: true },
@@ -128,7 +129,7 @@ test("a RECONCILE that names a channel at a second index of the page's session e
   expect(twice.sent.filter((frame) => frame.tag === TAG.RECONCILED)).toHaveLength(0)
 
   const wire = h.wire()
-  await wire.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  await wire.deliver(encode.reconcile({ attempt: 1, open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
   const opens = (ix: number) =>
     encode.reconcile({ sessionId: wire.sessionId(), released: [], open: [{ id: 'A', ix, lastSeq: 0 }] })
   // The page names the channel again where it holds it: that's no violation.
@@ -142,7 +143,7 @@ test("a RECONCILE that names a channel at a second index of the page's session e
 test('a page that awaits one channel at two indexes of its session has its wire ended as the channel registers', async () => {
   const h = createHarness()
   const wire = h.wire()
-  await wire.deliver(encode.reconcile({ open: [] }))
+  await wire.deliver(encode.reconcile({ attempt: 1, open: [] }))
   for (const ix of [0, 1])
     await wire.deliver(
       encode.reconcile({
@@ -169,8 +170,8 @@ test('a bug in handling a frame is reported, and the server goes on handling the
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const buggy = h.wire()
   const other = h.wire()
-  await buggy.deliver(encode.reconcile({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
-  await other.deliver(encode.reconcile({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+  await buggy.deliver(encode.reconcile({ attempt: 1, open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
+  await other.deliver(encode.reconcile({ attempt: 1, open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
 
   // As a WebSocket host calls it: the promise is dropped, so a rejection would be unhandled.
   void buggy.deliver(encode.text(0, '111', 1))
