@@ -96,7 +96,7 @@ It is `'may-have-run'` when the call may have taken effect, for example when the
 | `Broadcast.publish()`, `Room.publish()`, `Room.send()`, a participant's `publish()` and `send()` | Publishing again can deliver the message twice |
 | `Room.create()` | Call `Room.get()`: a second `Room.create()` rejects with `Room already exists` if the first took effect. Or use `Room.getOrCreate()` |
 | `Room.close()`, `Room.setMeta()`, `Room.updateMeta()`, a participant's `setMeta()`, `updateMeta()` and `leave()` | Call it again: two calls end as one does |
-| `Room.removeParticipant()` | Call it again. With `{ identity }`, two calls end as one does. With `{ id }`, a second call rejects once the participant is no longer in the room: the first call took effect, or the room closed |
+| `Room.removeParticipant()` | Call it again. With `{ identity }`, two calls end as one does. With `{ id }`, a second call that rejects with an error other than a `BackendError` means the participant is no longer in the room: the first call removed them, they left, or the room closed |
 | `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join, at once or at its next heartbeat |
 | `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: a read is safe to call again whatever its `outcome` says. It says `'may-have-run'` only when it found a participant or a room that had lapsed, and the cleanup it started may have taken effect |
 
