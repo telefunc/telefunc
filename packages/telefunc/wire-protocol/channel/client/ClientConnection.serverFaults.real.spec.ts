@@ -16,6 +16,7 @@ import { ClientChannel } from './ClientChannel.js'
 import {
   delay,
   findText,
+  framesOf,
   framesStart,
   opens,
   pair,
@@ -316,32 +317,81 @@ test("the streaming upload the server refuses `frames` naming no channel ends ev
   expect([ends, decides.withheld.includes(TAG.END), opens()]).toEqual([[sessionEndOnPage, sessionEndOnPage], true, 1])
 })
 
-test("the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
-  let requestsBefore = -1
-  const decides = answerDecides()
-  world.hooks = [
-    { kind: 'open', stream: decides.stream },
-    {
+/** The page's first WebSocket, whose close the page reads `ms` after it came. */
+function closingFirstSocketLate(ms: number) {
+  const Counted = globalThis.WebSocket
+  let made = 0
+  globalThis.WebSocket = class ClosingLate extends Counted {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols)
+      if (made++ > 0) return
+      let held = true
+      // Added before the page sets its handler, so it runs first and can keep the close from it until it is let go.
+      this.addEventListener('close', (event) => {
+        if (!held) return
+        held = false
+        event.stopImmediatePropagation()
+        const { code, reason } = event
+        setTimeout(() => this.dispatchEvent(Object.assign(new Event('close'), { code, reason })), ms)
+      })
+    }
+  }
+  return { restore: () => void (globalThis.WebSocket = Counted) }
+}
+
+// The staged WebSocket holds no session, so the server's end closes it as a loss, which races the barrier POST's answer
+// to the page. Each order is made here, and each takes only the requests its carrier needs, beside the page's PINGs,
+// its heartbeat, which go in either.
+test.each([
+  ["the POST's answer reaches the page first", 'answer', ['post']],
+  ["the WebSocket's loss reaches the page first, and the POST's answer never", 'loss', ['post', 'open']],
+])(
+  "the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection: %s",
+  async (_order, first, requests) => {
+    let requestsBefore = -1
+    // Each batch POST after the barrier's that carries PINGs alone, by where it went among the requests.
+    const pingsAt: number[] = []
+    const pings: (typeof world.hooks)[number] = {
       kind: 'post',
-      carries: TAG.BARRIER,
       body: (bytes) => {
-        requestsBefore = world.started.length
-        return [bytes.subarray(0, framesStart(bytes)), ...unframeable(), bytes.subarray(framesStart(bytes))]
+        const tags = Array.from(framesOf(bytes), ({ frame }) => frame[0])
+        if (requestsBefore >= 0 && tags.every((tag) => tag === TAG.PING)) pingsAt.push(world.started.length)
+        return [bytes]
       },
-    },
-  ]
-  const [first, second] = opening(crypto.randomUUID(), ['sse', 'ws'])
-  const ends = [first, second].map(({ page }) => endsOf(page))
-  await until(() => ends.every((each) => each.length > 0))
-  // The staged WebSocket holds no session, so its end is a loss: a page that reads it before the barrier's answer falls
-  // back to SSE once, and that reopen reads the session's end the server kept.
-  const reopens = world.started.slice(requestsBefore).filter((kind) => kind === 'open').length
-  expect([reopens <= 1, ends, decides.withheld.includes(TAG.END)]).toEqual([
-    true,
-    [sessionEndOnPage, sessionEndOnPage],
-    true,
-  ])
-})
+    }
+    const decides = answerDecides()
+    const late = first === 'answer' ? closingFirstSocketLate(1_000) : null
+    world.hooks = [
+      { kind: 'open', stream: decides.stream },
+      {
+        kind: 'post',
+        carries: TAG.BARRIER,
+        body: (bytes) => {
+          requestsBefore = world.started.length
+          return [bytes.subarray(0, framesStart(bytes)), ...unframeable(), bytes.subarray(framesStart(bytes))]
+        },
+        // Where the loss comes first, the reopen it makes reads the end the server kept.
+        ...(first === 'loss' ? { held: true } : {}),
+      },
+      ...Array.from({ length: 20 }, () => pings),
+    ]
+    try {
+      const [one, two] = opening(crypto.randomUUID(), ['sse', 'ws'])
+      const ends = [one, two].map(({ page }) => endsOf(page))
+      await until(() => ends.every((each) => each.length > 0))
+      // Past the late close, so that no request it could make goes unseen.
+      await delay(1_200)
+      const sent = world.started.flatMap((kind, at) => (at < requestsBefore || pingsAt.includes(at) ? [] : [kind]))
+      expect([sent, ends, decides.withheld.includes(TAG.END)]).toEqual([
+        requests,
+        [sessionEndOnPage, sessionEndOnPage],
+        true,
+      ])
+    } finally {
+      late?.restore()
+    }
+  },
+)
 
 test('a session the server ends tells each channel on the page its end on the event stream alone, and the page opens no other wire', async () => {
   world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', severalFrames), held: true }]

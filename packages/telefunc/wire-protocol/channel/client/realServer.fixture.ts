@@ -5,6 +5,7 @@
 export {
   cutIn,
   findText,
+  framesOf,
   framesStart,
   open,
   opens,
