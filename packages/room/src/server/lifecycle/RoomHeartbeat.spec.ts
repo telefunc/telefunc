@@ -17,7 +17,7 @@ async function heldRoom() {
   }
   const plane = getRoomPlane()
   const config = encodeRoomRecord({ meta: {}, inc: room.inc, hold: room.hold })
-  await plane.compareExchangeHead(
+  await plane.direct.compareExchangeHead(
     room.id,
     { form: 'absent' },
     { head: { currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
@@ -33,7 +33,7 @@ async function heldRoom() {
     }),
   }
   const authority = {
-    reconcileMeta: () => plane.driver.readHead(room.id),
+    reconcileMeta: () => plane.direct.reads.readHead(room.id),
     checkCoverage: vi.fn<() => Promise<void>>(),
   }
   const heartbeat = new RoomHeartbeat({
@@ -50,7 +50,7 @@ async function heldRoom() {
     model.closed = true
     heartbeat.update()
   }
-  const lapse = async () => (await plane.driver.readHead(room.id))?.expiresAt ?? 0
+  const lapse = async () => (await plane.direct.reads.readHead(room.id))?.expiresAt ?? 0
   return { room, hosting, authority, stop, lapse, renewedAt: () => renewedAt }
 }
 
@@ -114,7 +114,7 @@ describe('RoomHeartbeat', () => {
     })
     authority.controlDelivered(1)
     // The close dropped the room's lanes, and its closed frame reaches the view while the check reads the control lane.
-    await getRoomPlane().driver.dropIncarnation(room.id, room.inc)
+    await getRoomPlane().direct.dropIncarnation(room.id, room.inc)
     const check = authority.checkCoverage()
     model.closed = true
     await check

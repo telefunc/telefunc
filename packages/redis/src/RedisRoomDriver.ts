@@ -417,9 +417,7 @@ class RedisRoomDriver implements RoomDriver {
       do {
         // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
         const [[next, keys]] = await Promise.all([
-          call.read(() =>
-            this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
-          ),
+          this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
           unlinking,
         ])
         cursor = next

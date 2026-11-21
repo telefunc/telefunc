@@ -15,6 +15,8 @@
 //   removals ended: the store doesn't change after the rejection.
 // - `Room.removeParticipant()` whose room closed after it planned the leave: the leave reaches the store, which
 //   changes nothing, and the call resolves, as the close ended the participant.
+// - `Room.removeParticipant()` by identity whose two leaves are refused, where one tab's eviction then reads no open
+//   head, as once the room closed, and the other's head read is refused: it didn't run, and the store keeps everything.
 import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -22,16 +24,24 @@ import { isDeepStrictEqual, promisify } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
+import { BackendError as StoreRefusal } from 'telefunc/__internal'
 import { Room } from '@telefunc/room'
 import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { RedisConnection } from './RedisConnection.js'
+import { RedisRoomDriver } from './RedisRoomDriver.js'
+import type { OperationOptions, OperationResult, RoomOperation } from '@telefunc/room/backend'
 
-/** Every key of Telefunc's in the store, with its value as DUMP gives it. */
-async function snapshot(admin: Redis): Promise<Map<string, Buffer | null>> {
+/** Every key of Telefunc's in the store, with what it holds: a hash's fields and values in field order, as a read
+ *  that rehashes a large hash reorders what DUMP gives of it, and any other value as DUMP gives it. */
+async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
   const keys = (await admin.keys('tf:*')).sort()
-  return new Map(await Promise.all(keys.map(async (key) => [key, await admin.dumpBuffer(key)] as const)))
+  const held = async (key: string) =>
+    (await admin.type(key)) === 'hash'
+      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      : await admin.dumpBuffer(key)
+  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
 }
 
 let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
@@ -425,7 +435,7 @@ describe.runIf(runs)('Room.removeParticipant() whose room closed after it planne
       const member = await joinedByAnotherServer(String(admin.options.host), room.id)
       const run = RedisConnection.prototype.run
       let armed = true
-      let closed: Map<string, Buffer | null> | undefined
+      let closed: Map<string, unknown> | undefined
       let leaveAnswer: unknown
       vi.spyOn(RedisConnection.prototype, 'run').mockImplementation(async function <Input, Output>(
         this: RedisConnection,
@@ -454,6 +464,72 @@ describe.runIf(runs)('Room.removeParticipant() whose room closed after it planne
         leaveAnswer: { kind: 'stale-incarnation' },
         unchanged: true,
       })
+    }, 60_000)
+  }
+})
+
+describe.runIf(runs)('a Room call whose eviction found the room closed meanwhile', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: Room.removeParticipant() by identity is told 'not-run' where every leave was refused, and the store keeps everything`, async () => {
+      const admin = await reached(store)
+      const room = await Room.create(`evicted-${i}`)
+      const tabs = (
+        await atAnotherServer(
+          String(admin.options.host),
+          room.id,
+          "for (let n = 0; n < 2; n++) console.log('tab:' + (await Room.join(id, { identity: 'u1' })).id)",
+        )
+      )
+        .filter((line) => line.startsWith('tab:'))
+        .map((line) => line.slice('tab:'.length))
+        .sort()
+      const refused = () =>
+        new StoreRefusal({ code: 'denied', outcome: 'not-run', message: 'the store refused the step (NOPERM)' })
+      const { runOperation, readHead } = RedisRoomDriver.prototype
+      let leavesRefused = 0
+      async function refusingLeaves<Args, Value>(
+        this: RedisRoomDriver,
+        roomId: string,
+        inc: string,
+        operation: RoomOperation<Args, Value>,
+        args: Args,
+        options?: OperationOptions,
+      ): Promise<OperationResult<Value>> {
+        if (roomId !== room.id || operation.name !== 'leave') {
+          return await runOperation.bind(this)(roomId, inc, operation, args, options)
+        }
+        leavesRefused++
+        throw refused()
+      }
+      vi.spyOn(RedisRoomDriver.prototype, 'runOperation').mockImplementation(refusingLeaves)
+      // After its refused leave, one tab's eviction reads no open head, as once the room closed; the other's read is
+      // refused.
+      let headsAfterLeaves = 0
+      vi.spyOn(RedisRoomDriver.prototype, 'readHead').mockImplementation(async function (
+        this: RedisRoomDriver,
+        roomId,
+      ) {
+        if (roomId !== room.id || leavesRefused === 0) return await readHead.call(this, roomId)
+        if (++headsAfterLeaves === 1) return null
+        throw refused()
+      })
+      const before = await snapshot(admin)
+      const removed = await Room.removeParticipant(room.id, { identity: 'u1' }).then(
+        () => 'resolved',
+        (error: unknown) => (error instanceof BackendError ? { code: error.code, outcome: error.outcome } : error),
+      )
+      vi.restoreAllMocks()
+      const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+      const listed = (await Room.getParticipants(room.id)).map(({ id }) => id).sort()
+      admin.disconnect()
+
+      expect({ removed, leavesRefused, unchanged, listed }).toEqual({
+        removed: { code: 'denied', outcome: 'not-run' },
+        leavesRefused: 2,
+        unchanged: true,
+        listed: tabs,
+      })
+      expect(tabs).toHaveLength(2)
     }, 60_000)
   }
 })

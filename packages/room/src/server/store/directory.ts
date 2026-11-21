@@ -56,14 +56,15 @@ function sweepLapsedRoomsSoon(): void {
  *  `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
   const slice = new Slice()
-  for (let due = await plane.driver.directoryDue(); due.length > 0; due = await plane.driver.directoryDue()) {
+  const { reads } = plane.direct
+  for (let due = await reads.directoryDue(); due.length > 0; due = await reads.directoryDue()) {
     await eachInFlight(due, (entry) => sweepDueRoom(plane, entry))
     if (slice.over) await slice.next()
   }
 }
 
 async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
-  const head = await plane.driver.readHead(roomId)
+  const head = await plane.direct.reads.readHead(roomId)
   if (head?.currentInc !== incTag) await plane.call((store) => repairRoomIndex(store, roomId, incTag, head))
   else await listRoom(plane.direct, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
 }

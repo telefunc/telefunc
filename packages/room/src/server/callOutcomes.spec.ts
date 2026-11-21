@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
+import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
 import type { OperationOptions, OperationResult, RoomOperation } from '../backend/contract.js'
 import { Room } from '../index.js'
 import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
@@ -24,7 +25,7 @@ async function storedRoom(): Promise<string> {
   const id = `outcome-${crypto.randomUUID()}`
   const inc = crypto.randomUUID()
   const hold = { emptyTimeout: 60_000, departureTimeout: 60_000 }
-  await getRoomPlane().compareExchangeHead(
+  await getRoomPlane().direct.compareExchangeHead(
     id,
     { form: 'absent' },
     {
@@ -39,14 +40,14 @@ async function storedRoom(): Promise<string> {
  *  it is still there. */
 async function lapsedLease(id: string): Promise<() => Promise<boolean>> {
   const plane = getRoomPlane()
-  const head = await plane.driver.readHead(id)
+  const head = await plane.direct.reads.readHead(id)
   if (head === null) throw new Error(`room ${id} has no head`)
   const { inc } = configFromHead(head)
   const key = `${LEASE_CELL_PREFIX}lapsed-${crypto.randomUUID()}`
   const bytes = new TextEncoder().encode(JSON.stringify({ until: 0 }))
-  await plane.driver.compareExchangeCells(id, inc, { expect: [], mutations: [{ key, bytes }] })
+  await plane.direct.compareExchangeCells(id, inc, { expect: [], mutations: [{ key, bytes }] })
   return async () => {
-    const read = await plane.driver.readCells(id, inc, { keys: [key] })
+    const read = await plane.direct.reads.readCells(id, inc, { keys: [key] })
     return read.kind !== 'stale-incarnation' && read.cells.has(key)
   }
 }
@@ -57,7 +58,7 @@ async function otherServersMember(
   id: string,
 ): Promise<{ member: string; lapse: () => Promise<void>; leaseStays: () => Promise<boolean> }> {
   const plane = getRoomPlane()
-  const head = await plane.driver.readHead(id)
+  const head = await plane.direct.reads.readHead(id)
   if (head === null) throw new Error(`room ${id} has no head`)
   const room = { id, ...configFromHead(head) }
   const lease = new RoomLease()
@@ -77,13 +78,13 @@ async function otherServersMember(
   )
   const bytes = new TextEncoder().encode(JSON.stringify({ until: 0 }))
   const lapse = async () => {
-    await plane.driver.compareExchangeCells(id, room.inc, {
+    await plane.direct.compareExchangeCells(id, room.inc, {
       expect: [],
       mutations: [{ key: `${LEASE_CELL_PREFIX}${lease.id}`, bytes }],
     })
   }
   const leaseStays = async () => {
-    const read = await plane.driver.readCells(id, room.inc, { keys: [`${LEASE_CELL_PREFIX}${lease.id}`] })
+    const read = await plane.direct.reads.readCells(id, room.inc, { keys: [`${LEASE_CELL_PREFIX}${lease.id}`] })
     return read.kind !== 'stale-incarnation' && read.cells.has(`${LEASE_CELL_PREFIX}${lease.id}`)
   }
   return { member, lapse, leaseStays }
@@ -91,19 +92,23 @@ async function otherServersMember(
 
 /** The store refuses each read of the room's meta. */
 function refuseMetaReads(): void {
-  const { driver } = getRoomPlane()
-  const readCells = driver.readCells.bind(driver)
-  vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+  const { readCells } = MemoryRoomDriver.prototype
+  vi.spyOn(MemoryRoomDriver.prototype, 'readCells').mockImplementation(async function (
+    this: MemoryRoomDriver,
+    roomId,
+    inc,
+    selector,
+  ) {
     if ('keys' in selector && selector.keys.includes(META_SEQ_CELL_KEY)) throw refused()
-    return await readCells(roomId, inc, selector)
+    return await readCells.call(this, roomId, inc, selector)
   })
 }
 
 /** The store refuses each removal of a member. */
 function refuseLeaves(): void {
-  const { driver } = getRoomPlane()
-  const runOperation = driver.runOperation.bind(driver)
+  const { runOperation } = MemoryRoomDriver.prototype
   async function refusingLeaves<Args, Value>(
+    this: MemoryRoomDriver,
     roomId: string,
     inc: string,
     operation: RoomOperation<Args, Value>,
@@ -111,9 +116,9 @@ function refuseLeaves(): void {
     options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
     if (operation.name === 'leave') throw refused()
-    return await runOperation(roomId, inc, operation, args, options)
+    return await runOperation.bind(this)(roomId, inc, operation, args, options)
   }
-  vi.spyOn(driver, 'runOperation').mockImplementation(refusingLeaves)
+  vi.spyOn(MemoryRoomDriver.prototype, 'runOperation').mockImplementation(refusingLeaves)
 }
 
 /** How `call` ends: its error's code and outcome, or `'resolved'`. */
@@ -146,11 +151,13 @@ describe('a Room call whose later step the store refuses after the call reaped a
       return seeded(roomId, config, stored, seed)
     })
     // The store refuses the head read once the call's reap removed the lease: the view's catch-up reads it.
-    const { driver } = getRoomPlane()
-    const readHead = driver.readHead.bind(driver)
-    vi.spyOn(driver, 'readHead').mockImplementation(async (roomId) => {
+    const { readHead } = MemoryRoomDriver.prototype
+    vi.spyOn(MemoryRoomDriver.prototype, 'readHead').mockImplementation(async function (
+      this: MemoryRoomDriver,
+      roomId,
+    ) {
       if (roomId === id && !(await leaseStays())) throw refused()
-      return await readHead(roomId)
+      return await readHead.call(this, roomId)
     })
 
     expect({ got: await outcomeOf(Room.get(id)), leaseStays: await leaseStays() }).toEqual({
@@ -167,8 +174,7 @@ describe('a Room call whose later step the store refuses after the call reaped a
     await Room.get(room.id)
     await lapse()
     // The store refuses the read of why members left, which the view's refresh makes for the member its reap removed.
-    const { driver } = getRoomPlane()
-    vi.spyOn(driver, 'readExpiringCells').mockRejectedValue(refused())
+    vi.spyOn(MemoryRoomDriver.prototype, 'readExpiringCells').mockRejectedValue(refused())
 
     expect({ got: await outcomeOf(Room.get(room.id)), leaseStays: await leaseStays() }).toEqual({
       got: { code: 'denied', outcome: 'may-have-run' },
@@ -182,8 +188,7 @@ describe('a Room call whose later step the store refuses after the call reaped a
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toContain(member)
     await Room.get(room.id)
     await lapse()
-    const { driver } = getRoomPlane()
-    vi.spyOn(driver, 'readExpiringCells').mockRejectedValue(refused())
+    vi.spyOn(MemoryRoomDriver.prototype, 'readExpiringCells').mockRejectedValue(refused())
 
     // The view refreshes one at a time: the second call waits on the first one's refresh, and its reap.
     const [first, second] = await Promise.all([outcomeOf(Room.get(room.id)), outcomeOf(Room.get(room.id))])
@@ -223,7 +228,7 @@ describe('a Room call whose later step the store refuses after the call reaped a
       const room = await Room.create(`outcome-${crypto.randomUUID()}`)
       const participant = await room.join({ identity: 'u1' })
       const leaseStays = await lapsedLease(room.id)
-      vi.spyOn(getRoomPlane().driver, 'commitLane').mockRejectedValueOnce(refused())
+      vi.spyOn(MemoryRoomDriver.prototype, 'commitLane').mockRejectedValueOnce(refused())
       const sending =
         by === 'id' ? Room.send(room.id, { id: participant.id }, 'hi') : Room.send(room.id, { identity: 'u1' }, 'hi')
 
@@ -250,27 +255,29 @@ describe('a Room call whose eviction found the room closed meanwhile', () => {
   it("Room.removeParticipant() by identity: told 'not-run' where every leave was refused and the store kept everything", async () => {
     const room = await Room.create(`outcome-${crypto.randomUUID()}`)
     const tabs = [await room.join({ identity: 'u1' }), await room.join({ identity: 'u1' })]
-    const { driver } = getRoomPlane()
-    const runOperation = driver.runOperation.bind(driver)
-    const readHead = driver.readHead.bind(driver)
+    const { runOperation, readHead } = MemoryRoomDriver.prototype
     let leavesRefused = 0
     async function refusingLeaves<Args, Value>(
+      this: MemoryRoomDriver,
       roomId: string,
       inc: string,
       operation: RoomOperation<Args, Value>,
       args: Args,
       options?: OperationOptions,
     ): Promise<OperationResult<Value>> {
-      if (operation.name !== 'leave') return await runOperation(roomId, inc, operation, args, options)
+      if (operation.name !== 'leave') return await runOperation.bind(this)(roomId, inc, operation, args, options)
       leavesRefused++
       throw refused()
     }
-    vi.spyOn(driver, 'runOperation').mockImplementation(refusingLeaves)
+    vi.spyOn(MemoryRoomDriver.prototype, 'runOperation').mockImplementation(refusingLeaves)
     // After its refused leave, one tab's eviction reads no open head, as once the room closed; the other's read is
     // refused.
     let headsAfterLeaves = 0
-    vi.spyOn(driver, 'readHead').mockImplementation(async (roomId) => {
-      if (leavesRefused === 0) return await readHead(roomId)
+    vi.spyOn(MemoryRoomDriver.prototype, 'readHead').mockImplementation(async function (
+      this: MemoryRoomDriver,
+      roomId,
+    ) {
+      if (leavesRefused === 0) return await readHead.call(this, roomId)
       if (++headsAfterLeaves === 1) return null
       throw refused()
     })

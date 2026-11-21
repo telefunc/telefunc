@@ -39,7 +39,7 @@ describe('BackendCall', () => {
     const refused = notRun()
 
     const failure = await BackendCall.run(async (call) => {
-      await call.read(answered)
+      await answered()
       return call.write(failingWith(refused))
     }).catch((error: unknown) => error)
 
@@ -49,7 +49,7 @@ describe('BackendCall', () => {
   it("tells 'may-have-run' for a step's 'not-run' after a write of the call was answered", async () => {
     const failure = await BackendCall.run(async (call) => {
       await call.write(answered)
-      return call.read(failingWith(notRun()))
+      return failingWith(notRun())()
     }).catch((error: unknown) => error)
 
     expect(failure).toBeInstanceOf(BackendError)
@@ -68,31 +68,29 @@ describe('BackendCall', () => {
   it("keeps 'not-run' after a write of the call that was itself refused before running", async () => {
     const failure = await BackendCall.run(async (call) => {
       await call.write(failingWith(notRun())).catch(() => {})
-      return call.read(failingWith(notRun()))
+      return failingWith(notRun())()
     }).catch((error: unknown) => error)
 
     expect(outcomeOf(failure)).toBe('not-run')
   })
 
-  it("tells 'may-have-run' for a step's 'not-run' while another write of the call is in flight", async () => {
+  it("tells 'may-have-run' for a step's 'not-run' while another write of the call was in flight, once it answered", async () => {
     const write = pendingWrite()
 
-    const failure = await BackendCall.run(async (call) => {
-      const inFlight = call.write(write.step)
-      const failure = await call.write(failingWith(notRun())).catch((error: unknown) => error)
-      write.handle.answer()
-      await inFlight
-      return failure
-    })
+    const closing = BackendCall.run(async (call) => {
+      await Promise.all([call.write(write.step), call.write(failingWith(notRun()))])
+    }).catch((error: unknown) => error)
+    await microtasks()
+    write.handle.answer()
 
-    expect(outcomeOf(failure)).toBe('may-have-run')
+    expect(outcomeOf(await closing)).toBe('may-have-run')
   })
 
   it('tells what an inner call of several steps tells, through an outer step', async () => {
     const inner = () =>
       BackendCall.run(async (call) => {
         await call.write(answered)
-        return call.read(failingWith(notRun()))
+        return failingWith(notRun())()
       })
 
     const failure = await BackendCall.run((outer) => outer.write(inner)).catch((error: unknown) => error)
@@ -105,7 +103,7 @@ describe('BackendCall', () => {
 
     const failure = await BackendCall.run(async (call) => {
       await call.write(answered)
-      return call.read(failingWith(bug))
+      return failingWith(bug)()
     }).catch((error: unknown) => error)
 
     expect(failure).toBe(bug)
@@ -211,69 +209,13 @@ describe('BackendCall', () => {
     })
   })
 
-  describe('all(): steps side by side', () => {
-    it("tells 'may-have-run' for a step's 'not-run' once a sibling that was still reading hands a write over", async () => {
-      let readDone = () => {}
-      const read = new Promise<void>((resolve) => (readDone = resolve))
-
-      const failure = await BackendCall.run(async (call) => {
-        const sibling = async () => {
-          await call.read(() => read)
-          await call.write(answered)
-        }
-        const refused = call.read(failingWith(notRun()))
-        const joined = call.all([refused, sibling()]).catch((error: unknown) => error)
-        await refused.catch(() => {})
-        readDone()
-        return await joined
-      })
-
-      expect(outcomeOf(failure)).toBe('may-have-run')
-    })
-
-    it("keeps 'not-run' where no step of the call wrote", async () => {
-      const failure = await BackendCall.run((call) =>
-        call.all([call.read(failingWith(notRun())), call.read(answered)]),
-      ).catch((error: unknown) => error)
-
-      expect(outcomeOf(failure)).toBe('not-run')
-    })
-
-    it('gives the values in the order of the steps', async () => {
-      let first = (_value: string) => {}
-
-      const values = await BackendCall.run((call) => {
-        const joined = call.all([
-          call.read(() => new Promise<string>((resolve) => (first = resolve))),
-          call.read(answered),
-        ])
-        first('first')
-        return joined
-      })
-
-      expect(values).toEqual(['first', 'ok'])
-    })
-
-    it('waits for every step before it tells a failure', async () => {
-      let settled = false
-      const slow = async () => {
-        await new Promise((resolve) => setTimeout(resolve, 10))
-        settled = true
-      }
-
-      await BackendCall.run((call) => call.all([call.read(failingWith(notRun())), slow()])).catch(() => {})
-
-      expect(settled).toBe(true)
-    })
-  })
-
   describe('join(): work under another account, which other calls may share', () => {
     it("tells 'may-have-run' for a later step's 'not-run' once the shared work wrote and succeeded", async () => {
       const shared = opened((account) => account.write(answered))
 
       const failure = await BackendCall.run(async (call) => {
         await call.join(shared.account, shared.done)
-        return call.read(failingWith(notRun()))
+        return failingWith(notRun())()
       }).catch((error: unknown) => error)
 
       expect(outcomeOf(failure)).toBe('may-have-run')
@@ -293,11 +235,11 @@ describe('BackendCall', () => {
     })
 
     it("keeps 'not-run' where the shared work only read", async () => {
-      const shared = opened((account) => account.read(answered))
+      const shared = opened(() => answered())
 
       const failure = await BackendCall.run(async (call) => {
         await call.join(shared.account, shared.done)
-        return call.read(failingWith(notRun()))
+        return failingWith(notRun())()
       }).catch((error: unknown) => error)
 
       expect(outcomeOf(failure)).toBe('not-run')
@@ -308,7 +250,7 @@ describe('BackendCall', () => {
       const joiner = () =>
         BackendCall.run(async (call) => {
           await call.join(shared.account, shared.done)
-          return call.read(failingWith(notRun()))
+          return failingWith(notRun())()
         }).catch((error: unknown) => error)
 
       const failures = await Promise.all([joiner(), joiner()])

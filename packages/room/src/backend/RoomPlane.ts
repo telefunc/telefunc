@@ -6,26 +6,9 @@ import {
   SharedSubscriptions,
   type BackendListener,
   type BackendSubscription,
-  type OrderingInfo,
   type SourceRules,
 } from 'telefunc/__internal'
-import type {
-  CommitOptions,
-  CommitResult,
-  CommitTarget,
-  EveryMemberLane,
-  EveryTrackLane,
-  HeadExchangeResult,
-  HeadExpectation,
-  HeadNext,
-  LaneId,
-  OperationOptions,
-  OperationResult,
-  RetainedFrame,
-  RoomDriver,
-  RoomOperation,
-  RoomSubscriptionSource,
-} from './contract.js'
+import type { EveryMemberLane, EveryTrackLane, LaneId, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { RoomStore, type RoomReads } from './RoomStore.js'
 
@@ -40,8 +23,8 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
 /** What Room's server code reaches the store by: `call(work)` for a public call, whose writes are counted in its
  *  account, and `direct` for work that tells no answer; and the lane subscriptions, shared by source and host. */
 class RoomPlane {
-  readonly driver: RoomDriver
-  /** The store with no account: background work, and a call whose only write is its last step. */
+  private readonly driver: RoomDriver
+  /** The store with no account: background work and its reads, and a call whose only write is its last step. */
   readonly direct: RoomStore
   private readonly reads: RoomReads
   private readonly subscriptions: SharedSubscriptions<RoomSubscriptionSource>
@@ -76,32 +59,6 @@ class RoomPlane {
    *  (`BackendCall.run`). */
   call<T>(work: (store: RoomStore) => Promise<T>): Promise<T> {
     return BackendCall.run((account) => work(new RoomStore(this.driver, this.reads, account)))
-  }
-
-  compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
-    return this.direct.compareExchangeHead(roomId, expected, next)
-  }
-
-  commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    return this.direct.commitLane(target, payload, opts)
-  }
-
-  runOperation<Args, Value>(
-    roomId: string,
-    inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
-    options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
-    return this.direct.runOperation(roomId, inc, operation, args, options)
-  }
-
-  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    return this.reads.readLaneOrder(roomId, inc, lane)
-  }
-
-  readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    return this.reads.readRetained(roomId, inc, lane)
   }
 
   subscribeLane(

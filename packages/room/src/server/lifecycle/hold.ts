@@ -71,7 +71,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
 /** Null once the incarnation is gone, and for a room without hold timeouts, which counts nothing. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
-  const read = await getRoomPlane().driver.readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
+  const read = await getRoomPlane().direct.reads.readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
   if (read.kind === 'stale-incarnation' || read.cells.size === 0) return null
   const counters = new Map<string, CellCounter>()
   for (const [key, raw] of read.cells) counters.set(key, decodeCellCounter(raw))
@@ -126,16 +126,16 @@ async function extendLapse(
   let known = opts?.head
   const timeout = unheldTimeout(record)
   const ttlMs = timeout === Infinity ? undefined : ROOM_LEASE_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
-  const plane = getRoomPlane()
+  const { direct } = getRoomPlane()
   await retryCompareExchange(async () => {
-    const head = known ?? (await plane.driver.readHead(id))
+    const head = known ?? (await direct.reads.readHead(id))
     known = undefined
     if (!isOpenIncarnation(head, inc)) return
     const { expiresAt } = head
     if (!firstHold && ttlMs === undefined && expiresAt === undefined) return
     const bothLapse = ttlMs !== undefined && expiresAt !== undefined
     if (!firstHold && bothLapse && expiresAt >= record.readAt + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS) return
-    const result = await plane.compareExchangeHead(
+    const result = await direct.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
       { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },

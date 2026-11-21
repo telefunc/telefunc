@@ -418,7 +418,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       await this.authority.ensureRoster()
       // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
       await withinRoomHorizon(this.lanePlan.semanticReady)
-      const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
+      const stored = await getRoomPlane().direct.reads.readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
       if (stored === null) return
       const serialized = decodeRoomText(stored.payload)
       const event = parse(serialized) as RoomDataEnvelope
@@ -452,11 +452,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     try {
       await this.authority.ensureRoster()
       await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
-      const plane = getRoomPlane()
       const lanes: LaneId[] =
         member !== EVERY_MEMBER && track !== EVERY_TRACK
           ? [{ kind: 'binary', member, track }]
-          : await plane.driver.listRetained(
+          : await getRoomPlane().direct.reads.listRetained(
               this.id,
               this.incarnation.inc,
               member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
@@ -470,7 +469,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {
     if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
-    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, lane)
+    const stored = await getRoomPlane().direct.reads.readRetained(this.id, this.incarnation.inc, lane)
     // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
     if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
     if (!this.model.hasMember(lane.member)) return

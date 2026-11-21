@@ -179,7 +179,10 @@ class AuthoritySync {
   }
 
   private async controlMark(): Promise<number> {
-    return (await getRoomPlane().readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ?? 0
+    return (
+      (await getRoomPlane().direct.reads.readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ??
+      0
+    )
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
@@ -270,7 +273,7 @@ class AuthoritySync {
   async reconcileMeta(): Promise<RoomHead | null> {
     const { id, inc } = this.incarnation
     const [head, seq] = await Promise.all([
-      getRoomPlane().driver.readHead(id),
+      getRoomPlane().direct.reads.readHead(id),
       this.model.metaWaiting ? null : readRoomMetaSeq(id, inc),
     ])
     const config = openConfig(head, inc)
