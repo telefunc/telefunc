@@ -447,3 +447,27 @@ test('a reopen whose wire is lost before its turn takes nothing from the wire th
     dying.leave()
   }
 })
+
+test('a page that knows only an id whose session the server dropped reads an end decided on its reopen under that id, though that reopen was never answered', async () => {
+  const pending = new ServerChannel<string, string>()
+  const first = wire()
+  const second = wire()
+  const third = wire()
+  try {
+    // The first wire holds only a channel not registered yet: lost, the session goes with it.
+    await first.send(reconcile({ open: [entry(pending.id, 0)] }, 1))
+    const known = first.sessionId()
+    first.lose()
+    getChannelMux().registerChannel(pending)
+    await second.send(reconcile({ sessionId: known, open: [entry(pending.id, 0)] }, 2))
+    // The server ends the session on the second wire; the page reads neither its RECONCILED nor its last word.
+    await second.send(unreadable)
+    await third.send(reconcile({ sessionId: known, open: [entry(pending.id, 0)] }, 3))
+    expect(third.hows()).toEqual(['unreadable'])
+  } finally {
+    first.leave()
+    second.leave()
+    third.leave()
+    pending.abort()
+  }
+})
