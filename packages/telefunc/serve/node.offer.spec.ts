@@ -194,6 +194,16 @@ test('a page opened after the app installed its upgrade listener is offered WebS
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
 
+test("a page opened after the app removed Telefunc's upgrade listener is offered SSE alone, and opens no WebSocket", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  app.server.removeAllListeners('upgrade')
+  const opened = webSockets.get(app.host)?.length
+  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+  expect(webSockets.get(app.host)?.length).toBe(opened)
+})
+
 test('of two apps in one process, only the one with an upgrade listener offers WebSocket', async () => {
   const a = await fetchApp()
   a.telefunc.installWebSocket(a.server)
