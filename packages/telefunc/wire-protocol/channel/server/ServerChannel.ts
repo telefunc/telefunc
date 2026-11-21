@@ -1130,10 +1130,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.answering.clear()
   }
 
-  /** @internal `MemoryHolder`: ended, it keeps only its close's own frames, no message, answer or abort, so letting go
-   *  costs its page at most the close's outcome, where the network lost them. */
+  /** @internal `MemoryHolder`: ended with its page in the close, which read the server's CLOSE or sent its own, it keeps
+   *  only its close's own frames, no message, answer or abort, so letting go costs its page at most the close's outcome,
+   *  where the network lost them. A page that never read the CLOSE learns from them alone that the channel ended. */
   letGoKept(): void {
-    if (this._phase === 'ended' && this.keepsOnlyTheClose()) this.mux?.letGoEnded(this.id)
+    if (this._phase === 'ended' && this.pageLastSeq >= this.closeRequestSeq && this.keepsOnlyTheClose())
+      this.mux?.letGoEnded(this.id)
   }
 
   /** Its page lacks nothing of it but frames of its close. */

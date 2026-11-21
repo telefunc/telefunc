@@ -103,6 +103,28 @@ for (const transport of ['sse', 'ws'] as const) {
   })
 }
 
+// A page that never read the server's CLOSE isn't in the close: what the network lost of its end is the only way it
+// learns how the channel ended, so it stays kept however short memory runs.
+for (const transport of ['sse', 'ws'] as const) {
+  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, the network lost the server's last frames with the connection, and memory runs short before the page is back`, () => {
+    test('a close that timed out with nothing before its CLOSE stays kept, and the page back reads the timed-out verdict', async () => {
+      const [channel, page] = await pair(transport)
+      network.losing = true
+      await channel.close({ timeout: 100 })
+      const connections = dropConnections()
+
+      // Holding all of `maxMemory` lets go of whatever may go; the queue then holds nothing for the rows after.
+      const queue = queueMemory()
+      const held = queue.tryHold(MAX_MEMORY)
+      queue.release()
+      connections.reconnect()
+      expect(held).toBe(false)
+
+      expect(await page.closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+    })
+  })
+}
+
 // Last: what these rows keep, their messages, stays held while their pages are away.
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, a close that timed out after the network lost its CLOSE and the messages before it`, () => {
