@@ -1,10 +1,10 @@
 // A `Room.setMeta()` that replaces a generation of more than one page: its exchange commits, then its control commit
 // and its drop of the old generation run side by side. What the store keeps when one of the two fails first, on the
 // memory store.
-// - The control commit fails while the drop waits for its second page: the call answers, and the drop hands over no
-//   delete after that. The old generation stays marked, for a later replace or the heartbeat to drop.
+// - The control commit fails while the drop waits for its second page: the call answers, and the drop, given its page
+//   only then, hands over no delete. The old generation stays marked, for a later replace or the heartbeat to drop.
 // - The drop fails first while the control commit is still in flight: the call answers once the commit settled. The
-//   update is committed and the old generation stays marked.
+//   update is committed, a subscriber of the room's control lane receives it, and the old generation stays marked.
 import { afterEach, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
@@ -17,6 +17,7 @@ import type {
 } from '../backend/contract.js'
 import { getRoomPlane } from '../backend/plane.js'
 import { Room } from '../index.js'
+import { decodeRoomRecord } from './lanes/lanes.js'
 import { META_DROP_CELL_PREFIX, roomMetaGenPrefix } from './store/cells.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -95,13 +96,12 @@ it('the control commit fails while the drop waits for its second page: no delete
     if (target.roomId !== id || target.lane.kind !== 'control')
       return await commitLane.call(this, target, payload, opts)
     await secondPage.done
-    // The drop's page comes once the commit failed, and the call answered by then where it doesn't wait for it.
-    setImmediate(release.open)
     throw refused()
   })
 
+  // The drop's page comes only once the call answered: a call that waited for the drop would never answer.
   const replaced = await outcomeOf(Room.setMeta(id, { replacement: true }))
-  await release.done
+  release.open()
   await new Promise<void>((resolve) => setImmediate(resolve))
   vi.restoreAllMocks()
 
@@ -111,8 +111,16 @@ it('the control commit fails while the drop waits for its second page: no delete
   })
 })
 
-it('the drop fails first while the control commit is in flight: the update committed, the old generation kept', async () => {
+it('the drop fails first while the control commit is in flight: the update committed and delivered, the old generation kept', async () => {
   const { id, inc } = await roomWithTwoPagesOfMeta()
+  // The seq of each meta update a subscriber of the room's control lane receives.
+  const delivered: unknown[] = []
+  const subscription = getRoomPlane().subscribeLane(id, inc, { kind: 'control' }, (payload) => {
+    const record: unknown = decodeRoomRecord(payload)
+    if (typeof record === 'object' && record !== null && '__r' in record && record.__r === 'update' && 'seq' in record)
+      delivered.push(record.seq)
+  })
+  await subscription.ready
   const dropFailed = deferred()
   const { compareExchangeCells, commitLane } = MemoryRoomDriver.prototype
   vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeCells').mockImplementation(async function (
@@ -140,14 +148,17 @@ it('the drop fails first while the control commit is in flight: the update commi
 
   const replaced = await outcomeOf(Room.setMeta(id, { replacement: true }))
   vi.restoreAllMocks()
+  subscription.unsubscribe()
 
   expect({
     replaced,
     meta: (await Room.get(id)).meta,
+    delivered,
     left: await generationZero(id, inc),
   }).toEqual({
     replaced: 'may-have-run',
     meta: { replacement: true },
+    delivered: [2],
     left: { marks: 1, cells: 1100 },
   })
 })
