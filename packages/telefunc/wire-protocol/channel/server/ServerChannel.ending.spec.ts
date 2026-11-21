@@ -162,9 +162,15 @@ function leaveRoomUnderMax(room: number): () => void {
 }
 
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
- *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire. A lossy
- *  page is behind once its oldest unconfirmed frame is older than `behindAfter` ms. */
-function overWebSocket(channels: ServerChannel[], requests: Request[] = [], behindAfter = Number.POSITIVE_INFINITY) {
+ *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire, and
+ *  `binaryOnly[index]` subscribes it to binary publishes only. A lossy page is behind once its oldest unconfirmed frame
+ *  is older than `behindAfter` ms. */
+function overWebSocket(
+  channels: ServerChannel[],
+  requests: Request[] = [],
+  behindAfter = Number.POSITIVE_INFINITY,
+  binaryOnly: boolean[] = [],
+) {
   const arrived: Uint8Array[] = []
   const receiver = new ClientPieceReceiver({ owner: { sendAck() {}, carryAck() {} } })
   // The frames of each message, as the page's WebSocket puts them back together.
@@ -200,7 +206,7 @@ function overWebSocket(channels: ServerChannel[], requests: Request[] = [], behi
     channel._onPageAttach(lastSeq, request)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
-    channel._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
+    channel._attachPeer(peer, { want: { version: 1, text: !binaryOnly[index], binary: true } })
     return peer
   }
   const peers = channels.map((channel, index) => {
@@ -468,6 +474,31 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
         open.abort()
       }
     })
+
+  test(`on a WebSocket, a ${kind} publish near the budget for an open lossy subscriber ${kind === 'text' ? 'leaves a closing binary-only one all that waits' : 'leaves a closing binary-only one its newest'}, and its close ends gracefully`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key, lossy: true })
+    const open = new ServerBroadcast<string>({ key, lossy: true })
+    const page = overWebSocket([channel, open], [], Number.POSITIVE_INFINITY, [true])
+    for (const name of ['p1', 'p2', 'p3'])
+      await Broadcast.publishBinary(key, new TextEncoder().encode(name + 'x'.repeat(600_000)))
+    const closing = channel.close()
+    const release = leaveRoom(450_000)
+    try {
+      // A publish of a kind its page didn't subscribe to replaces nothing it holds, as for an open subscriber.
+      await publish(key, 'p4' + 'x'.repeat(900_000))
+      const pageReads = await page.readAll()
+      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(
+        kind === 'text' ? ['0:p1', '0:p2', '0:p3', '0:CLOSE'] : ['0:p1', '0:p3', '0:CLOSE'],
+      )
+      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+      expect(await closing).toBeNull()
+    } finally {
+      release()
+      open.abort()
+    }
+  })
 
   for (const [near, leave] of [
     ['the budget', leaveRoom],

@@ -349,14 +349,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     else this._replayBuffer?.dropNewestPublishes(this.unhanded())
   }
 
-  /** Where `holder` is a lossy page of this publish's key, on its object, it lets go of what the publish replaces; one
-   *  that is closing, which the publish doesn't reach, of all that waits for its wire but its newest. */
+  /** Where `holder` is a lossy page of this publish's key, on its object, subscribed to its kind, it lets go of what the
+   *  publish replaces; one that is closing, which the publish doesn't reach, of all that waits for its wire but its
+   *  newest. */
   private replaceIn(holder: MemoryHolder, binary: boolean): void {
     if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
-    if (holder.takesPublish(binary ? holder.pageWant.binary : holder.pageWant.text))
-      holder.lossyPublishes.letWaitingGo()
-    else if (holder._phase === 'closing') holder.keepOnlyNewest()
+    const subscribed = binary ? holder.pageWant.binary : holder.pageWant.text
+    if (holder.takesPublish(subscribed)) holder.lossyPublishes.letWaitingGo()
+    else if (subscribed && holder._phase === 'closing') holder.keepOnlyNewest()
   }
 
   /** What waits for its wire goes but its newest. */
