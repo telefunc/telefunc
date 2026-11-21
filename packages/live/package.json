@@ -1,0 +1,149 @@
+{
+  "name": "@telefunc/live",
+  "version": "0.1.0",
+  "description": "Live database queries for Telefunc: end a Drizzle, Kysely or Prisma 8 read with `.live()`, and the client fetches it again when a write changes what it read.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/live#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/live"
+  },
+  "license": "MIT",
+  "telefunc": {
+    "server": "@telefunc/live",
+    "client": "@telefunc/live/wire"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/liveQuery.js",
+    "./dist/postgres.js",
+    "./dist/wire/server.js",
+    "./dist/wire/client.js"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "workerd": "./dist/index.js",
+      "worker": "./dist/index.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/index.js"
+    },
+    "./drizzle": {
+      "types": "./dist/drizzle.d.ts",
+      "workerd": "./dist/drizzle.js",
+      "worker": "./dist/drizzle.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/drizzle.js"
+    },
+    "./kysely": {
+      "types": "./dist/kysely.d.ts",
+      "workerd": "./dist/kysely.js",
+      "worker": "./dist/kysely.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/kysely.js"
+    },
+    "./prisma": {
+      "types": "./dist/prisma.d.ts",
+      "workerd": "./dist/prisma.js",
+      "worker": "./dist/prisma.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/prisma.js"
+    },
+    "./prisma-sqlite": {
+      "types": "./dist/prismaSqlite.d.ts",
+      "workerd": "./dist/prismaSqlite.js",
+      "worker": "./dist/prismaSqlite.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/prismaSqlite.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "workerd": "./dist/postgres.js",
+      "worker": "./dist/postgres.js",
+      "browser": "./dist/browser.js",
+      "default": "./dist/postgres.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./tanstack-query": {
+      "types": "./dist/tanstack-query.d.ts",
+      "default": "./dist/tanstack-query.js"
+    },
+    "./wire": {
+      "default": "./dist/wire/client.js"
+    }
+  },
+  "imports": {
+    "#postgres": {
+      "types": "./src/postgres/import.ts",
+      "workerd": "./dist/postgres/import.workerd.js",
+      "default": "./dist/postgres/import.js"
+    },
+    "#sqlparser": {
+      "types": "./src/sqlite/sqlparser.ts",
+      "workerd": "./dist/sqlite/sqlparser.workerd.js",
+      "default": "./dist/sqlite/sqlparser.js"
+    },
+    "#libpg-query-wasm": {
+      "types": "./src/postgres/wasm.ts",
+      "workerd": "./dist/postgres/wasm.workerd.js",
+      "default": "./dist/postgres/wasm.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && node copySqlparser.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@guanmingchiu/sqlparser-ts": "0.63.0",
+    "libpg-query": "18.2.4"
+  },
+  "peerDependencies": {
+    "@prisma/orm-postgres": ">=8.0.0-rc.23",
+    "@prisma/orm-sqlite": ">=8.0.0-rc.23",
+    "@tanstack/query-core": ">=5.40.0",
+    "drizzle-orm": ">=0.45.0",
+    "kysely": ">=0.28.0",
+    "telefunc": ">=0.3.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-socket": "0.2.19",
+    "@libsql/client": "0.18.0",
+    "@prisma/orm-postgres": "8.0.0-rc.23",
+    "@prisma/orm-sqlite": "8.0.0-rc.23",
+    "@tanstack/query-core": "^5.66.0",
+    "@types/node": "^24.0.4",
+    "@types/pg": "8.20.4",
+    "drizzle-orm": "0.45.4",
+    "kysely": "0.29.8",
+    "pg": "^8.23.1",
+    "postgres": "3.4.7",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@prisma/orm-postgres": {
+      "optional": true
+    },
+    "@prisma/orm-sqlite": {
+      "optional": true
+    },
+    "@tanstack/query-core": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    },
+    "kysely": {
+      "optional": true
+    }
+  }
+}

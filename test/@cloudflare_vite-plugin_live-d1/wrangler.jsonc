@@ -1,0 +1,23 @@
+{
+  // spellcheck-ignore
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telefunc_test_cloudflare_vite-plugin_live-d1",
+  "main": "./worker.ts",
+  "compatibility_date": "2025-08-15",
+  "durable_objects": {
+    "bindings": [
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "todos",
+      "database_id": "live-d1"
+    }
+  ]
+}

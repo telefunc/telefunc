@@ -1,0 +1,471 @@
+export { createDrizzleSqlite }
+
+import {
+  and,
+  asc,
+  between,
+  count,
+  countDistinct,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  like,
+  lt,
+  max,
+  not,
+  relations,
+  sql,
+  sum,
+} from 'drizzle-orm'
+import { except, integer, real, sqliteTable, text, union } from 'drizzle-orm/sqlite-core'
+import { liveDrizzle } from '@telefunc/live/drizzle'
+import type { OrmDriver } from './types.ts'
+
+const users = sqliteTable('users', {
+  id: integer('id').primaryKey(),
+  name: text('name').notNull(),
+  team: integer('team').notNull(),
+  nick: text('nick'),
+})
+const todos = sqliteTable('todos', {
+  id: integer('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  text: text('text').notNull(),
+  done: integer('done', { mode: 'boolean' }).notNull(),
+  priority: integer('priority').notNull(),
+  amount: real('amount').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  due: integer('due'),
+})
+const tags = sqliteTable('tags', {
+  id: integer('id').primaryKey(),
+  todoId: integer('todo_id').notNull(),
+  name: text('name').notNull(),
+})
+const deletedTodos = sqliteTable('deleted_todos', {
+  id: integer('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  todoId: integer('todo_id').notNull(),
+})
+const settings = sqliteTable('settings', {
+  id: integer('id').primaryKey(),
+  name: text('name').notNull(),
+  value: integer('value').notNull(),
+})
+const usersRelations = relations(users, ({ many }) => ({ todos: many(todos) }))
+const todosRelations = relations(todos, ({ one }) => ({
+  user: one(users, { fields: [todos.userId], references: [users.id] }),
+}))
+const schema = { users, todos, tags, usersRelations, todosRelations }
+
+const NICKS = ['ann', 'ANN', 'Bob', 'bob', 'cy', 'Dee']
+
+/** A todo with an id neither sequence reaches, so no user has it, and a tag on it; a new user owns it, as a racing
+ *  delete may have left none. `insertTaggedUser` then inserts a user with that id. Query builders, since Drizzle's D1
+ *  `batch()` can't bind a `db.run(sql)` that has parameters. */
+const orphanTag = (db: any, text: string) => [
+  db.insert(users).values({ name: text, team: 1 }),
+  db.insert(todos).values({
+    id: 1000000,
+    userId: sql`last_insert_rowid()`,
+    text,
+    done: false,
+    priority: 1,
+    amount: 1,
+    updatedAt: '2026-11-12',
+  }),
+  db.insert(tags).values({ todoId: 1000000, name: text }),
+]
+
+/** `client` is a better-sqlite3 or bun:sqlite database, a libSQL client or a D1 binding, `drizzle` the Drizzle driver
+ *  for it; `exec` runs text that may hold several statements; `named` runs a statement with named parameters;
+ *  `product`: the connection has the app's aggregate `product()`. */
+function createDrizzleSqlite(
+  client: object,
+  drizzle: (config: { client: any; schema: typeof schema }) => object,
+  {
+    exec = (text) => (client as { exec(text: string): unknown }).exec(text),
+    named,
+    product = false,
+  }: {
+    exec?: (text: string) => unknown
+    named?: (text: string, args: Record<string, unknown>) => unknown
+    product?: boolean
+  } = {},
+): OrmDriver {
+  const db = liveDrizzle(drizzle({ client, schema }) as any) as any
+  const driver: OrmDriver = {
+    reads: {
+      byUser: ({ user }) => db.select().from(todos).where(eq(todos.userId, user)).orderBy(todos.id),
+      deletedTodos: ({ user }) =>
+        db
+          .select({ todoId: deletedTodos.todoId })
+          .from(deletedTodos)
+          .where(eq(deletedTodos.userId, user))
+          .orderBy(deletedTodos.todoId),
+      recent: ({ user }) =>
+        db.select().from(todos).where(eq(todos.userId, user)).orderBy(desc(todos.updatedAt), desc(todos.id)).limit(3),
+      priorityTies: ({ user }) =>
+        db
+          .select({ id: todos.id, priority: todos.priority })
+          .from(todos)
+          .where(eq(todos.userId, user))
+          .orderBy(desc(todos.priority))
+          .limit(2),
+      firstTexts: () =>
+        db.select({ id: todos.id, text: todos.text }).from(todos).orderBy(todos.text, todos.id).limit(3),
+      textsBelow: () =>
+        db.select({ id: todos.id, text: todos.text }).from(todos).where(lt(todos.text, 'B')).orderBy(todos.id),
+      openPage: () =>
+        db
+          .select({ id: todos.id, text: todos.text })
+          .from(todos)
+          .where(eq(todos.done, false))
+          .orderBy(todos.id)
+          .limit(5)
+          .offset(3),
+      teamJoin: ({ team }) =>
+        db
+          .select({ id: todos.id, text: todos.text, name: users.name })
+          .from(todos)
+          .innerJoin(users, eq(users.id, todos.userId))
+          .where(eq(users.team, team))
+          .orderBy(todos.id),
+      userWithTodos: ({ user }) =>
+        db.query.users.findMany({ where: eq(users.id, user), with: { todos: { orderBy: asc(todos.id) } } }),
+      countByDone: ({ user }) =>
+        db
+          .select({ done: todos.done, n: count() })
+          .from(todos)
+          .where(eq(todos.userId, user))
+          .groupBy(todos.done)
+          .orderBy(todos.done),
+      // SQLite's `LIKE` ignores ASCII case: 'a%' matches 'A1' too.
+      likeIn: ({ user, user2 }) =>
+        db
+          .select()
+          .from(todos)
+          .where(and(inArray(todos.userId, [user, user2]), like(todos.text, 'a%')))
+          .orderBy(todos.id),
+      // No escape character: the backslash is one.
+      likeBackslash: () => db.select({ id: todos.id }).from(todos).where(like(todos.text, 'a\\%')).orderBy(todos.id),
+      sumAmount: ({ user }) =>
+        db
+          .select({ total: sum(todos.amount) })
+          .from(todos)
+          .where(eq(todos.userId, user)),
+      // An aggregate of the app's, defined on the connection: the catalog lists it.
+      ...(product && {
+        productOf: ({ user }: { user: number }) =>
+          db
+            .select({ product: sql`product(${todos.amount})` })
+            .from(todos)
+            .where(eq(todos.userId, user)),
+      }),
+      busyUsers: () =>
+        db
+          .select({ userId: todos.userId, n: count() })
+          .from(todos)
+          .groupBy(todos.userId)
+          .having(gt(count(), 7))
+          .orderBy(todos.userId),
+      topPriority: () =>
+        db
+          .select({ userId: todos.userId, top: max(todos.priority) })
+          .from(todos)
+          .groupBy(todos.userId)
+          .orderBy(todos.userId),
+      priorityKinds: ({ user }) =>
+        db
+          .select({ kinds: countDistinct(todos.priority) })
+          .from(todos)
+          .where(eq(todos.userId, user)),
+      todosOrTagged: ({ user }) =>
+        union(
+          db.select({ id: todos.id }).from(todos).where(eq(todos.userId, user)),
+          db.select({ id: tags.todoId }).from(tags).where(eq(tags.name, 'tag 1')),
+        ).orderBy(sql`1`),
+      untagged: ({ user }) =>
+        except(
+          db.select({ id: todos.id }).from(todos).where(eq(todos.userId, user)),
+          db.select({ id: tags.todoId }).from(tags),
+        ).orderBy(sql`1`),
+      distinctUsers: () =>
+        db.selectDistinct({ userId: todos.userId }).from(todos).where(eq(todos.done, true)).orderBy(todos.userId),
+      usersWithOpen: () =>
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            exists(
+              db
+                .select({ one: sql`1` })
+                .from(todos)
+                .where(and(eq(todos.userId, users.id), not(todos.done))),
+            ),
+          )
+          .orderBy(users.id),
+      usersByTagTodo: () =>
+        db
+          .select({ id: users.id, tag: tags.id })
+          .from(users)
+          .innerJoin(tags, eq(tags.todoId, users.id))
+          .orderBy(users.id, tags.id),
+      tagsOfUser: ({ user }) =>
+        db
+          .select({ id: tags.id, name: tags.name })
+          .from(tags)
+          .innerJoin(todos, eq(todos.id, tags.todoId))
+          .where(eq(todos.userId, user))
+          .orderBy(tags.id),
+      priorityRange: ({ low, high }) =>
+        db
+          .select({ id: todos.id })
+          .from(todos)
+          .where(between(todos.priority, low, high))
+          .orderBy(todos.id),
+      leftJoinTags: ({ user }) =>
+        db
+          .select({ id: todos.id, tag: tags.name })
+          .from(todos)
+          .leftJoin(tags, eq(tags.todoId, todos.id))
+          .where(eq(todos.userId, user))
+          .orderBy(todos.id, tags.id),
+      // `NOCASE`: 'ann' is 'ANN'.
+      nickIs: ({ low }) => db.select({ id: users.id }).from(users).where(eq(users.nick, NICKS[low]!)).orderBy(users.id),
+      nickFirst: () => db.select({ id: users.id, nick: users.nick }).from(users).orderBy(users.nick, users.id).limit(2),
+      // SQLite sorts `NULL` first.
+      dueFirst: () =>
+        db.select({ id: todos.id, due: todos.due }).from(todos).orderBy(asc(todos.due), todos.id).limit(3),
+      dueLast: () =>
+        db.select({ id: todos.id, due: todos.due }).from(todos).orderBy(desc(todos.due), todos.id).limit(3),
+      // A negative `LIMIT` is none.
+      afterThree: () => db.all(sql`select id from todos order by id limit -1 offset 3`),
+      // SQLite runs compound operators from the left, `INTERSECT` too: (a UNION b) INTERSECT c. Text, so the counts decide.
+      compound: ({ user }) =>
+        db.all(
+          sql`select text from todos where user_id = ${user} union select name from tags intersect select text from todos where done = 1 order by 1`,
+        ),
+      // A number bound to a text column compares as text: 10 as '10.0'.
+      textIsNumber: () => db.all(sql`select id from todos where text = ${10.5}`),
+      // A text bound to an integer column compares as a number.
+      priorityIsText: ({ low }) => db.all(sql`select id from todos where priority = ${String(low)} order by id`),
+      settings: () => db.select().from(settings).orderBy(settings.id),
+    },
+    writes: {
+      insertTodo: ({ user, value, text, date }) =>
+        db
+          .insert(todos)
+          .values({
+            userId: user,
+            text: value % 7 === 0 ? `a\\${text}` : text,
+            done: value % 2 === 0,
+            priority: value % 5,
+            amount: value / 10,
+            updatedAt: date.toISOString(),
+            due: value % 4 === 0 ? null : value % 10,
+          })
+          .run(),
+      updateText: ({ todo, text }) => db.update(todos).set({ text }).where(eq(todos.id, todo)).run(),
+      // 10.5 as text: what `textIsNumber` reads.
+      textOfNumber: ({ todo }) => db.update(todos).set({ text: '10.5' }).where(eq(todos.id, todo)).run(),
+      toggleDone: ({ todo }) =>
+        db
+          .update(todos)
+          .set({ done: sql`not ${todos.done}` })
+          .where(eq(todos.id, todo))
+          .run(),
+      updatePriority: ({ todo, value, date }) =>
+        db
+          .update(todos)
+          .set({ priority: value % 5, updatedAt: date.toISOString() })
+          .where(eq(todos.id, todo))
+          .run(),
+      setDue: ({ todo, value }) =>
+        db
+          .update(todos)
+          .set({ due: value % 3 === 0 ? null : value % 10 })
+          .where(eq(todos.id, todo))
+          .run(),
+      moveTodo: ({ todo, otherUser }) =>
+        db.update(todos).set({ userId: otherUser }).where(eq(todos.id, todo)).returning({ id: todos.id }).all(),
+      deleteTodo: ({ todo }) => db.delete(todos).where(eq(todos.id, todo)).run(),
+      insertTag: ({ todo, text }) => db.insert(tags).values({ todoId: todo, name: text }).run(),
+      deleteTag: ({ tag }) => db.delete(tags).where(eq(tags.id, tag)).run(),
+      renameUser: ({ user, text, value }) =>
+        db
+          .update(users)
+          .set({ name: text, team: (value % 3) + 1 })
+          .where(eq(users.id, user))
+          .run(),
+      renameNick: ({ user, value }) =>
+        db
+          .update(users)
+          .set({ nick: NICKS[value % NICKS.length] })
+          .where(eq(users.id, user))
+          .run(),
+      upsertTodo: ({ todo, user, text }) =>
+        db
+          .insert(todos)
+          .values({ id: todo, userId: user, text, done: false, priority: 0, amount: 0, updatedAt: '2026-11-11' })
+          .onConflictDoUpdate({ target: todos.id, set: { text } })
+          .run(),
+      rawBump: ({ user }) => db.run(sql`update todos set priority = priority + 1 where user_id = ${user}`),
+      // `:v` and `@v` are two parameters, both bound from `v`.
+      ...(named && {
+        namedUpdate: ({ todo, value }) =>
+          named('update todos set priority = :v, due = @v where id = $id', { v: value % 5, id: todo }),
+      }),
+      // Deletes the setting of that name, then inserts it with a new id.
+      replaceSetting: ({ value }) =>
+        db.run(sql`replace into settings (name, value) values (${`s${value % 5}`}, ${value})`),
+      insertOrIgnore: ({ user, text }) =>
+        db.run(sql`insert or ignore into users (id, name, team) values (${user}, ${text}, 1)`),
+      insertSelect: ({ user }) =>
+        db.run(
+          sql`insert into tags (todo_id, name) select id, 'copied' from todos where user_id = ${user} order by id limit 1`,
+        ),
+      deleteUser: ({ user }) => db.delete(users).where(eq(users.id, user)).run(),
+      insertOrphanTag: ({ text }) =>
+        db.transaction((tx: any) => {
+          for (const insert of orphanTag(tx, text)) insert.run()
+        }),
+      // A user with the id some tags' `todo_id` holds: it joins rows of `usersByTagTodo` as it's inserted.
+      insertTaggedUser: ({ text }) =>
+        db.run(
+          sql`insert into users (id, name, team) select g.todo_id, ${text}, 1 from tags g where not exists (select 1 from users u where u.id = g.todo_id) order by g.todo_id desc limit 1`,
+        ),
+      // Two statements in one text: run as written.
+      deleteUserRaw: ({ user }) => exec(`delete from users where id = ${Number(user)}; select 1`),
+      insertUser: ({ text, value }) =>
+        db
+          .insert(users)
+          .values({ name: text, team: (value % 3) + 1, nick: NICKS[value % NICKS.length] })
+          .run(),
+      txCommit: ({ todo, user, text }) =>
+        db.transaction((tx: any) => {
+          tx.insert(todos)
+            .values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+            .run()
+          tx.update(todos).set({ done: true }).where(eq(todos.id, todo)).run()
+        }),
+      txRollback: ({ user, text }) => {
+        try {
+          db.transaction((tx: any) => {
+            tx.insert(todos)
+              .values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+              .run()
+            tx.rollback()
+          })
+        } catch {}
+      },
+      savepointRollback: ({ todo, user, text }) =>
+        db.transaction((tx: any) => {
+          tx.update(todos).set({ text }).where(eq(todos.id, todo)).run()
+          try {
+            tx.transaction((inner: any) => {
+              inner
+                .insert(todos)
+                .values({ userId: user, text: `${text}!`, done: false, priority: 1, amount: 1, updatedAt: '2026' })
+                .run()
+              inner.rollback()
+            })
+          } catch {}
+        }),
+      // A statement that fails in a transaction undoes only itself: the transaction commits the rest.
+      txFailedStatement: ({ todo, value }) =>
+        db.transaction((tx: any) => {
+          tx.update(todos)
+            .set({ priority: value % 5 })
+            .where(eq(todos.id, todo))
+            .run()
+          try {
+            tx.run(sql`insert into users (id, name, team) values (1, 'taken', 1)`)
+          } catch {}
+        }),
+    },
+    liveRead: () => db.select().from(todos).where(eq(todos.userId, 1)).live(),
+    async close() {},
+  }
+  if (!db.batch) return driver
+  return 'executeMultiple' in client
+    ? withAsyncTransactions(withBatches(driver, db), driver, db)
+    : withBatches(driver, db)
+}
+
+/** libSQL's transactions are asynchronous: the same writes, awaited. Its batches stay, under names of their own. */
+function withAsyncTransactions(batches: OrmDriver, driver: OrmDriver, db: any): OrmDriver {
+  const {
+    txCommit: batchCommit,
+    txRollback: batchRollback,
+    ...writes
+  } = batches.writes as Required<OrmDriver['writes']>
+  const newTodo = (tx: any, user: number, text: string) =>
+    tx.insert(todos).values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+  return {
+    ...driver,
+    writes: {
+      ...writes,
+      batchCommit,
+      batchRollback,
+      txCommit: ({ todo, user, text }) =>
+        db.transaction(async (tx: any) => {
+          await newTodo(tx, user, text)
+          await tx.update(todos).set({ done: true }).where(eq(todos.id, todo))
+        }),
+      txRollback: ({ user, text }) =>
+        db
+          .transaction(async (tx: any) => {
+            await newTodo(tx, user, text)
+            tx.rollback()
+          })
+          .catch(() => {}),
+      savepointRollback: ({ todo, user, text }) =>
+        db.transaction(async (tx: any) => {
+          await tx.update(todos).set({ text }).where(eq(todos.id, todo))
+          await tx
+            .transaction(async (inner: any) => {
+              await newTodo(inner, user, `${text}!`)
+              inner.rollback()
+            })
+            .catch(() => {})
+        }),
+      // A statement that fails in a transaction undoes only itself: the transaction commits the rest.
+      txFailedStatement: ({ todo, value }) =>
+        db.transaction(async (tx: any) => {
+          await tx
+            .update(todos)
+            .set({ priority: value % 5 })
+            .where(eq(todos.id, todo))
+          await tx.run(sql`insert into users (id, name, team) values (1, 'taken', 1)`).catch(() => {})
+        }),
+    },
+  }
+}
+
+/** D1 refuses `BEGIN`: its transaction is a `batch()`, which commits whole or not at all. */
+function withBatches(driver: OrmDriver, db: any): OrmDriver {
+  const { txCommit, txRollback, savepointRollback, txFailedStatement, ...writes } = driver.writes
+  const newTodo = (user: number, text: string) =>
+    db.insert(todos).values({ userId: user, text, done: false, priority: 1, amount: 1, updatedAt: '2026-11-12' })
+  return {
+    ...driver,
+    writes: {
+      ...writes,
+      txCommit: ({ todo, user, text }) =>
+        db.batch([newTodo(user, text), db.update(todos).set({ done: true }).where(eq(todos.id, todo))]),
+      insertOrphanTag: ({ text }) => db.batch(orphanTag(db, text)),
+      // The second statement always fails (`name` is `NOT NULL`): the batch is refused, and the first undone with it.
+      txRollback: async ({ user, text }) => {
+        try {
+          await db.batch([newTodo(user, text), db.run(sql`insert into users (name, team) values (null, 1)`)])
+        } catch {
+          return
+        }
+        throw new Error('A batch committed although one of its statements failed')
+      },
+    },
+  }
+}
