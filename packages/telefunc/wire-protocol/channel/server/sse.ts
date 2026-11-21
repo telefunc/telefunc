@@ -305,8 +305,8 @@ class SseServerTransport {
           return await this.handleBatchPost(connId, reader)
       }
     } catch (err) {
-      // A typed protocol-input fault is the client's: refused, quietly. Anything else is our bug — rethrow so the request
-      // pipeline (`runTelefunc`) logs it and masks it as a 500.
+      // A body that ends mid-frame or a frame over the limit is the client's: refused, quietly. Anything else is our bug
+      // — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
       const fault = faultOf(err)
       if (fault === null) throw err
@@ -575,17 +575,16 @@ function parseMetadata(raw: string): SseRequestMetadata {
 }
 
 /** The fault a failed read of a request's frames is: an over-limit frame is read no further than its header, so the
- *  request's frames after it go unread, and its channel, named by that header, ends; a body the server can't read as
- *  frames ends the session. Null for any other failure. */
+ *  request's frames after it go unread, and its channel, named by that header, ends. Null for any other failure: a
+ *  frame the server can't take is the mux's to decide, so what else fails is the server's bug. */
 function faultOf(err: unknown): Fault | null {
-  if (err instanceof OversizeFrameError) {
-    return { scope: 'channel', ix: channelOf(err.head), cause: 'frameOverLimit', wire: 'loss' }
-  }
-  return isProtocolViolationError(err) ? { scope: 'session', cause: 'unreadable' } : null
+  return err instanceof OversizeFrameError
+    ? { scope: 'channel', ix: channelOf(err.head), cause: 'frameOverLimit', wire: 'loss' }
+    : null
 }
 
 function reportDispatchBug(err: unknown): void {
-  if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) return
+  if (err instanceof OversizeFrameError || err instanceof StreamTruncatedError) return
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 

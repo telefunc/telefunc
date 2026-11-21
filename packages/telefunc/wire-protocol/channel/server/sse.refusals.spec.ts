@@ -18,6 +18,7 @@ import { base64urlToUint8Array } from '../../wire/base64url.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
 import { ERROR_REASON, decode, encode, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
+import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './ChannelMux.js'
 import { END_CAUSE } from '../endCause.js'
@@ -252,4 +253,21 @@ test('a streaming upload whose wire closes under it is answered `retry` at the f
   expect(answered.statusCode).toBe(400)
   expect(answered.contentType).toMatch(refusal('retry'))
   expect(got).toEqual([])
+})
+
+test("a body whose source fails with Telefunc's own protocol error is the server's bug: the request throws, and the session's channels live on", async () => {
+  const { connId, opened, channel } = await openWire()
+  let ended = false
+  channel.onClose(() => void (ended = true))
+  let pulls = 0
+  const failing = new ReadableStream<Uint8Array>({
+    pull: (controller) => {
+      if (++pulls === 1) controller.enqueue(encodeSseRequestMetadata({ connId }))
+      else controller.error(new ProtocolViolationError('a source that fails so'))
+    },
+  })
+  await expect(post(failing)).rejects.toThrow('a source that fails so')
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  expect(ended).toBe(false)
+  await cancel(opened)
 })
