@@ -26,7 +26,7 @@ import { reapLeases } from './lease.js'
 type Roster = { members: MemberSnapshot[] }
 
 /** Live members, read again after a lapsed lease's were removed; its reads and writes are steps of `call`. */
-async function reapAndReadRoster(room: RoomIncarnation, call = new BackendCall()): Promise<Roster> {
+async function reapAndReadRoster(room: RoomIncarnation, call: BackendCall): Promise<Roster> {
   const [leases, roster] = await Promise.all([
     call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
     call.read(() => readRoster(room)),
@@ -64,7 +64,7 @@ function* memberRecords(cells: ReadonlyMap<string, Uint8Array>): Generator<reado
 async function reapAndReadMembersById(
   room: RoomIncarnation,
   ids: string[],
-  call = new BackendCall(),
+  call: BackendCall,
 ): Promise<MemberSnapshot[]> {
   const [leases, members] = await Promise.all([
     call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
@@ -120,7 +120,7 @@ function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantM
 }
 
 /** Read again after a lapsed lease's members were removed; its reads and writes are steps of `call`. */
-async function reapAndCountPresence(room: RoomIncarnation, call = new BackendCall()): Promise<number> {
+async function reapAndCountPresence(room: RoomIncarnation, call: BackendCall): Promise<number> {
   const [leases, count] = await Promise.all([
     call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
     call.read(() => countPresence(room)),
@@ -142,7 +142,7 @@ async function countPresence(room: RoomIncarnation): Promise<number> {
 async function reapAndResolveIdentity(
   room: RoomIncarnation,
   identity: string,
-  call = new BackendCall(),
+  call: BackendCall,
 ): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
   const markers = await call.read(() => readPrefix(room.id, room.inc, prefix))

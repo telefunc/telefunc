@@ -97,17 +97,18 @@ async function joinMember(
 
 /** Removes a member with its leave; false once it was gone. */
 async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
-  const call = new BackendCall()
-  try {
-    const left = await call.write(() =>
-      runOperation(room, LEAVE, { id, cause: leaveCauseToWire(cause), hold: room.hold }),
-    )
-    if (left.value === null) return false
-    afterHoldChange(room, holdDelta(left.value.hidden ? null : room.hold, -1).after(left.counters))
-    return true
-  } catch (error) {
-    // A room that closed under the eviction ended the member with everyone else.
-    if (!isOpenIncarnation(await call.read(() => getRoomPlane().driver.readHead(room.id)), room.inc)) return true
-    throw error
-  }
+  return await BackendCall.run(async (call) => {
+    try {
+      const left = await call.write(() =>
+        runOperation(room, LEAVE, { id, cause: leaveCauseToWire(cause), hold: room.hold }),
+      )
+      if (left.value === null) return false
+      afterHoldChange(room, holdDelta(left.value.hidden ? null : room.hold, -1).after(left.counters))
+      return true
+    } catch (error) {
+      // A room that closed under the eviction ended the member with everyone else.
+      if (!isOpenIncarnation(await call.read(() => getRoomPlane().driver.readHead(room.id)), room.inc)) return true
+      throw error
+    }
+  })
 }

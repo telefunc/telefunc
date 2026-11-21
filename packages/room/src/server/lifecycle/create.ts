@@ -29,7 +29,7 @@ type Refusal = { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 async function tryCreateRoom(
   id: string,
   options: RoomOptions | undefined,
-  call = new BackendCall(),
+  call: BackendCall,
 ): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const plane = getRoomPlane()

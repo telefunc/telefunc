@@ -1,6 +1,7 @@
 export { AuthoritySync }
 export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 
+import { assert } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { BackendCall, createDeferred, unrefTimer } from 'telefunc/__internal'
@@ -199,8 +200,13 @@ class AuthoritySync {
 
   private refresh(): Refresh {
     if (this.pendingRefresh === null) {
-      const call = new BackendCall()
-      this.pendingRefresh = { call, done: this.refreshOnce(call) }
+      let account: BackendCall | undefined
+      const done = BackendCall.run((call) => {
+        account = call
+        return this.refreshOnce(call)
+      })
+      assert(account !== undefined) // `run()` hands its work the account before it awaits anything
+      this.pendingRefresh = { call: account, done }
     }
     return this.pendingRefresh
   }

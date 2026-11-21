@@ -112,22 +112,24 @@ class Admissions {
       admission.assertLive(this.model)
       // The member's record and its join event are one write, so its leave always follows its join. Not sent once the
       // admission was abandoned, whose own error it then rejects with.
-      const call = new BackendCall()
-      await call
-        .write(() =>
-          joinMember(
-            this.replica.incarnation,
-            this.hosting.lease,
-            { id, record, meta, join },
-            { inbox, wanted: () => !admission.abandoned },
-          ),
-        )
-        .catch((error: unknown) => {
-          admission.assertLive(this.model)
-          throw error
-        })
-      // An inbox that fails after the join was written tells the join may have run, though the member is then evicted.
-      await call.read(() => inbox.ready)
+      await BackendCall.run(async (call) => {
+        await call
+          .write(() =>
+            joinMember(
+              this.replica.incarnation,
+              this.hosting.lease,
+              { id, record, meta, join },
+              { inbox, wanted: () => !admission.abandoned },
+            ),
+          )
+          .catch((error: unknown) => {
+            admission.assertLive(this.model)
+            throw error
+          })
+        // An inbox that fails after the join was written tells the join may have run, though the member is then
+        // evicted.
+        await call.read(() => inbox.ready)
+      })
       admission.assertLive(this.model)
       admission.commit()
       this.underWay.delete(id)

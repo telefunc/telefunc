@@ -36,7 +36,7 @@ async function repairRoomIndex(
   id: string,
   listedInc: string,
   head: RoomHead | null,
-  call = new BackendCall(),
+  call: BackendCall,
 ): Promise<void> {
   if (head?.currentInc === listedInc) return
   await call.write(() => plane.driver.dropIncarnation(id, listedInc))
@@ -70,6 +70,6 @@ async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
 
 async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
   const head = await plane.driver.readHead(roomId)
-  if (head?.currentInc !== incTag) await repairRoomIndex(plane, roomId, incTag, head)
+  if (head?.currentInc !== incTag) await BackendCall.run((call) => repairRoomIndex(plane, roomId, incTag, head, call))
   else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
 }

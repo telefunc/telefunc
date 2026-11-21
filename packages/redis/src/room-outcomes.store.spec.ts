@@ -11,6 +11,8 @@
 //   refused: they may have run, as the reap wrote.
 // - `Room.get()` of a room this process holds a view of, whose catch-up reaped a lapsed lease of another server and
 //   was then refused: it may have run, as the reap wrote.
+// - A call whose reap of a lapsed lease is refused while it still removes the lease's views rejects only once those
+//   removals ended: the store doesn't change after the rejection.
 import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
@@ -291,6 +293,57 @@ describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up re
       expect({ refused, reaped }).toMatchObject({
         refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
         reaped: { lease: 0, member: 0 },
+      })
+    }, 60_000)
+  }
+})
+
+/** The incarnation's cells of room `id` and the lease that hosts `member`, as the store holds them. */
+async function hostingLease(admin: Redis, id: string, member: string): Promise<{ values: string; lease: string }> {
+  const [values] = await admin.keys(`tf:0:room:{${id}}:g:*:values`)
+  if (values === undefined) throw new Error(`room ${id} has no cells`)
+  const mark = (await admin.hkeys(values)).find((key) => key.startsWith('sm:') && key.endsWith(`:${member}`))
+  const lease = mark?.split(':')[1]
+  if (lease === undefined) throw new Error(`no lease hosts ${member}`)
+  return { values, lease }
+}
+
+describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the reap still writes', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: rejects once every write it started ended`, async () => {
+      const admin = await reached(store)
+      const room = await Room.create(`drained-${i}`)
+      const member = await joinedByAnotherServer(String(admin.options.host), room.id)
+      const { values, lease } = await hostingLease(admin, room.id, member)
+      const incarnation = values.slice(0, -':values'.length)
+      // The other server's pages held more views than a reap removes at once, each counted in the room's holds.
+      const views = Array.from({ length: 300 }, (_, n) => `v:${lease}:view-${n}`)
+      for (const view of views) {
+        await admin.zadd(`${incarnation}:cells`, 0, view)
+        await admin.hset(values, view, '')
+        await admin.hset(`${incarnation}:versions`, view, '1')
+      }
+      const holds = (await admin.hget(values, 'holds')) ?? ''
+      const held = /"value":(\d+)/.exec(holds)?.[1]
+      if (held === undefined) throw new Error(`room ${room.id} counts no holds`)
+      await admin.hset(values, 'holds', holds.replace(/"value":\d+/, `"value":${Number(held) + views.length}`))
+      await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+      // The store refuses the read that plans the member's removal; the views' removals go on beside it.
+      await admin.call('ACL', 'SETUSER', 'telefunc', '-hkeys')
+      const refused = await Room.getParticipants(room.id).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      const atRejection = await snapshot(admin)
+      await sleep(2_000)
+      const unchanged = isDeepStrictEqual(await snapshot(admin), atRejection)
+      const viewsLeft = (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length
+      admin.disconnect()
+
+      expect({ refused, unchanged, viewsLeft }).toMatchObject({
+        refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
+        unchanged: true,
+        viewsLeft: 0,
       })
     }, 60_000)
   }

@@ -411,25 +411,26 @@ class RedisRoomDriver implements RoomDriver {
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
     // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
     const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
-    const call = new BackendCall()
-    let cursor = '0'
-    let unlinking: Promise<unknown> | undefined
-    do {
-      // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
-      const [[next, keys]] = await Promise.all([
-        call.read(() =>
-          this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
-        ),
-        unlinking,
-      ])
-      cursor = next
-      unlinking =
-        keys.length > 0
-          ? call.write(() => this.connection.send('unlink', (client) => client.unlink(...keys)))
-          : undefined
-    } while (cursor !== '0')
-    await unlinking
-    await call.write(() => this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc }))
+    await BackendCall.run(async (call) => {
+      let cursor = '0'
+      let unlinking: Promise<unknown> | undefined
+      do {
+        // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
+        const [[next, keys]] = await Promise.all([
+          call.read(() =>
+            this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
+          ),
+          unlinking,
+        ])
+        cursor = next
+        unlinking =
+          keys.length > 0
+            ? call.write(() => this.connection.send('unlink', (client) => client.unlink(...keys)))
+            : undefined
+      } while (cursor !== '0')
+      await unlinking
+      await call.write(() => this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc }))
+    })
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {

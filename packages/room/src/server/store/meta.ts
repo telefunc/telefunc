@@ -209,50 +209,53 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
 async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: RoomMetaWrite): Promise<void> {
   const { inc } = config
   const plane = getRoomPlane()
-  const call = new BackendCall()
-  const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof EXCHANGE_CONFLICT> => {
-    const read = await call.read(() => readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY]))
-    const seq = read.cells.get(META_SEQ_CELL_KEY)
-    if (seq === undefined) {
-      const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
-      const prefix = roomMetaGenPrefix(0)
-      const result = await call.write(() =>
-        plane.driver.compareExchangeCells(roomId, inc, {
-          expect: [{ key: META_SEQ_CELL_KEY, version: null }],
-          mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
-          counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
-        }),
-      )
-      return committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
-    }
-    const counts = [{ key: META_SEQ_CELL_KEY, delta: 1 }]
-    const expect = [{ key: META_GEN_CELL_KEY, version: read.versions.get(META_GEN_CELL_KEY)! }]
-    const count = decodeCellCounter(seq).value
-    const gen = decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!)
-    if ('replace' in write) {
-      const meta = metaEntriesAt(write.replace, count)
-      const prefix = roomMetaGenPrefix(count)
-      const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
-      const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
+  await BackendCall.run(async (call) => {
+    const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof EXCHANGE_CONFLICT> => {
+      const read = await call.read(() => readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY]))
+      const seq = read.cells.get(META_SEQ_CELL_KEY)
+      if (seq === undefined) {
+        const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
+        const prefix = roomMetaGenPrefix(0)
+        const result = await call.write(() =>
+          plane.driver.compareExchangeCells(roomId, inc, {
+            expect: [{ key: META_SEQ_CELL_KEY, version: null }],
+            mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
+            counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
+          }),
+        )
+        return committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
+      }
+      const counts = [{ key: META_SEQ_CELL_KEY, delta: 1 }]
+      const expect = [{ key: META_GEN_CELL_KEY, version: read.versions.get(META_GEN_CELL_KEY)! }]
+      const count = decodeCellCounter(seq).value
+      const gen = decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!)
+      if ('replace' in write) {
+        const meta = metaEntriesAt(write.replace, count)
+        const prefix = roomMetaGenPrefix(count)
+        const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
+        const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
+        const result = await call.write(() =>
+          plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts }),
+        )
+        return result.kind === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
+      }
+      const prefix = roomMetaGenPrefix(gen)
+      const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
+      const merging = keys.length === 0 ? new Map() : (await call.read(() => readOpenCells(roomId, inc, keys))).cells
+      const changes = metaChanges(write.merge, prefix, count, merging)
+      const mutations = changes.map((change) => changeMutation(prefix, change))
       const result = await call.write(() =>
         plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts }),
       )
-      return result.kind === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
-    }
-    const prefix = roomMetaGenPrefix(gen)
-    const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-    const merging = keys.length === 0 ? new Map() : (await call.read(() => readOpenCells(roomId, inc, keys))).cells
-    const changes = metaChanges(write.merge, prefix, count, merging)
-    const mutations = changes.map((change) => changeMutation(prefix, change))
-    const result = await call.write(() => plane.driver.compareExchangeCells(roomId, inc, { expect, mutations, counts }))
-    return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
+      return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
+    })
+    if (update === null) return
+    const [commit] = await Promise.all([
+      call.write(() => commitLane(controlLane(roomId, inc), encodeRoomRecord(update))),
+      'replace' in write && call.write(() => dropReplacedMetaGenerations(roomId, inc)),
+    ])
+    acceptedOrThrow(roomId, commit)
   })
-  if (update === null) return
-  const [commit] = await Promise.all([
-    call.write(() => commitLane(controlLane(roomId, inc), encodeRoomRecord(update))),
-    'replace' in write && call.write(() => dropReplacedMetaGenerations(roomId, inc)),
-  ])
-  acceptedOrThrow(roomId, commit)
 }
 
 /** The update a committed exchange made, at the `meta:seq` it left. */
@@ -271,9 +274,8 @@ function committed(
  *  mark, a later replace or the heartbeat, drops no live key. */
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
   const plane = getRoomPlane()
-  const call = new BackendCall()
   // A page read that fails after a page's delete fails the drop as the delete may have.
-  await call.read(async () => {
+  await BackendCall.run(async (call) => {
     const marks = await plane.driver.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
     if (marks.kind === 'stale-incarnation') return
     const slice = new Slice()

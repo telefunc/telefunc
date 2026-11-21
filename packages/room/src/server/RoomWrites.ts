@@ -251,28 +251,29 @@ class RoomWrites {
   ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     // One account of the call's writes: the reap that finding the recipient may do, and the send.
-    const call = new BackendCall()
-    const target = await this.resolveMember(to, call)
-    if (!target) throw participantGoneError(to)
-    const sender = this.memberSender(from)
-    const stamp = this.stampedSender(from, sender)
-    const onBeforeSend = this.owner.guards?.onBeforeSend
-    if (onBeforeSend) await onBeforeSend(sender, target, data)
-    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
-    if (ackId) envelope.ackId = ackId
-    if (field !== undefined) envelope.field = field
-    const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-    const committed = await call.write(() =>
-      commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
-        requiredCellKeys,
-      }),
-    )
-    const receipt = acceptedOrThrow(this.incarnation.id, committed)
-    if (receipt.lost !== undefined) throw messageLostError()
-    const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
-    const onAfterSend = this.owner.guards?.onAfterSend
-    if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
-    return info
+    return await BackendCall.run(async (call) => {
+      const target = await this.resolveMember(to, call)
+      if (!target) throw participantGoneError(to)
+      const sender = this.memberSender(from)
+      const stamp = this.stampedSender(from, sender)
+      const onBeforeSend = this.owner.guards?.onBeforeSend
+      if (onBeforeSend) await onBeforeSend(sender, target, data)
+      const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
+      if (ackId) envelope.ackId = ackId
+      if (field !== undefined) envelope.field = field
+      const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
+      const committed = await call.write(() =>
+        commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
+          requiredCellKeys,
+        }),
+      )
+      const receipt = acceptedOrThrow(this.incarnation.id, committed)
+      if (receipt.lost !== undefined) throw messageLostError()
+      const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
+      const onAfterSend = this.owner.guards?.onAfterSend
+      if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
+      return info
+    })
   }
 
   /** A sender that left had its wait failed by its leave; only a closed room is an error. */

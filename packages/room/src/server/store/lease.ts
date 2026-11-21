@@ -204,12 +204,13 @@ async function renewLease(room: RoomIncarnation, lease: RoomLease): Promise<bool
 /** Claims each lapsed lease and removes what it hosted: its members, each leaving `'disconnected'`, and its pages'
  *  views; then the lease. A claim lapses as a lease does, so a claimant that stops leaves the rest to the next. */
 async function reapLapsedLeases(room: RoomIncarnation): Promise<void> {
-  await reapLeases(room, await readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX))
+  const leases = await readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)
+  await BackendCall.run((call) => reapLeases(room, leases, call))
 }
 
 /** False once none of the leases read had lapsed. Each reap is a write of `call`, which a read that found none lapsed
  *  doesn't mark as having written. */
-async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt, call = new BackendCall()): Promise<boolean> {
+async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt, call: BackendCall): Promise<boolean> {
   const lapsed = Array.from(cells.keys()).filter((key) => decodeLeaseRecord(cells.get(key)!).until < now)
   const cleaner = crypto.randomUUID()
   // The first lease's failure, told once every reap ended: one that went through may have come before it.
@@ -218,15 +219,15 @@ async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt, call =
 }
 
 async function reapLease(room: RoomIncarnation, key: string, cleaner: string): Promise<void> {
-  const call = new BackendCall()
-  const { value: claimed } = await call.write(() => runOperation(room, CLAIM_LEASE, { key, cleaner }))
-  if (claimed) await call.write(() => cleanLease(room, key.slice(LEASE_CELL_PREFIX.length), cleaner))
+  await BackendCall.run(async (call) => {
+    const { value: claimed } = await call.write(() => runOperation(room, CLAIM_LEASE, { key, cleaner }))
+    if (claimed) await call.write(() => cleanLease(room, key.slice(LEASE_CELL_PREFIX.length), cleaner))
+  })
 }
 
 async function evictLeaseMembers(room: RoomIncarnation, lease: string): Promise<void> {
   const marks = await readPrefix(room.id, room.inc, leaseMemberCellPrefix(lease))
-  const call = new BackendCall()
-  await call.read(() =>
+  await BackendCall.run((call) =>
     eachInFlight(marks.keys(), (key) =>
       call.write(() => evictMember(room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' })),
     ),
@@ -235,12 +236,15 @@ async function evictLeaseMembers(room: RoomIncarnation, lease: string): Promise<
 
 async function removeLeaseViews(room: RoomIncarnation, lease: string): Promise<void> {
   const views = await readPrefix(room.id, room.inc, leaseViewCellPrefix(lease))
-  const call = new BackendCall()
-  await call.read(() => eachInFlight(views.keys(), (key) => call.write(() => removeView(room, key))))
+  await BackendCall.run((call) => eachInFlight(views.keys(), (key) => call.write(() => removeView(room, key))))
 }
 
 async function cleanLease(room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
-  const call = new BackendCall()
-  await Promise.all([call.write(() => evictLeaseMembers(room, lease)), call.write(() => removeLeaseViews(room, lease))])
-  await call.write(() => runOperation(room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner }))
+  await BackendCall.run(async (call) => {
+    await Promise.all([
+      call.write(() => evictLeaseMembers(room, lease)),
+      call.write(() => removeLeaseViews(room, lease)),
+    ])
+    await call.write(() => runOperation(room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner }))
+  })
 }

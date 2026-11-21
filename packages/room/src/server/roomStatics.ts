@@ -146,7 +146,7 @@ function roomNotFoundError(id: string): RoomError {
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const result = await tryCreateRoom(id, options)
+  const result = await BackendCall.run((call) => tryCreateRoom(id, options, call))
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
   if (result.kind !== 'created') throw new RoomError(`Room already exists: ${id}`)
   return result.room
@@ -155,10 +155,11 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
   // One account of the call's writes: the reap of a lapsed lease that opening the room may do.
-  const call = new BackendCall()
-  const room = await openRoom(await call.read(() => requireRoom(id)), call)
-  await call.read(() => applyGetOptions(room, options))
-  return room
+  return await BackendCall.run(async (call) => {
+    const room = await openRoom(await call.read(() => requireRoom(id)), call)
+    await call.read(() => applyGetOptions(room, options))
+    return room
+  })
 }
 
 async function applyGetOptions(room: ServerRoom, { tail }: RoomGetOptions = {}): Promise<void> {
@@ -191,12 +192,13 @@ async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOption
   const { tail, ...roomOptions } = options ?? {}
   // One account of the call's writes: the create's, or a cleanup it did before it found the room open, and the reap
   // that opening the room may do.
-  const call = new BackendCall()
-  const result = await tryCreateRoom(id, roomOptions, call)
-  if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) }, call)
-  await call.read(() => applyGetOptions(room, { tail }))
-  return room
+  return await BackendCall.run(async (call) => {
+    const result = await tryCreateRoom(id, roomOptions, call)
+    if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
+    const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) }, call)
+    await call.read(() => applyGetOptions(room, { tail }))
+    return room
+  })
 }
 
 /** A room's guards and after-hooks, typed by its participants' meta. */
@@ -261,20 +263,21 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   const plane = getRoomPlane()
   // One account of the call's writes, over every page: a step that fails once a cleanup of a lapsed room or lease was
   // handed over may have run.
-  const call = new BackendCall()
-  const rooms: RoomInfo[] = []
-  let cursor: string | undefined
-  do {
-    const page = await call.read(() => plane.driver.directoryList(options?.prefix ?? '', cursor))
-    cursor = page.cursor
-    // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
-    for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
-      const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
-      const listed = await call.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, call, roomId, incTag)))
-      for (const info of listed) if (info !== null) rooms.push(info)
-    }
-  } while (cursor !== undefined)
-  return rooms
+  return await BackendCall.run(async (call) => {
+    const rooms: RoomInfo[] = []
+    let cursor: string | undefined
+    do {
+      const page = await call.read(() => plane.driver.directoryList(options?.prefix ?? '', cursor))
+      cursor = page.cursor
+      // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
+      for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
+        const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
+        const listed = await call.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, call, roomId, incTag)))
+        for (const info of listed) if (info !== null) rooms.push(info)
+      }
+    } while (cursor !== undefined)
+    return rooms
+  })
 }
 
 /** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. Its
@@ -367,30 +370,30 @@ async function resolveParticipantRef(
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
   // One account of the call's writes: the reap that finding the participant may do, and the evictions.
-  const call = new BackendCall()
-  const incarnation = await call.read(() => findRoom(id))
-  if (incarnation === null) {
-    // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
-    if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
-    assertParticipantIdentity(target.identity, 'The participant ref { identity }')
-    return
-  }
-  const members = await resolveParticipantRef(incarnation, target, call)
-  const cause = removedCause(target.reason)
-  // Each eviction goes on after another failed, so the failure is told once every one settled.
-  await call.read(() => eachInFlight(members, (member) => call.write(() => evictMember(incarnation, member.id, cause))))
+  await BackendCall.run(async (call) => {
+    const incarnation = await call.read(() => findRoom(id))
+    if (incarnation === null) {
+      // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
+      if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
+      assertParticipantIdentity(target.identity, 'The participant ref { identity }')
+      return
+    }
+    const members = await resolveParticipantRef(incarnation, target, call)
+    const cause = removedCause(target.reason)
+    // Each eviction goes on after another failed, so the failure is told once every one settled.
+    await eachInFlight(members, (member) => call.write(() => evictMember(incarnation, member.id, cause)))
+  })
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
-  const incarnation = await requireRoom(id)
-  let members: MemberSnapshot[]
-  if (target === undefined) {
-    members = (await reapAndReadRoster(incarnation)).members
-  } else {
+  // One account of the call's writes: the reap of a lapsed lease that reading the members may do.
+  const members = await BackendCall.run(async (call) => {
+    const incarnation = await call.read(() => requireRoom(id))
+    if (target === undefined) return (await reapAndReadRoster(incarnation, call)).members
     assertUsage(isObject(target), 'Room.getParticipants() target should be { identity }')
     assertParticipantIdentity(target.identity, 'Room.getParticipants() target identity')
-    members = await reapAndResolveIdentity(incarnation, target.identity)
-  }
+    return await reapAndResolveIdentity(incarnation, target.identity, call)
+  })
   return members
     .filter((member) => !member.hidden)
     .map((member) => ({
@@ -419,21 +422,20 @@ async function sendToParticipant(
 ): Promise<RoomSendReceipt | RoomSendReceipt[]> {
   const message = ownMessage(data)
   // One account of the call's writes: the reap that finding the participant may do, and the sends.
-  const call = new BackendCall()
-  const incarnation = await call.read(() => requireRoom(id))
-  const members = await resolveParticipantRef(incarnation, target, call)
-  if ('id' in target)
-    return deliveredOrThrow(id, await call.write(() => sendDm(id, incarnation.inc, target.id, message)))
-  const receipts: RoomSendReceipt[] = []
-  // Each send goes on after another failed, so the failure is told once every one settled.
-  await call.read(() =>
-    eachInFlight(members, async (member) => {
+  return await BackendCall.run(async (call) => {
+    const incarnation = await call.read(() => requireRoom(id))
+    const members = await resolveParticipantRef(incarnation, target, call)
+    if ('id' in target)
+      return deliveredOrThrow(id, await call.write(() => sendDm(id, incarnation.inc, target.id, message)))
+    const receipts: RoomSendReceipt[] = []
+    // Each send goes on after another failed, so the failure is told once every one settled.
+    await eachInFlight(members, async (member) => {
       const commit = await call.write(() => sendDm(id, incarnation.inc, member.id, message))
       // A tab that left since the user's tabs were read is skipped: the others still get the message.
       if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
-    }),
-  )
-  return receipts
+    })
+    return receipts
+  })
 }
 
 async function sendDm(id: string, inc: string, member: string, message: unknown): Promise<LaneCommit> {
