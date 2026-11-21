@@ -130,6 +130,11 @@ type MuxServerOptions = {
  *  session cause, which each channel of the session ends with. */
 type WireClose = 'transient' | 'pageLeft' | SessionCause
 
+/** Whether a wire closed `how` ended its session for good, with that cause. */
+function endedSession(how: WireClose): how is SessionCause {
+  return how !== 'transient' && how !== 'pageLeft'
+}
+
 /** A session as one wire held it: its id, and the page's number for that wire. */
 type SessionHold = { sessionId: string; attempt: number }
 
@@ -532,8 +537,12 @@ class ChannelMux implements UpgradeStagesOwner {
     try {
       entry.state.deliveries.handle(delivery)
       // A turn queued on a wire that closed since takes nothing: the close dealt with what the wire held, and what the
-      // frame names the page names again on its next wire.
-      if (entry.closed !== null) return null
+      // frame names the page names again on its next wire. Once the wire ended its session, the page names its channels
+      // on no other wire, and those a RECONCILE queued behind that end names end with its cause.
+      if (entry.closed !== null) {
+        if (endedSession(entry.closed)) this.refuseReconciled(entry, rawFrame, entry.closed)
+        return null
+      }
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
@@ -634,9 +643,11 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
-      // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or awaited.
+      // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or awaited,
+      // and so does each channel it names.
       const ended = this.endedSessions.causeOf(frame.payload.sessionId)
       if (ended !== undefined) {
+        this.refuseNamed(frame.payload.open, entry, ended)
         this.endSessionOn(entry, frame.payload.sessionId, ended)
         return null
       }
@@ -658,6 +669,36 @@ class ChannelMux implements UpgradeStagesOwner {
     }
     this.dispatchChannelFrame(session, channelFrame)
     return null
+  }
+
+  /** The channels a RECONCILE on `entry` names, where it is a RECONCILE, end with `cause`: its wire ended its session
+   *  before its turn. */
+  private refuseReconciled(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>, cause: SessionCause): void {
+    if (peekTag(rawFrame) !== TAG.RECONCILE) return
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
+    if (frame.tag === TAG.RECONCILE) this.refuseNamed(frame.payload.open, entry, cause)
+  }
+
+  /** A RECONCILE an end of its session covers, `cause`'s, refuses each channel it names, registered or not: one the
+   *  server has ends now, and an initial one it hasn't registered yet ends as it registers, within `connectTtl`. */
+  private refuseNamed(open: ReconcileOpenEntry[], entry: WireEntry, cause: SessionCause): void {
+    for (const each of open) {
+      const channel = this.channels.get(each.id)
+      if (channel) channel._onServerEnd(cause)
+      // One refused wait per channel, however many reopens name it: the first refusal stands, its deadline too.
+      else if (each.initial && !this.registrationWaits.refuses(each.id)) {
+        const refused: AwaitedChannel = {
+          channelId: each.id,
+          open: each,
+          entry,
+          held: [],
+          phase: 'waiting',
+          ttl: null,
+          refused: cause,
+        }
+        this.registrationWaits.wait(refused, this.options.connectTtl)
+      }
+    }
   }
 
   /** Whether a RECONCILE on a wire that doesn't hold the session comes from an older attempt of the page's than the one

@@ -2,13 +2,15 @@
 // one wire that holds it; a wire that holds nothing goes only as a loss; a reopen or an upgrade's commit hands the session over. Each
 // wire reads the session id from the RECONCILED it was sent.
 
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import type { ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
+import { END_CAUSE } from '../endCause.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
+import { RegistrationWaits } from './RegistrationWaits.js'
 import { ServerChannel } from './ServerChannel.js'
 
 const KEEP = 1_000
@@ -465,6 +467,84 @@ test('a page that knows only an id whose session the server dropped reads an end
     await third.send(reconcile({ sessionId: known, open: [entry(pending.id, 0)] }, 3))
     expect(third.hows()).toEqual(['unreadable'])
   } finally {
+    first.leave()
+    second.leave()
+    third.leave()
+    pending.abort()
+  }
+})
+
+test("a channel named in a RECONCILE queued behind its wire's session end ends with that end's cause as it registers", async () => {
+  const live = channel()
+  const waiting = new ServerChannel<string, string>()
+  const holder = wire()
+  try {
+    await holder.send(reconcile({ open: [entry(live.c.id, 0)] }, 1))
+    const sessionId = holder.sessionId()
+    const queued = holder.send(
+      reconcile({ sessionId, open: [entry(live.c.id, 0), entry(waiting.id, 1)], released: [] }, 1),
+    )
+    getChannelMux().endFault(holder.w, { scope: 'session', cause: 'unreadable' })
+    await queued
+    const ends: string[] = []
+    waiting.onClose((err) => void ends.push(err ? err.message : 'clean'))
+    getChannelMux().registerChannel(waiting)
+    expect([...ends]).toEqual([END_CAUSE.unreadable.error().message])
+  } finally {
+    holder.leave()
+    waiting.abort()
+  }
+})
+
+test("a reopen answered with its session's kept end ends a registered channel it names that the session never held, with that end's cause", async () => {
+  const live = channel()
+  const other = channel()
+  const first = wire()
+  const second = wire()
+  try {
+    await first.send(reconcile({ open: [entry(live.c.id, 0)] }, 1))
+    const sessionId = first.sessionId()
+    getChannelMux().endFault(first.w, { scope: 'session', cause: 'receiveBudget' })
+    await second.send(reconcile({ sessionId, open: [entry(live.c.id, 0), entry(other.c.id, 1)] }, 2))
+    expect({ answer: second.hows(), otherEnds: [...other.ends] }).toEqual({
+      answer: ['receiveBudget'],
+      otherEnds: [END_CAUSE.receiveBudget.error().message],
+    })
+  } finally {
+    first.leave()
+    second.leave()
+    other.c.abort()
+  }
+})
+
+test("two reopens answered with their session's kept end, both unread, naming one channel not registered yet leave one wait for it, and the channel ends with that cause as it registers", async () => {
+  const live = channel()
+  const pending = new ServerChannel<string, string>()
+  const first = wire()
+  const second = wire()
+  const third = wire()
+  const waits = vi.spyOn(RegistrationWaits.prototype, 'wait')
+  try {
+    await first.send(reconcile({ open: [entry(live.c.id, 0)] }, 1))
+    const sessionId = first.sessionId()
+    // The page reads neither the last word nor the two answers below.
+    getChannelMux().endFault(first.w, { scope: 'session', cause: 'receiveBudget' })
+    await second.send(reconcile({ sessionId, open: [entry(live.c.id, 0), entry(pending.id, 1)] }, 2))
+    await third.send(reconcile({ sessionId, open: [entry(live.c.id, 0), entry(pending.id, 1)] }, 3))
+    const ends: string[] = []
+    pending.onClose((err) => void ends.push(err ? err.message : 'clean'))
+    getChannelMux().registerChannel(pending)
+    expect({
+      waits: waits.mock.calls.filter(([awaited]) => awaited.channelId === pending.id).length,
+      answers: [second.hows(), third.hows()],
+      ends: [...ends],
+    }).toEqual({
+      waits: 1,
+      answers: [['receiveBudget'], ['receiveBudget']],
+      ends: [END_CAUSE.receiveBudget.error().message],
+    })
+  } finally {
+    waits.mockRestore()
     first.leave()
     second.leave()
     third.leave()
