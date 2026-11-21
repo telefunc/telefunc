@@ -2689,7 +2689,7 @@ function Room() {
         await pollUntil(() => ({
           done:
             demand.some(([track]) => track === 't999') &&
-            demand.some(([t]) => t === null) &&
+            demand.some(([t]) => t === 'main') &&
             demand.some(([t]) => t === 'own'),
         }))
 
