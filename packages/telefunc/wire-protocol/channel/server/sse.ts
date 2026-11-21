@@ -409,7 +409,7 @@ class SseServerTransport {
       this.closeWire(wire, 'pageLeft')
       return okResponse()
     }
-    const sessionId = this.closedWires.get(connId)?.sessionId
+    const sessionId = this.keptOf(connId)?.sessionId
     if (sessionId) this.mux.endSession(sessionId)
     return okResponse()
   }
@@ -523,7 +523,14 @@ class SseServerTransport {
   /** What a request for `connId`, whose wire the server no longer has, is answered: the end the server decided for it,
    *  else a loss. */
   private answerFor(connId: string): Refusal {
-    return this.closedWires.get(connId)?.refused ?? REFUSED.noWire
+    return this.keptOf(connId)?.refused ?? REFUSED.noWire
+  }
+
+  /** What the server kept of `connId`'s closed wire, while it is younger than `connectTtl`; undefined past that, though
+   *  the entry stays until a later close sweeps it (`rememberClosed`), refusing the connId's requests meanwhile. */
+  private keptOf(connId: string): { sessionId: string | null; refused: Refusal | null } | undefined {
+    const closed = this.closedWires.get(connId)
+    return closed !== undefined && performance.now() - closed.at < this.mux.connectTtl ? closed : undefined
   }
 
   /** As `RegistrationWaits.stop`: the timeout path must remove the

@@ -190,6 +190,21 @@ test.each([
   },
 )
 
+test("a POST for a wire the server ended, past `connectTtl` with no close since, is refused `retry`: the end isn't kept past its time", async () => {
+  const { connId, opened } = await openWire()
+  const ended = await post(encodeSseRequest({ connId }, [encode.attachResult(999, null)]))
+  expect(ended.contentType).toMatch(refusal('frames', '', UNREADABLE))
+  const now = performance.now()
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(now + getChannelMux().connectTtl + 1)
+  try {
+    const late = await post(encodeSseRequest({ connId }, [encode.ping([])]))
+    expect(late.contentType).toMatch(refusal('retry'))
+  } finally {
+    clock.mockRestore()
+    await cancel(opened)
+  }
+})
+
 test('a body the server cannot frame is refused `frames`, naming no channel', async () => {
   const { connId, opened } = await openWire()
   // A frame of no bytes: no tag, no header.
