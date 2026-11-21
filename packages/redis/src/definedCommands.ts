@@ -1,8 +1,8 @@
 // The scripts `defineCommand` attaches to the backend's client, typed as ioredis documents for a defined command: by
 // augmenting its `RedisCommander`, which a standalone client and a Cluster share. Each name of the commands table is
-// a method taking the keys and arguments in one array, and so is its `Buffer` form, whose reply holds bytes. Nothing
-// imports this module: it is part of the package's own compilation only, so an app's ioredis types don't gain these
-// methods.
+// a method taking the keys and arguments in one array, and so is its `Buffer` form, whose reply holds bytes. Only
+// RedisConnection.ts imports it, as types, which leaves no import in the emitted code or declarations: an app's ioredis
+// types don't gain these methods.
 import type { ClientContext, Result } from 'ioredis'
 import type { CommandName } from './commands.js'
 

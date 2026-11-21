@@ -13,6 +13,9 @@ import {
   type SubscriberSocket,
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
+// The scripts' methods on the client (`client[name]` in run()), in every program that compiles this file; it adds no
+// import to the emitted code or types.
+import type {} from './definedCommands.js'
 import { redisFailure } from './redisFailure.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
