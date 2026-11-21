@@ -235,12 +235,12 @@ See also: <Link href="/Telefunc" />.
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-When a page leaves, its channels close at once. When its connection drops instead, the server keeps its channels open for `reconnectTimeout`, so that the client gets them back if it reconnects in time. Lower it to close a gone client's channels sooner. For when a Durable Object with no open channel hibernates, see Cloudflare's [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
+When a page leaves, it tells the server, which closes its channels at once. When its connection drops instead, the server keeps its channels open for `reconnectTimeout`, so that the client gets them back if it reconnects in time. Lower it to close a gone client's channels sooner. For when a Durable Object with no open channel hibernates, see Cloudflare's [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
 
 ```ts
 import { config } from 'telefunc'
 
-// A dropped client gets 5 s to reconnect before its channels close; a silent one counts as dropped 4 s after its last ping
+// A dropped client gets 5 s to reconnect before its channels close
 config.channel = {
   reconnectTimeout: 5_000,
   pingInterval: 2_000
