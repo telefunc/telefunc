@@ -170,8 +170,8 @@ test('a held frame the server refuses as its channel registers ends that channel
   const otherEnds = endsOf(other.channel)
   const awaited = awaitedPair(key)
   sends(awaited.page, 'b1')
-  await until(() => world.hooked.length > 0)
-  await delay(200)
+  // The POST's own answer says the server took the held frame: the channel registers only after it.
+  await until(() => world.hooked[0]?.status === 200)
   const opened = opens()
   getChannelMux().registerChannel(awaited.channel)
   await until(() => awaited.serverEnds.length > 0 && awaited.pageEnds.length > 0)

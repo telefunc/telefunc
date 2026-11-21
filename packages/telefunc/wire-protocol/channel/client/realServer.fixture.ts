@@ -56,8 +56,9 @@ const world: {
   requests: { kind: Kind; bytes: number; status: number; contentType: string | null }[]
   /** Each request as it went, by its kind: a streaming upload is answered only at its end. */
   started: Kind[]
-  /** Each batch POST a hook changed, as it went: `again` sends it once more, past the hooks, whatever the page aborted. */
-  hooked: { again: () => Promise<Response> }[]
+  /** Each batch POST a hook changed, as it went: `again` sends it once more, past the hooks, whatever the page aborted;
+   *  `status` is its own answer's, once it came. */
+  hooked: { again: () => Promise<Response>; status: number | null }[]
   sockets: number
   /** What the page's WebSockets send in place of each message, where set. */
   wsSends: ((message: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>[]) | null
@@ -147,10 +148,14 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
         : body
   world.started.push(kind)
   const target = hook.url ? hook.url(url) : url
-  if (taken?.taken && sent instanceof Blob)
-    world.hooked.push({ again: () => realFetch(target, { ...init, body: sent, signal: null }) })
+  const hooked: (typeof world.hooked)[number] | null =
+    taken?.taken && sent instanceof Blob
+      ? { again: () => realFetch(target, { ...init, body: sent, signal: null }), status: null }
+      : null
+  if (hooked !== null) world.hooked.push(hooked)
   if (hook.held) return heldAnswer(realFetch(target, { ...init, body: sent, signal: null }), init?.signal)
   const response = await realFetch(target, { ...init, body: sent })
+  if (hooked !== null) hooked.status = response.status
   const contentType = response.headers.get('content-type')
   world.requests.push({ kind, bytes: bytes?.byteLength ?? 0, status: response.status, contentType })
   if (hook.stream && response.body) {
