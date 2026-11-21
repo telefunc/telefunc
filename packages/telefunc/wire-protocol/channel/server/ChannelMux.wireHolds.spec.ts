@@ -420,3 +420,30 @@ test('a reopen retires what the old holder awaited: the channel registering late
     pending.abort()
   }
 })
+
+test('a reopen whose wire is lost before its turn takes nothing from the wire that holds the session: both channels stay, and the next message arrives there', async () => {
+  const a = channel()
+  const b = channel()
+  const holder = wire()
+  const dying = wire()
+  try {
+    await holder.send(reconcile({ open: [entry(a.c.id, 0), entry(b.c.id, 1)] }, 1))
+    const sessionId = holder.sessionId()
+    const holderBefore = holder.frames.length
+    // The reopen's turn is queued when its wire is lost.
+    const settling = dying.send(reconcile({ sessionId, open: [entry(a.c.id, 0)] }, 2))
+    dying.lose()
+    await settling
+    void a.c.send('next').catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect({
+      aEnds: [...a.ends],
+      bEnds: [...b.ends],
+      onHolder: holder.frames.slice(holderBefore).some((frame) => frame[0] === TAG.TEXT),
+      dyingReconciled: dying.tags().includes(TAG.RECONCILED),
+    }).toEqual({ aEnds: [], bEnds: [], onHolder: true, dyingReconciled: false })
+  } finally {
+    holder.leave()
+    dying.leave()
+  }
+})

@@ -531,6 +531,9 @@ class ChannelMux implements UpgradeStagesOwner {
   ): Promise<ReconcileOutcome | null> {
     try {
       entry.state.deliveries.handle(delivery)
+      // A turn queued on a wire that closed since takes nothing: the close dealt with what the wire held, and what the
+      // frame names the page names again on its next wire.
+      if (entry.closed !== null) return null
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
@@ -824,7 +827,7 @@ class ChannelMux implements UpgradeStagesOwner {
         ? this.attachSession(session, ctrl.open, entry, replay)
         : this.attachChanges(session, ctrl.open, released, entry)
 
-    // Closed since this frame arrived: a transient close keeps its channels' reconnect grace, the others end them.
+    // Closed while this RECONCILE settled: a transient close keeps its channels' reconnect grace, the others end them.
     if (entry.closed !== null) {
       state.attaching.clear()
       this.sessions.release(entry)
