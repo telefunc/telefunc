@@ -391,6 +391,40 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       expect(verdicts).toEqual({ string: refused, list: refused, hash: refused })
     }, 300_000)
 
+    it(`${name}: an operation whose plan counted a member's lanes that changed is a conflict, whatever it can't read after`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      if (store === undefined) throw new Error(`${name} didn't start`)
+      // The plan expects one lane of the member where there is none, as after a concurrent leave; the store refuses SCARD,
+      // the read of the member's retained lanes that the plan's count makes needless.
+      const keys = ['head', 'rev', 'manifest', 'index', 'values', 'versions', 'retained', 'semantic', 'owners']
+      const key = (part: string) => `stale-plan:${part}`
+      const plan = {
+        expect: [],
+        members: [['a', 1, 0, keys.length + 1]],
+        semantic: 'semantic',
+        prefixes: [],
+        mutations: [],
+        counts: [],
+        retained: [],
+        trackLanes: [],
+        expiring: [],
+        commit: [],
+      }
+      await store.admin.set(key('head'), JSON.stringify({ inc: 'i', state: 'open' }))
+      await store.admin.call('ACL', 'SETUSER', 'stale-plan', 'on', '>pw', '~*', '&*', '+@all', '-scard')
+      const client = new Redis({ host: store.admin.options.host, username: 'stale-plan', password: 'pw' })
+      client.on('error', () => {})
+      const named = [...keys, 'member', 'member-retained'].map(key)
+      const reply = await client
+        .eval(REDIS_COMMANDS.operation.lua, named.length, ...named, 'i', JSON.stringify(plan))
+        .catch((error: unknown) => String(error))
+      client.disconnect()
+      await store.admin.del(key('head'))
+      await store.admin.call('ACL', 'DELUSER', 'stale-plan')
+
+      expect(reply).toBe('{"kind":"conflict"}')
+    })
+
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {
       const store = stores.find((candidate) => candidate.name === name)
       if (store === undefined) throw new Error(`${name} didn't start`)

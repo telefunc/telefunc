@@ -903,8 +903,9 @@ for _, read in ipairs(plan.expect) do
 end
 for _, member in ipairs(plan.members) do
   ${heldCallLua('local lanes', OPERATION_PLAN_HOLDS.members[0], "'HLEN', KEYS[member[4]]", 'KEYS[member[4]]')}
+  if lanes ~= member[2] then return '{"kind":"conflict"}' end
   ${heldCallLua('local retained', OPERATION_PLAN_HOLDS.members[1], "'SCARD', KEYS[member[4] + 1]", 'KEYS[member[4] + 1]')}
-  if lanes ~= member[2] or retained ~= member[3] then return '{"kind":"conflict"}' end
+  if retained ~= member[3] then return '{"kind":"conflict"}' end
 end
 local CK, CA = {}, {}
 if plan.commit[1] then
