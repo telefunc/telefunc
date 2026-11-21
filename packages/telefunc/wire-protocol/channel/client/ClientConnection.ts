@@ -133,6 +133,8 @@ type ClientChannelTransport = {
   readonly uplink: Uplink
   readonly downlink: Downlink
   start(): void
+  /** Lets the attempt under way go, through its own socket or request: it opens nothing, and reports nothing more. */
+  cancelAttempt(): void
   hasWire(): boolean
   isConnecting(): boolean
   /** Send a wire-level ping on this wire. Heartbeat's send callback calls this. */

@@ -110,10 +110,12 @@ export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
 export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
 
-/** A WebSocket attempt races a socket past 3 × its last open R: TCP's first timeout from R (RFC 6298 §2.2). */
-export const WS_RACE_AFTER_OPENS = 3
-/** …and never sooner, however fast the last open: TCP's least timeout, and its first (RFC 6298 §2.4, §2.1). */
-export const WS_RACE_AFTER_MIN_MS = 1_000
+/** An attempt not open within 3 × the last open R is cut: TCP's first timeout from R (RFC 6298 §2.2)… */
+export const ATTEMPT_ALLOWANCE_OPENS = 3
+/** …and never sooner than 3 s, with no open measured too: a TLS open over Slow 3G takes 1.3 s. */
+export const ATTEMPT_ALLOWANCE_MIN_MS = 3_000
+/** Each attempt cut since the last open is given this many times as long as the one before it. */
+export const ATTEMPT_ALLOWANCE_GROWTH = 2
 
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000

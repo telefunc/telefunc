@@ -1,8 +1,9 @@
 // A page's `send(data, { lossy: true })`: the REAL ClientChannel on the REAL ClientConnection and SendGate, over an SSE
-// wire that never reconciles, so the gate holds every frame the page sends and the test reads them in order. The clock
-// is faked, and the wire measured a 50 ms round trip: a frame held past its `behindAfter`, 650 ms, is behind, and a newer
-// lossy send may take its place. Its channel is open, as after its first attach, unless a test says otherwise. The
-// reconnect, with what the server then reads, is in ClientConnection.reconnectOrdering.spec.ts.
+// wire whose stream's head came and that never reconciles, so the gate holds every frame the page sends and the test
+// reads them in order. The clock is faked, and the wire measured a 50 ms round trip: a frame held past its
+// `behindAfter`, 650 ms, is behind, and a newer lossy send may take its place. Its channel is open, as after its first
+// attach, unless a test says otherwise. The reconnect, with what the server then reads, is in
+// ClientConnection.reconnectOrdering.spec.ts.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -30,12 +31,13 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-/** A channel whose wire opened and measured its round trip, and which a RECONCILED opened: what it sends from then on
- *  waits in the gate for the next RECONCILED. */
-function newChannel(ack = false) {
+/** A channel whose wire opened, was answered and measured its round trip, and which a RECONCILED opened: what it sends
+ *  from then on waits in the gate for the next RECONCILED. */
+async function newChannel(ack = false) {
   const channel = unopenedChannel(ack)
-  // The wire opens one reconcile window after the first channel, carrying what the gate held till then.
-  vi.advanceTimersByTime(200)
+  // The wire opens one reconcile window after the first channel, carrying what the gate held till then, and its
+  // stream's head answers it.
+  await vi.advanceTimersByTimeAsync(200)
   // As a BDP probe's answer does: until a round trip is measured, the page is never behind.
   ;(channel as any).connection.transport.uplink.roundTrips.measured(50)
   // As a RECONCILED that lists it does.
@@ -108,14 +110,14 @@ describe('a lossy send from the page, while the gate holds it', () => {
     expect(miscounted(channel)).toBe(0)
   })
 
-  test('on a link that is not behind, each one waits to go', () => {
-    const channel = newChannel()
+  test('on a link that is not behind, each one waits to go', async () => {
+    const channel = await newChannel()
     send(channel, 'L1 L2')
     expect(held(channel)).toEqual(['L1', 'L2'])
   })
 
-  test('once the link is behind, a newer one takes its place, and the page counts the bytes that adds', () => {
-    const channel = newChannel()
+  test('once the link is behind, a newer one takes its place, and the page counts the bytes that adds', async () => {
+    const channel = await newChannel()
     send(channel, 'L1')
     behind()
     void channel.send('L2, longer', { lossy: true })
@@ -127,8 +129,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
     ['L1 R1 L2', 'L1 R1 L2'],
     ['L1 L2 R1 L3 L4', 'L2 R1 L4'],
   ] as const) {
-    test(`${sends}, the link behind before each: a plain send keeps the one before it, ${read} go`, () => {
-      const channel = newChannel()
+    test(`${sends}, the link behind before each: a plain send keeps the one before it, ${read} go`, async () => {
+      const channel = await newChannel()
       for (const s of sends.split(' ')) {
         send(channel, s)
         behind()
@@ -138,8 +140,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
     })
   }
 
-  test('a replacement larger than the server accepts throws, and leaves the one that waits', () => {
-    const channel = newChannel()
+  test('a replacement larger than the server accepts throws, and leaves the one that waits', async () => {
+    const channel = await newChannel()
     void channel.sendBinary(new Uint8Array([1]), { lossy: true })
     behind()
     expect(() => channel.sendBinary(new Uint8Array(WIRE_MAX_RAW_FRAME_BYTES), { lossy: true })).toThrow(
@@ -151,8 +153,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
 })
 
 describe('a lossy send from the page out of credit', () => {
-  test('waits as the newest, and goes once the server grants more messages', () => {
-    const channel = newChannel()
+  test('waits as the newest, and goes once the server grants more messages', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1 L2')
     expect(held(channel).at(-1)).toBe('-')
@@ -162,8 +164,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(miscounted(channel)).toBe(0)
   })
 
-  test('waits as the newest, and goes once the server grants more bytes', () => {
-    const channel = newChannel()
+  test('waits as the newest, and goes once the server grants more bytes', async () => {
+    const channel = await newChannel()
     for (let i = 0; i < 3; i++) void channel.sendBinary(new Uint8Array(1024 * 1024))
     expect((channel as any).sendCredit.isOutOfCredit()).toBe(true)
     send(channel, 'L1')
@@ -172,24 +174,24 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).at(-1)).toBe('L1')
   })
 
-  test('a limit that grants nothing leaves it waiting', () => {
-    const channel = newChannel()
+  test('a limit that grants nothing leaves it waiting', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     grant(channel, { count: CREDIT_MSG_WINDOW_INITIAL })
     expect(held(channel).at(-1)).toBe('-')
   })
 
-  test('goes ahead of a plain send, and of the close', () => {
-    const channel = newChannel()
+  test('goes ahead of a plain send, and of the close', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1 R1 L2')
     void channel.close()
     expect(held(channel).slice(-4)).toEqual(['L1', 'R1', 'L2', 'CLOSE'])
   })
 
-  test('one larger than the server accepts throws at its call, and leaves the one held and the next plain send', () => {
-    const channel = newChannel()
+  test('one larger than the server accepts throws at its call, and leaves the one held and the next plain send', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     expect(() => channel.sendBinary(new Uint8Array(WIRE_MAX_RAW_FRAME_BYTES), { lossy: true })).toThrow(
@@ -199,8 +201,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).slice(-2)).toEqual(['L1', 'R'])
   })
 
-  test('is dropped by a newer one sent once a reconnect raised the credit, so it never goes after it', () => {
-    const channel = newChannel()
+  test('is dropped by a newer one sent once a reconnect raised the credit, so it never goes after it', async () => {
+    const channel = await newChannel()
     channel._attach.capWindows(1024)
     void channel.sendBinary(new Uint8Array(1024))
     send(channel, 'L1')
@@ -210,8 +212,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).slice(1)).toEqual(['L2', 'R1'])
   })
 
-  test("the caller's bytes are its own once `sendBinary` returned", () => {
-    const channel = newChannel()
+  test("the caller's bytes are its own once `sendBinary` returned", async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     const bytes = new Uint8Array([1, 2])
     void channel.sendBinary(bytes, { lossy: true })
@@ -220,8 +222,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).at(-1)).toBe('[1,2]')
   })
 
-  test('is let go when the channel aborts', () => {
-    const channel = newChannel()
+  test('is let go when the channel aborts', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     channel.abort()
@@ -231,7 +233,7 @@ describe('a lossy send from the page out of credit', () => {
 
 describe('`lossy` on the page', () => {
   test('resolves at once, on a channel made with `ack: true` too; with `ack: true` it is a usage error', async () => {
-    const channel = newChannel(true)
+    const channel = await newChannel(true)
     await expect(channel.send('L', { lossy: true })).resolves.toBe(undefined)
     // A text that asks for no acknowledgement.
     expect(held(channel)).toEqual(['L'])
@@ -241,8 +243,8 @@ describe('`lossy` on the page', () => {
 })
 
 describe('bytes given to `send()` and `publish()` on the page', () => {
-  test('are a usage error naming `sendBinary()`, and nothing goes', () => {
-    const channel = newChannel()
+  test('are a usage error naming `sendBinary()`, and nothing goes', async () => {
+    const channel = await newChannel()
     const page = channel as unknown as ClientChannelType
     expect(() => page.send(new Uint8Array([1, 2, 255]))).toThrow('Bytes go through `sendBinary()`')
     expect(() => page.send(new ArrayBuffer(4), { lossy: true })).toThrow('turns this `ArrayBuffer` into a plain object')
@@ -250,8 +252,8 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
     expect(held(channel)).toEqual(['R'])
   })
 
-  test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', () => {
-    const channel = newChannel()
+  test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', async () => {
+    const channel = await newChannel()
     const page = channel as unknown as ClientChannelType
     expect(() => page.send({ b: new Uint8Array(1) })).toThrow('turns the `Uint8Array` at `b` into')
     expect(() => page.send({ a: { b: { c: new ArrayBuffer(1) } } }, { lossy: true })).toThrow(
@@ -276,8 +278,8 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
   })
 })
 
-test("a lossy send out of credit when the server's close comes doesn't go after the page acknowledged that close", () => {
-  const channel = newChannel()
+test("a lossy send out of credit when the server's close comes doesn't go after the page acknowledged that close", async () => {
+  const channel = await newChannel()
   // A close callback still working keeps the channel on the wire after it acknowledged the close.
   channel.onClose(() => new Promise<void>(() => {}))
   useUpCredit(channel)
@@ -289,8 +291,8 @@ test("a lossy send out of credit when the server's close comes doesn't go after 
   expect(sent.slice(sent.indexOf(`tag ${TAG.CLOSE_ACK}`))).toEqual([`tag ${TAG.CLOSE_ACK}`])
 })
 
-test("a page's abort drops its lossy send that waits after its last plain send, and keeps the plain send", () => {
-  const channel = newChannel()
+test("a page's abort drops its lossy send that waits after its last plain send, and keeps the plain send", async () => {
+  const channel = await newChannel()
   send(channel, 'R1 L1')
   channel.abort()
   expect(held(channel)).toEqual(['R1', `tag ${TAG.ABORT}`])

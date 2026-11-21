@@ -199,6 +199,23 @@ class SseTransport implements UpgradeSource {
     }, SSE_RECONCILE_DEADLINE_MS)
   }
 
+  cancelAttempt(): void {
+    this.connecting = false
+    if (this.startTimer) {
+      clearTimeout(this.startTimer)
+      this.startTimer = null
+    }
+    const abortController = this.transportAbort
+    if (!abortController) return
+    this.transportAbort = null
+    this.openPending = false
+    // Its open, upload and reader end with it, and say nothing: the open's frames go back to the outbox.
+    this.abandonedControllers.add(abortController)
+    this.closeStreamRequest()
+    abortController.abort()
+    this.settleDrained()
+  }
+
   hasWire(): boolean {
     return this.transportAbort !== null
   }
@@ -274,6 +291,7 @@ class SseTransport implements UpgradeSource {
 
     const body = await this.openDownstream(ssePromise, stage, abortController)
     if (!body) return
+    this.owner.onTransportAnswered(this)
     if (this.outbox.length > 0) void this.flushOutbox()
 
     const reader = createSseEventStreamReader(

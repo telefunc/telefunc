@@ -8,6 +8,9 @@ import { ChannelClosedError, ChannelOverflowError, rejectedFrameError } from '..
 import { closeTimedOutError } from '../ChannelEnding.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
+  ATTEMPT_ALLOWANCE_GROWTH,
+  ATTEMPT_ALLOWANCE_MIN_MS,
+  ATTEMPT_ALLOWANCE_OPENS,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
@@ -42,6 +45,8 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 interface TransportOwner {
   /** `startedAt`: when the socket or request that opened started. */
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void
+  /** The server answered the attempt's request with its event stream's head, before the wire opens. */
+  onTransportAnswered(transport: ClientChannelTransport): void
   /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
    *  another `WIRE_VERSION`; `rejectedFrame`: it refused the wire for a frame it couldn't read. */
   onTransportClosed(
@@ -95,6 +100,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private recovery: Recovery | null = null
   /** When the wire being opened started, until its RECONCILED. */
   private attemptStartedAt: number | null = null
+  /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
+  private allowanceTimer: ReturnType<typeof setTimeout> | null = null
+  /** When the attempt under way started, till the server answered it. */
+  private allowanceFrom = 0
+  /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
+  private answeredMs: number | null = null
+  private cuts = 0
   /** How long the last wire took from its start to its RECONCILED: the room an attempt needs before the deadline. */
   private handshakeMs = 0
   private ttl: ReturnType<typeof setTimeout> | null = null
@@ -156,9 +168,37 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
    *  the recovery's deadline by the clock, the deadline's timer not yet run (a page that slept or blocked its loop),
    *  the channels end instead. */
   private startWire(): void {
-    if (performance.now() >= this.recoveryFrom().deadline) return this.onRecoveryDeadline()
-    this.attemptStartedAt = performance.now()
+    const now = performance.now()
+    const { deadline } = this.recoveryFrom()
+    if (now >= deadline) return this.onRecoveryDeadline()
+    this.attemptStartedAt = now
+    this.allowanceFrom = now
+    this.clearAllowance()
+    const allowance = attemptAllowance(this.answeredMs, this.cuts, deadline - now)
+    this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
     this.transport.start()
+  }
+
+  /** The attempt under way wasn't answered in time: it goes, and counts as failed. A page that left let it go. */
+  private cutAttempt(): void {
+    this.allowanceTimer = null
+    if (this.closed || !this.transport.isConnecting()) return
+    this.cuts++
+    this.transport.cancelAttempt()
+    this.onTransportClosed(this.transport)
+  }
+
+  /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
+  private attemptAnswered(): void {
+    if (this.allowanceTimer === null) return
+    this.clearAllowance()
+    this.answeredMs = performance.now() - this.allowanceFrom
+    this.cuts = 0
+  }
+
+  private clearAllowance(): void {
+    if (this.allowanceTimer) clearTimeout(this.allowanceTimer)
+    this.allowanceTimer = null
   }
 
   private enterClosed(): void {
@@ -242,8 +282,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
+  onTransportAnswered(transport: ClientChannelTransport): void {
+    if (transport === this.transport) this.attemptAnswered()
+  }
+
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (transport !== this.transport) return
+    this.attemptAnswered()
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
     if (this.attemptStartedAt !== null) this.attemptStartedAt = startedAt
@@ -390,12 +435,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.closeAll(rejectedFrameError())
       return
     }
+    this.clearAllowance()
     this.upgrade.abortAttempt()
     this.handleTransportLoss(refusal ?? null)
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
+    this.attemptAnswered()
     this.endRecovery()
     if (this.attemptStartedAt !== null) {
       this.handshakeMs = performance.now() - this.attemptStartedAt
@@ -617,6 +664,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     this.clearReconnectTimer()
+    this.clearAllowance()
     this.endRecovery()
     this.upgrade.abandon()
     this.enterClosed()
@@ -687,6 +735,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
  *  to a proxy or a server that restarted, don't come back together, on the first attempt or at the cap. */
 function reconnectDelay(attempt: number): number {
   return Math.random() * Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+}
+
+/** How long an attempt may go unanswered before it is cut: three times as long as the last attempt the server answered
+ *  took, and never under the minimum, a first connect too; growing with each attempt cut since; never past half of
+ *  `leftMs`, the recovery's time left, so another attempt fits after a cut. */
+function attemptAllowance(answeredMs: number | null, cuts: number, leftMs: number): number {
+  const allowance = Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * (answeredMs ?? 0))
+  return Math.min(allowance * ATTEMPT_ALLOWANCE_GROWTH ** cuts, leftMs / 2)
 }
 
 // ── Transport registry ──

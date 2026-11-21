@@ -223,113 +223,99 @@ describe("a page's recovery", () => {
     expect(ended[0]).toMatchObject({ message: 'Connection dropped' })
   })
 
-  test('ends an attempt that never opens at that deadline, with every socket it raced, never two connecting at once', async () => {
+  test('cuts an attempt that never opens at its allowance, 3 s, then 6 s, then half the time left, one socket at a time, and ends the channels at the deadline', async () => {
+    const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
     const { lostAt, ended } = await lostWire({ then: Array<Script>(8).fill('hangs') })
     await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
     expect(ended).toEqual([])
-    // 0.9 of 500, then a socket more 1 s, 2 s, 4 s and 8 s on; the next, 16 s on, would come past the deadline.
-    expect(madeSince(lostAt)).toEqual([450, 1450, 3450, 7450, 15450])
-    expect(ScriptedWebSocket.mostConnecting).toBe(2)
+    // 0.9 of 500, 1,000, 2,000 and 4,000 after each cut: at 450 + 3,000; 4,350 + 6,000; 12,150 + 8,925, half of the
+    // 17,850 left, not 12,000; 24,675 + 2,662.5. The next, 0.9 of 5,000 on, would start past the deadline.
+    expect(madeSince(lostAt)).toEqual([450, 4350, 12150, 24675])
+    expect(ScriptedWebSocket.mostConnecting).toBe(1)
+    // The wire's drop, then each cut.
+    expect(closed).toHaveBeenCalledTimes(5)
     await vi.advanceTimersByTimeAsync(2)
     expect(ended).toHaveLength(1)
-    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([false, true, true, true, true, true])
+    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([false, true, true, true, true])
   })
 
-  test('races a socket beside an attempt that never opens, 1 s on with no backoff, and the one that opens is the wire', async () => {
+  test('cuts an attempt that never opens 3 s on and backs off from the cut; the next socket is the wire', async () => {
     const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
     const { lostAt, ended } = await lostWire({ then: ['hangs', { reconcile: { afterMs: 0 } }] })
     await vi.advanceTimersByTimeAsync(5_000)
-    expect(madeSince(lostAt)).toEqual([450, 1450])
-    const [, hung, raced] = ScriptedWebSocket.made
+    // 0.9 of 500, then 0.9 of 1,000 after the cut at 3,450.
+    expect(madeSince(lostAt)).toEqual([450, 4350])
+    const [, hung, next] = ScriptedWebSocket.made
     expect([hung?.closedByPage, hung?.sent]).toEqual([true, 0])
-    expect([raced?.closedByPage, raced?.readyState]).toEqual([false, 1])
-    expect(raced?.sent).toBeGreaterThan(0)
-    // The first wire's open, then the raced socket's alone.
+    expect([next?.closedByPage, next?.readyState]).toEqual([false, 1])
+    expect(next?.sent).toBeGreaterThan(0)
+    // The first wire's open, then the next socket's.
     expect(open).toHaveBeenCalledTimes(2)
     expect(ended).toEqual([])
   })
 
-  test('races a socket three times as long as the last open after an attempt started, where that is past 1 s', async () => {
-    // The first connect races a socket 1 s on, which hangs.
-    const { lostAt, ended } = await lostWire({ openMs: 3_000, then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
-    await vi.advanceTimersByTimeAsync(13_000)
-    expect(madeSince(lostAt)).toEqual([450, 9450])
+  test('gives an attempt three times as long as the last open took, where that is past 3 s', async () => {
+    const { lostAt, ended } = await lostWire({ openMs: 2_500, then: ['hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(10_000)
+    // Cut 7,500 after 450; the next 0.9 of 1,000 later.
+    expect(madeSince(lostAt)).toEqual([450, 8850])
     expect(ended).toEqual([])
   })
 
-  test('takes the first socket of a link that got slower than 1 s and three times its last open, when it opens', async () => {
+  test('after an open of 1.3 s gives the next attempt 3.9 s', async () => {
+    const { lostAt } = await lostWire({ openMs: 1_300, then: ['hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(madeSince(lostAt)).toEqual([450, 5250])
+  })
+
+  test('takes a socket that opens slower than three times the last open, inside the 3 s every attempt has', async () => {
     const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
     const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 1_500 } }) })
-    // The first wire opened; the first socket after the loss opens at 450 + 1,500, as it would without a race.
     expect(open).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1_949)
     expect(open).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(2)
     expect(open).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(5_000)
-    expect(madeSince(lostAt)).toEqual([450, 1450])
-    const [, first, raced] = ScriptedWebSocket.made
-    expect([first?.readyState, first?.closedByPage]).toEqual([1, false])
-    expect([raced?.closedByPage, raced?.sent]).toEqual([true, 0])
-    expect(open).toHaveBeenCalledTimes(2)
+    expect(madeSince(lostAt)).toEqual([450])
     expect(ended).toEqual([])
   })
 
-  test('over a link whose open outlasts two races, ends on a socket it opened, having made three', async () => {
-    const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 3_500 } }) })
-    await vi.advanceTimersByTimeAsync(9_000)
-    // The third, 2 s after the second, lets the first go; the second opens 3.5 s after it was made.
-    expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
+  test('over a link whose open takes 4 s, cuts the first attempt at 3 s and takes the second, given 6 s', async () => {
+    const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 4_000 } }) })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(madeSince(lostAt)).toEqual([450, 4350])
     expect(ScriptedWebSocket.made.slice(1).map((ws) => [ws.readyState, ws.closedByPage])).toEqual([
       [3, true],
       [1, false],
-      [3, true],
     ])
     expect(ended).toEqual([])
   })
 
-  test('where every open outlasts its allowance, keeps at most two sockets connecting: at the backoff draw, then 1, 3 and 7 s on', async () => {
+  test('where every open takes 10 s, takes the attempt whose allowance first reaches it, one socket at a time', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.2)
     const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
     const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 10_000 } }) })
-    await vi.advanceTimersByTimeAsync(14_000)
-    // 0.2 of 500 first; the third socket, made 3 s on, opens 10 s after it was made, before the second's open.
-    expect(madeSince(lostAt)).toEqual([100, 1100, 3100, 7100])
-    expect(ScriptedWebSocket.mostConnecting).toBe(2)
-    expect(ScriptedWebSocket.made.slice(1).map((ws) => ws.readyState)).toEqual([3, 3, 1, 3])
+    await vi.advanceTimersByTimeAsync(21_000)
+    // 0.2 of 500, cut 3 s on; 0.2 of 1,000, cut 6 s on; 0.2 of 2,000: given 10,150, half of what is left, it opens.
+    expect(madeSince(lostAt)).toEqual([100, 3300, 9700])
+    expect(ScriptedWebSocket.mostConnecting).toBe(1)
+    expect(ScriptedWebSocket.made.slice(1).map((ws) => ws.readyState)).toEqual([3, 3, 1])
     expect(open).toHaveBeenCalledTimes(2)
     expect(ended).toEqual([])
   })
 
-  test('after an open of 1.3 s waits 3.9 s before it races, so on that link it makes one socket per reconnect', async () => {
-    // The first connect races a socket 1 s on, which hangs.
-    const { lostAt } = await lostWire({
-      openMs: 1_300,
-      then: ['hangs', { opens: { afterMs: 1_300 } }, 'hangs', { reconcile: { afterMs: 0 } }],
-    })
-    await vi.advanceTimersByTimeAsync(2_000)
-    expect(madeSince(lostAt)).toEqual([450])
-    const reconnected = ScriptedWebSocket.made[2]
-    if (!reconnected) throw new Error('no reconnect')
-    expect(reconnected.readyState).toBe(1)
-    reconnected.drop()
-    const relostAt = performance.now()
-    await vi.advanceTimersByTimeAsync(5_000)
-    // Its socket hangs: the race comes 3 × 1.3 s on.
-    expect(madeSince(relostAt)).toEqual([450, 4350])
-  })
-
-  test('closes a socket it let go that opens all the same, before any frame', async () => {
+  test('closes a socket it cut that opens all the same, before any frame', async () => {
     const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
-    await lostWire({ then: [{ opens: { afterMs: 3_000, despiteClose: true } }, { reconcile: { afterMs: 0 } }] })
-    await vi.advanceTimersByTimeAsync(5_000)
-    const [, late, raced] = ScriptedWebSocket.made
+    await lostWire({ then: [{ opens: { afterMs: 4_000, despiteClose: true } }, { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(6_000)
+    const [, late, next] = ScriptedWebSocket.made
     expect([late?.readyState, late?.sent]).toEqual([3, 0])
-    expect(raced?.readyState).toBe(1)
+    expect(next?.readyState).toBe(1)
     expect(open).toHaveBeenCalledTimes(2)
   })
 
-  test('races a first connect that never opens 1 s on, as it measured no open', async () => {
+  test('cuts a first connect that never opens 3 s on, as it measured no open', async () => {
     ScriptedWebSocket.scripts = ['hangs', { reconcile: { afterMs: 0 } }]
     const ended: unknown[] = []
     ClientConnection.getOrCreate(
@@ -338,8 +324,8 @@ describe("a page's recovery", () => {
       { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey: crypto.randomUUID() },
     )
     const startedAt = performance.now()
-    await vi.advanceTimersByTimeAsync(3_000)
-    expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - startedAt))).toEqual([0, 1_000])
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - startedAt))).toEqual([0, 3450])
     expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([true, false])
     expect(ended).toEqual([])
   })
@@ -370,12 +356,16 @@ describe("a page's recovery", () => {
   )
 
   test('keeps a first connect that reconciles late inside its deadline, and the deadline goes with the RECONCILED', async () => {
-    // Sockets at 0, 1, 3, 7, 15 and 31 s hang; the one at 63 s reconciles.
+    // Sockets at 0, 3.45, 10.35, 24.15 and 50.675 s hang, cut 3, 6, 12 s on and then at half of the 45.85 and 19.325 s
+    // left; the one at 64.837 s reconciles, inside the deadline's last ping deadline, so its unanswered pings don't end it.
     const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
-    const ended = firstConnect([...Array<Script>(6).fill('hangs'), { reconcile: { afterMs: 0 } }])
+    const ended = firstConnect([...Array<Script>(5).fill('hangs'), { reconcile: { afterMs: 0 } }])
     await vi.advanceTimersByTimeAsync(DEFAULT_RECOVERY_WINDOW_MS + 1)
     const wire = ScriptedWebSocket.made.at(-1)
-    expect(ScriptedWebSocket.made).toHaveLength(7)
+    const firstAt = ScriptedWebSocket.made[0]?.at ?? 0
+    expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - firstAt))).toEqual([
+      0, 3450, 10350, 24150, 50675, 64837,
+    ])
     expect([wire?.readyState, wire?.closedByPage]).toEqual([1, false])
     expect(open).toHaveBeenCalledTimes(1)
     expect(ended).toEqual([])
@@ -409,9 +399,9 @@ describe("a page's recovery", () => {
     expect(ended).toEqual([])
   })
 
-  test('takes nothing from an attempt it gave up on at the deadline: its socket opening and reconciling late ends nothing twice', async () => {
-    // Eight refused attempts, then one at 29.25 s, the only socket connecting when the deadline comes at 30 s: it opens
-    // 2 s after it was made, after the page closed it, as a runtime may.
+  test('takes nothing from an attempt it cut before the deadline: its socket opening and reconciling late ends nothing twice', async () => {
+    // Eight refused attempts, then one at 29.25 s, cut at half the 0.75 s left: it opens 2 s after it was made, after
+    // the page closed it, as a runtime may.
     const { lostAt, ended } = await lostWire({
       then: [...Array<Script>(8).fill('refused'), { opens: { afterMs: 2_000, despiteClose: true } }],
     })
@@ -444,41 +434,6 @@ describe("a page's recovery", () => {
     expect(ended).toHaveLength(1)
   })
 
-  for (const [closes, lives] of [
-    ['older', 'newer'],
-    ['newer', 'older'],
-  ] as const)
-    test(`goes on racing when the ${closes} of two connecting sockets closes, and reports no loss for it`, async () => {
-      const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
-      const { lostAt, ended } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
-      await vi.advanceTimersByTimeAsync(1_500)
-      const [, older, newer] = ScriptedWebSocket.made
-      ;(closes === 'older' ? older : newer)?.drop()
-      // The first wire's loss alone.
-      expect(closed).toHaveBeenCalledTimes(1)
-      await vi.advanceTimersByTimeAsync(3_500)
-      // The race goes on from the one that lives: the next socket 2 s after the second.
-      expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
-      const survivor = lives === 'older' ? older : newer
-      expect([survivor?.closedByPage, survivor?.sent]).toEqual([true, 0])
-      expect(ScriptedWebSocket.made[3]?.sent).toBeGreaterThan(0)
-      expect(closed).toHaveBeenCalledTimes(1)
-      expect(ended).toEqual([])
-    })
-
-  test('reports one loss once both connecting sockets closed, and backs off from it', async () => {
-    const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
-    const { lostAt } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
-    await vi.advanceTimersByTimeAsync(1_500)
-    for (const ws of ScriptedWebSocket.made.slice(1)) ws.drop()
-    expect(closed).toHaveBeenCalledTimes(2)
-    await vi.advanceTimersByTimeAsync(5_000)
-    // 0.9 of the second delay, 1,000, from the last close at 1,500; no race socket after either.
-    expect(madeSince(lostAt)).toEqual([450, 1450, 2400])
-    expect(ScriptedWebSocket.made[3]?.sent).toBeGreaterThan(0)
-    expect(closed).toHaveBeenCalledTimes(2)
-  })
-
   test("takes a socket's `error` with no `close` as its failure, as Node 22's after a reset, and backs off from it", async () => {
     const { lostAt, ended } = await lostWire({ then: ['errors', { reconcile: { afterMs: 0 } }] })
     await vi.advanceTimersByTimeAsync(5_000)
@@ -498,55 +453,54 @@ describe("a page's recovery", () => {
     expect(closed).toHaveBeenCalledTimes(3)
   })
 
-  test('takes nothing from the `error`s of a socket it let go, as Node 22 fires once the page closed it', async () => {
+  test('takes nothing from the `error`s of a socket it cut, as Node 22 fires once the page closed it', async () => {
     const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
     const { lostAt, ended } = await lostWire({ then: Array<Script>(8).fill('hangs22') })
     await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
-    // The schedule of an attempt whose sockets never answer: the ones let go at 3,450 and on say nothing of it.
-    expect(madeSince(lostAt)).toEqual([450, 1450, 3450, 7450, 15450])
-    expect(ScriptedWebSocket.mostConnecting).toBe(2)
-    expect(closed).toHaveBeenCalledTimes(1)
+    // The schedule of attempts whose sockets never answer: the cut sockets' `error`s say nothing of it.
+    expect(madeSince(lostAt)).toEqual([450, 4350, 12150, 24675])
+    expect(ScriptedWebSocket.mostConnecting).toBe(1)
+    // The wire's drop, then each cut.
+    expect(closed).toHaveBeenCalledTimes(5)
     expect(ended).toEqual([])
   })
 
-  test('ends the attempt with a socket it could not make, the one still connecting too, and backs off from it', async () => {
-    const { lostAt, ended } = await lostWire({ then: ['hangs', 'throws', { reconcile: { afterMs: 0 } }] })
+  test('ends an attempt whose socket it could not make, and backs off from it', async () => {
+    const { lostAt, ended } = await lostWire({ then: ['throws', { reconcile: { afterMs: 0 } }] })
     await vi.advanceTimersByTimeAsync(5_000)
-    // The race's socket, 1 s on, couldn't be made: the next comes 0.9 of the second delay, 1,000, after it.
-    expect(madeSince(lostAt)).toEqual([450, 2350])
-    const [, hung, next] = ScriptedWebSocket.made
-    expect([hung?.closedByPage, hung?.sent, next?.readyState]).toEqual([true, 0, 1])
+    // The socket at 450 couldn't be made: the next comes 0.9 of the second delay, 1,000, after it.
+    expect(madeSince(lostAt)).toEqual([1350])
+    const next = ScriptedWebSocket.made.at(-1)
+    expect(next?.readyState).toBe(1)
     expect(next?.sent).toBeGreaterThan(0)
     expect(ended).toEqual([])
   })
 
-  test('a page that leaves while it reconnects lets every socket it was opening go, and opens none after', async () => {
+  test('a page that leaves while it reconnects lets the socket it was opening go, and opens none after', async () => {
     const page = new EventTarget()
     vi.stubGlobal('addEventListener', page.addEventListener.bind(page))
     vi.stubGlobal('removeEventListener', page.removeEventListener.bind(page))
     try {
       const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
-      await lostWire({ then: [{ opens: { afterMs: 2_500, despiteClose: true } }, 'hangs', 'hangs'] })
+      await lostWire({ then: [{ opens: { afterMs: 2_500, despiteClose: true } }, 'hangs'] })
       await vi.advanceTimersByTimeAsync(1_500)
-      expect(ScriptedWebSocket.made).toHaveLength(3)
+      expect(ScriptedWebSocket.made).toHaveLength(2)
       page.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: false }))
+      // Past its allowance too: the attempt the page let go is not cut, so no other follows it.
       await vi.advanceTimersByTimeAsync(5_000)
-      // The first would open 2.5 s after it was made, closed or not: it closes again before any frame.
-      expect(ScriptedWebSocket.made.slice(1).map((ws) => [ws.closedByPage, ws.sent])).toEqual([
-        [true, 0],
-        [true, 0],
-      ])
-      expect(ScriptedWebSocket.made).toHaveLength(3)
+      // It would open 2.5 s after it was made, closed or not: it closes again before any frame.
+      expect(ScriptedWebSocket.made.slice(1).map((ws) => [ws.closedByPage, ws.sent])).toEqual([[true, 0]])
+      expect(ScriptedWebSocket.made).toHaveLength(2)
       expect(open).toHaveBeenCalledTimes(1)
     } finally {
       vi.unstubAllGlobals()
     }
   })
 
-  test('measures a handshake on the socket that opened, not from the start of an attempt whose sockets hung', async () => {
+  test('measures a handshake from the start of the attempt that opened, not from the first of a recovery whose attempts were cut', async () => {
     const { lostAt } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
-    await vi.advanceTimersByTimeAsync(3_500)
-    expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
+    await vi.advanceTimersByTimeAsync(12_200)
+    expect(madeSince(lostAt)).toEqual([450, 4350, 12150])
     const wire = ScriptedWebSocket.made[3]
     if (!wire) throw new Error('no wire')
     vi.spyOn(Math, 'random').mockReturnValue(0.35)
@@ -554,7 +508,7 @@ describe("a page's recovery", () => {
     const relostAt = performance.now()
     await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
     // 0.35 of 500, 1,000, 2,000, 4,000, then of the 5,000 cap, each after the last refusal. The last two fit the
-    // deadline at 30,000 after the opened socket's own handshake, 0 ms, and wouldn't after the 3 s its attempt took.
+    // deadline at 30,000 after the opened attempt's own handshake, 0 ms, and wouldn't after the 12 s its recovery took.
     expect(madeSince(relostAt)).toEqual([
       175, 525, 1225, 2625, 4375, 6125, 7875, 9625, 11375, 13125, 14875, 16625, 18375, 20125, 21875, 23625, 25375,
       27125, 28875,

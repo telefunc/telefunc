@@ -1,0 +1,133 @@
+// A page whose wire drops on the slowest link it supports: its next attempt opens, however long that takes there, and
+// is never cut. Over a real server and page, through a forwarder of each row's own that makes the link slow after the
+// page connected.
+
+import { afterAll, beforeAll, expect, test, vi } from 'vitest'
+import { createServer, type Server } from 'node:http'
+import net, { type Socket } from 'node:net'
+import { Telefunc } from '../../serve/node.js'
+import { config as serverConfig } from '../../node/server/serverConfig.js'
+import { ServerChannel } from './server/ServerChannel.js'
+import { ClientChannel } from './client/ClientChannel.js'
+import { WireLifecycle } from './client/WireLifecycle.js'
+import { getChannelMux } from './server/ChannelMux.js'
+
+/** 400 kbit/s each way, 200 ms each way. */
+const BYTES_PER_S = 50_000
+const ONE_WAY_MS = 200
+/** A new connection's TCP and TLS 1.3 handshakes, a round trip each, before its first byte goes. */
+const HANDSHAKE_MS = 4 * ONE_WAY_MS
+
+serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000 }
+
+let server: Server
+let port: number
+beforeAll(async () => {
+  const telefunc = new Telefunc()
+  server = createServer((req, res) => void telefunc.serve({ req, res }))
+  telefunc.installWebSocket(server)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no port')
+  port = address.port
+})
+afterAll(() => {
+  server.closeAllConnections()
+  server.close()
+})
+
+/** A forwarder that passes bytes as they come until `slow()`, then at the link's rate and delay each way, a new
+ *  connection's first bytes held for its handshakes; `drop()` cuts every connection. */
+async function link() {
+  let slowSince: number | null = null
+  const sockets = new Set<Socket>()
+  /** `from`'s bytes to `to`, in order, each way's link busy while one is under way. */
+  const carry = (from: Socket, to: Socket) => {
+    let free = 0
+    from.on('data', (chunk: Buffer) => {
+      if (slowSince === null) return void to.write(chunk)
+      const now = performance.now()
+      free = Math.max(free, now) + (chunk.byteLength * 1000) / BYTES_PER_S
+      setTimeout(() => void (to.destroyed || to.write(chunk)), free + ONE_WAY_MS - now)
+    })
+  }
+  const forwarder = net.createServer((page) => {
+    page.on('error', () => {})
+    sockets.add(page)
+    page.pause()
+    setTimeout(
+      () => {
+        const upstream = net.connect(port, '127.0.0.1')
+        upstream.on('error', () => {})
+        sockets.add(upstream)
+        carry(page, upstream)
+        carry(upstream, page)
+        page.on('close', () => upstream.destroy())
+        upstream.on('close', () => page.destroy())
+        page.resume()
+      },
+      slowSince === null ? 0 : HANDSHAKE_MS,
+    )
+  })
+  await new Promise<void>((resolve) => forwarder.listen(0, '127.0.0.1', resolve))
+  const address = forwarder.address()
+  if (address === null || typeof address === 'string') throw new Error('no port')
+  return {
+    telefuncUrl: `http://127.0.0.1:${address.port}/_telefunc`,
+    slow() {
+      slowSince = performance.now()
+    },
+    drop() {
+      for (const socket of sockets) socket.destroy()
+    },
+    close() {
+      for (const socket of sockets) socket.destroy()
+      forwarder.close()
+    },
+  }
+}
+
+for (const channels of [1, 4_096])
+  for (const transport of ['sse', 'ws'] as const)
+    test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page with ${channels === 1 ? 'a channel' : '4,096 channels'} whose wire drops on a 400 kbit/s link with a 400 ms round trip reconnects on its first attempt, and what it sent arrives`, async () => {
+      const network = await link()
+      const register = vi.spyOn(WireLifecycle.prototype, 'register')
+      const pages: ClientChannel<string, string>[] = []
+      try {
+        const connection = {
+          telefuncUrl: network.telefuncUrl,
+          transports: [transport],
+          connectionKey: crypto.randomUUID(),
+        }
+        const ends = Array.from({ length: channels }, () => {
+          const channel = new ServerChannel<string, string>()
+          getChannelMux().registerChannel(channel)
+          return channel
+        })
+        for (const channel of ends) pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+        // The page's own connection, which its channels registered on as they were made.
+        const lifecycle = register.mock.contexts.at(-1)
+        register.mockRestore()
+        await Promise.all([...ends.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
+        const [lead] = ends
+        const [first] = pages
+        if (!lead || !first) throw new Error('no channel')
+        const received = Promise.withResolvers<string>()
+        lead.listen((message) => void received.resolve(message))
+        network.slow()
+        const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+        try {
+          network.drop()
+          void first.send('after')
+          expect(await received.promise).toBe('after')
+          // The drop alone: no attempt was cut.
+          expect(lost.mock.contexts.filter((context) => context === lifecycle)).toHaveLength(1)
+        } finally {
+          lost.mockRestore()
+        }
+      } finally {
+        register.mockRestore()
+        for (const page of pages) page.abort()
+        network.close()
+      }
+    }, 60_000)

@@ -5,14 +5,11 @@ import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_TRANSPORT,
   LOSSY_CONFIRM_SLACK_MS,
-  TIMER_DELAY_MAX_MS,
   WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
   WS_CLOSE_REJECTED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
-  WS_RACE_AFTER_MIN_MS,
-  WS_RACE_AFTER_OPENS,
 } from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
 import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/ClientHeadroom.js'
@@ -39,7 +36,7 @@ type WirePieces = {
   pair: ReturnType<typeof pairPublishes>
 }
 
-/** A socket of the attempt under way, not open yet, with what its frames go through once it is the wire. */
+/** The socket of the attempt under way, not open yet, with what its frames go through once it is the wire. */
 type Connecting = { ws: WebSocket; pieces: WirePieces; startedAt: number }
 
 type WsTransportOptions = {
@@ -58,12 +55,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   private ws: WebSocket | null = null
   /** The wire the page left, still read until the next takes over; its headroom's timers may still send. */
   private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
-  /** The attempt's newest socket, none open yet, and the one before it, still connecting beside it (see `connect`). */
+  /** The attempt's socket, not open yet. */
   private connecting: Connecting | null = null
-  private racing: Connecting | null = null
-  private raceTimer: ReturnType<typeof setTimeout> | null = null
-  /** How long the last socket that became the wire took from its start to its open. */
-  private openMs: number | null = null
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
@@ -130,72 +123,40 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   start(): void {
     if (this.connecting || this.hasWire()) return
-    this.connect(Math.max(WS_RACE_AFTER_MIN_MS, WS_RACE_AFTER_OPENS * (this.openMs ?? 0)))
-  }
-
-  /** Opens a socket for the attempt, and, if none opened within `raceAfterMs`, another beside it, given twice as long:
-   *  a socket the network reset or holds unanswered may never say so. The older of two still connecting goes. */
-  private connect(raceAfterMs: number): void {
-    this.letGo(this.racing)
-    this.racing = null
     let ws: WebSocket
     try {
       ws = new WebSocket(this.wsUrl())
     } catch {
-      // Whichever socket of the attempt it was, the attempt ends with it.
-      this.cancelAttempt()
       this.owner.onTransportClosed(this)
       return
     }
     ws.binaryType = 'arraybuffer'
     const socket: Connecting = { ws, pieces: this.wirePieces(ws), startedAt: performance.now() }
-    this.racing = this.connecting
     this.connecting = socket
     this.pieces = socket.pieces
     ws.onopen = () => this.adopt(socket)
     // Its first `error` or `close`: Node 22's undici 6 fires no `close` before the upgrade (nodejs/undici#3506).
     ws.onclose = ws.onerror = () => this.connectFailed(socket)
-    this.raceTimer = setTimeout(() => this.connect(Math.min(TIMER_DELAY_MAX_MS, raceAfterMs * 2)), raceAfterMs)
   }
 
-  /** The first socket to open is the wire; the other still connecting goes. */
   private adopt(socket: Connecting): void {
-    this.letGo(socket === this.connecting ? this.racing : this.connecting)
-    this.endAttempt()
-    this.openMs = performance.now() - socket.startedAt
+    this.connecting = null
     this.ws = socket.ws
     this.setupHandlers(socket.ws, socket.pieces)
     this.owner.onTransportOpen(this, socket.startedAt)
   }
 
-  /** A socket that failed before it opened, once; the attempt fails with the last. */
+  /** The socket failed before it opened, once. */
   private connectFailed(socket: Connecting): void {
     socket.ws.onclose = socket.ws.onerror = null
     socket.pieces.headroom.close()
-    if (socket === this.racing) this.racing = null
-    else {
-      this.connecting = this.racing
-      this.racing = null
-    }
-    if (this.connecting) {
-      this.pieces = this.connecting.pieces
-      return
-    }
-    this.endAttempt()
+    this.connecting = null
     this.owner.onTransportClosed(this)
   }
 
-  /** Lets the attempt's sockets go, and starts no other. */
-  private cancelAttempt(): void {
+  cancelAttempt(): void {
     this.letGo(this.connecting)
-    this.letGo(this.racing)
-    this.endAttempt()
-  }
-
-  private endAttempt(): void {
-    if (this.raceTimer) clearTimeout(this.raceTimer)
-    this.raceTimer = null
-    this.connecting = this.racing = null
+    this.connecting = null
   }
 
   /** A socket the attempt no longer needs: closed, and closed again should it open all the same, before any frame. */
