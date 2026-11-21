@@ -12,34 +12,12 @@ import {
   expectServerError,
 } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
-/** The tags and sizes the wire gives (packages/telefunc/wire-protocol/wire/tags.ts and frame.ts): a frame's header is
- *  7 bytes, tag, u16 index, u32 seq; a LENGTH's seq is the bytes of the frame after it. */
-const WIRE = { RECONCILED: 0x05, LENGTH: 0x0d, PIECES_ACK: 0x0b, HEADER: 7, PIECES_ACK_BYTES: 19 }
-
-/** Whether a WebSocket message carries a RECONCILED: alone, or among the frames of a message of several, where each
- *  frame of varying size before the last has its LENGTH ahead of it, and the acknowledgements the server carries ride
- *  first. */
+/** Whether a WebSocket message carries a RECONCILED, alone or among the frames of a message of several. */
 function carriesReconciled(message: Buffer): boolean {
-  let at = 0
-  while (at < message.byteLength) {
-    switch (message[at]) {
-      case WIRE.RECONCILED:
-        return true
-      case WIRE.LENGTH: {
-        const next = at + WIRE.HEADER
-        if (message[next] === WIRE.RECONCILED) return true
-        at = next + message.readUInt32LE(at + 3)
-        break
-      }
-      case WIRE.PIECES_ACK:
-        at += WIRE.PIECES_ACK_BYTES
-        break
-      default:
-        return false
-    }
-  }
-  return false
+  return Array.from(messageFrames(new Uint8Array(message)), (frame) => frame[0]).includes(TAG.RECONCILED)
 }
 
 function testClose(inDocker = false) {
