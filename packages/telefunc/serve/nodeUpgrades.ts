@@ -63,8 +63,8 @@ function upgradeOthersOnlyForTheirListeners(
 }
 
 /** Telefunc's `upgrade` listener on `httpServer`, once: its pages are offered WebSocket while the listener is there. A
- *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or off the
- *  store an app's own `installWebSocket()` adds (serve/node.ts). */
+ *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or, for
+ *  `serve({ request })`, off the header an app's own `installWebSocket()` adds (serve/requestServer.ts). */
 function takeUpgrades(httpServer: HttpServer): void {
   if (upgradeServers.has(httpServer) || registeredServers.has(httpServer)) return
   upgradeServers.add(httpServer)
