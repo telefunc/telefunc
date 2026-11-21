@@ -179,13 +179,11 @@ test('a lossy replacement that leaves the channel out of credit, made while the 
   const since = performance.now()
   void channel.send('small', { lossy: true })
   // It takes the place of the one before, which waits with it in the gate for the reconnect, and counts the bytes it
-  // adds. The first wire went before it read a PONG, so its upload's failure went with it: the reopened wire uploads
-  // again, the gate releases the frame onto that upload, and as the server refuses it at once the frame, written and
-  // unacknowledged, goes again in a batch POST at once.
+  // adds. It carries no mark: what the gate releases goes on its own deadline, 10 ms after the wire reopened.
   void channel.sendBinary(new Uint8Array(32_768), { lossy: true })
   await vi.advanceTimersByTimeAsync(5_000)
   const reopened = server.posts.slice(from).find(({ opensWire }) => opensWire)
   expect(reopened).toBeDefined()
   const reopenedAfter = (reopened?.startedAt ?? 0) - since
-  expect(postsSince(from, since)).toEqual([{ after: reopenedAfter, opensWire: false, dataFrames: [32_775] }])
+  expect(postsSince(from, since)).toEqual([{ after: reopenedAfter + 10, opensWire: false, dataFrames: [32_775] }])
 })
