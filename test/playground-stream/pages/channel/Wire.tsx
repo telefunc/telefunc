@@ -28,6 +28,12 @@ type WireState = {
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
+  /** Two channels on the page's connection, as the server refuses a frame of `refused`'s: how each ended, if it did
+   *  ('open' while it hasn't), and what `kept` sent. */
+  uploadRefused: {
+    refused: { channelId: string; close: string }
+    kept: { channelId: string; sent: number; close: string }
+  } | null
 }
 
 const RESUME_COUNT = 256
@@ -51,6 +57,7 @@ function WireDemo() {
     held: null,
     release: null,
     upload: null,
+    uploadRefused: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const burstChannel = useRef<Awaited<ReturnType<typeof onWireBurst>>['channel'] | null>(null)
@@ -187,6 +194,43 @@ function WireDemo() {
     setState((s) => ({ ...s, upload: { ...s.upload!, sent } }))
   }, [])
 
+  const refusedChannels = useRef<{
+    refused: Awaited<ReturnType<typeof onWireUpload>>['channel']
+    kept: Awaited<ReturnType<typeof onWireUpload>>['channel']
+  } | null>(null)
+  const keptSent = useRef(0)
+  // Both open before either sends, so what they send goes on the wire's streaming upload where the page has one.
+  const uploadRefusedOpen = useCallback(async () => {
+    const [refused, kept] = await Promise.all([onWireUpload(), onWireUpload()])
+    await Promise.all([refused.channel.opened, kept.channel.opened])
+    refusedChannels.current = { refused: refused.channel, kept: kept.channel }
+    const ended = (which: 'refused' | 'kept') => (err: unknown) =>
+      setState((s) => {
+        if (!s.uploadRefused) return s
+        const close = err instanceof Error ? err.message : String(err)
+        return { ...s, uploadRefused: { ...s.uploadRefused, [which]: { ...s.uploadRefused[which], close } } }
+      })
+    refused.channel.onClose(ended('refused'))
+    kept.channel.onClose(ended('kept'))
+    setState((s) => ({
+      ...s,
+      uploadRefused: {
+        refused: { channelId: refused.channelId, close: 'open' },
+        kept: { channelId: kept.channelId, sent: 0, close: 'open' },
+      },
+    }))
+  }, [])
+  const uploadRefusedSend = useCallback((which: 'refused' | 'kept') => {
+    const channels = refusedChannels.current
+    if (!channels) return
+    if (which === 'refused') return void channels.refused.send('refused').catch(() => {})
+    void channels.kept.send(textMessage(keptSent.current++)).catch(() => {})
+    const sent = keptSent.current
+    setState((s) =>
+      s.uploadRefused ? { ...s, uploadRefused: { ...s.uploadRefused, kept: { ...s.uploadRefused.kept, sent } } } : s,
+    )
+  }, [])
+
   const release = useCallback(async (when: 'arrived' | 'opened') => {
     const { channel, channelId } = await onWireRelease(RELEASE_COUNT)
     let received = 0
@@ -288,6 +332,30 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Send the next message
+        </button>
+        <button
+          id="wire-upload-refused-open"
+          type="button"
+          onClick={uploadRefusedOpen}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open two channels on the page's connection
+        </button>
+        <button
+          id="wire-upload-refused-send-refused"
+          type="button"
+          onClick={() => uploadRefusedSend('refused')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Send on the first
+        </button>
+        <button
+          id="wire-upload-refused-send-kept"
+          type="button"
+          onClick={() => uploadRefusedSend('kept')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Send the second's next message
         </button>
         <button
           id="wire-end-open"
