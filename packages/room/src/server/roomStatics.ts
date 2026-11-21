@@ -38,7 +38,7 @@ import type {
 } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
-import { eachInFlight } from './store/cellStore.js'
+import { bothSettled, eachInFlight } from './store/cellStore.js'
 import { evictMember } from './store/members.js'
 import {
   reapAndCountPresence,
@@ -154,8 +154,10 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
-  const room = await openRoom(await requireRoom(id))
-  await applyGetOptions(room, options)
+  // One account of the call's writes: the reap of a lapsed lease that opening the room may do.
+  const call = new BackendCall()
+  const room = await openRoom(await call.read(() => requireRoom(id)), call)
+  await call.read(() => applyGetOptions(room, options))
   return room
 }
 
@@ -164,12 +166,17 @@ async function applyGetOptions(room: ServerRoom, { tail }: RoomGetOptions = {}):
 }
 
 /** A handle on this process's view of the room, with its members: a held view catches up unless it is current; a new
- *  one reads the roster and the meta. */
-async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord): Promise<ServerRoom> {
+ *  one reads the roster and the meta. Its reads and writes are steps of `call`. */
+async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord, call: BackendCall): Promise<ServerRoom> {
   const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
-  if (held !== undefined) return await held.sharedHandle()
-  const [roster, meta] = await Promise.all([reapAndReadRoster(incarnation), requireRoomMeta(id, incarnation)])
+  if (held !== undefined) return await call.read(() => held.sharedHandle())
+  const [roster, meta] = await call.read(() =>
+    bothSettled(
+      reapAndReadRoster(incarnation, call),
+      call.read(() => requireRoomMeta(id, incarnation)),
+    ),
+  )
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
   // One seeded meanwhile for a join alone has read no roster.
   return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle()
@@ -184,10 +191,13 @@ async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<St
 async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOptions): Promise<Room> {
   assertRoomId(id)
   const { tail, ...roomOptions } = options ?? {}
-  const result = await tryCreateRoom(id, roomOptions)
+  // One account of the call's writes: the create's, or a cleanup it did before it found the room open, and the reap
+  // that opening the room may do.
+  const call = new BackendCall()
+  const result = await tryCreateRoom(id, roomOptions, call)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) })
-  await applyGetOptions(room, { tail })
+  const room = result.kind === 'created' ? result.room : await openRoom({ id, ...configFromHead(result.head) }, call)
+  await call.read(() => applyGetOptions(room, { tail }))
   return room
 }
 
@@ -278,10 +288,9 @@ async function listedRoom(
   incTag: string,
 ): Promise<RoomInfo | null> {
   const head = await call.read(() => plane.driver.readHead(roomId))
-  const [, info] = await Promise.all([
-    repairRoomIndex(plane, roomId, incTag, head, call),
-    openRoomInfo(plane, call, roomId, head),
-  ])
+  const [, info] = await call.read(() =>
+    bothSettled(repairRoomIndex(plane, roomId, incTag, head, call), openRoomInfo(plane, call, roomId, head)),
+  )
   return info
 }
 
@@ -293,10 +302,12 @@ async function openRoomInfo(
 ): Promise<RoomInfo | null> {
   const config = openConfig(head)
   if (config === null) return null
-  const [count, stored] = await Promise.all([
-    countListedRoom(plane, call, roomId, config),
-    call.read(() => readRoomMeta(roomId, config)),
-  ])
+  const [count, stored] = await call.read(() =>
+    bothSettled(
+      countListedRoom(plane, call, roomId, config),
+      call.read(() => readRoomMeta(roomId, config)),
+    ),
+  )
   if (count === null || stored === null) return null
   return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
 }
@@ -337,32 +348,38 @@ async function closeRoom(id: string): Promise<void> {
   if (closed !== null) cancelClose(id, closed)
 }
 
-async function resolveParticipantRef(incarnation: RoomIncarnation, target: ParticipantRef): Promise<MemberSnapshot[]> {
+/** Its reads and writes, a reap of a lapsed lease among them, are steps of `call`. */
+async function resolveParticipantRef(
+  incarnation: RoomIncarnation,
+  target: ParticipantRef,
+  call: BackendCall,
+): Promise<MemberSnapshot[]> {
   assertUsage(isObject(target), 'The participant ref should be { id } or { identity }')
   if ('id' in target) {
     assertUsage(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const members = await reapAndReadMembersById(incarnation, [target.id])
+    const members = await reapAndReadMembersById(incarnation, [target.id], call)
     if (members.length === 0) throw participantGoneError(target.id)
     return members
   }
   assertParticipantIdentity(target.identity, 'The participant ref { identity }')
-  return await reapAndResolveIdentity(incarnation, target.identity)
+  return await reapAndResolveIdentity(incarnation, target.identity, call)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
-  const incarnation = await findRoom(id)
+  // One account of the call's writes: the reap that finding the participant may do, and the evictions.
+  const call = new BackendCall()
+  const incarnation = await call.read(() => findRoom(id))
   if (incarnation === null) {
     // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
     if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
     assertParticipantIdentity(target.identity, 'The participant ref { identity }')
     return
   }
-  const members = await resolveParticipantRef(incarnation, target)
+  const members = await resolveParticipantRef(incarnation, target, call)
   const cause = removedCause(target.reason)
-  const call = new BackendCall()
   // Each eviction goes on after another failed, so the failure is told once every one settled.
   await call.read(() => eachInFlight(members, (member) => call.write(() => evictMember(incarnation, member.id, cause))))
 }
@@ -404,11 +421,13 @@ async function sendToParticipant(
   data: unknown,
 ): Promise<RoomSendReceipt | RoomSendReceipt[]> {
   const message = ownMessage(data)
-  const incarnation = await requireRoom(id)
-  const members = await resolveParticipantRef(incarnation, target)
-  if ('id' in target) return deliveredOrThrow(id, await sendDm(id, incarnation.inc, target.id, message))
-  const receipts: RoomSendReceipt[] = []
+  // One account of the call's writes: the reap that finding the participant may do, and the sends.
   const call = new BackendCall()
+  const incarnation = await call.read(() => requireRoom(id))
+  const members = await resolveParticipantRef(incarnation, target, call)
+  if ('id' in target)
+    return deliveredOrThrow(id, await call.write(() => sendDm(id, incarnation.inc, target.id, message)))
+  const receipts: RoomSendReceipt[] = []
   // Each send goes on after another failed, so the failure is told once every one settled.
   await call.read(() =>
     eachInFlight(members, async (member) => {

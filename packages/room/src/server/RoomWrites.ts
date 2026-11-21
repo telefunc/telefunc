@@ -4,7 +4,7 @@ export type { RoomWritesOptions, RoomWritesOwner }
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import type { CommitAccepted } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
+import { BackendCall, type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
 import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -250,7 +250,9 @@ class RoomWrites {
     { ackId, field }: { ackId?: string; field?: string } = {},
   ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
-    const target = await this.resolveMember(to)
+    // One account of the call's writes: the reap that finding the recipient may do, and the send.
+    const call = new BackendCall()
+    const target = await this.resolveMember(to, call)
     if (!target) throw participantGoneError(to)
     const sender = this.memberSender(from)
     const stamp = this.stampedSender(from, sender)
@@ -260,10 +262,12 @@ class RoomWrites {
     if (ackId) envelope.ackId = ackId
     if (field !== undefined) envelope.field = field
     const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-    const committing = commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
-      requiredCellKeys,
-    })
-    const receipt = acceptedOrThrow(this.incarnation.id, await committing)
+    const committed = await call.write(() =>
+      commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
+        requiredCellKeys,
+      }),
+    )
+    const receipt = acceptedOrThrow(this.incarnation.id, committed)
     if (receipt.lost !== undefined) throw messageLostError()
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this.owner.guards?.onAfterSend
@@ -281,10 +285,11 @@ class RoomWrites {
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
-  private async resolveMember(id: string): Promise<Sender | null> {
+  /** Its reads and writes, a reap of a lapsed lease among them, are steps of `call`. */
+  private async resolveMember(id: string, call: BackendCall): Promise<Sender | null> {
     const entry = this.model.entry(id)
     if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
-    const [member] = await reapAndReadMembersById(this.incarnation, [id])
+    const [member] = await reapAndReadMembersById(this.incarnation, [id], call)
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
   }
 }

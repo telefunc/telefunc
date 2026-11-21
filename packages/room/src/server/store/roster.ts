@@ -25,10 +25,12 @@ import { reapLeases } from './lease.js'
 
 type Roster = { members: MemberSnapshot[] }
 
-/** Live members, read again after a lapsed lease's were removed. */
-async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
-  const call = new BackendCall()
-  const [leases, roster] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), readRoster(room)])
+/** Live members, read again after a lapsed lease's were removed; its reads and writes are steps of `call`. */
+async function reapAndReadRoster(room: RoomIncarnation, call = new BackendCall()): Promise<Roster> {
+  const [leases, roster] = await Promise.all([
+    call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
+    call.read(() => readRoster(room)),
+  ])
   return (await reapLeases(room, leases, call)) ? await call.read(() => readRoster(room)) : roster
 }
 
@@ -58,12 +60,15 @@ function* memberRecords(cells: ReadonlyMap<string, Uint8Array>): Generator<reado
   for (const [key, raw] of cells) yield [memberIdOfCellKey(key), raw]
 }
 
-/** Read again after a lapsed lease's members were removed. */
-async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  const call = new BackendCall()
+/** Read again after a lapsed lease's members were removed; its reads and writes are steps of `call`. */
+async function reapAndReadMembersById(
+  room: RoomIncarnation,
+  ids: string[],
+  call = new BackendCall(),
+): Promise<MemberSnapshot[]> {
   const [leases, members] = await Promise.all([
-    readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX),
-    readMembersById(room, ids),
+    call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
+    call.read(() => readMembersById(room, ids)),
   ])
   return (await reapLeases(room, leases, call)) ? await call.read(() => readMembersById(room, ids)) : members
 }
@@ -133,11 +138,16 @@ async function countPresence(room: RoomIncarnation): Promise<number> {
   return count
 }
 
-async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): Promise<MemberSnapshot[]> {
+/** Its reads and writes are steps of `call`. */
+async function reapAndResolveIdentity(
+  room: RoomIncarnation,
+  identity: string,
+  call = new BackendCall(),
+): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
-  const markers = await readPrefix(room.id, room.inc, prefix)
+  const markers = await call.read(() => readPrefix(room.id, room.inc, prefix))
   const ids = Array.from(markers.keys(), (key) => key.slice(prefix.length))
-  const members = await reapAndReadMembersById(room, ids)
+  const members = await reapAndReadMembersById(room, ids, call)
   // A member and its identity marker are written and removed in one compare-exchange.
   assert(members.every((member) => member.identity === identity))
   return members

@@ -5,6 +5,8 @@
 //   its first page and fails on its second may have run: the call's writes are one account.
 // - `Room.removeParticipant()` by id: a store's refusal is a `BackendError`, which says nothing of the participant;
 //   another error means the participant is no longer in the room.
+// - `Room.removeParticipant()` and `Room.send()` that reaped a lapsed lease while finding the participant, then were
+//   refused: they may have run, as the reap wrote.
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
@@ -145,5 +147,50 @@ describe.runIf(runs)('Room.removeParticipant() by id, called again', () => {
         open: true,
       })
     }, 60_000)
+  }
+})
+
+/** A lease of another server in room `id` that lapsed, hosting nothing, written as the backend writes a cell: a call
+ *  that finds a participant there reaps it. Whether it is still there. */
+async function lapsedLease(admin: Redis, id: string): Promise<() => Promise<boolean>> {
+  const [values] = await admin.keys(`tf:0:room:{${id}}:g:*:values`)
+  if (values === undefined) throw new Error(`room ${id} has no cells`)
+  const incarnation = values.slice(0, -':values'.length)
+  const key = 'session:lapsed'
+  await admin.zadd(`${incarnation}:cells`, 0, key)
+  await admin.hset(values, key, JSON.stringify({ until: 0 }))
+  await admin.hset(`${incarnation}:versions`, key, '1')
+  return async () => (await admin.hexists(values, key)) === 1
+}
+
+describe.runIf(runs)('a Room call refused after it reaped a lapsed lease', () => {
+  for (const [i, store] of STORES.entries()) {
+    for (const call of ['Room.removeParticipant()', 'Room.send()'] as const) {
+      it(`${store.name}: ${call} by id, refused at its own write, may have run`, async () => {
+        const admin = await reached(store)
+        const id = `reaped-${i}-${call === 'Room.send()' ? 'send' : 'remove'}`
+        await Room.create(id)
+        const participant = await Room.join(id)
+        const leaseStays = await lapsedLease(admin, id)
+        // The removal and the send each publish on a channel of the room; the reap publishes on none.
+        await admin.call('ACL', 'SETUSER', 'telefunc', 'resetchannels')
+        const refused = await (
+          call === 'Room.send()'
+            ? Room.send(id, { id: participant.id }, 'hi')
+            : Room.removeParticipant(id, { id: participant.id })
+        ).then(
+          () => 'resolved',
+          (error: unknown) => error,
+        )
+        const reaped = !(await leaseStays())
+        await admin.call('ACL', 'SETUSER', 'telefunc', '&*')
+        admin.disconnect()
+
+        expect({ refused, reaped }).toMatchObject({
+          refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
+          reaped: true,
+        })
+      }, 60_000)
+    }
   }
 })

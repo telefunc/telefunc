@@ -25,10 +25,14 @@ type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | Refusal
 /** `head`: the open head it found. */
 type Refusal = { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 
-async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
+/** Its reads and writes are steps of `call`. */
+async function tryCreateRoom(
+  id: string,
+  options: RoomOptions | undefined,
+  call = new BackendCall(),
+): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const plane = getRoomPlane()
-  const call = new BackendCall()
   return await retryCompareExchange(async () => {
     // The head a create may replace: a closing one taken over, a closed one cleaned up.
     let current = await call.read(() => plane.driver.readHead(id))
