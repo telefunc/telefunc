@@ -1,4 +1,4 @@
-export { onResubscribe, onPublish }
+export { onResubscribe, onPublish, onReceived }
 
 import { Broadcast } from 'telefunc'
 
@@ -9,6 +9,10 @@ async function onResubscribe(key: string) {
   Broadcast.subscribe(key, () => {})()
   received.set(key, [])
   Broadcast.subscribe<string>(key, (message) => received.get(key)!.push(message))
+}
+
+async function onReceived(key: string) {
+  return received.get(key)!
 }
 
 async function onPublish(key: string, message: string) {

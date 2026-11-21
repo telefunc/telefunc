@@ -1,0 +1,69 @@
+export { assertRoomTimeout, roomConfig, getRoomConfig, reportDeliveryLost, reportLaneLost }
+export type { RoomConfig }
+
+import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from './constants.js'
+import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
+import type { RoomSubscriptionSource } from '../backend/contract.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { assertUsage } from '../utils/assert.js'
+
+type RoomConfig = {
+  /**
+   * How long, in milliseconds, a room nobody joined stays once nothing holds it, before it closes. `Infinity` keeps it
+   * until `Room.close()`. A room's own `emptyTimeout` overrides it.
+   *
+   * @default 300000
+   */
+  emptyTimeout?: number
+  /**
+   * How long, in milliseconds, a room a member had joined stays once nothing holds it, before it closes. `Infinity`
+   * keeps it until `Room.close()`. A room's own `departureTimeout` overrides it.
+   *
+   * @default 20000
+   */
+  departureTimeout?: number
+}
+
+const globalObject = getGlobalObject<{ config: RoomConfig }>('server/config.ts', () => ({ config: {} }))
+
+/** `Room` defaults. */
+const roomConfig: RoomConfig = new Proxy({} as RoomConfig, {
+  get(_target, prop) {
+    return globalObject.config[prop as keyof RoomConfig]
+  },
+  set(_target, prop, value) {
+    const configPath = `roomConfig.${String(prop)}`
+    assertUsage(prop === 'emptyTimeout' || prop === 'departureTimeout', `Unknown ${configPath}`)
+    assertRoomTimeout(value, configPath)
+    globalObject.config[prop] = value
+    return true
+  },
+})
+
+function getRoomConfig(): Required<RoomConfig> {
+  return {
+    emptyTimeout: globalObject.config.emptyTimeout ?? ROOM_EMPTY_TIMEOUT_MS,
+    departureTimeout: globalObject.config.departureTimeout ?? ROOM_DEPARTURE_TIMEOUT_MS,
+  }
+}
+
+/** Logs a message, a join or a leave Room couldn't hand on to a server holding the room: delivery is at-most-once, so
+ *  nothing else hears of it. A join or a leave still took effect, as the servers read it back. */
+function reportDeliveryLost(roomId: string, reason: string): void {
+  console.error(`Room delivery handoff of '${roomId}' lost: ${reason}`)
+}
+
+/** Tells the app of what a lane lost. Demand is what the servers tell each other, and its gaps are asked for again. */
+function reportLaneLost(roomId: string, lane: RoomSubscriptionSource['lane'], reason: string): void {
+  if (lane.kind !== 'demand') reportDeliveryLost(roomId, reason)
+}
+
+/** Milliseconds a timer can wait, or `Infinity` for never. */
+function assertRoomTimeout(value: unknown, what: string): asserts value is number {
+  assertUsage(
+    value === Infinity ||
+      (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS),
+    `\`${what}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest ` +
+      `a timer waits, or Infinity`,
+  )
+}

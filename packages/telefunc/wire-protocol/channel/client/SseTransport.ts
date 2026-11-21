@@ -4,6 +4,7 @@ import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
+  LOSSY_CONFIRM_SLACK_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
@@ -24,6 +25,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SseEvents } from './SseEvents.js'
@@ -106,12 +108,12 @@ class SseTransport implements UpgradeSource {
   private postOutBytes = 0
   /** The frames in `outbox`. */
   private outboxBytes = 0
-  /** The batch POST out is lost if this passes. */
-  private postWatch: ReturnType<typeof setTimeout> | null = null
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
+  /** A barrier waiting for the POST out: it goes next, with the outbox. */
+  private barrierTurn: (() => void) | null = null
   /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
   private streamRequest:
     | { tag: 'idle' }
@@ -157,12 +159,23 @@ class SseTransport implements UpgradeSource {
   }
 
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
-    if (this.flushing || this.outbox.length > 0) {
-      const drained = new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
-      await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS))])
+    // The outbox goes with the barrier, so it waits only for the POST out, whose frames the server must take first.
+    if (this.flushing) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await new Promise<void>((resolve) => {
+        this.barrierTurn = resolve
+        timer = setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS)
+      })
+      clearTimeout(timer)
+      this.barrierTurn = null
     }
     // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
-    if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
+    if (this.flushing) return 'not-emitted'
+    if (!this.hasWire() || signal.aborted) {
+      // The turn the POST's end handed it held the outbox back: it goes on as that end would have sent it.
+      this.flushNextOrDrain()
+      return 'not-emitted'
+    }
     this.flushScheduler.cancel()
     const queued = this.takeOutbox().map((entry) => entry.frame)
     queued.push(buildFrame().frame)
@@ -263,7 +276,7 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
-      (bytes) => this.heartbeat?.noteReceived(bytes),
+      (bytes) => this.heartbeatOf(abortController)?.noteReceived(bytes),
     )
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
@@ -384,6 +397,7 @@ class SseTransport implements UpgradeSource {
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
+    const pair = pairPublishes()
     try {
       while (true) {
         const raw = await reader.readNextEntry()
@@ -394,11 +408,14 @@ class SseTransport implements UpgradeSource {
         }
         const frame = decode(raw)
         if (frame.tag === TAG.PONG) {
-          this.heartbeat?.resetPong()
+          this.heartbeatOf(abortController)?.resetPong()
           this.owner.onTransportPong(frame.ended)
           continue
         }
-        this.owner.onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        const paired = pair(frame)
+        if (paired) {
+          this.owner.onTransportFrame(paired, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        }
       }
     } catch {
       if (abortController.signal.aborted) return
@@ -415,6 +432,12 @@ class SseTransport implements UpgradeSource {
       // Abandoned controllers are owned by a successor transport — don't notify closed.
       if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
+  }
+
+  /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
+   *  nothing of the wire in use. */
+  private heartbeatOf(abortController: AbortController): Heartbeat | null {
+    return this.transportAbort === abortController ? this.heartbeat : null
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
@@ -473,8 +496,7 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
-      this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
-      const response = await this.postAndRead(body, wire.signal)
+      const response = await this.postWithDeadline(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
       this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
@@ -488,11 +510,10 @@ class SseTransport implements UpgradeSource {
       this.abandonActiveTransport()
       this.owner.onTransportClosed(this)
     } finally {
-      if (this.postWatch) clearTimeout(this.postWatch)
-      this.postWatch = null
       this.flushing = false
       this.postOutBytes = 0
-      this.flushNextOrDrain()
+      if (this.barrierTurn) this.barrierTurn()
+      else this.flushNextOrDrain()
       this.owner.onTransportHeadroom(this)
     }
   }
@@ -506,16 +527,29 @@ class SseTransport implements UpgradeSource {
     )
   }
 
+  /** Its frames wait for their POST's turn: the throttle, or the POST ahead of them, which takes a round trip. */
+  get behindAfter(): number {
+    const roundTrip = this.uplink.roundTrips.pathRtt
+    return LOSSY_CONFIRM_SLACK_MS + Math.max(this.flushThrottleMs, roundTrip) + roundTrip
+  }
+
   headroom(): number {
     return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
-  /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
-  private watchPost(wire: AbortController, ms: number): void {
-    this.postWatch = setTimeout(() => {
-      this.owner.onWireLate(this)
-      if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
-    }, ms)
+  /** A batch POST out past its deadline is given up, as a wire that missed its pong: its wire reconnects, resending what
+   *  it carried. */
+  private async postWithDeadline(body: Blob, wireSignal: AbortSignal): Promise<Response> {
+    const post = new AbortController()
+    const abort = () => post.abort()
+    const deadline = setTimeout(abort, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
+    wireSignal.addEventListener('abort', abort, { once: true })
+    try {
+      return await this.postAndRead(body, post.signal)
+    } finally {
+      clearTimeout(deadline)
+      wireSignal.removeEventListener('abort', abort)
+    }
   }
 
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */

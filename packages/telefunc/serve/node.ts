@@ -4,6 +4,7 @@ import crossws from 'crossws/adapters/node'
 import { serve as serveTelefunc, serveNode } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
+import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -79,7 +80,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     if (registeredServers.has(httpServer)) return
     registeredServers.add(httpServer)
 
-    httpServer.on('upgrade', (req, socket, head) => {
+    httpServer.on('upgrade', async (req, socket, head) => {
+      await preloadServerProductionEntry()
       const config = getServerConfig()
       if (getRequestPathname(req.url ?? '') !== config.telefuncUrl) return
       if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
@@ -104,6 +106,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInputNode<Req, Res>): Promise<boolean>
   async function serve(input: ServeInputRequest): Promise<Response | undefined>
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
+    await preloadServerProductionEntry()
     if (!isNodeServeInput(input)) {
       if (!isTelefuncRequest(input.request)) return undefined
       const httpResponse = await serveTelefunc(

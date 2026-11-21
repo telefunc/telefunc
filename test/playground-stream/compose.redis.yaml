@@ -1,0 +1,5 @@
+# Publishes the stack's Redis on a host port Docker assigns, for a server outside the stack (`pnpm preview:redis`).
+services:
+  redis:
+    ports:
+      - "6379"

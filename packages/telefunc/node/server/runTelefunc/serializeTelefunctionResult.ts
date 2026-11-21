@@ -7,7 +7,8 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import { getSessionToken } from '../../../wire-protocol/wire/requestKind.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -15,18 +16,23 @@ import {
   type ShieldLogConfig,
   type ShieldValidatorCtx,
 } from '../shield.js'
-import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
-import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
+import type {
+  ServerReplacerContext,
+  StreamingProducer,
+  StreamingValueServer,
+} from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
+import { carryChannel } from './carryChannel.js'
+import type { AbortError } from '../Abort.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
-import { getServerExtensionTypes } from '../serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -61,7 +67,6 @@ function serializeTelefunctionResult(runContext: {
   telefunctionAborted: boolean
   context: Context
   requestContext: RequestContext
-  abortSignal: AbortSignal
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {
@@ -77,59 +82,81 @@ function serializeTelefunctionResult(runContext: {
     : { ret: runContext.telefunctionReturn }
 
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
-  const streamingValues: StreamingValueServer[] = []
+  const producers: StreamingValueServer[] = []
   let nextStreamingIndex = 0
-  let flowId: string | undefined
+  /** What the response carries is registered once the response is sure to go; ending the response before that, as a
+   *  failed serialization or a page that left does, ends what only it would carry; a channel an earlier response carried
+   *  stays open. */
+  const registrations: (() => void)[] = []
+  let goes = false
+  /** The response holds a channel an earlier response carried. */
+  let carriesAnEarlierChannel = false
   const { valueShields } = runContext
   const shieldCtx = {
     telefunctionName: runContext.telefunctionName,
     telefuncFilePath: runContext.telefuncFilePath,
     shieldErrors: runContext.serverConfig.log.shieldErrors,
   }
-  const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
-    mux.registerChannel(channel as ServerChannel<unknown, unknown>)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
-    channel._validators = makeValidators(channel, valueShields, shieldCtx)
+    registrations.push(() => {
+      channel._validators = makeValidators(channel, valueShields, shieldCtx)
+      carryChannel(channel, requestContext)
+    })
   }
   function sendStream(createProducer: () => StreamingProducer) {
+    // Taken as it's serialized: a stream that can't be read fails the serialization, which ends what the response carries.
+    const producer = createProducer()
+    const stream = {
+      close() {},
+      abort(abortError: AbortError) {
+        if (!goes) producer.cancel(abortError)
+      },
+    }
     if (useChannelPump) {
-      const channelId = pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
-      return {
-        metadata: { channelId },
-        // Pump self-manages lifecycle: close in finally, abort via responseAbort.errorPromise race.
-        close() {},
-        abort() {},
-      }
+      const channel = new ServerChannel<never, never>()
+      registrations.push(() => pumpProducerToChannel(channel, producer, runContext, requestContext.trackPending()))
+      return { metadata: { channelId: channel.id }, ...stream }
     }
     const index = nextStreamingIndex++
-    streamingValues.push({ createProducer, index })
-    // A lone stream's reader is the body itself. Off on Workers: waking one request from another isn't proven there.
-    if (index > 0 && !isCloudflareWorkers()) flowId ??= crypto.randomUUID()
-    return {
-      metadata: flowId ? { __index: index, flowId } : { __index: index },
-      // Inline streaming lifecycle is managed by the HTTP body stream.
-      close() {},
-      abort() {},
-    }
+    producers.push({ producer, index })
+    return { metadata: { __index: index }, ...stream }
   }
   function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
     registerChannel(channel)
     return channel
   }
+  function createBroadcastChannel() {
+    const end = new ServerBroadcastEnd()
+    registerChannel(end)
+    return end
+  }
+  const responseStates = new Map<symbol, unknown>()
+  function responseState<T>(key: symbol, init: () => T): T {
+    if (!responseStates.has(key)) responseStates.set(key, init())
+    return responseStates.get(key) as T
+  }
+  // Read once a replacer asks, so a response that returns no value of a page parses no URL.
+  let page: string | undefined
   const replacer = createStreamingReplacer(
-    function getContext(value: unknown) {
+    function getContext(value: unknown): ServerReplacerContext {
       return {
         createChannel,
         registerChannel,
+        createBroadcastChannel,
         sendStream,
+        responseState,
+        get page() {
+          return (page ??= getSessionToken(requestContext.request) ?? crypto.randomUUID())
+        },
         validators: makeValidators(value, valueShields, shieldCtx),
+        maxFrameBytes: getAdapterMaxFrameBytes(),
       }
     },
-    function onReplaced({ abort }) {
-      requestContext.responseAbort.onAbort(abort)
+    function onReplaced({ value, abort }) {
+      // Registered already, so an earlier response carried it: this one fails, and the channel stays with its page.
+      if (ServerChannel.isServerChannel(value) && value._wasRegistered) carriesAnEarlierChannel = true
+      else requestContext.responseAbort.onAbort(abort)
     },
     responseTypes,
   )
@@ -138,6 +165,7 @@ function serializeTelefunctionResult(runContext: {
   try {
     httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
   } catch (err: unknown) {
+    requestContext.responseAbort.abort()
     assert(hasProp(err, 'message', 'string'))
     assertUsage(
       false,
@@ -149,10 +177,27 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  if (useChannelPump || streamingValues.length === 0) {
-    requestContext.markComplete()
+  if (carriesAnEarlierChannel) {
+    requestContext.responseAbort.abort()
+    assertUsage(
+      false,
+      [
+        `The value returned by telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) holds a channel that an earlier telefunction call returned.`,
+        'A channel connects the server to one client: return a `new Channel()` from each call, and for many clients a `new BroadcastChannel({ key })` from each call, with the same `key`.',
+      ].join(' '),
+    )
+  }
+
+  // Its page left while the telefunction ran: nobody gets this response.
+  if (requestContext.abortSignal.aborted) {
+    requestContext.responseAbort.abort()
     return { type: 'text', body: httpResponseBody }
   }
+
+  goes = true
+  for (const register of registrations) register()
+
+  if (useChannelPump || producers.length === 0) return { type: 'text', body: httpResponseBody }
 
   const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -165,13 +210,12 @@ function serializeTelefunctionResult(runContext: {
       : (frame: Uint8Array<ArrayBuffer>) => frame
 
   const onStreamComplete = requestContext.trackPending()
-  requestContext.markComplete()
 
   return {
     type: 'streaming',
     body: buildInlineResponseBody({
       metadataSerialized: httpResponseBody,
-      streamingValues,
+      producers,
       telefuncId,
       context: runContext.context,
       abortSignal: requestContext.abortSignal,
@@ -179,7 +223,6 @@ function serializeTelefunctionResult(runContext: {
       onComplete: onStreamComplete,
       encodeFrame,
       useNodeStream: runContext.useNodeStream,
-      flowId,
     }),
     streamTransport: runContext.streamTransport,
   }

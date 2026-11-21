@@ -14,6 +14,8 @@ const localKey = Symbol.for(REDIS_KEY)
 const localState: CleanupState = ((globalThis as Record<symbol, unknown>)[localKey] ??= {}) as CleanupState
 
 const redis: IORedis | null = process.env.REDIS_URL ? new IORedis(process.env.REDIS_URL) : null
+// ioredis reconnects by itself while a test restarts Redis.
+redis?.on('error', () => {})
 
 const cleanupState = new Proxy(localState, {
   set(target, key, value) {

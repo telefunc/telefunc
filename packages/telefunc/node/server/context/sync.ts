@@ -1,6 +1,7 @@
 export { getContext_sync }
 export { provideTelefuncContext_sync }
 export { restoreContext_sync }
+export { withoutContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { assertUsage } from '../../../utils/assert.js'
@@ -15,6 +16,16 @@ const syncState = getGlobalObject<{ context: Context | null }>('context/sync.ts'
 
 function getContext_sync(): Context | null {
   return syncState.context
+}
+
+function withoutContext_sync<Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args): R {
+  const { context } = syncState
+  syncState.context = null
+  try {
+    return fn(...args)
+  } finally {
+    syncState.context = context
+  }
 }
 
 function provideTelefuncContext_sync(context: Telefunc.Context) {

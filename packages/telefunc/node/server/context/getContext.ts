@@ -1,6 +1,7 @@
 export { getContext }
 export { provideTelefuncContext }
 export { PROVIDED_CONTEXT }
+export { WITHHELD_CONTEXT }
 export type { Telefunc }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
@@ -12,9 +13,15 @@ import type { RequestContext } from './requestContext.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
 const PROVIDED_CONTEXT: unique symbol = Symbol.for('telefunc.providedContext')
+/** Set where a server-side callback delivers other users' messages (`withoutContext()`). */
+const WITHHELD_CONTEXT: unique symbol = Symbol.for('telefunc.withheldContext')
 
 function getContext<Context extends object = Telefunc.Context>(): Context & TelefuncBuiltins {
   const raw = getRawContext()
+  assertUsage(
+    !raw?.[WITHHELD_CONTEXT],
+    "[getContext()] A server-side callback that delivers other users' messages has no context: read the context before you subscribe",
+  )
   if (!raw) {
     if (isAsyncMode()) {
       assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')

@@ -1,0 +1,7 @@
+{
+  // spellcheck-ignore
+  "compatibility_flags": ["nodejs_compat"],
+  "name": "telefunc_test_cloudflare-serve",
+  "main": "./worker.js",
+  "compatibility_date": "2025-08-15"
+}

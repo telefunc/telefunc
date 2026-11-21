@@ -21,14 +21,12 @@ function Backlog() {
     channelRef.current = channel
     let expected = 0
     channel.listen((message) => {
-      const inOrder = Number(message.trimEnd()) === expected++
+      const inOrder = message === String(expected++).padEnd(16 * 1024)
       setState((s) => ({ ...s, received: s.received + 1, outOfOrder: s.outOfOrder + (inOrder ? 0 : 1) }))
     })
     channel.onClose((err) => setState((s) => ({ ...s, closeErr: err?.name ?? 'none' })))
     setState((s) => ({ ...s, channelId: channel.id }))
   }
-
-  const run = () => channelRef.current!.send(6000)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -37,7 +35,10 @@ function Backlog() {
       <button type="button" id="backlog-open" onClick={open}>
         Open
       </button>
-      <button type="button" id="backlog-run" onClick={run}>
+      <button type="button" id="backlog-run-1500" onClick={() => channelRef.current!.send(1500)}>
+        Send 24 MiB, unawaited
+      </button>
+      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current!.send(6000)}>
         Send 96 MiB, unawaited
       </button>
     </div>

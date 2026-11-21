@@ -4,7 +4,6 @@ import React, { useCallback, useRef, useState } from 'react'
 import { Abort, withContext } from 'telefunc/client'
 import {
   onWireResume,
-  onWireOverrun,
   onWireBurst,
   onWireEnd,
   onWireLarge,
@@ -12,12 +11,14 @@ import {
   onWireHeld,
   onWireRelease,
   onWireUpload,
+  onWireConnection,
+  onWireChat,
+  onWirePresence,
 } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
   resume: { channelId: string; received: TallyState } | null
-  overrun: { channelId: string; received: TallyState; onClose: string | null } | null
   burst: { channelId: string; received: number[]; onClose: string | null } | null
   /** received: the messages, then 'onClose:' and 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
   end: { channelId: string; received: string[]; close: string | null } | null
@@ -30,10 +31,24 @@ type WireState = {
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
+  /** What the page's end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close', each with isConnected. */
+  connection: { channelId: string; events: string[] } | null
+  /** What the page's end saw: 'open', 'check' ('closing' once a close started), 'disconnect', 'reconnect', 'close', each with isConnected. */
+  chat: { channelId: string; events: string[] } | null
+  /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
+  presence: { channelId: string; online: boolean; closed?: string } | null
+  /** A channel whose onDisconnect aborts a signal that closes it: the onReconnect callbacks that signal removed and
+   *  that ran anyway, what close() resolved to, and whether `closed` settled. */
+  closeOnDisconnect: {
+    open: boolean
+    disconnected: boolean
+    reconnects: number
+    close: number | null
+    closed: boolean
+  } | null
 }
 
 const RESUME_COUNT = 256
-const OVERRUN_COUNT = 16
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
@@ -47,7 +62,6 @@ const HELD_NEXT = 100
 function WireDemo() {
   const [state, setState] = useState<WireState>({
     resume: null,
-    overrun: null,
     burst: null,
     end: null,
     large: null,
@@ -55,13 +69,109 @@ function WireDemo() {
     held: null,
     release: null,
     upload: null,
+    connection: null,
+    chat: null,
+    presence: null,
+    closeOnDisconnect: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
-  const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
   const burstChannel = useRef<Awaited<ReturnType<typeof onWireBurst>>['channel'] | null>(null)
   // A channel the page drops closes once garbage-collected.
   const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
   const resumeChannel = useRef<Awaited<ReturnType<typeof onWireResume>>['channel'] | null>(null)
+  const connectionChannel = useRef<Awaited<ReturnType<typeof onWireConnection>>['channel'] | null>(null)
+  const chatChannel = useRef<Awaited<ReturnType<typeof onWireChat>>['channel'] | null>(null)
+  const chatReport = useRef<(event: string) => void>(() => {})
+  const presenceChannel = useRef<Awaited<ReturnType<typeof onWirePresence>>['channel'] | null>(null)
+  const closeOnDisconnectChannel = useRef<Awaited<ReturnType<typeof onWireConnection>>['channel'] | null>(null)
+
+  const connection = useCallback(async () => {
+    const { channel, channelId } = await onWireConnection()
+    connectionChannel.current = channel
+    const events: string[] = []
+    const report = (event: string) => {
+      events.push(`${event}:${channel.isConnected}`)
+      setState((s) => ({ ...s, connection: { channelId, events: [...events] } }))
+    }
+    report('start')
+    channel.onOpen(() => report('open'))
+    channel.onDisconnect(() => report('disconnect'))
+    channel.onReconnect(() => report('reconnect'))
+    channel.onClose(() => report('close'))
+  }, [])
+
+  const closeOnDisconnect = useCallback(async () => {
+    const { channel } = await onWireConnection()
+    closeOnDisconnectChannel.current = channel
+    const seen = { open: false, disconnected: false, reconnects: 0, close: null as number | null, closed: false }
+    const show = () => setState((s) => ({ ...s, closeOnDisconnect: { ...seen } }))
+    const controller = new AbortController()
+    channel.onReconnect(
+      () => {
+        seen.reconnects++
+        show()
+      },
+      { signal: controller.signal },
+    )
+    controller.signal.addEventListener('abort', () => {
+      void channel.close().then((close) => {
+        seen.close = close
+        show()
+      })
+      void channel.closed.then(() => {
+        seen.closed = true
+        show()
+      })
+    })
+    channel.onOpen(() => {
+      seen.open = true
+      show()
+    })
+    channel.onDisconnect(() => {
+      seen.disconnected = true
+      show()
+      controller.abort()
+    })
+  }, [])
+
+  const chat = useCallback(async () => {
+    const { channel, channelId } = await onWireChat()
+    chatChannel.current = channel
+    const events: string[] = []
+    const report = (event: string) => {
+      events.push(`${event}:${channel.isConnected}`)
+      setState((s) => ({ ...s, chat: { channelId, events: [...events] } }))
+    }
+    chatReport.current = report
+    channel.onOpen(() => report('open'))
+    channel.onDisconnect(() => report('disconnect'))
+    channel.onReconnect(() => report('reconnect'))
+    channel.onClose(() => report('close'))
+    await channel.send('hello', { ack: true })
+  }, [])
+
+  const presence = useCallback(async () => {
+    const { channel, channelId } = await onWirePresence()
+    presenceChannel.current = channel
+    const show = (online: boolean) => setState((s) => ({ ...s, presence: { channelId, online } }))
+    let loaded = false
+    const loadMissedMessages = async () => {
+      if (!loaded) {
+        loaded = true
+        throw new Error('Could not load the missed messages')
+      }
+    }
+    channel.onOpen(() => show(true))
+    channel.onDisconnect(() => show(false))
+    channel.onReconnect(async () => {
+      await loadMissedMessages()
+    })
+    channel.onReconnect(() => show(true))
+    channel.onClose((err) => {
+      const closed = err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err?.name
+      setState((s) => ({ ...s, presence: { channelId, online: false, closed } }))
+    })
+  }, [])
 
   const resume = useCallback(async () => {
     const { channel, channelId } = await onWireResume(RESUME_COUNT)
@@ -83,22 +193,6 @@ function WireDemo() {
     }
   }, [])
 
-  const overrunOpen = useCallback(async () => {
-    const { channel, channelId } = await onWireOverrun(OVERRUN_COUNT)
-    const tally = new Tally()
-    let onClose: string | null = null
-    const show = () => setState((s) => ({ ...s, overrun: { channelId, received: { ...tally.state }, onClose } }))
-    show()
-    channel.onClose((err) => {
-      onClose = err ? err.name : 'none'
-      show()
-    })
-    channel.listen((message) => {
-      tally.text(message)
-      show()
-    })
-    overrunChannel.current = channel
-  }, [])
   const burstOpen = useCallback(async (sends: number, kind: 'text' | 'binary') => {
     const { channel, channelId } = await onWireBurst(sends, kind)
     const received: number[] = []
@@ -116,9 +210,6 @@ function WireDemo() {
     channel.listen((message) => onMessage(Number.parseInt(message)))
     channel.listenBinary((data) => onMessage(new DataView(data.buffer, data.byteOffset).getUint32(0)))
     burstChannel.current = channel
-  }, [])
-  const overrunSend = useCallback(() => {
-    for (let n = 0; n < OVERRUN_COUNT; n++) void overrunChannel.current!.send(textMessage(n))
   }, [])
 
   const endCall = useRef(new AbortController())
@@ -234,22 +325,6 @@ function WireDemo() {
         >
           Send {RESUME_COUNT} messages each way, connection dropped halfway
         </button>
-        <button
-          id="wire-overrun-open"
-          type="button"
-          onClick={overrunOpen}
-          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
-        >
-          Open overrun channel
-        </button>
-        <button
-          id="wire-overrun-send"
-          type="button"
-          onClick={overrunSend}
-          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
-        >
-          Send {OVERRUN_COUNT} messages unawaited
-        </button>
         {(['text', 'binary'] as const).map((kind) =>
           [5, 6].map((sends) => (
             <button
@@ -326,6 +401,54 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Send the next message
+        </button>
+        <button
+          id="wire-connection"
+          type="button"
+          onClick={connection}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a channel that shows its connection
+        </button>
+        <button
+          id="wire-close-on-disconnect"
+          type="button"
+          onClick={closeOnDisconnect}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a channel that closes itself when its connection drops
+        </button>
+        <button
+          id="wire-connection-close"
+          type="button"
+          onClick={() => connectionChannel.current!.close()}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close it
+        </button>
+        <button
+          id="wire-chat"
+          type="button"
+          onClick={chat}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a chat and send a message
+        </button>
+        <button
+          id="wire-chat-check"
+          type="button"
+          onClick={() => chatReport.current(chatChannel.current!.isClosed ? 'closing' : 'check')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Show whether the chat is connected
+        </button>
+        <button
+          id="wire-presence"
+          type="button"
+          onClick={presence}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Go online
         </button>
         <button
           id="wire-end-open"

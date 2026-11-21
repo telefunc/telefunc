@@ -1,11 +1,30 @@
 export { RedisReconnect }
 
 import React, { useRef, useState } from 'react'
-import { onBinaryBroadcastAcrossReconnect, onRedisSubscribeFailure } from './RedisReconnect.telefunc'
+import {
+  onBinaryBroadcastAcrossReconnect,
+  onBroadcastOverRedisLimit,
+  onBroadcastPublishedDuringResume,
+  onBroadcastRenewalRefused,
+  onBroadcastStartReadFailed,
+  onBroadcastSubscriberDropped,
+  onBroadcastSubscriberSilent,
+  onPublishBesideRefusedSubscribe,
+  onRedisChannelDenied,
+  onRedisSubscribeFailure,
+} from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [readiness, setReadiness] = useState<unknown>(null)
+  const [channelDenied, setChannelDenied] = useState<unknown>(null)
+  const [beside, setBeside] = useState<unknown>(null)
+  const [renewalRefused, setRenewalRefused] = useState<unknown>(null)
   const [firstBytes, setFirstBytes] = useState<number[]>([])
+  const [dropped, setDropped] = useState<unknown>(null)
+  const [duringResume, setDuringResume] = useState<unknown>(null)
+  const [startReadFailed, setStartReadFailed] = useState<unknown>(null)
+  const [silent, setSilent] = useState<unknown>(null)
+  const [overLimit, setOverLimit] = useState<unknown>(null)
   // A broadcast the page drops closes once garbage-collected.
   const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
@@ -18,6 +37,72 @@ function RedisReconnect() {
         onClick={async () => setReadiness(await onRedisSubscribeFailure())}
       >
         Fail and restore Redis subscriptions
+      </button>
+      <pre id="redis-channel-denied-result">{JSON.stringify(channelDenied)}</pre>
+      <button
+        type="button"
+        id="test-redis-channel-denied"
+        onClick={async () => setChannelDenied(await onRedisChannelDenied())}
+      >
+        Redis denies one channel next to allowed ones
+      </button>
+      <h2>Publishes Across a Dropped Subscriber</h2>
+      <pre id="redis-subscriber-dropped-result">{JSON.stringify(dropped)}</pre>
+      <button
+        type="button"
+        id="test-redis-subscriber-dropped"
+        onClick={async () => setDropped(await onBroadcastSubscriberDropped())}
+      >
+        Drop the server's Redis subscriber connection during publishes
+      </button>
+      <h2>A Publish Over Redis's Limit</h2>
+      <pre id="redis-over-limit-result">{JSON.stringify(overLimit)}</pre>
+      <button
+        type="button"
+        id="test-redis-over-limit"
+        onClick={async () => setOverLimit(await onBroadcastOverRedisLimit())}
+      >
+        Publish past the limit
+      </button>
+      <h2>A Publish While a Reconnected Subscription Reads Its Start</h2>
+      <pre id="redis-during-resume-result">{JSON.stringify(duringResume)}</pre>
+      <button
+        type="button"
+        id="test-redis-during-resume"
+        onClick={async () => setDuringResume(await onBroadcastPublishedDuringResume())}
+      >
+        Publish while the start is read back
+      </button>
+      <h2>A Publish Beside a Failed Start Read</h2>
+      <pre id="redis-start-read-failed-result">{JSON.stringify(startReadFailed)}</pre>
+      <button
+        type="button"
+        id="test-redis-start-read-failed"
+        onClick={async () => setStartReadFailed(await onBroadcastStartReadFailed())}
+      >
+        Fail the other kind's start read during a publish
+      </button>
+      <h2>A Silent Subscriber Connection</h2>
+      <pre id="redis-silent-result">{JSON.stringify(silent)}</pre>
+      <button type="button" id="test-redis-silent" onClick={async () => setSilent(await onBroadcastSubscriberSilent())}>
+        Stop Redis's replies reaching a subscriber connection
+      </button>
+      <pre id="redis-beside-refused-result">{JSON.stringify(beside)}</pre>
+      <button
+        type="button"
+        id="test-redis-beside-refused"
+        onClick={async () => setBeside(await onPublishBesideRefusedSubscribe())}
+      >
+        Publish on one key while Redis refuses another key's subscription
+      </button>
+      <h2>A Renewal Redis Refuses</h2>
+      <pre id="redis-renewal-refused-result">{JSON.stringify(renewalRefused)}</pre>
+      <button
+        type="button"
+        id="test-redis-renewal-refused"
+        onClick={async () => setRenewalRefused(await onBroadcastRenewalRefused())}
+      >
+        Refuse a key whose subscription is in effect, and drop the subscriber connection
       </button>
       <h2>Binary Publish Across a Redis Reconnect</h2>
       <pre id="redis-reconnect-result">{JSON.stringify(firstBytes)}</pre>

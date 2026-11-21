@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "packages": "pnpm --filter \"@telefunc/room...\" run build",
+    "dev": "pnpm run packages && vite",
+    "build": "pnpm run packages && vite build",
+    "preview": "pnpm run build && vite preview"
+  },
+  "dependencies": {
+    "@telefunc/room": "workspace:*",
+    "telefunc": "0.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.16"
+  },
+  "type": "module"
+}

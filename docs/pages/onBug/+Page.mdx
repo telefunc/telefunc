@@ -17,6 +17,7 @@ This allows you, for example, to install the tracker code of some tracking servi
 `onBug()` is called:
  - When a telefunction throws an error **that is not `Abort()`**. (The telefunction has a bug.)
  - When Telefunc throws an error. (Telefunc has a bug.)
+ - When Redis, Cloudflare or your `BroadcastTransport` refuses a broadcast's subscription on the server. (See <Link href="/channel#broadcast">`Broadcast`</Link>.)
 
 > `throw Abort()` does *not* trigger `onBug()`. Telefunc handles `Abort` as an expected error, and returns the error data (if any) as part of a >= `4xx` response, see <Link href="/abort-vs-error" />.
 

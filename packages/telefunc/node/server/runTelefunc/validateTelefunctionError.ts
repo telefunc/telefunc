@@ -5,7 +5,7 @@ import type { TelefuncId } from './serializeTelefunctionResult.js'
 import { Abort } from '../Abort.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { callBugListeners } from './onBug.js'
-import { handleError } from './handleError.js'
+import { describeValue, handleError } from './handleError.js'
 
 function validateTelefunctionError(err: unknown, telefuncId: TelefuncId): void {
   assertUsage(
@@ -23,7 +23,7 @@ function handleTelefunctionBug(err: unknown): void {
   handleError(err)
 }
 
-/** Reports what a user's callback threw or rejected with, which may be no `Error`. */
+/** Reports what a user's callback threw or rejected with, which may be no `Error`, nor convert to a string. */
 function handleCallbackBug(err: unknown): void {
-  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+  handleTelefunctionBug(err instanceof Error ? err : new Error(describeValue(err)))
 }

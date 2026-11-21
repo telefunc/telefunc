@@ -103,6 +103,8 @@ services:
     command:
       - --logtostderr
       - --proactor_threads=4
+      # Pinned by default, to the machine's first cores: whatever else runs on those stalls every reply (30x measured).
+      - --proactor_affinity_mode=off
       - --maxmemory=16gb
       - --snapshot_cron=
       - --dbfilename=

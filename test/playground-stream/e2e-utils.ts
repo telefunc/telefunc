@@ -1,12 +1,13 @@
 export {
   resetCleanupState,
   getCleanupState,
-  getStreamFlowCount,
   forceServerGc,
   serverHeapUsed,
+  serverArrayBuffers,
   cutWire,
   dropNextWebSocket,
   runServerAction,
+  failBackend,
   holdNextSsePost,
   holdNextSseWire,
   holdNextSseOpen,
@@ -14,24 +15,41 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  withPacedLink,
+  expectServerError,
   getResult,
   sleep,
   restartProxy,
   stopProxy,
   startProxy,
+  restartRedis,
+  killInstance,
+  startInstance,
+  dropRedisConnections,
+  getRedisChannels,
+  getRedisKeys,
+  snapshotRedis,
+  rewindRedis,
+  moveRedisSlot,
+  retryOnNetworkChange,
   countConnections,
   serverRuntime,
   setServerRuntime,
   canCutWire,
+  REDIS_TOOK_REFUSED_KEY,
 }
 
-import { page, getServerUrl } from '@brillout/test-e2e'
-import type { Response, WebSocket } from 'playwright-chromium'
-import { execSync } from 'node:child_process'
+import { page, getServerUrl, expectLog, autoRetry } from '@brillout/test-e2e'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
+import type { BackendFault } from './failing-backend'
+import { execFile, execSync } from 'node:child_process'
 import { dirname } from 'node:path'
+import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { startBlackHoleProxy, type BlackHoleProxy } from './black-hole-proxy'
 
 const playgroundDir = dirname(fileURLToPath(import.meta.url))
+const execFileAsync = promisify(execFile)
 
 /**
  * Force-severs every browser-to-origin connection by restarting the Caddy container.
@@ -40,18 +58,83 @@ const playgroundDir = dirname(fileURLToPath(import.meta.url))
  * survives), so the only reliable way to test reconnect on those wires is to terminate
  * Caddy at the TCP layer.
  */
-function restartProxy() {
-  execSync('docker compose restart proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function restartProxy() {
+  await composeProxy('restart')
 }
 
 /** Like `restartProxy` but split — stop indefinitely, then `startProxy` brings it back.
  *  Use when the test needs to perform actions while disconnected (queued sends, clicks). */
-function stopProxy() {
-  execSync('docker compose stop proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function stopProxy() {
+  await composeProxy('stop')
 }
 
-function startProxy() {
-  execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
+async function startProxy() {
+  await composeProxy('start')
+}
+
+/** Without blocking the test: a page event or a timer armed before it is handled while Docker works, which may take
+ *  longer than the timer. */
+async function composeProxy(command: 'restart' | 'stop' | 'start') {
+  await execFileAsync('docker', ['compose', command, 'proxy'], { cwd: playgroundDir })
+}
+
+/** Restarts the stack's Redis, which keeps no data across a restart. */
+function restartRedis() {
+  execSync('docker compose restart redis', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Kills a server instance at once, as a crash does: it leaves nothing behind cleanly. */
+function killInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose kill playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+function startInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose start playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Drops every connection to the stack's Redis, as a failover or a network cut does. */
+async function dropRedisConnections() {
+  const resp = await fetch(`${getServerUrl()}/api/redis/drop-connections`, { method: 'POST' })
+  const { dropped } = (await resp.json()) as { dropped: number }
+  if (dropped === 0) throw new Error('dropRedisConnections() found no connection to drop')
+}
+
+/** The Pub/Sub channels some connection to the stack's Redis subscribes to, matching a glob pattern. */
+async function getRedisChannels(pattern: string): Promise<string[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/channels?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { channels: string[] }).channels
+}
+
+/** The keys in the stack's Redis matching a glob pattern, each with its time to live in ms (-1: none). */
+async function getRedisKeys(pattern: string): Promise<{ key: string; ttl: number }[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/keys?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { keys: { key: string; ttl: number }[] }).keys
+}
+
+type RedisSnapshot = unknown
+
+async function snapshotRedis(): Promise<RedisSnapshot> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/snapshot`)
+  return ((await resp.json()) as { snapshot: RedisSnapshot }).snapshot
+}
+
+/** Rewinds the stack's Redis to a snapshot and drops every connection, as a failover onto a replica that missed the
+ *  writes since does. */
+async function rewindRedis(snapshot: RedisSnapshot) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/restore`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ snapshot }),
+  })
+  if (!resp.ok) throw new Error(`rewindRedis() failed: ${await resp.text()}`)
+  await dropRedisConnections()
+}
+
+/** Redis Cluster: moves the slot of `key` to another master one key at a time, as a reshard does. */
+async function moveRedisSlot(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/move-slot?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`moveRedisSlot() failed: ${await resp.text()}`)
+  return (await resp.json()) as { moved: number }
 }
 
 type ServerRuntime = 'node' | 'bun' | 'deno'
@@ -73,14 +156,12 @@ function canCutWire(): boolean {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** Fails a card of a subscription Redis should refuse (`refuseChannels()`) where Redis took it instead. */
+const REDIS_TOOK_REFUSED_KEY =
+  "Redis took a subscription its channel permissions should refuse: check the ACL pattern in pages/publish/refuseChannels.ts against the channel names Telefunc's Redis transport subscribes to"
+
 async function resetCleanupState() {
   await fetch(`${getServerUrl()}/api/cleanup-state/reset`, { method: 'POST' })
-}
-
-/** How many responses on the page's server take stream-flow requests; through the page, for the sticky cookie. */
-async function getStreamFlowCount(): Promise<number> {
-  const { text } = await fetchFromPage(`${getServerUrl()}/api/stream-flows`, 'GET')
-  return JSON.parse(text).count
 }
 
 async function getCleanupState(): Promise<Record<string, string>> {
@@ -103,6 +184,13 @@ async function serverHeapUsed(): Promise<number> {
   return (JSON.parse(resp.text) as { heapUsed: number }).heapUsed
 }
 
+/** The server's `arrayBuffers` after a GC, in bytes, asked for from here, as the page's link may be what's being tested. */
+async function serverArrayBuffers(): Promise<number> {
+  await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
+  const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
+  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
+}
+
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {
   return page.evaluate(
     async ({ url, method }) => {
@@ -117,6 +205,12 @@ function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boole
 async function runServerAction(key: string) {
   const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
   if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
+}
+
+/** The server's store fails the call, or drops the message, `fault` names (failing-backend.ts). */
+async function failBackend(fault: BackendFault) {
+  const resp = await fetch(`${getServerUrl()}/api/backend/fault`, { method: 'POST', body: JSON.stringify(fault) })
+  if (!resp.ok) throw new Error(`failBackend() failed: ${await resp.text()}`)
 }
 
 /** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */
@@ -164,6 +258,32 @@ async function releaseHeldSsePosts(): Promise<number> {
   return released
 }
 
+/** The server logged `error` (text it contains, or a pattern over lines in a row), by now or soon. Its output may reach
+ *  the test after the page saw the outcome. Outside Docker it is searched in each write to the server's stderr, one per
+ *  logged error. Under Docker the test gets compose's stdout in chunks that may cut a line or an error, so it is
+ *  searched in each playground container's output as Docker keeps it. */
+async function expectServerError(error: string | RegExp, inDocker: boolean): Promise<void> {
+  if (!inDocker) return autoRetry(() => expectLog(error, { filter: (log) => log.logSource === 'stderr' }))
+  const logged = (output: string) => (typeof error === 'string' ? output.includes(error) : error.test(output))
+  // Not `autoRetry()`: it counts its timeout in tries of 100 ms, and each look here runs `docker compose`.
+  const giveUp = Date.now() + 30_000
+  while (!playgroundOutputs().some(logged)) {
+    if (Date.now() > giveUp) throw new Error(`No playground container logged ${String(error)}`)
+    await sleep(500)
+  }
+}
+
+/** Each playground container's output, stdout and stderr, its lines whole and each stream's in order. */
+function playgroundOutputs(): string[] {
+  // A whole run's output may pass `execSync`'s 1 MiB default.
+  const docker = (args: string) =>
+    execSync(`docker compose ${args}`, { cwd: playgroundDir, encoding: 'utf8', maxBuffer: 64 << 20 })
+  return docker('config --services')
+    .split('\n')
+    .filter((service) => service.startsWith('playground-'))
+    .map((service) => docker(`logs --no-color --no-log-prefix ${service}`))
+}
+
 /**
  * Loads a page and waits for it to hydrate — resiliently, because the Docker suite runs the browser
  * against a Caddy container over the Docker bridge.
@@ -206,6 +326,44 @@ const NAVIGATE_ATTEMPTS = 4
 const HYDRATION_TIMEOUT = 5_000
 const NAVIGATE_RETRY_DELAY = 500
 
+/**
+ * Runs `attempt` again, as `navigate()` does a navigation, if the runner's network changes under one of the page's
+ * requests. Docker's last interfaces settle about two seconds after the stack starts, and Chromium then fails what is in
+ * flight with `ERR_NETWORK_CHANGED`, so a page call made at that moment never answers. `attempt` stops waiting for its
+ * answer once `cut()` is true.
+ */
+async function retryOnNetworkChange(attempt: (cut: () => boolean) => Promise<void>) {
+  for (let left = NAVIGATE_ATTEMPTS; left > 0; left--) {
+    let cut = false
+    const onFailed = (request: Request) => {
+      if (request.failure()?.errorText === 'net::ERR_NETWORK_CHANGED') cut = true
+    }
+    page.on('requestfailed', onFailed)
+    try {
+      await attempt(() => cut)
+    } finally {
+      page.off('requestfailed', onFailed)
+    }
+    if (!cut) return
+    await sleep(NAVIGATE_RETRY_DELAY)
+  }
+  throw new Error(`The network changed under each of ${NAVIGATE_ATTEMPTS} attempts`)
+}
+
+/** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
+async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+  const proxy = await startBlackHoleProxy(getServerUrl())
+  try {
+    await navigate(`${proxy.url}/channel`)
+    proxy.pace(link)
+    await run()
+  } finally {
+    // The page leaves before the proxy closes, which would cut its connections.
+    await page.goto('about:blank')
+    await proxy.close()
+  }
+}
+
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.
 const transientNetworkErrors = [
@@ -214,7 +372,6 @@ const transientNetworkErrors = [
   'ERR_CONNECTION_RESET',
   'ERR_CONNECTION_REFUSED',
   'ERR_INTERNET_DISCONNECTED',
-  'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
   // Chromium aborts a navigation that starts just after a test's setOffline(false).
   'ERR_ABORTED',

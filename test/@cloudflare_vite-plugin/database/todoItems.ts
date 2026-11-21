@@ -29,7 +29,7 @@ async function resetTodoItems() {
 }
 
 // wrangler's auto-generated Env types the namespace as `DurableObjectNamespace` without a
-// generic when `main` is a virtual module (`vike:server-entry`), so RPC methods aren't
+// generic when `main` is a virtual module (`vike:server`), so RPC methods aren't
 // surfaced. Cast once here to recover the typed stub.
 async function getTodoItemsData(): Promise<DurableObjectStub<TodoListDurableObject>> {
   const namespace = env.TO_DO_LIST_DURABLE_OBJECTS as DurableObjectNamespace<TodoListDurableObject>

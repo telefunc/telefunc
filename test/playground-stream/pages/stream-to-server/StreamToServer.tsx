@@ -48,7 +48,7 @@ function StreamToServer() {
         id="test-collect"
         onClick={async () => {
           setResult('')
-          const res = await onCollect(makeTextStream(['aaa', 'bb', 'cccc', 'd']))
+          const res = await onCollect(makeTextStream(['', 'aaa', 'bb', 'cccc', 'd']))
           setResult(JSON.stringify(res))
         }}
       >

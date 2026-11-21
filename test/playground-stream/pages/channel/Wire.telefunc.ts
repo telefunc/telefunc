@@ -1,6 +1,5 @@
 export {
   onWireResume,
-  onWireOverrun,
   onWireBurst,
   onWireEnd,
   onWireLarge,
@@ -8,6 +7,9 @@ export {
   onWireHeld,
   onWireRelease,
   onWireUpload,
+  onWireConnection,
+  onWireChat,
+  onWirePresence,
 }
 
 import { Channel, Abort } from 'telefunc'
@@ -56,7 +58,7 @@ async function onWireResume(count: number) {
  * At server action wireBurst_<id>, `sends` messages without awaiting them, each starting with its index: nearly all of the
  * page's first credit, then nearly 64 MiB each. The server drops the page's connections right after.
  *
- * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = what the send that closed the channel threw.
+ * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was
  */
 async function onWireBurst(sends: number, kind: 'text' | 'binary') {
   const ch = new Channel<never, string>()
@@ -64,49 +66,18 @@ async function onWireBurst(sends: number, kind: 'text' | 'binary') {
     cleanupState[`wireBurst_${ch.id}_onOpen`] = 'true'
   })
   onServerAction(`wireBurst_${ch.id}`, () => {
-    try {
-      for (let n = 0; n < sends; n++) {
-        const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
-        if (kind === 'text') void ch.send(String(n).padEnd(bytes))
-        else {
-          const message = new Uint8Array(bytes)
-          new DataView(message.buffer).setUint32(0, n)
-          void ch.sendBinary(message)
-        }
-      }
-    } catch (err) {
-      cleanupState[`wireBurst_${ch.id}`] = (err as Error).message
+    const refused = (err: Error) => {
+      cleanupState[`wireBurst_${ch.id}`] = err.message
     }
-    cutWireSockets()
-  })
-  return { channel: ch.client, channelId: ch.id }
-}
-
-/**
- * `count` numbered messages the page sends, or the server sends at server action wireOverrun_<id>, without awaiting them;
- * the server drops the page's connections right after its own.
- *
- * cleanupState: wireOverrun_<id> = the server's tally of what the page sent; wireOverrun_<id>_onOpen = 'true' once it opens; wireOverrun_<id>_onClose = its onClose error's name.
- */
-async function onWireOverrun(count: number) {
-  const ch = new Channel<(message: string) => void, (message: string) => void>()
-  const tally = new Tally()
-  const report = () => {
-    cleanupState[`wireOverrun_${ch.id}`] = JSON.stringify(tally.state)
-  }
-  report()
-  ch.onOpen(() => {
-    cleanupState[`wireOverrun_${ch.id}_onOpen`] = 'true'
-  })
-  ch.onClose((err) => {
-    cleanupState[`wireOverrun_${ch.id}_onClose`] = err ? err.name : 'none'
-  })
-  ch.listen((message) => {
-    tally.text(message)
-    report()
-  })
-  onServerAction(`wireOverrun_${ch.id}`, () => {
-    for (let n = 0; n < count; n++) void ch.send(textMessage(n))
+    for (let n = 0; n < sends; n++) {
+      const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
+      if (kind === 'text') void ch.send(String(n).padEnd(bytes)).catch(refused)
+      else {
+        const message = new Uint8Array(bytes)
+        new DataView(message.buffer).setUint32(0, n)
+        void ch.sendBinary(message).catch(refused)
+      }
+    }
     cutWireSockets()
   })
   return { channel: ch.client, channelId: ch.id }
@@ -205,4 +176,87 @@ async function onWireUpload() {
     cleanupState[`wireUpload_${ch.id}`] = JSON.stringify(tally.state)
   })
   return { channel: ch.client, channelId: ch.id }
+}
+
+/** cleanupState: wireConnection_<id> = what the server end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close',
+ *  each with isConnected. */
+async function onWireConnection() {
+  const ch = new Channel<never, never>()
+  const events: string[] = []
+  const report = (event: string) => {
+    events.push(`${event}:${ch.isConnected}`)
+    cleanupState[`wireConnection_${ch.id}`] = JSON.stringify(events)
+  }
+  report('start')
+  ch.onOpen(() => report('open'))
+  ch.onDisconnect(() => report('disconnect'))
+  ch.onReconnect(() => report('reconnect'))
+  ch.onClose(() => report('close'))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/** A chat whose server saves each message before acknowledging it, and ends the chat while a save is pending.
+ *  Server actions: wireChat_<id>_close, _check (records isConnected), _saved (the database finishes the save).
+ *  cleanupState: wireChat_<id> = what the server end saw: 'open', 'message', 'check' ('closing' once a close started), 'disconnect', 'reconnect', 'close', each with isConnected. */
+async function onWireChat() {
+  const ch = new Channel<(message: string) => Promise<string>, never>()
+  const events: string[] = []
+  const report = (event: string) => {
+    events.push(`${event}:${ch.isConnected}`)
+    cleanupState[`wireChat_${ch.id}`] = JSON.stringify(events)
+  }
+  let saved!: () => void
+  const save = new Promise<void>((resolve) => (saved = resolve))
+  onServerAction(`wireChat_${ch.id}_saved`, () => saved())
+  onServerAction(`wireChat_${ch.id}_close`, () => void ch.close({ timeout: 60_000 }))
+  onServerAction(`wireChat_${ch.id}_check`, () => report(ch.isClosed ? 'closing' : 'check'))
+  ch.listen(async (message) => {
+    report('message')
+    await save
+    return `saved:${message}`
+  })
+  ch.onOpen(() => report('open'))
+  ch.onDisconnect(() => report('disconnect'))
+  ch.onReconnect(() => report('reconnect'))
+  ch.onClose(() => report('close'))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+const sessions = new Set<string>()
+
+/** A member's channel that saves whether they're online, and ends once they signed out; cleanupState:
+ *  wirePresence_<id> = the status the database holds. */
+async function onWirePresence() {
+  const ch = new Channel<never, never>()
+  const database = connectToDatabase()
+  const session = crypto.randomUUID()
+  sessions.add(session)
+  // The member signs out on another device.
+  onServerAction(`wirePresence_${ch.id}_signOut`, () => sessions.delete(session))
+  ch.onDisconnect(async () => {
+    await database.saveStatus(ch.id, 'away')
+  })
+  ch.onReconnect(async () => {
+    if (!(await isSignedIn(session))) throw Abort({ reason: 'signed out' })
+    await database.saveStatus(ch.id, 'online')
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+async function isSignedIn(session: string) {
+  return sessions.has(session)
+}
+
+/** A database that is unavailable for the first write. */
+function connectToDatabase() {
+  let connected = false
+  return {
+    async saveStatus(memberId: string, status: string) {
+      if (!connected) {
+        connected = true
+        throw new Error('Database unavailable')
+      }
+      cleanupState[`wirePresence_${memberId}`] = status
+    },
+  }
 }

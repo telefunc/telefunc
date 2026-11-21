@@ -1,29 +1,37 @@
 export { Listeners }
+export type { Registration }
 
-/** Callbacks in the order they were added, each added and removed in O(1). `list()` is replaced on a change, never
- *  mutated, so a dispatch iterates the ones it started with. */
+/** One `add()`: its `listener` is null once it is removed. */
+type Entry<T> = { listener: T | null }
+type Registration<T> = Readonly<Entry<T>>
+
+/** Listeners in the order they were added, each added and removed in O(1). A dispatch reaches the ones registered when
+ *  it began, minus the ones removed since: it walks `list()`, which a change replaces and never mutates, and skips a
+ *  registration whose `listener` is null. */
 class Listeners<T> {
-  private byRegistration: Map<object, T> | null = null
+  private registrations: Set<Entry<T>> | null = null
   private removers: Map<object, () => void> | null = null
-  private snapshot: readonly T[] | undefined = NO_LISTENERS
+  private snapshot: readonly Registration<T>[] | undefined = NO_LISTENERS
 
   get size(): number {
-    return this.byRegistration?.size ?? 0
+    return this.registrations?.size ?? 0
   }
 
-  /** Returns the function that removes this registration. */
-  add(listener: T, { signal, onRemove }: { signal?: AbortSignal; onRemove?: () => void } = {}): () => void {
-    if (signal?.aborted) return () => {}
-    const byRegistration = (this.byRegistration ??= new Map())
-    const registration = {}
-    byRegistration.set(registration, listener)
+  /** Returns the registration's removal, which reports whether it was still registered. */
+  add(listener: T, { signal, onRemove }: { signal?: AbortSignal; onRemove?: () => void } = {}): () => boolean {
+    if (signal?.aborted) return () => false
+    const registrations = (this.registrations ??= new Set())
+    const registration: Entry<T> = { listener }
+    registrations.add(registration)
     this.snapshot = undefined
     const remove = () => {
-      if (!byRegistration.delete(registration)) return
+      if (!registrations.delete(registration)) return false
+      registration.listener = null
       this.snapshot = undefined
       signal?.removeEventListener('abort', remove)
       this.removers?.delete(registration)
       onRemove?.()
+      return true
     }
     if (signal) {
       signal.addEventListener('abort', remove, { once: true })
@@ -34,12 +42,13 @@ class Listeners<T> {
 
   clear(): void {
     if (this.removers) for (const remove of this.removers.values()) remove()
-    this.byRegistration?.clear()
+    for (const registration of this.registrations ?? []) registration.listener = null
+    this.registrations?.clear()
     this.snapshot = NO_LISTENERS
   }
 
-  list(): readonly T[] {
-    return (this.snapshot ??= [...this.byRegistration!.values()])
+  list(): readonly Registration<T>[] {
+    return (this.snapshot ??= [...this.registrations!.values()])
   }
 }
 

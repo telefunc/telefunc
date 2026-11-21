@@ -8,9 +8,14 @@ export {
   onBenchBinaryServerPush,
   onBenchBroadcastRoom,
   onBenchBroadcastPublish,
+  onBenchBroadcastBinaryPublish,
+  onBenchRoomTrack,
+  onBenchRoomTrackPublish,
 }
 
 import { BroadcastChannel, Channel } from 'telefunc'
+import { Room, type LocalParticipant } from '@telefunc/room'
+import { anyoneCanJoin } from '../../anyone-can-join'
 
 const INSTANCE_ID = process.env.INSTANCE_ID ?? 'local'
 
@@ -161,27 +166,41 @@ async function onBenchBinaryServerPush(count: number, payloadSize: number) {
   return { channel: ch.client, instance: INSTANCE_ID, count }
 }
 
-/** Open a broadcast room and subscribe. Returns room + server-side stats closure. */
+/** A broadcast on `key`, for the page to subscribe to. */
 async function onBenchBroadcastRoom(key: string) {
-  const room = new BroadcastChannel<PushMsg>({ key })
-  let serverReceived = 0
-  room.subscribe(() => {
-    serverReceived++
-  })
-  return {
-    room,
-    instance: INSTANCE_ID,
-    getStats: async () => ({ count: serverReceived, instance: INSTANCE_ID }),
-  }
+  return { room: new BroadcastChannel<PushMsg>({ key }), instance: INSTANCE_ID }
 }
 
-/** Publish `count` messages to a broadcast key; returns elapsed time. */
+/** Publishes `count` messages on `key`, pipelined. */
 async function onBenchBroadcastPublish(key: string, count: number, payloadSize: number) {
   const room = new BroadcastChannel<PushMsg>({ key })
   const payload = 'x'.repeat(payloadSize)
-  const t0 = Date.now()
-  const promises: Promise<unknown>[] = []
-  for (let i = 0; i < count; i++) promises.push(room.publish({ seq: i, payload, sentAt: Date.now() }))
-  await Promise.all(promises)
-  return { instance: INSTANCE_ID, elapsedMs: Date.now() - t0, count }
+  await Promise.all(Array.from({ length: count }, (_, seq) => room.publish({ seq, payload, sentAt: Date.now() })))
+}
+
+/** Publishes `count` frames on `key`, pipelined. */
+async function onBenchBroadcastBinaryPublish(key: string, count: number, payloadSize: number) {
+  const room = new BroadcastChannel({ key })
+  const frame = new Uint8Array(payloadSize).fill(0xab)
+  await Promise.all(Array.from({ length: count }, () => room.publishBinary(frame)))
+}
+
+/** The members that publish on a bench room, joined before the page starts timing. */
+const roomPublishers = new Map<string, Promise<LocalParticipant>>()
+
+/** A room for the page to watch, with the member that will publish on its `bench` track. */
+async function onBenchRoomTrack(roomId: string) {
+  const room = anyoneCanJoin(await Room.getOrCreate(roomId))
+  if (!roomPublishers.has(roomId)) roomPublishers.set(roomId, room.join({ meta: { name: 'Bench' } }))
+  await roomPublishers.get(roomId)
+  return { room, instance: INSTANCE_ID }
+}
+
+/** The room's member publishes `count` frames on its `bench` track without `lossy`, pipelined, then leaves. */
+async function onBenchRoomTrackPublish(roomId: string, count: number, payloadSize: number) {
+  const member = await roomPublishers.get(roomId)!
+  roomPublishers.delete(roomId)
+  const frame = new Uint8Array(payloadSize).fill(0xab)
+  await Promise.all(Array.from({ length: count }, () => member.publishBinary(frame, { track: 'bench' })))
+  await member.leave()
 }

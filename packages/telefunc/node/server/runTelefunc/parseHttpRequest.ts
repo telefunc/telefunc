@@ -13,28 +13,19 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
-import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { queueMemory } from '../../../wire-protocol/channel/server/channelMemory.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleStreamFlowRequest } from '../../../wire-protocol/values/server/response/StreamFlow.js'
+import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
-
-// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
-// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
-// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
-// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
-// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 type RunContext = {
   request: Request
@@ -65,11 +56,13 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      /** The wants of the page's broadcasts the server hasn't confirmed to it, where there are any. */
+      wants: CallWant[] | undefined
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
-      wireResponse?: undefined
+      isSseRequest: false
       isMalformedRequest: false
     }
-  | { isMalformedRequest: false; wireResponse: SseChannelHttpResponse }
+  | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
   | { isMalformedRequest: true }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
@@ -88,20 +81,13 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
-    return { isMalformedRequest: false, wireResponse: sseResponse }
-  }
-  if (requestKind === REQUEST_KIND.FLOW) {
-    const { text } = await readBody(request, readable, REQUEST_KIND.TEXT)
-    return { isMalformedRequest: false, wireResponse: handleStreamFlowRequest(text) }
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
-  const mux = getChannelMux()
   const createChannel = <ClientToServer, ServerToClient>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
-    mux.registerChannel(channel)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
+    carryChannel(channel, requestContext)
     return channel
   }
   const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
@@ -109,7 +95,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     registerFile,
     consumeFile,
     createChannel,
-    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) =>
+      ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
   }
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;
@@ -117,10 +104,18 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
+  const wants = wantsOf(envelope.raw)
+  if (wants === null) {
+    logParseError('Telefunc request body has unexpected `wants`', runContext)
+    return { isMalformedRequest: true }
+  }
+
   return {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    wants,
+    isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()
@@ -148,8 +143,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // underlying channel/stream closes and the client releases the original.
           const wrapper = wrapProxy(value)
           // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
-          requestContext.onTopLevelError(close)
+          requestContext.onClose(getChannelMux().gcRegistry.register(wrapper, close))
+          requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
         },
@@ -255,6 +250,13 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
         ? (parsed.extensions as Record<string, Record<string, unknown>>)
         : {},
   }
+}
+
+/** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | undefined | null {
+  if (!hasProp(raw, 'wants')) return undefined
+  const { wants } = raw
+  return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
 }
 
 function logParseException(err: unknown, runContext: RunContext) {

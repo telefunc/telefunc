@@ -183,7 +183,7 @@ class AttachExchange {
     const attached = (ix: number): boolean => {
       if (inFlight.ixes.has(ix)) return serverHas.has(ix)
       const record = this.channels.get(ix)
-      return record !== undefined && !this.channels.isUndeclared(record) && !record.awaited
+      return record !== undefined && !this.channels.isUndeclared(ix) && !record.awaited
     }
     for (const frame of this.gate.drain(attached)) frames.push(frame)
 
@@ -261,10 +261,11 @@ class AttachExchange {
     const opened = record.state.tag === 'pending'
     if (opened) this.channels.open(record)
     else if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
-    // As `applyReconciled` does: its replay, then what it queued.
+    // As `applyReconciled` does: its replay, then what it queued, which a RECONCILE out lets go at its RECONCILED, in
+    // order with what the other channels queued meanwhile.
     const { transport } = this.owner
     for (const frame of this.replayTo(record, lastSeq)) transport.sendFrame(frame)
-    for (const frame of this.gate.drain((i) => i === ix)) transport.sendFrame(frame)
+    if (!this.isReconciling) for (const frame of this.gate.drain((i) => i === ix)) transport.sendFrame(frame)
     if (opened && record.state.tag === 'open') {
       record.channel._onTransportOpen(transport.batched, transport.uplink, transport.downlink)
     }
@@ -347,7 +348,7 @@ class AttachExchange {
     },
   ): ReconcileOpenEntry[] {
     const open: ReconcileOpenEntry[] = []
-    const subscribing = new Set<number>()
+    const wanting = new Set<number>()
     for (const record of records) {
       const { ix } = record
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
@@ -368,11 +369,11 @@ class AttachExchange {
       const state = record.channel._attach.state(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
-      if (state.broadcast) subscribing.add(ix)
+      if (state.want) wanting.add(ix)
       open.push(payloadEntry)
     }
-    // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-    if (subscribing.size > 0) this.gate.dropSubscriptionFrames(subscribing)
+    // The declared wants supersede the WANT frames queued before them.
+    if (wanting.size > 0) this.gate.dropWantFrames(wanting)
     return open
   }
 
@@ -417,7 +418,7 @@ class AttachExchange {
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
     this.gate.dropQueue(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
-    channel._onEnded(replayLossError('client'))
+    channel._onEnded(replayLossError())
     return { kind: 'control', frame }
   }
 }

@@ -19,10 +19,11 @@ import {
 import type { Urgency } from '../../flowControl/credit.js'
 import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, BdpPingAck, ChannelFrame, SequencedEncoder } from '../../wire/frame.js'
-import type { ReconciledPayload } from '../../wire/payloads.js'
+import type { CallWant, ReconciledPayload, Want } from '../../wire/payloads.js'
 import type { Heartbeat } from './Heartbeat.js'
-import type { ChannelTable } from './ChannelTable.js'
+import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
 import type { SendGate } from './SendGate.js'
+import { EVERY_STREAM, OWN_STREAM } from '../ownStream.js'
 import type { ChannelAttach } from './ChannelAttach.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -48,18 +49,42 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onEnded(err?: Error): void
+  /** The channel's wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void
   /** Its credits as the connection drives them across wires. */
   readonly _attach: ChannelAttach
 }
 
 interface MuxConnection {
+  /** A frame of `stream` that must arrive: it ends the place of that stream's lossy frame that still waits, or of every
+   *  stream's with `EVERY_STREAM`. */
   sendSequenced<T>(
     channel: MuxChannel,
     kind: 'data' | 'ack',
     encodeFrame: SequencedEncoder<T>,
     data: T,
     onQueued?: (seq: number) => void,
+    stream?: string,
   ): number
+  /** A lossy frame of `stream`, whose place a newer one may take while it waits to go (`replaceWaiting`). */
+  sendReplaceable<T>(
+    channel: MuxChannel,
+    stream: string,
+    kind: 'data' | 'ack',
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+    onQueued?: (seq: number) => void,
+  ): number
+  /** Puts `data` in the place of `stream`'s lossy frame that still waits to go on a link that is behind. Returns that
+   *  frame's seq and the bytes this adds; null where none waits or the link keeps up. */
+  replaceWaiting<T>(
+    channel: MuxChannel,
+    stream: string,
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+  ): { seq: number; added: number } | null
+  /** Throws where `data`, encoded by `encodeFrame`, is larger than the server accepts, as its send would. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -72,8 +97,11 @@ interface MuxConnection {
   bufferedAmount(): number
   /** Bytes the wire delivered in the `ms` before its latest delivery: the frame being handled, on arrival. */
   deliveredBefore(ms: number): number
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
+  sendWant(channel: MuxChannel, want: Want): void
+  /** `channel` declares its want as this task ends, or before the page sends a channel's frame or calls the server. */
+  wantDue(channel: DueWant): void
+  /** The server confirmed every want `channel` sent: a call carries none of it. */
+  wantSettled(channel: MuxChannel): void
   unregister(channel: MuxChannel): void
   reconnectWindow(): number
 }
@@ -110,6 +138,9 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
   headroom(): number
+  /** How long a lossy publish may wait to go before the page counts as behind: past the wire's own wait, its least
+   *  round trip, so `Infinity` before that is measured. */
+  readonly behindAfter: number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
   abandonActiveTransport(): void
@@ -126,10 +157,24 @@ type ClientChannelTransport = {
 }
 
 // One per page, however many copies of Telefunc it loaded: each would otherwise open its own connections.
-const globalObject = getGlobalObject<{ connections: Map<string, ClientConnection> }>(
-  'channel/client/ClientConnection.ts',
-  { connections: new Map() },
-)
+const globalObject = getGlobalObject<{
+  connections: Map<string, ClientConnection>
+  /** The page's channels with a want the server hasn't confirmed, by the `telefuncUrl` of the calls that carry it. */
+  wanting: Map<string, Set<MuxChannel>>
+  /** The page's channels whose want changed in this task and isn't declared yet, by `telefuncUrl`. */
+  wantsDue: Map<string, Set<DueWant>>
+}>('channel/client/ClientConnection.ts', { connections: new Map(), wanting: new Map(), wantsDue: new Map() })
+
+/** A channel whose want changed in this task, which it declares once. */
+type DueWant = { _declareWant(): void }
+
+/** Declares the wants that changed in this task of the page's channels on `telefuncUrl`. */
+function declareWantsDue(telefuncUrl: string): void {
+  const due = globalObject.wantsDue.get(telefuncUrl)
+  if (due === undefined) return
+  globalObject.wantsDue.delete(telefuncUrl)
+  for (const channel of due) channel._declareWant()
+}
 
 /** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
  *  frames and hands them to its send gate; the wire lifecycle carries them. */
@@ -147,6 +192,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   private readonly cacheKey: string
+  private readonly telefuncUrl: string
   /** True if its transports include a WebSocket, whose runtime may accept smaller frames than the wire's limit. */
   private readonly usesWebSocket: boolean
   private readonly lifecycle: WireLifecycle
@@ -163,10 +209,26 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     cacheKey,
   }: { telefuncUrl: string; options: ClientConnectionOptions; cacheKey: string }) {
     this.cacheKey = cacheKey
+    this.telefuncUrl = telefuncUrl
     this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
     this.channels = this.lifecycle.channels
     this.gate = this.lifecycle.gate
+  }
+
+  /** The wants of the page's broadcasts on `telefuncUrl` that the server hasn't confirmed: a call to it carries them, so
+   *  its server applies them before the telefunction runs. Undefined where there are none. */
+  static unconfirmedWants(telefuncUrl: string): CallWant[] | undefined {
+    declareWantsDue(telefuncUrl)
+    const wanting = globalObject.wanting.get(telefuncUrl)
+    if (wanting === undefined) return undefined
+    const wants: CallWant[] = []
+    for (const channel of wanting) {
+      const want = channel.isClosed ? null : channel._attach.unconfirmedWant
+      if (want !== null) wants.push({ channel: channel.id, ...want })
+    }
+    // A broadcast closing before its want was confirmed stays here until it sends nothing more.
+    return wants.length === 0 ? undefined : wants
   }
 
   /** The next `getOrCreate` opens a fresh connection; one that already replaced this one stays cached. */
@@ -181,6 +243,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
 
   /** Called once the channel sends nothing more. */
   unregister(channel: MuxChannel): void {
+    this.wantSettled(channel)
     this.lifecycle.unregister(channel)
   }
 
@@ -192,28 +255,78 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     encodeFrame: SequencedEncoder<T>,
     data: T,
     onQueued?: (seq: number) => void,
+    stream: string = OWN_STREAM,
   ): number {
+    declareWantsDue(this.telefuncUrl)
     const record = this.channels.of(channel)
     if (record === undefined) return 0
-    const { replay } = record
-    const frame = encodeFrame(record.ix, data, replay.seq + 1)
+    const frame = this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+    const seq = this.sequence(record, stream)
+    onQueued?.(seq)
+    this.gate.send(record, seq, frame, kind)
+    return frame.byteLength
+  }
+
+  sendReplaceable<T>(
+    channel: MuxChannel,
+    stream: string,
+    kind: 'data' | 'ack',
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+    onQueued?: (seq: number) => void,
+  ): number {
+    const queued = (seq: number) => {
+      const record = this.channels.of(channel)
+      if (record !== undefined) (record.replaceable ??= new Map()).set(stream, seq)
+      onQueued?.(seq)
+    }
+    return this.sendSequenced(channel, kind, encodeFrame, data, queued, stream)
+  }
+
+  replaceWaiting<T>(
+    channel: MuxChannel,
+    stream: string,
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+  ): { seq: number; added: number } | null {
+    const record = this.channels.of(channel)
+    const seq = record?.replaceable?.get(stream)
+    if (record === undefined || seq === undefined) return null
+    const added = this.gate.replaceWaiting(record.ix, seq, this.fitting(channel, encodeFrame(record.ix, data, seq)))
+    return added === null ? null : { seq, added }
+  }
+
+  /** The next seq of `record`'s channel, for a frame of `stream` that must arrive. The stream's lossy frame that still
+   *  waits, or every stream's, keeps its data from here on: what was sent after a frame never arrives ahead of it in an
+   *  older one's place. */
+  private sequence(record: ChannelRecord, stream: string): number {
+    if (stream === EVERY_STREAM) record.replaceable?.clear()
+    else record.replaceable?.delete(stream)
+    return record.replay.nextSeq()
+  }
+
+  /** For a send held before it takes a seq: a frame's header has the same size at any seq. */
+  assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined) this.fitting(channel, encodeFrame(record.ix, data, record.replay.seq + 1))
+  }
+
+  /** `frame`, where it is no larger than the server accepts from `channel`: the server ends any wire a larger frame
+   *  arrives on, and the replay would send it again on the next one. */
+  private fitting(channel: MuxChannel, frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
     const maxFrameBytes = this.maxFrameBytesOf(channel)
-    // The server ends any wire a larger frame arrives on, and the replay would send it again on the next one.
     assertUsage(
       frame.byteLength <= maxFrameBytes,
       `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
     )
-    const seq = replay.nextSeq()
-    onQueued?.(seq)
-    this.gate.send(record, seq, frame, kind)
-    return frame.byteLength
+    return frame
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const { ix } = record
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends any wire a larger frame arrives on, so the awaiting send gets an error answer instead.
@@ -235,21 +348,21 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   sendAbort(channel: MuxChannel, abortValue: string): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.abort(record.ix, abortValue, seq), 'control')
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.close(record.ix, timeoutMs, seq), 'control')
   }
 
   sendCloseAck(channel: MuxChannel): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const seq = record.replay.nextSeq()
+    const seq = this.sequence(record, OWN_STREAM)
     this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
   }
 
@@ -287,15 +400,27 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
+  sendWant(channel: MuxChannel, want: Want): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastSub(record.ix, binary), 'control')
+    this.gate.sendUnsequenced(record, encode.want(record.ix, want), 'control')
+    let wanting = globalObject.wanting.get(this.telefuncUrl)
+    if (wanting === undefined) globalObject.wanting.set(this.telefuncUrl, (wanting = new Set()))
+    wanting.add(channel)
   }
 
-  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const record = this.channels.of(channel)
-    if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
+  wantDue(channel: DueWant): void {
+    let due = globalObject.wantsDue.get(this.telefuncUrl)
+    if (due === undefined) {
+      globalObject.wantsDue.set(this.telefuncUrl, (due = new Set()))
+      const { telefuncUrl } = this
+      queueMicrotask(() => declareWantsDue(telefuncUrl))
+    }
+    due.add(channel)
+  }
+
+  wantSettled(channel: MuxChannel): void {
+    const wanting = globalObject.wanting.get(this.telefuncUrl)
+    if (wanting?.delete(channel) && wanting.size === 0) globalObject.wanting.delete(this.telefuncUrl)
   }
 }
