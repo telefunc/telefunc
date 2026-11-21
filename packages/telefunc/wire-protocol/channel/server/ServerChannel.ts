@@ -908,12 +908,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pageNeedsNothing(): boolean {
     if (this._replayBuffer === null) return false
     if (this.pageClosed) return true
-    return (
-      this.pageLastSeq >= this._replayBuffer.seq &&
-      this.offlineBuffer.size === 0 &&
-      this.pendingAckRes.length === 0 &&
-      this.pendingEnd.length === 0
-    )
+    return this.pageLastSeq >= this._replayBuffer.seq && this.nothingPending()
+  }
+
+  /** Nothing waits for its page outside its replay: no send buffered while it was away, no answer, no end. */
+  private nothingPending(): boolean {
+    return this.offlineBuffer.size === 0 && this.pendingAckRes.length === 0 && this.pendingEnd.length === 0
   }
 
   /** As for a send made now, its `await` throttles the sender by the page's credit. */
@@ -1140,9 +1140,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Its page lacks nothing of it but frames of its close. */
   private keepsOnlyTheClose(): boolean {
-    if (this._replayBuffer === null) return false
-    if (this.offlineBuffer.size > 0 || this.pendingAckRes.length > 0 || this.pendingEnd.length > 0) return false
-    return this._replayBuffer.holdsOnly(isCloseFrame)
+    return this._replayBuffer !== null && this.nothingPending() && this._replayBuffer.holdsOnly(isCloseFrame)
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
