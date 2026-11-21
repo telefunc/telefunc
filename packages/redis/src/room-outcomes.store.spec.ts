@@ -174,10 +174,9 @@ describe.runIf(runs)('a Room call refused after it reaped a lapsed lease', () =>
         const leaseStays = await lapsedLease(admin, id)
         // The removal and the send each publish on a channel of the room; the reap publishes on none.
         await admin.call('ACL', 'SETUSER', 'telefunc', 'resetchannels')
-        const refused = await (
-          call === 'Room.send()'
-            ? Room.send(id, { id: participant.id }, 'hi')
-            : Room.removeParticipant(id, { id: participant.id })
+        const refused = await (call === 'Room.send()'
+          ? Room.send(id, { id: participant.id }, 'hi')
+          : Room.removeParticipant(id, { id: participant.id })
         ).then(
           () => 'resolved',
           (error: unknown) => error,
