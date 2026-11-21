@@ -230,12 +230,18 @@ function typedResponse({ status, contentType }: { status: number; contentType: s
   return new Response('Refused', { status, headers })
 }
 
-/** What a streaming upload meets: the server takes it (`taken`, acknowledged on its wire's event stream); it fails to
- *  fetch `afterMs` after it went, unacknowledged, its frames read and answered `answersAfterMs` after each where given
- *  (as a body that reached the server whose acknowledgement never reached the page), else unread (as HTTP/1.1 or a
- *  network change); or something in front holds its body for as long as it is open (`held`), as a proxy that forwards a
- *  request only once its body ended: it settles only as the page aborts it. */
-type UploadScript = { tag: 'taken' } | { tag: 'fails'; afterMs: number; answersAfterMs?: number } | { tag: 'held' }
+/** What a streaming upload meets: the server takes it (`taken`, acknowledged on its wire's event stream, `ackAfterMs`
+ *  after it went where given, or when the test calls `world.heldAcks` with `ack: 'held'`); it fails to fetch `afterMs`
+ *  after it went, unacknowledged, its frames read and answered `answersAfterMs` after each where given (as a body that
+ *  reached the server whose acknowledgement never reached the page), else unread (as HTTP/1.1 or a network change);
+ *  something in front holds its body for as long as it is open (`held`), as a proxy that forwards a request only once
+ *  its body ended: it settles only as the page aborts it; or something in front answers it with `status` and an HTML
+ *  page, unacknowledged (`answered`). */
+type UploadScript =
+  | { tag: 'taken'; ackAfterMs?: number; ack?: 'held' }
+  | { tag: 'fails'; afterMs: number; answersAfterMs?: number }
+  | { tag: 'held' }
+  | { tag: 'answered'; status: number }
 
 /** The test's server and what it saw; `useScriptedServer` makes a new one for each test. */
 type World = {
@@ -256,6 +262,11 @@ type World = {
   uploadAnswers: { status: number; contentType: string[] }[]
   /** How many streaming uploads the page sent, taken or not. */
   uploadPosts: number
+  /** Each data frame a taken upload carried to the server: the upload (as `uploadPosts` counted it), the channel, the
+   *  seq. */
+  uploaded: { upload: number; ix: number; seq: number }[]
+  /** The acknowledgements of uploads taken with `ack: 'held'`, in order: a test calls one to send it. */
+  heldAcks: (() => void)[]
   postLimit: number
   holdOpens: boolean
   heldOpens: (() => void)[]
@@ -280,6 +291,8 @@ const world: World = {
   uploadScripts: [],
   uploadAnswers: [],
   uploadPosts: 0,
+  uploaded: [],
+  heldAcks: [],
   /** The largest batch POST body something in front of the server takes: a larger one is answered 413, unread. */
   postLimit: Infinity,
   /** While set, the server answers no open, and writes nothing on its stream: each waits in `heldOpens`, which a test
@@ -380,7 +393,10 @@ async function meetUpload(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | null | undefined,
 ): Promise<Response> {
-  if (script.tag === 'taken') return takeUpload(body, wire)
+  if (script.tag === 'taken') return takeUpload(body, wire, script)
+  if (script.tag === 'answered') {
+    return new Response('<h1>Refused</h1>', { status: script.status, headers: { 'Content-Type': 'text/html' } })
+  }
   if (script.tag === 'held') {
     return new Promise((_, reject) =>
       signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true }),
@@ -412,10 +428,17 @@ async function answerUpload(body: ReadableStream<Uint8Array>, wire: number, afte
   }
 }
 
-/** A streaming upload, acknowledged on its wire's event stream: its frames are answered as they come, as a batch
- *  POST's are, until it carried data while an answer waits in `uploadAnswers`, or its body ended. */
-async function takeUpload(body: ReadableStream<Uint8Array>, wire: number): Promise<Response> {
+/** A streaming upload, acknowledged on its wire's event stream as `script` says: its frames are read only then, as
+ *  Telefunc's server reads them after the acknowledgement, and answered as they come, as a batch POST's are, until it
+ *  carried data while an answer waits in `uploadAnswers`, or its body ended. */
+async function takeUpload(
+  body: ReadableStream<Uint8Array>,
+  wire: number,
+  { ackAfterMs, ack }: { ackAfterMs?: number; ack?: 'held' },
+): Promise<Response> {
   const stream = await streamOf(wire)
+  if (ackAfterMs !== undefined) await new Promise((resolve) => setTimeout(resolve, ackAfterMs))
+  if (ack === 'held') await new Promise<void>((resolve) => world.heldAcks.push(resolve))
   stream?.frame(encode.streamRequestOpenAck())
   const reader = body.getReader()
   for await (const frame of uploadFrames(reader)) {
@@ -424,6 +447,7 @@ async function takeUpload(body: ReadableStream<Uint8Array>, wire: number): Promi
       void reader.cancel().catch(() => {})
       return typedResponse(refusal)
     }
+    if (isSequencedFrame(frame)) world.uploaded.push({ upload: wire, ix: frame.index, seq: frame.seq })
     for (const down of world.server.answer(frame)) stream?.frame(down)
   }
   return new Response(null)
@@ -501,6 +525,8 @@ function useScriptedServer(): void {
     world.uploadScripts = []
     world.uploadAnswers = []
     world.uploadPosts = 0
+    world.uploaded = []
+    world.heldAcks = []
     world.holdOpens = false
     world.heldOpens = []
     world.holdReady = false

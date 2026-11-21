@@ -132,10 +132,6 @@ export const WS_CLOSE_REFUSED = 4002
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'
 
-/** How long to wait for the stream-request POST handshake ack on the SSE downstream
- *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
-export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
-
 // ===== SSE -> WS upgrade =====
 
 /** Batch mode: the barrier's wait for the POST out; one still out then is an upload, and the upgrade waits for the drain. */

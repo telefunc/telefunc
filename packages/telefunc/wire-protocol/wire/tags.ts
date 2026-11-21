@@ -35,9 +35,8 @@ const TAG = {
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
   /** Server → client wire-probe ack. Sent over the SSE downstream after the long-lived
-   *  client→server stream-request POST's metadata has been parsed. The client awaits this
-   *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
-   *  confirms the half-duplex streaming wire round-trips end-to-end. */
+   *  client→server stream-request POST's metadata has been parsed: what the page writes on that POST from then on
+   *  reaches the server as it is sent. Until it comes, the page sends in batch POSTs. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
   PREPARE: 0x07 as const,
   READY: 0x08 as const,

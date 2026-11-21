@@ -49,6 +49,8 @@ type Hook = {
   stream?: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>
   /** The request reaches the server, and its answer never reaches the page. */
   held?: true
+  /** The request waits this long before it reaches the server, as on a slow link. */
+  delayMs?: number
 }
 const world: {
   hooks: Hook[]
@@ -57,6 +59,8 @@ const world: {
   requests: { kind: Kind; bytes: number; status: number; contentType: string | null }[]
   /** Each request as it went, by its kind: a streaming upload is answered only at its end. */
   started: Kind[]
+  /** The text messages batch POSTs carried, as they went. */
+  posted: string[]
   /** Each batch POST a hook changed, as it went: `again` sends it once more, past the hooks, whatever the page aborted;
    *  `status` is its own answer's, once it came. */
   hooked: { again: () => Promise<Response>; status: number | null }[]
@@ -74,6 +78,7 @@ const world: {
   uploads: false,
   requests: [],
   started: [],
+  posted: [],
   hooked: [],
   sockets: 0,
   pendingBodyReads: 0,
@@ -88,6 +93,15 @@ function textOf(frame: Uint8Array<ArrayBuffer>, text: string): { ix: number; seq
   const decoded = decode(frame)
   if (decoded.tag !== TAG.TEXT || decoded.text !== JSON.stringify(text)) return null
   return { ix: readU16(frame, 1), seq: readU32(frame, SEQ_OFFSET) }
+}
+
+/** The text messages a batch body carries. */
+function textsOf(body: Uint8Array<ArrayBuffer>): string[] {
+  return Array.from(framesOf(body)).flatMap(({ frame }) => {
+    if (frame[0] !== TAG.TEXT) return []
+    const decoded = decode(frame)
+    return decoded.tag === TAG.TEXT ? [String(JSON.parse(decoded.text))] : []
+  })
 }
 
 /** Where a batch body's frame that carries `text` ends, and its channel and seq; null where none does. */
@@ -155,6 +169,7 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
         ? hook.upload(body)
         : body
   world.started.push(kind)
+  if (kind === 'post' && bytes !== null) world.posted.push(...textsOf(bytes))
   const target = hook.url ? hook.url(url) : url
   const hooked: (typeof world.hooked)[number] | null =
     taken?.taken && sent instanceof Blob
@@ -162,6 +177,7 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
       : null
   if (hooked !== null) world.hooked.push(hooked)
   if (hook.held) return heldAnswer(realFetch(target, { ...init, body: sent, signal: null }), init?.signal)
+  if (hook.delayMs !== undefined) await delay(hook.delayMs)
   const response = await realFetch(target, { ...init, body: sent })
   if (hooked !== null) hooked.status = response.status
   const contentType = response.headers.get('content-type')
@@ -228,6 +244,7 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
       uploads: false,
       requests: [],
       started: [],
+      posted: [],
       hooked: [],
       sockets: 0,
       closedStreaming: [],
