@@ -22,7 +22,7 @@ import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
-import type { Fault, ReconcileOutcome, ServerTransport, WireClose } from './ChannelMux.js'
+import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
@@ -65,6 +65,9 @@ type SseWire = {
   /** What the POSTs that meet the wire closed are answered, where the server decided its end. */
   refused: Refusal | null
 }
+
+/** A closed wire as the server keeps it: when it closed, the session it held, and its `refused`. */
+type ClosedWire = { at: number; hold: SessionHold | null; refused: Refusal | null }
 
 type EventStreamOptions = {
   useNodeStream: boolean
@@ -253,9 +256,9 @@ class SseServerTransport {
    *  wire — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingWires = new Map<string, Set<(wire: SseWire | null) => void>>()
-  /** When each wire closed, the session it had, and what the server decided its end to be answered with, for
+  /** When each wire closed, the session it held, and what the server decided its end to be answered with, for
    *  `connectTtl`: a page never reuses a connId, so a POST for one is refused, as a POST that met its close is. */
-  private readonly closedWires = new Map<string, { at: number; sessionId: string | null; refused: Refusal | null }>()
+  private readonly closedWires = new Map<string, ClosedWire>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseWire> = {
     getConnId: (wire) => wire.connId,
@@ -396,8 +399,8 @@ class SseServerTransport {
       this.closeWire(wire, 'pageLeft')
       return okResponse()
     }
-    const sessionId = this.keptOf(connId)?.sessionId
-    if (sessionId) this.mux.endSession(sessionId)
+    const hold = this.keptOf(connId)?.hold
+    if (hold) this.mux.endSession(hold)
     return okResponse()
   }
 
@@ -507,13 +510,13 @@ class SseServerTransport {
     return await this.waitForWire(connId)
   }
 
-  private rememberClosed({ connId, refused }: SseWire, sessionId: string | null): void {
+  private rememberClosed({ connId, refused }: SseWire, hold: SessionHold | null): void {
     const now = performance.now()
     for (const [closed, { at }] of this.closedWires) {
       if (now - at < this.mux.connectTtl) break
       this.closedWires.delete(closed)
     }
-    this.closedWires.set(connId, { at: now, sessionId, refused })
+    this.closedWires.set(connId, { at: now, hold, refused })
   }
 
   /** What a request for `connId`, whose wire the server no longer has, is answered: the end the server decided for it,
@@ -524,7 +527,7 @@ class SseServerTransport {
 
   /** What the server kept of `connId`'s closed wire, while it is younger than `connectTtl`; undefined past that, though
    *  the entry stays until a later close sweeps it (`rememberClosed`), refusing the connId's requests meanwhile. */
-  private keptOf(connId: string): { sessionId: string | null; refused: Refusal | null } | undefined {
+  private keptOf(connId: string): ClosedWire | undefined {
     const closed = this.closedWires.get(connId)
     return closed !== undefined && performance.now() - closed.at < this.mux.connectTtl ? closed : undefined
   }

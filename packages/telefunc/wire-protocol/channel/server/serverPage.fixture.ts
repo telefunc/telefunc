@@ -18,7 +18,8 @@ type ServePath = 'web' | 'node'
 /** A page's event stream: what its frames carried so far, read as the page reads them. */
 async function openStream(path: ServePath, reconcile: Uint8Array<ArrayBuffer>) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-  const body = encodeSseRequest({ connId: crypto.randomUUID(), streamResponse: true }, [reconcile])
+  const connId = crypto.randomUUID()
+  const body = encodeSseRequest({ connId, streamResponse: true }, [reconcile])
   const opened =
     path === 'web'
       ? await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
@@ -44,6 +45,13 @@ async function openStream(path: ServePath, reconcile: Uint8Array<ArrayBuffer>) {
     },
     /** The page's connection drops: the server's wire closes transiently. */
     drop: () => (stream instanceof ReadableStream ? reader.cancel() : stream.destroy()),
+    /** The page leaves for good, as a closed tab does: its close POST names this stream's wire. */
+    leave: () =>
+      handleSseChannelRequest(
+        new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) }),
+        undefined,
+        () => false,
+      ),
   }
 }
 

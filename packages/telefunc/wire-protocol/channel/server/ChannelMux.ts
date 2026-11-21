@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, Wire, WireClose }
+export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, SessionHold, Wire, WireClose }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -128,6 +128,10 @@ type MuxServerOptions = {
 /** How a wire closed: lost (its page may reconnect), its page left for good, or ended for good by the server for a
  *  session cause, which each channel of the session ends with. */
 type WireClose = 'transient' | 'pageLeft' | SessionCause
+
+/** A session as one wire held it: its id, and the page's number for that wire. */
+type SessionHold = { sessionId: string; attempt: number }
+
 type DetachReason = WireClose | 'recoveryFailed'
 
 type WireState = {
@@ -310,8 +314,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
 
-  /** Returns the id of the session the wire held, if it held one. */
-  onWireClosed(wire: Wire, reason: WireClose): string | undefined {
+  /** Returns the session the wire held, if it held one. */
+  onWireClosed(wire: Wire, reason: WireClose): SessionHold | undefined {
     const entry = this.wires.get(wire)
     if (!entry) return undefined
     entry.state.closed = { reason }
@@ -331,17 +335,20 @@ class ChannelMux implements UpgradeStagesOwner {
     if (session === null) return undefined
     const stagedProbe = this.stages.probeFor(session.id)
     if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
+    // The wire that holds a session is the page's newest to take it, so its number is the session's highest.
+    const hold = { sessionId: session.id, attempt: session.high }
     this.sessions.release(entry)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace); the others end them.
     this.detachSession(session, reason)
-    return session.id
+    return hold
   }
 
-  /** The page of a session that no wire holds left: ends its channels as its wire's close would have. A session a wire
-   *  holds again is that wire's to end. */
-  endSession(sessionId: string): void {
-    const session = this.sessions.get(sessionId)
-    if (session === undefined || session.holder !== null) return
+  /** The page of a session that no wire holds left, `hold` naming the wire its leaving came for: ends its channels as
+   *  that wire's close would have, where that wire was the last to hold the session. A session a later wire took is
+   *  that wire's to end, held or not. */
+  endSession(hold: SessionHold): void {
+    const session = this.sessions.get(hold.sessionId)
+    if (session === undefined || session.holder !== null || session.high !== hold.attempt) return
     this.detachSession(session, 'pageLeft')
   }
 
