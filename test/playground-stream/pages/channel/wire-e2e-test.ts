@@ -1,4 +1,4 @@
-export { testWire, testWireSlowPing, testWireShortReconnect, testUploadSessionEnd }
+export { testWire, testWireSlowPing, testWireShortReconnect, testUploadSessionEnd, testUploadAfterNetworkLoss }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
@@ -660,6 +660,26 @@ declare global {
   interface Window {
     uploadEnd?: UploadEnd
     sendUnreadableOnUpload?: () => boolean
+    /** The kind of each request the page made, in order. */
+    requestKinds?: RequestKind[]
+    /** Resolves once the browser may send the upload the page is about to make. */
+    beforeUpload?: () => Promise<void>
+  }
+}
+
+type RequestKind = 'open' | 'upload' | 'post'
+
+/** For `addInitScript`: `window.requestKinds` gets the kind of each request the page makes, its SSE opens, streaming
+ *  uploads and batch POSTs; each upload waits for `window.beforeUpload()` where the test exposes it. */
+function watchRequestKinds() {
+  const kinds: RequestKind[] = []
+  window.requestKinds = kinds
+  const fetchPage = window.fetch
+  window.fetch = (input, init) => {
+    const upload = init?.body instanceof ReadableStream
+    kinds.push(upload ? 'upload' : new Headers(init?.headers).get('accept') === 'text/event-stream' ? 'open' : 'post')
+    const ready = upload && window.beforeUpload ? window.beforeUpload() : Promise.resolve()
+    return ready.then(() => fetchPage(input, init))
   }
 }
 
@@ -761,6 +781,48 @@ function testUploadSessionEnd() {
         true,
       )
       expect(requests).deep.equal([])
+    } finally {
+      await context.close()
+    }
+  })
+}
+
+function testUploadAfterNetworkLoss() {
+  test('channel: over HTTP/2, a page whose first streaming upload the network fails, and which loses its wire to it, uploads again on the wire it reconnects on: its sends take no batch POST', async () => {
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('no browser')
+    const context = await browser.newContext({ ignoreHTTPSErrors: true })
+    // The network goes as the page's first upload goes out, and comes back half a second later, as a phone leaving
+    // Wi-Fi: the upload fails to fetch, and so does what the page sends meanwhile, which loses it the wire.
+    let networkLost = false
+    await context.exposeBinding('beforeUpload', async () => {
+      if (networkLost) return
+      networkLost = true
+      await context.setOffline(true)
+      setTimeout(() => void context.setOffline(false), 500)
+    })
+    try {
+      const own = await context.newPage()
+      await own.addInitScript(watchRequestKinds)
+      await navigate(`${getServerUrl()}/channel`, undefined, own)
+      await own.click('#wire-upload-refused-open')
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.close).toBe('open')
+      })
+      await sleep(3_000)
+      const before = (await own.evaluate(() => window.requestKinds?.length)) ?? 0
+      for (let i = 0; i < 10; i++) {
+        await own.click('#wire-upload-refused-send-kept')
+        await sleep(300)
+      }
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.sent).toBe(10)
+      })
+      const kinds = (await own.evaluate(() => window.requestKinds)) ?? []
+      // What the page sent from its second open on: the wires it reconnected on.
+      const second = kinds.indexOf('open', kinds.indexOf('open') + 1)
+      const reopened = second === -1 ? [] : kinds.slice(second)
+      expect([networkLost, reopened.includes('upload'), kinds.slice(before)]).deep.equal([true, true, []])
     } finally {
       await context.close()
     }

@@ -127,7 +127,10 @@ class SseTransport implements UpgradeSource {
   private drainCallbacks: Array<() => void> = []
   /** A barrier waiting for the POST out: it goes next, with the outbox. */
   private barrierTurn: (() => void) | null = null
-  /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
+  /** The streaming upload POST. Once `failed`, frames go in batch POSTs from the outbox. A failure is the wire's,
+   *  `on` naming it, until that wire reads a PONG that answers a PING sent after it: then the upload failed on a path
+   *  that lives, and the failure is the connection's (`on` null), as an answered refusal of the upload is. A wire lost
+   *  first takes its failure with it, as a network change does: the next wire uploads again. */
   private streamRequest:
     | { tag: 'idle' }
     | {
@@ -136,7 +139,14 @@ class SseTransport implements UpgradeSource {
         /** Written before the server acknowledged the POST; null once it did. */
         unconfirmed: Uint8Array<ArrayBuffer>[] | null
       }
-    | { tag: 'failed' } = { tag: 'idle' }
+    | {
+        tag: 'failed'
+        /** `pongsOwed`: the PONGs the server may still send for PINGs sent before the failure. */
+        on: { wire: AbortController; pongsOwed: number } | null
+      } = { tag: 'idle' }
+  /** The PINGs the page sent on the wire, and the PONGs it read on it. */
+  private pings = 0
+  private pongs = 0
 
   constructor({ telefuncUrl, fetchImpl, userHeaders, owner }: SseTransportOptions) {
     this.telefuncUrl = telefuncUrl
@@ -309,7 +319,10 @@ class SseTransport implements UpgradeSource {
       abortController.signal,
       { accept: 'text/event-stream' },
     )
-    const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
+    this.pings = 0
+    this.pongs = 0
+    const kept = this.streamRequest.tag === 'failed' && this.streamRequest.on === null
+    const upload = kept ? null : this.openUpload(abortController)
     this.owner.onTransportReconcileSent(this)
 
     const body = await this.openDownstream(ssePromise, stage, abortController)
@@ -395,7 +408,7 @@ class SseTransport implements UpgradeSource {
     }
     // Not acknowledged in time, or the POST ended: frames go in batch POSTs from now on.
     if (result === 'ok') this.confirmUpload(upload, abortController)
-    else this.abandonUpload(upload)
+    else this.abandonUpload(upload, abortController)
     return true
   }
 
@@ -426,7 +439,7 @@ class SseTransport implements UpgradeSource {
     // Something in front refuses a body that never ends (a limit on its size): the next wires send in batch POSTs.
     if (answer?.tag === 'refused' || answer?.tag === 'tooLarge') {
       this.closeStreamRequest()
-      this.streamRequest = { tag: 'failed' }
+      this.streamRequest = { tag: 'failed', on: null }
     }
     // Telefunc's own: `retry` is a loss and keeps the streaming upload; the others end as on the batch path.
     if (answer?.tag === 'otherWireVersion' || answer?.tag === 'route' || answer?.tag === 'frames') {
@@ -437,13 +450,15 @@ class SseTransport implements UpgradeSource {
     abortController.abort()
   }
 
-  /** The upload went unacknowledged: frames go in batch POSTs from now on. */
-  private abandonUpload({ abort }: StreamUpload): void {
+  /** The upload went unacknowledged on the wire `abortController` aborts: frames go in batch POSTs from now on. */
+  private abandonUpload({ abort }: StreamUpload, abortController: AbortController): void {
     // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
     const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
-    this.streamRequest = { tag: 'failed' }
+    // The PINGs unanswered now are each answered at most once from what went before; one sent again goes after the
+    // failure, so a PONG past these answers what went after it. One the server never read leaves a PONG more to wait.
+    this.streamRequest = { tag: 'failed', on: { wire: abortController, pongsOwed: this.pings - this.pongs } }
     const now = performance.now()
     if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
     this.owner.onTransportBatched(this)
@@ -481,6 +496,7 @@ class SseTransport implements UpgradeSource {
         if (frame.tag === TAG.PONG) {
           // A PONG still on its way on a wire the page left says nothing of the wire in use.
           if (this.transportAbort !== abortController) continue
+          this.readPong(abortController)
           this.heartbeat?.resetPong()
           this.owner.onTransportPong(frame.ended)
           continue
@@ -920,7 +936,18 @@ class SseTransport implements UpgradeSource {
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (!this.hasWire()) return
+    this.pings++
     this.sendFrame({ kind: 'heartbeat', frame })
+  }
+
+  /** A PONG on the wire `abortController` aborts. The server answers each PING it reads with one PONG, in order: past
+   *  the PONGs owed at an upload's failure, this one answers a PING sent after it, so the wire outlived the failure. */
+  private readPong(abortController: AbortController): void {
+    this.pongs++
+    const failed = this.streamRequest
+    if (failed.tag !== 'failed' || failed.on?.wire !== abortController) return
+    if (failed.on.pongsOwed > 0) failed.on.pongsOwed--
+    else this.streamRequest = { tag: 'failed', on: null }
   }
 
   /** Its PINGs wait for a POST as long as the ping deadline allows the page to hold them. */
@@ -965,7 +992,7 @@ class SseTransport implements UpgradeSource {
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
   private closeStreamRequest(): void {
-    // Only 'active' has a body to close; 'failed' is sticky-terminal so don't regress to 'idle'.
+    // Only 'active' has a body to close; 'failed' keeps its verdict, the wire's or the connection's.
     if (this.streamRequest.tag !== 'active') return
     this.streamRequest.body.close()
     this.streamRequest = { tag: 'idle' }
