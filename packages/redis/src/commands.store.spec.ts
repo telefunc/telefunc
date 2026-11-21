@@ -292,26 +292,26 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       expect(made).toEqual({
         tfBroadcastStart: ['3 commands, 0 TYPE'],
         tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
-        tfRoomCellsExchange: ['19 commands, 2 TYPE', '16 commands, 2 TYPE'],
+        tfRoomCellsExchange: ['18 commands, 2 TYPE', '15 commands, 2 TYPE'],
         tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
         tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
         tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
         tfRoomDropIncarnation: ['3 commands, 1 TYPE', '3 commands, 1 TYPE'],
         tfRoomHeadExchange: [
-          '20 commands, 3 TYPE',
+          '18 commands, 3 TYPE',
           '4 commands, 0 TYPE',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
-          '20 commands, 3 TYPE',
+          '18 commands, 3 TYPE',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
         ],
         tfRoomOperation: [
-          '40 commands, 2 TYPE',
-          '37 commands, 2 TYPE',
+          '38 commands, 2 TYPE',
+          '35 commands, 2 TYPE',
           '28 commands, 2 TYPE',
-          '45 commands, 5 TYPE',
-          '48 commands, 5 TYPE',
+          '43 commands, 5 TYPE',
+          '46 commands, 5 TYPE',
         ],
       })
     }, 300_000)
@@ -432,6 +432,31 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       await store.admin.call('ACL', 'DELUSER', 'stale-plan')
 
       expect(reply).toBe('{"kind":"conflict"}')
+    })
+
+    it(`${name}: an exchange that writes a counter cell and counts it counts from what it wrote`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      if (store === undefined) throw new Error(`${name} didn't start`)
+      // The check before the first write reads the counter at 1; the exchange then writes it at 5 and counts it by 1.
+      const keys = ['head', 'rev', 'manifest', 'index', 'values', 'versions'].map((part) => `written-count:${part}`)
+      const [head, , , , values] = keys
+      if (head === undefined || values === undefined) throw new Error('no keys')
+      await store.admin.set(head, JSON.stringify({ inc: 'i', state: 'open' }))
+      await store.admin.hset(values, 'counter', '{"value":1,"changedAt":1}')
+      const written = '{"value":5,"changedAt":2}'
+      const argv = ['i', '1', '0', '1', 'counter', 'set', written, 'counter', '1', '']
+
+      const reply = await store.admin.eval(REDIS_COMMANDS.cellsExchange.lua, keys.length, ...keys, ...argv)
+      const stored = await store.admin.hget(values, 'counter')
+      await store.admin.del(...keys)
+
+      expect({
+        reply: Array.isArray(reply) ? reply.slice(0, 3) : reply,
+        stored: stored?.match(/"value":(\d+)/)?.[1],
+      }).toEqual({
+        reply: ['committed', 'counter', '6'],
+        stored: '6',
+      })
     })
 
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {

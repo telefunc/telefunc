@@ -156,17 +156,21 @@ end`
 }
 
 /** Lua that refuses where the counter cell `key` of the hash `valuesKey`, changed by `delta` (a Lua name), holds no
- *  count that stays an integer. As the hash's first command, its HGET is the hash's check. */
+ *  count that stays an integer. As the hash's first command, its HGET is the hash's check. What it read goes to
+ *  `tf_checked`, so the count (`tf_count`) doesn't read and decode the cell again. */
 function countableLua(valuesKey: string, key: string, delta: string): string {
   return `${integerLua(delta, `'the change of counter ' .. ${key}`)}
 ${heldCallLua('local raw', 'hash', `'HGET', ${valuesKey}, ${key}`, valuesKey)}
+local checked = {}
 if raw then
   ${jsonLua('counter', 'raw', `'counter ' .. ${key}`)}
   local value = counter.value
   ${integerLua('value', `'counter ' .. ${key}`)}
   local changed = value + ${delta}
   ${integerLua('changed', `'counter ' .. ${key} .. ' changed by ' .. ${delta}`)}
-end`
+  checked.counter = counter
+end
+tf_checked[${key}] = checked`
 }
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
@@ -249,8 +253,12 @@ return {seq, ts}
 // Writes a cell at `version`, or deletes it with no value; counts a counter cell, appending its key, value and
 // changedAt to `reply` (see CellCount).
 //   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them
+// `tf_checked`: the counter cells the checks before the first write read, by key: `{ counter = <decoded> }`, or `{}`
+// where the cell was absent. A cell the script writes leaves it, so a later count reads what the write left.
 const CELL_WRITES_LUA = `
+local tf_checked = {}
 local function tf_write(key, value, version)
+  tf_checked[key] = nil
   if value then
     redis.call('HSET', KEYS[5], key, value)
     redis.call('HSET', KEYS[6], key, version)
@@ -272,11 +280,18 @@ local function tf_cell_writes_allowed()
   tf_allowed('HGET', KEYS[5], '')
 end
 local function tf_count(key, delta, create, version, now, reply)
-  local raw = redis.call('HGET', KEYS[5], key)
-  local counter = raw and cjson.decode(raw)
+  local checked = tf_checked[key]
+  local counter
+  if checked then
+    counter = checked.counter
+  else
+    local raw = redis.call('HGET', KEYS[5], key)
+    counter = raw and cjson.decode(raw)
+  end
+  local stored = counter ~= nil
   if not counter and create then counter = { value = 0 } end
   if not counter then return end
-  if delta ~= 0 or not raw then
+  if delta ~= 0 or not stored then
     counter.value = counter.value + delta
     counter.changedAt = now
     tf_write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt), version)
