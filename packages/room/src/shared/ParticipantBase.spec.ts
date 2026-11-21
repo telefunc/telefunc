@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { pageRoom } from '../test/pageRoom.js'
 import { Room } from '../index.js'
 import { RoomRemotes } from './RoomView.js'
+import { ClientParticipant } from '../client/ClientParticipant.js'
 import { RoomDemand } from '../server/lanes/RoomDemand.js'
 import { ServerLocalParticipant } from '../server/ServerLocalParticipant.js'
 import type { DemandChange, TrackWatch, TrackWatchState } from './protocol.js'
@@ -66,6 +67,14 @@ describe("a participant's demand", () => {
       await Promise.resolve()
     }
     expect({ tracks: me.demand.length, reads: shownOf.mock.calls.length }).toEqual({ tracks: 1_000, reads: 1_000 })
+  })
+
+  it('reads none of its tracks while nothing reads its demand or listens', async () => {
+    const { me, deliver } = await joinedIn({ sam: 1 })
+    const watches = vi.spyOn(ClientParticipant.prototype, '_watches', 'get')
+    for (let i = 0; i < 1_000; i++) deliver({ __r: 'demand', member: me.id, track: `t${i}`, add: ['sam'] })
+    const reads = watches.mock.calls.length
+    expect({ reads, tracks: me.demand.length }).toEqual({ reads: 0, tracks: 1_000 })
   })
 
   it('keeps an entry, and the list, the same object while nothing in them changes', async () => {

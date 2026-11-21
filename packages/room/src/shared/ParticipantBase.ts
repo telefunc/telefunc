@@ -101,7 +101,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private readonly demandEntries = new Map<TrackKey, TrackDemand>()
   /** The tracks whose entry may have changed since it was read. */
   private readonly staleTracks = new Set<TrackKey>()
-  private allTracksStale = false
+  /** Whether every track's entry may have changed, as before the first read. */
+  private allTracksStale = true
   /** The version of its room's roster the entries were read at. */
   private demandRosterVersion = -1
   /** The entries that changed since `shownDemand` was made: each its new entry, `null` for one that went, and whether
