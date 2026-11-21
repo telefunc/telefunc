@@ -3,6 +3,8 @@ export { testWire, testWireSlowPing, testWireShortReconnect }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Response, WebSocket } from 'playwright-chromium'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 import {
   navigate,
   getResult,
@@ -207,10 +209,11 @@ function testWire(isDev: boolean) {
       }
       ws.onclose = () => answered('closed')
       ws.onmessage = (event) => {
-        const frame = new Uint8Array(event.data as ArrayBuffer)
-        // RECONCILED, its JSON after the 7-byte header.
-        if (frame[0] !== 0x05) return
-        sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
+        // RECONCILED, alone or among the frames of a message of several; its JSON after the 7-byte header.
+        const frames = Array.from(messageFrames(new Uint8Array(event.data as ArrayBuffer)))
+        const reconciled = frames.find((frame) => frame[0] === TAG.RECONCILED)
+        if (reconciled === undefined) return
+        sessionId = JSON.parse(new TextDecoder().decode(reconciled.subarray(7))).sessionId
         answered('reconciled')
       }
       // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
@@ -220,9 +223,9 @@ function testWire(isDev: boolean) {
           if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
           settle = resolve
           const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
-          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          // A RECONCILE: its tag, then index 0 and seq 0 in the 7-byte header.
           const frame = new Uint8Array(7 + payload.byteLength)
-          frame[0] = 0x04
+          frame[0] = TAG.RECONCILE
           frame.set(payload, 7)
           ws.send(frame)
         })
