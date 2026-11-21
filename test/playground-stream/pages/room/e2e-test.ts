@@ -1450,7 +1450,7 @@ function testRoom() {
       expect(r.pubOwn).deep.equal([['own', true]])
       expect(r.otherOwn).deep.equal([])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
-      // The page still answers once it holds 5,098 tracks' demand.
+      // The page still answers once it holds 5,097 tracks' demand: t1 to t999, `main`, `own` and `many`'s 4,096.
       expect(await page.evaluate(() => document.readyState)).toBe('complete')
     },
   )

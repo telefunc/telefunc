@@ -2704,6 +2704,8 @@ function Room() {
         await pollUntil(() => ({ done: demand.some(([track, wanted]) => track === 't0' && !wanted) }))
 
         const many = await onGetRoom(roomId)
+        // Collecting `many` would end its subscriptions, and the demand this waits for with them.
+        const releaseMany = keepReachable(many)
         for (let i = 0; i < 4_096; i++) many.subscribeBinary(() => {}, { track: `x${i}` })
         const tooMany = (() => {
           try {
@@ -2713,9 +2715,8 @@ function Room() {
             return (err as Error).message
           }
         })()
-        const manyWanted = () =>
-          new Set(demand.filter(([track, wanted]) => wanted && track.startsWith('x')).map(([track]) => track)).size
-        // Pub's demand follows the 4,096 tracks `many` wants as well.
+        const manyWanted = () => pub.demand.filter(({ track }) => track.startsWith('x')).length
+        // Pub's demand holds the 4,096 tracks `many` wants as well.
         await pollUntil(() => ({ done: manyWanted() === 4_096 }))
         setResult(
           JSON.stringify({
@@ -2731,6 +2732,7 @@ function Room() {
             tooMany,
           }),
         )
+        releaseMany()
         releasePubView()
       })}
 
