@@ -30,10 +30,7 @@ function wire() {
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     bufferedAmount: () => 0,
-    close: (x, end) => {
-      ends.push(end)
-      mux.onWireClosed(x, end.how)
-    },
+    close: (_, end) => void ends.push(end),
   }
   mux.onWireOpen(w, transport)
   const tags = () => frames.map((frame) => frame[0])

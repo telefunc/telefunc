@@ -270,7 +270,7 @@ class SseServerTransport {
     // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
     queuedAhead: (wire) => Math.floor((wire.events.streamBytes * 3) / 4),
     queueOf: (wire) => wire.events,
-    close: (wire, { how, refusal }) => this.closeWire(wire, how, refusal),
+    close: (wire, { refusal }, held) => this.endStream(wire, refusal, held),
   }
 
   /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
@@ -330,10 +330,10 @@ class SseServerTransport {
     request: Request,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
-    if (existing) this.closeWire(existing, 'transient')
+    if (existing) this.mux.endFault(existing, { scope: 'loss' })
 
     // The stream is this wire's alone: its cancel closes this wire, not the one its connId names by then.
-    const events = new EventStream({ useNodeStream, onCancel: () => this.closeWire(wire, 'transient') })
+    const events = new EventStream({ useNodeStream, onCancel: () => this.onWireGone(wire, 'transient') })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
     const wire: SseWire = {
@@ -396,7 +396,7 @@ class SseServerTransport {
   private handleClosePost(connId: string): SseChannelHttpResponse {
     const wire = this.mux.getWireByConnId<SseWire>(connId)
     if (wire) {
-      this.closeWire(wire, 'pageLeft')
+      this.onWireGone(wire, 'pageLeft')
       return okResponse()
     }
     const hold = this.keptOf(connId)?.hold
@@ -462,7 +462,7 @@ class SseServerTransport {
       reportDispatchBug(err)
       const fault = faultOf(err)
       if (fault !== null) this.mux.endFault(wire, fault)
-      else this.closeWire(wire, 'transient')
+      else this.onWireGone(wire, 'transient')
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
       wire.resolveReady()
@@ -581,13 +581,21 @@ class SseServerTransport {
     })
   }
 
-  /** `refused`: what the POSTs that meet the close are answered, where the server decided it and told the channels it
-   *  ends: then the stream sends what it holds before it ends. */
-  private closeWire(wire: SseWire, how: WireClose, refused: Refusal | null = null): void {
+  /** The page's side of the wire went (its stream cancelled, its close POST, its body cut): the mux forgets the wire,
+   *  then its stream ends. */
+  private onWireGone(wire: SseWire, how: WireClose): void {
+    if (wire.closed) return
+    this.endStream(wire, null, this.mux.onWireClosed(wire, how) ?? null)
+  }
+
+  /** The wire's stream ends, and the server keeps what the page's later requests for it are answered. `refused`: what
+   *  the POSTs that meet the close are answered, where the server decided it and told the channels it ends: then the
+   *  stream sends what it holds before it ends. `held`: the session the wire held, for the page's close POST. */
+  private endStream(wire: SseWire, refused: Refusal | null, held: SessionHold | null): void {
     if (wire.closed) return
     wire.closed = true
     wire.refused = refused
-    this.rememberClosed(wire, this.mux.onWireClosed(wire, how) ?? null)
+    this.rememberClosed(wire, held)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))

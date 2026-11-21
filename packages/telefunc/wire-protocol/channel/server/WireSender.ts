@@ -35,14 +35,16 @@ type WireSenderOptions = {
   heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   /** The channels attaching to the wire in this turn, which its headroom counts too. */
   attaching: ReadonlySet<ServerChannel>
+  /** The wire's backlog passed what its channels allow, in a frame the sender was handed: the owner ends the wire. */
+  onPastBacklog: () => void
 }
 
 /** A wire's headroom and the receiver that acknowledges what the wire took, on a wire that takes pieces. */
 type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 /** Sends a wire's frames in call order, but for a RECONCILED and an attach probe's answer, which go ahead of what waits
- *  for the RECONCILED; terminates the wire once its backlog passes what its channels allow. The peers of its channels
- *  send through it, and once the wire closed it drops what they send. */
+ *  for the RECONCILED; has its owner end the wire once its backlog passes what its channels allow. The peers of its
+ *  channels send through it, and once the wire closed it drops what they send. */
 class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, WireQueue {
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
@@ -56,13 +58,14 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly deliveries: Deliveries
   private readonly heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   private readonly attaching: ReadonlySet<ServerChannel>
+  private readonly onPastBacklog: () => void
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
   private headroom = 0
   /** The largest frame sent on the wire. */
   private largestSent = 0
-  /** Its backlog passed that, and the wire is being terminated. */
+  /** Its backlog passed that, and its owner ends the wire. */
   private pastBacklog = false
   /** A RECONCILED is owed: what is sent meanwhile is held behind it. */
   private owed = false
@@ -80,6 +83,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     deliveries,
     heldChannels,
     attaching,
+    onPastBacklog,
   }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
@@ -94,6 +98,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.deliveries = deliveries
     this.heldChannels = heldChannels
     this.attaching = attaching
+    this.onPastBacklog = onPastBacklog
   }
 
   /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
@@ -182,7 +187,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   /** Counts `frame` against what the wire may hold, whether it is handed now or held for a RECONCILED; false once the
-   *  wire's backlog passed that, and the wire is being terminated. */
+   *  wire's backlog passed that, and the owner is told, after the turn, to end the wire. */
   private admit(frame: Uint8Array<ArrayBuffer>): boolean {
     if (this.closed || this.pastBacklog) return false
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
@@ -190,7 +195,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
       this.headroom = this.measureHeadroom()
       if (this.headroom < 0) {
         this.pastBacklog = true
-        queueMicrotask(() => this.transport.close(this.wire, { how: 'transient', refusal: null }))
+        queueMicrotask(this.onPastBacklog)
         return false
       }
     }

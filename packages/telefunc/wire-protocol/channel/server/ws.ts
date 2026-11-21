@@ -44,22 +44,25 @@ function getTelefuncChannelOptions({
     // A loss closes at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
     // An end the server decided closes with its refusal as the reason, after what the socket already holds and ahead of
     // what the wire's sender holds back, which goes with the wire.
-    close: (peer, { how, refusal }) => {
+    close: (peer, { refusal }) => {
       if (refusal === null) terminate(peer)
       else peer.close(WS_CLOSE_REFUSED, wireEnd(refusal))
-      mux.onWireClosed(peer, how)
     },
   }
   /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
   const sameVersion = new WeakMap<Request, boolean>()
 
   /** crossws calls a hook with no catch: on Node a hook's throw would end the process. A throw is printed as a call's
-   *  error is, and ends the hook's peer where it isn't ending already (`ends`). The upgrade hook has no guard: neither
+   *  error is, and `ends` the hook's peer where it isn't ending already: the mux's peer goes as a loss, through the
+   *  mux's one close, so that it can't cut an end already going. The upgrade hook has no guard: neither
    *  `readableHost()` nor `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context. */
-  function guard<Args extends unknown[]>(hook: (peer: Peer, ...args: Args) => unknown, ends = true) {
+  function guard<Args extends unknown[]>(
+    hook: (peer: Peer, ...args: Args) => unknown,
+    ends: ((peer: Peer) => void) | null,
+  ) {
     const onError = (peer: Peer, err: unknown) => {
       handleError(err)
-      if (ends) terminate(peer)
+      ends?.(peer)
     }
     return (peer: Peer, ...args: Args): void => {
       try {
@@ -81,6 +84,7 @@ function getTelefuncChannelOptions({
       sameVersion.set(request, namesWireVersion(request))
       return upgrade?.(request)
     },
+    // A throw in `open` comes before the mux has the peer, where nothing else would close it.
     open: guard((peer) => {
       const request = wireRequest(peer)
       const named = request && sameVersion.get(request)
@@ -89,17 +93,18 @@ function getTelefuncChannelOptions({
       // learns nothing from a refused handshake.
       if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
       mux.onWireOpen(peer, transport, request)
-    }),
-    message: guard((peer, message: Message) =>
-      mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+    }, terminate),
+    message: guard(
+      (peer, message: Message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+      (peer) => mux.endFault(peer, { scope: 'loss' }),
     ),
-    // A close the server decided was told to the mux as it closed: the mux has forgotten the peer.
+    // Where the server decided the close, the mux forgot the peer as it decided it, and finds nothing here.
     close: guard(
       (peer, details: Parameters<Hooks['close']>[1]) =>
         mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
-      false,
+      null,
     ),
-    error: guard((peer) => mux.onWireClosed(peer, 'transient'), false),
+    error: guard((peer) => mux.onWireClosed(peer, 'transient'), null),
   })
   return {
     hooks,

@@ -29,10 +29,7 @@ function page() {
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     bufferedAmount: () => 0,
-    close: (w, end) => {
-      ends.push(end)
-      mux.onWireClosed(w, end.how)
-    },
+    close: (_, end) => void ends.push(end),
   }
   mux.onWireOpen(wire, transport)
   return {

@@ -55,10 +55,7 @@ function webSocketWire() {
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     bufferedAmount: () => 0,
-    close: (w, end) => {
-      handed.push('close')
-      mux.onWireClosed(w, end.how)
-    },
+    close: () => void handed.push('close'),
   }
   mux.onWireOpen(wire, transport)
   return { wire, handed }

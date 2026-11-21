@@ -77,8 +77,9 @@ type ServerTransport<TWire> = {
   queuedAhead?(wire: TWire): number | undefined
   /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
   queueOf?(wire: TWire): WireQueue
-  /** Ends the wire as `end` says, and tells the mux with `onWireClosed`. */
-  close(wire: TWire, end: ServerEnd): void
+  /** Ends the wire as `end` says, and tells the mux nothing: the mux forgot the wire before. `held`: the session the
+   *  wire held, which an HTTP transport keeps for the page's close POST. */
+  close(wire: TWire, end: ServerEnd, held: SessionHold | null): void
 }
 
 /** How the server ends a wire: lost, or for good for a session cause. `refusal`: the end the server decided, which the
@@ -143,9 +144,6 @@ type WireState = {
   /** When the last PONG went out. */
   pongedAt: number
   recvChain: Promise<unknown> | null
-  /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind, which its session's channels
-   *  detach with. */
-  closed: { reason: WireClose } | null
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
   /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
@@ -163,6 +161,9 @@ type WireEntry = {
   /** The session the wire holds, which it alone speaks for; null on a wire that holds none: one before its first
    *  RECONCILE, a staged probe, and one whose session a reopen or an upgrade's commit took. */
   holds: Session | null
+  /** How the wire closed, decided by the server or seen by its transport; null while it is open. A turn queued on the
+   *  wire reads it at its start. */
+  closed: WireClose | null
 }
 
 function getChannelMux(): ChannelMux {
@@ -264,7 +265,6 @@ class ChannelMux implements UpgradeStagesOwner {
         deliveries,
         pongedAt: performance.now(),
         recvChain: null,
-        closed: null,
         recvBacklog,
         awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
         attaching,
@@ -278,9 +278,11 @@ class ChannelMux implements UpgradeStagesOwner {
         deliveries,
         heldChannels: () => entry.holds?.channels,
         attaching,
+        onPastBacklog: () => this.endFault(wire, { scope: 'loss' }),
       }),
       request,
       holds: null,
+      closed: null,
     }
     this.wires.set(wire, entry)
     const connId = transport.getConnId(wire)
@@ -314,14 +316,33 @@ class ChannelMux implements UpgradeStagesOwner {
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
   }
 
-  /** Returns the session the wire held, if it held one. */
+  /** The wire's transport saw it close: the mux forgets it. Returns the session the wire held, if it held one. */
   onWireClosed(wire: Wire, reason: WireClose): SessionHold | undefined {
     const entry = this.wires.get(wire)
     if (!entry) return undefined
-    entry.state.closed = { reason }
-    this.clearPingTimer(entry.state)
-    entry.state.awaited.stop()
-    entry.sender.close()
+    const held = this.decideClose(entry, reason)
+    this.dispose(entry, reason)
+    return held ?? undefined
+  }
+
+  /** The one close the server decides on a wire, as `end` says, the only caller of `transport.close`. The mux forgets
+   *  the wire first, so a later decision, its sender's included, finds nothing; the transport then ends it; what the
+   *  wire held goes last, once its bytes were handed, and also where the transport throws. */
+  private closeWire(entry: WireEntry, end: ServerEnd): void {
+    if (this.wires.get(entry.wire) !== entry) return
+    const held = this.decideClose(entry, end.how)
+    try {
+      entry.transport.close(entry.wire, end, held)
+    } finally {
+      this.dispose(entry, end.how)
+    }
+  }
+
+  /** The wire is closed, as `reason` says: it leaves the mux's indexes. Returns the session it held, read before the
+   *  wire releases it. */
+  private decideClose(entry: WireEntry, reason: WireClose): SessionHold | null {
+    const { wire } = entry
+    entry.closed = reason
     this.wires.delete(wire)
     const connId = entry.transport.getConnId(wire)
     // Identity-equality guards against deleting a *replacement* wire's entry when
@@ -329,18 +350,27 @@ class ChannelMux implements UpgradeStagesOwner {
     if (connId !== null && this.wiresByConnId.get(connId) === wire) {
       this.wiresByConnId.delete(connId)
     }
+    const session = entry.holds
+    // The wire that holds a session is the page's newest to take it, so its number is the session's highest.
+    return session === null ? null : { sessionId: session.id, attempt: session.high }
+  }
+
+  /** Drops what the closed wire held: its timer, what it awaits, its sender, its stage, and its session, whose
+   *  channels detach as `reason` says, the app's callbacks running there. */
+  private dispose(entry: WireEntry, reason: WireClose): void {
+    const { wire } = entry
+    this.clearPingTimer(entry.state)
+    entry.state.awaited.stop()
+    entry.sender.close()
     this.stages.clear(wire)
     // A wire that holds no session speaks for no channel: its page's channels are another wire's, or none.
     const session = entry.holds
-    if (session === null) return undefined
+    if (session === null) return
     const stagedProbe = this.stages.probeFor(session.id)
     if (stagedProbe !== undefined) this.stages.abandon(stagedProbe)
-    // The wire that holds a session is the page's newest to take it, so its number is the session's highest.
-    const hold = { sessionId: session.id, attempt: session.high }
     this.sessions.release(entry)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace); the others end them.
     this.detachSession(session, reason)
-    return hold
   }
 
   /** The page of a session that no wire holds left, `hold` naming the wire its leaving came for: ends its channels as
@@ -372,7 +402,7 @@ class ChannelMux implements UpgradeStagesOwner {
       assertProtocol(entry.sender.pieces, 'frames in one message on a wire that takes no pieces')
       const frames = messageFrames(rawFrame)
       let next = frames.next()
-      while (!next.done && entry.state.closed === null) {
+      while (!next.done && entry.closed === null) {
         const frame = next.value
         next = frames.next()
         const settles = frame[0] === TAG.RECONCILE || frame[0] === TAG.BARRIER
@@ -529,7 +559,7 @@ class ChannelMux implements UpgradeStagesOwner {
     // wire before its first RECONCILE, a staged probe, one whose session another wire took.
     if (session === null || fault.scope === 'loss') {
       entry.sender.close('dropped')
-      return entry.transport.close(wire, { how: 'transient', refusal: null })
+      return this.closeWire(entry, { how: 'transient', refusal: null })
     }
     // A wire the end closes says it as its last word: what its channels send on it from here goes no more, kept in
     // their replay for their next attach.
@@ -537,7 +567,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const channelEnded = fault.scope === 'channel' && this.endChannelAt(entry, fault.ix, fault.cause)
     if (channelEnded && fault.wire === 'kept') return
     if (fault.scope === 'channel' && channelEnded) {
-      return entry.transport.close(wire, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
+      return this.closeWire(entry, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
     }
     this.endSessionOn(entry, session.id, fault.scope === 'session' ? fault.cause : 'unreadable')
   }
@@ -549,7 +579,7 @@ class ChannelMux implements UpgradeStagesOwner {
     entry.sender.close('first')
     entry.state.awaited.refuseAll(cause)
     this.endedSessions.keep(sessionId, cause, this.options.reconnectTimeout)
-    entry.transport.close(entry.wire, { how: cause, refusal: frameRefusal(cause, undefined) })
+    this.closeWire(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
   /** The channels of the session `entry`'s wire holds, by index; undefined while it holds none. */
@@ -795,10 +825,10 @@ class ChannelMux implements UpgradeStagesOwner {
         : this.attachChanges(session, ctrl.open, released, entry)
 
     // Closed since this frame arrived: a transient close keeps its channels' reconnect grace, the others end them.
-    if (state.closed) {
+    if (entry.closed !== null) {
       state.attaching.clear()
       this.sessions.release(entry)
-      this.detachSession(session, state.closed.reason)
+      this.detachSession(session, entry.closed)
       state.awaited.stop()
       throw new ProtocolViolationError('wire closed mid-reconcile')
     }
@@ -1033,7 +1063,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** A wire that closed keeps no timer. */
   private resetPingTimer(entry: WireEntry): void {
-    if (entry.state.closed !== null) return
+    if (entry.closed !== null) return
     entry.state.lastReceivedAt = performance.now()
     this.armPingDeadline(entry, entry.state.lastReceivedAt + this.pingDeadlineOf(entry))
   }
