@@ -22,7 +22,7 @@ async function findTelefunction(runContext: {
     runContext.telefuncFilesAll.length > 0,
     [
       `Telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) not found.`,
-      "Your app doesn't seem to have any `.telefunc.{js|ts|...}` file.",
+      "Your app doesn't seem to have any `.telefunc.{js|ts|...}` file, nor any telefunctions registered with `defineTelefunctions()`.",
     ].join(' '),
   )
 
@@ -36,7 +36,7 @@ async function findTelefunction(runContext: {
     }
     const telefunction = telefuncFile.fileExports[runContext.telefunctionName]
     assertTelefunction(telefunction, runContext.telefunctionName, telefuncFile.filePath)
-    if (!runContext.serverConfig.disableNamingConvention) {
+    if (!runContext.serverConfig.disableNamingConvention && telefuncFile.filePath !== '') {
       await assertNamingConvention(
         telefunction,
         runContext.telefunctionName,
@@ -86,7 +86,11 @@ async function findTelefunction(runContext: {
     } else {
       assert(!telefuncFile.fileExports[runContext.telefunctionName])
       assert(telefuncFile.filePath === runContext.telefuncFilePath)
-      errMsg += `the file ${telefuncFile.filePath} doesn't export a telefunction named "${runContext.telefunctionName}". `
+      if (telefuncFile.filePath === '') {
+        errMsg += `the telefunction "${runContext.telefunctionName}" was not registered with defineTelefunctions(). `
+      } else {
+        errMsg += `the file ${telefuncFile.filePath} doesn't export a telefunction named "${runContext.telefunctionName}". `
+      }
       const telefuncFileExportNames = Object.keys(telefuncFile.fileExports)
       if (telefuncFileExportNames.length === 0) {
         errMsg += `(The file ${telefuncFile.filePath} doesn't export any telefunction.)`

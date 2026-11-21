@@ -1,4 +1,5 @@
 export { serve, telefunc } from './telefunc.js'
+export { defineTelefunctions } from './defineTelefunctions.js'
 import { config } from './serverConfig.js'
 export { config }
 export { config as telefuncConfig }
