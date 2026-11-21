@@ -10,5 +10,7 @@
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_classes": ["TelefuncDurableObject"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
+  ]
 }
