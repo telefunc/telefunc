@@ -310,12 +310,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.beforeAttach = []
   }
 
-  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest. An abort
-   *  drops what waits for a lossy one's page, and goes behind it for a reliable one (`onAbortOwed`). */
   override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     this.endOverflowed()
-    if (this._phase === 'open') this.sendNewestOnly()
     return super.close(opts)
+  }
+
+  /** @internal A graceful close, whichever end began it, goes behind what waits for its page, so a lossy one first
+   *  replaces that with the newest. An abort drops what waits for a lossy one's page, and goes behind it for a reliable
+   *  one (`onAbortOwed`). */
+  override _stopSending(): void {
+    super._stopSending()
+    this.sendNewestOnly()
   }
 
   override abort(abortValue?: unknown, message?: string): void {

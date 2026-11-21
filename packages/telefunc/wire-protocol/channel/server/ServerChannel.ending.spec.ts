@@ -152,8 +152,9 @@ function leaveRoom(room: number): () => void {
 }
 
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
- *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire. */
-function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
+ *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire. A lossy
+ *  page is behind once its oldest unconfirmed frame is older than `behindAfter` ms. */
+function overWebSocket(channels: ServerChannel[], requests: Request[] = [], behindAfter = Number.POSITIVE_INFINITY) {
   const arrived: Uint8Array[] = []
   const receiver = new ClientPieceReceiver({ owner: { sendAck() {}, carryAck() {} } })
   // The frames of each message, as the page's WebSocket puts them back together.
@@ -178,7 +179,7 @@ function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
     },
     carry() {},
     bufferedAmount: () => 0,
-    behindAfter: () => Number.POSITIVE_INFINITY,
+    behindAfter: () => behindAfter,
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   }
@@ -1181,6 +1182,36 @@ test("on a WebSocket, a lossy send that waits when the page closes goes ahead of
   fromPage(channel, encode.closeDone(0, 2))
   await channel.closed
 })
+
+/** The server's frames of a close each end begins, and what the page sends back of it. */
+const LOSSY_CLOSES = {
+  server: { serverSends: ['0:CLOSE', '0:CLOSE_DONE'], pageAnswers: [encode.closeAck(0, 1), encode.closeDone(0, 2)] },
+  page: { serverSends: ['0:CLOSE_ACK', '0:CLOSE_DONE'], pageAnswers: [encode.closeDone(0, 2)] },
+}
+
+for (const [closer, { serverSends, pageAnswers }] of Object.entries(LOSSY_CLOSES)) {
+  test(`on a WebSocket, a lossy subscriber's newest publish that waits for its page goes ahead of the close the ${closer} begins, and none after it`, async () => {
+    vi.useFakeTimers({ toFake: ['performance'] })
+    try {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key, lossy: true })
+      // Its page confirms nothing, so it is behind as soon as p1 went: p2 waits, and p3 takes its place.
+      const page = overWebSocket([channel], [], 0)
+      for (const name of ['p1', 'p2', 'p3']) {
+        await Broadcast.publish(key, name)
+        vi.advanceTimersByTime(1)
+      }
+      if (closer === 'server') void channel.close()
+      else fromPage(channel, encode.close(0, 1_000, 1))
+      // The page confirms all it read, which would hand on whatever still waited.
+      for (const frame of pageAnswers) fromPage(channel, frame)
+      expect(await channel.closed).toBeNull()
+      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...serverSends])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+}
 
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
