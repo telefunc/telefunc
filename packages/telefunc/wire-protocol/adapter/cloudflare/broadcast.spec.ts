@@ -1017,3 +1017,33 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     })
   })
 })
+
+describe("a Durable Object's delivery to a receiver that throws, ahead of another route's receiver", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('is reported, and the route after it and the deliveries after it still arrive', () => {
+    const reports: unknown[] = []
+    vi.spyOn(console, 'error').mockImplementation((error) => void reports.push(error))
+    const member = createBroadcast().member('telefunc-shard-weur-0', new OrderedStubs())
+    const throwing: BroadcastRoute = { key: 'room:throwing', kind: 'text' }
+    const healthyRoute: BroadcastRoute = { key: 'room:healthy', kind: 'text' }
+    const thrower: unknown[] = []
+    const healthy: unknown[] = []
+    member.subscribeLocal(throwing, {
+      deliver(payload) {
+        thrower.push(payload)
+        throw new Error('Test: a receiver throws')
+      },
+    })
+    member.subscribeLocal(healthyRoute, { deliver: (payload) => void healthy.push(payload) })
+
+    const missing = [1, 2].map((seq) =>
+      member.deliver({ routes: [throwing, healthyRoute], payload: `"${seq}"`, info: { seq, timestamp: 1 }, owed: true }),
+    )
+
+    expect({ missing, thrower, healthy }).toEqual({ missing: [0, 0], thrower: ['"1"', '"2"'], healthy: ['"1"', '"2"'] })
+    expect(reports.map(String)).toEqual(['Error: Test: a receiver throws', 'Error: Test: a receiver throws'])
+  })
+})

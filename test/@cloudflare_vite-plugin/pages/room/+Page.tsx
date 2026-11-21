@@ -18,7 +18,7 @@ import {
   onCloseHeld,
   onSubscribeHeld,
   onMetaKeyOrder,
-  onThrowingReceiver,
+  onThrowingListener,
   onJoinClosing,
   onJoinRefused,
 } from './Room.telefunc'
@@ -92,7 +92,7 @@ function Page() {
       {card('close-held', () => onCloseHeld(query().get('id')!))}
       {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
       {card('meta-key-order', () => onMetaKeyOrder())}
-      {card('throwing-receiver', () => onThrowingReceiver())}
+      {card('throwing-listener', () => onThrowingListener())}
       {card('join-closing', () => onJoinClosing())}
       {card('join-refused', () => onJoinRefused())}
     </div>

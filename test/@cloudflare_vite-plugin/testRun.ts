@@ -30,8 +30,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       log.logText.includes('Backend subscription closed: text:refused-presence') ||
       // testLapsedPresence()'s authority refuses its refreshes, and the route reports it lost.
       log.logText.includes("Cloudflare Broadcast presence for 'lapsed-presence:") ||
-      // testRoomStorage()'s receiver throws, as a test of what a store does then.
-      log.logText.includes('Test: a receiver throws') ||
+      // testRoomStorage()'s server listener throws, as a test of what Room does then.
+      log.logText.includes('Test: a listener throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
       log.logText.includes('Test: the session refused the delivery') ||
       // testRoomJoinInbox()'s authority refuses an inbox's registration, and the subscription it ended is reported.
@@ -672,9 +672,9 @@ function testRoomStorage() {
     for (const page of [holder!, closer!]) await page.context().close()
   })
 
-  test("Room: a store's receiver that throws is reported, its writes still commit and its next frame still arrives", async () => {
+  test('Room: a server listener that throws is reported, and the listener beside it and the messages after it still arrive', async () => {
     await openRoomPage()
-    expect(await clickRoomCard(page, 'throwing-receiver')).deep.equal({ writes: ['written', 'written'], calls: 2 })
+    expect(await clickRoomCard(page, 'throwing-listener')).deep.equal({ thrower: 2, healthy: 2 })
   })
 
   test('Room: its meta keeps the key order its writes gave it', async () => {

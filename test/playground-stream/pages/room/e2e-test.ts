@@ -498,11 +498,11 @@ function testRoom() {
     },
   )
   testRoomScenario<{ thrower: number; healthy: number }>(
-    'throwing-receiver',
-    "room: a store's receiver that throws is reported, and the receiver beside it and the frames after it still arrive",
+    'throwing-listener',
+    'room: a server listener that throws is reported, and the listener beside it and the messages after it still arrive',
     (r) => {
       expect(r).deep.equal({ thrower: 2, healthy: 2 })
-      expectLog('Test: a receiver throws')
+      expectLog('Test: a listener throws')
     },
   )
   testRoomScenario<{

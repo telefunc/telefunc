@@ -23,9 +23,7 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
 /** What Room's server code reaches the store by: `call(work)` for a public call, whose writes are counted in its
  *  account, and `direct` for work that tells no answer; and the lane subscriptions, shared by source and host. */
 class RoomPlane {
-  /** The driver itself, which tests reach to wrap or watch it: Room's server code reaches the store by `call()` and
-   *  `direct` only. */
-  readonly driver: RoomDriver
+  private readonly driver: RoomDriver
   /** The store with no account: background work and its reads, and a call whose only write is its last step. */
   readonly direct: RoomStore
   private readonly reads: RoomReads

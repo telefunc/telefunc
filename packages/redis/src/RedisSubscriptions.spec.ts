@@ -372,3 +372,41 @@ describe('a subscriber connection Redis refuses at its login', () => {
     })
   })
 })
+
+describe('a receiver that throws, ahead of another on the same channel', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('is reported, and the receiver after it and the frames after it still arrive', async () => {
+    const reports: unknown[] = []
+    vi.spyOn(console, 'error').mockImplementation((error) => void reports.push(error))
+    const { subscriptions, publish } = setup()
+    const thrower: string[] = []
+    const healthy: string[] = []
+    const listen = (deliver: (payload: unknown) => void) =>
+      subscriptions.subscribe({
+        channel: TEXT,
+        invalidationChannel: null,
+        frames: { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
+        readStarts: async () => new Map(),
+        receiver: { deliver },
+        reportMissed() {},
+      })
+    const attempts = [
+      listen((payload) => {
+        thrower.push(String(payload))
+        throw new Error('Test: a receiver throws')
+      }),
+      listen((payload) => void healthy.push(String(payload))),
+    ]
+    await Promise.all(subscriptions.establishingOn([TEXT]))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+
+    publish(TEXT, frameOf(1, 'first'))
+    publish(TEXT, frameOf(2, 'second'))
+
+    expect({ thrower, healthy }).toEqual({ thrower: ['first', 'second'], healthy: ['first', 'second'] })
+    expect(reports.map(String)).toEqual(['Error: Test: a receiver throws', 'Error: Test: a receiver throws'])
+  })
+})

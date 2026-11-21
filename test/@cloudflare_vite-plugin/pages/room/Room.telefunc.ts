@@ -15,14 +15,13 @@ export {
   onCloseHeld,
   onSubscribeHeld,
   onMetaKeyOrder,
-  onThrowingReceiver,
+  onThrowingListener,
   onJoinClosing,
   onJoinRefused,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
-import { getRoomPlane } from '@telefunc/room/backend'
 import { inboxRegistrations } from './inboxRegistrations'
 
 async function onRoomRoundTrip() {
@@ -175,32 +174,23 @@ async function onMetaKeyOrder() {
   return { merged: Object.entries(merged), replaced: Object.entries(replaced) }
 }
 
-/** A store handing a control frame to a receiver that throws: no write sees its delivery lost, and the next frame still
- *  reaches it. */
-async function onThrowingReceiver() {
-  const id = `throwing-receiver:${crypto.randomUUID()}`
-  await Room.create(id)
-  const { driver } = getRoomPlane()
-  const inc = (await driver.readHead(id))!.currentInc!
-  let calls = 0
-  const attempt = driver.subscribe(
-    { roomId: id, inc, lane: { kind: 'control' } },
-    {
-      deliver() {
-        calls++
-        throw new Error('Test: a receiver throws')
-      },
-    },
-  )
-  while (attempt.state() !== 'ready') await new Promise((resolve) => setTimeout(resolve, 10))
-  const write = (n: number) =>
-    Room.setMeta(id, { n }).then(
-      () => 'written',
-      (error: Error) => error.message,
-    )
-  const writes = [await write(1), await write(2)]
-  await attempt.unsubscribe()
-  return { writes, calls }
+/** A server listener that throws, ahead of a healthy one on the same room: both hear every message. */
+async function onThrowingListener() {
+  const id = `throwing-listener:${crypto.randomUUID()}`
+  const room = await Room.getOrCreate(id)
+  let thrower = 0
+  let healthy = 0
+  room.subscribe(() => {
+    thrower++
+    throw new Error('Test: a listener throws')
+  })
+  room.subscribe(() => void healthy++)
+  const me = await room.join()
+  await me.publish('first')
+  await me.publish('second')
+  for (let i = 0; i < 50 && (thrower < 2 || healthy < 2); i++) await new Promise((resolve) => setTimeout(resolve, 100))
+  await Room.close(id)
+  return { thrower, healthy }
 }
 
 /** The name of a room's authority, as `telefuncDurableObjectCall` sees it. */

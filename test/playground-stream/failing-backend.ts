@@ -25,7 +25,6 @@ import {
   ROOM_PLANE,
   type CellsRead,
   type CommitResult,
-  type RoomDriver,
   type RoomPlane,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
@@ -60,7 +59,7 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   faults: (BackendFault & { times: number })[]
   subscriptions: Set<FailingAttempt>
   holds: CellPagesHold[]
-  holding: WeakSet<RoomDriver>
+  holding: WeakSet<RoomPlane['direct']['reads']>
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomPlane['direct']['reads']>
 }
@@ -217,11 +216,12 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
     return released.promise
   }
   holds.push({ roomId, key, pages, wait })
-  const { driver } = getRoomPlane()
-  if (!holding.has(driver)) {
-    holding.add(driver)
-    const read = driver.readCellPages.bind(driver)
-    driver.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
+  // Room reads cell pages through the plane's reads, which every store of the plane shares.
+  const { reads } = getRoomPlane().direct
+  if (!holding.has(reads)) {
+    holding.add(reads)
+    const read = reads.readCellPages.bind(reads)
+    reads.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
   }
   return { reached: reached.promise, release: released.resolve }
 }

@@ -101,7 +101,7 @@ export {
   onRecreate,
   onJoinAnswering,
   onJoinClosed,
-  onThrowingReceiver,
+  onThrowingListener,
   onPublishLoop,
   onSubscriberDropped,
   onPublishOverRedisLimit,
@@ -125,7 +125,6 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
-import { getRoomPlane } from '@telefunc/room/backend'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
@@ -1361,27 +1360,22 @@ async function onPublishLoop(roomId: string) {
   return { otherWorkRan: turns > 0 }
 }
 
-/** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */
-async function onThrowingReceiver(roomId: string) {
-  const { driver } = getRoomPlane()
-  const inc = (await driver.readHead(roomId))!.currentInc!
-  const source = { roomId, inc, lane: { kind: 'semantic' } } as const
+/** A server listener that throws, ahead of a healthy one on the same room: both hear every message. */
+async function onThrowingListener(roomId: string) {
+  const room = await Room.get(roomId)
   let thrower = 0
   let healthy = 0
-  const attempts = [
-    driver.subscribe(source, {
-      deliver() {
-        thrower++
-        throw new Error('Test: a receiver throws')
-      },
+  const offs = [
+    room.subscribe(() => {
+      thrower++
+      throw new Error('Test: a listener throws')
     }),
-    driver.subscribe(source, { deliver: () => void healthy++ }),
+    room.subscribe(() => void healthy++),
   ]
-  while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
   await Room.publish(roomId, 'first')
   await Room.publish(roomId, 'second')
   await sleep(300)
-  await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
+  for (const off of offs) off()
   return { thrower, healthy }
 }
 
