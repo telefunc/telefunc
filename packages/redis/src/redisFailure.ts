@@ -1,5 +1,5 @@
 // The store's replies: how each wording a store replies with becomes Telefunc's `BackendError`, in one ordered table.
-export { redisFailure, isRefusal }
+export { redisFailure, isRefusal, isLoginRefusal }
 
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
@@ -130,7 +130,7 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
       outcome: outcome(row.notRun && wrapper === null),
       message: sentence(row.kind, where, tagged),
     })
-    if (row.stands) refusals.add(failure)
+    if (row.stands) refusals.set(failure, row.kind)
     return failure
   }
   const known = shown === undefined ? undefined : CODES[shown]
@@ -180,7 +180,14 @@ function isRefusal(error: unknown): error is BackendError {
   return error instanceof BackendError && refusals.has(error)
 }
 
+/** A refused login (`WRONGPASS`, `NOAUTH`, Redis 5's `ERR invalid password`), told from an ACL's `NOPERM` by the
+ *  reply's first word, which Redis 7.0.0 and 7.4.12 and Valkey 7.2.5 and 8.1.1 word alike. A login is each node's
+ *  own; an ACL refusal is of one command, key or channel. */
+function isLoginRefusal(error: unknown): error is BackendError {
+  return error instanceof BackendError && refusals.get(error) === 'login'
+}
+
 const { refusals } = getGlobalObject('redisFailure.ts', () => ({
-  /** The failures that are a refusal that stands (`isRefusal()`). */
-  refusals: new WeakSet<BackendError>(),
+  /** The failures that are a refusal that stands, with their reply's kind (`isRefusal()`, `isLoginRefusal()`). */
+  refusals: new WeakMap<BackendError, Kind>(),
 }))

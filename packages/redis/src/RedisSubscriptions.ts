@@ -6,7 +6,7 @@ import { DriverAttempt, createDeferred, unrefTimer, type Deferred } from 'telefu
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
-import { isRefusal, redisFailure } from './redisFailure.js'
+import { isLoginRefusal, isRefusal, redisFailure } from './redisFailure.js'
 import { decodeOrderingFrame } from './orderingFrame.js'
 import type { RedisConnection } from './RedisConnection.js'
 
@@ -205,7 +205,7 @@ class RedisSubscriptions {
     try {
       socket = await this.connection.openSubscriberSocket()
     } catch (error) {
-      return this.lost(id, this.failure(error))
+      return this.lostSocket(id, this.failure(error))
     }
     if (!this.isCurrent(id)) return socket.disconnect()
     connecting.socket = socket
@@ -223,7 +223,6 @@ class RedisSubscriptions {
       return this.lostSocket(id, this.failure(error))
     }
     if (!this.isCurrent(id)) return
-    this.refusedLogins = 0
     const connected: ConnectedSocket = {
       phase: 'connected',
       id,
@@ -239,7 +238,9 @@ class RedisSubscriptions {
 
   /** A ping still unanswered at the next one means the connection went silent. */
   private async ping(connection: ConnectedSocket): Promise<void> {
-    if (connection.awaitingPong) return this.lost(connection.id, new Error('Redis subscriber connection went silent'))
+    if (connection.awaitingPong) {
+      return this.lost(connection.id, new Error('Redis subscriber connection went silent'), false)
+    }
     connection.awaitingPong = true
     try {
       await connection.socket.ping()
@@ -265,15 +266,18 @@ class RedisSubscriptions {
     }
   }
 
-  /** The subscriber socket's end. A refused login stands once each node the subscriber can sit on refused it in turn:
-   *  while a node of a Cluster may still let it in, the next socket goes there, as after a drop. */
+  /** The subscriber socket's end, or its opening's, or its first SUBSCRIBE's refusal of its login: the one place a
+   *  refusal of the subscriber's login is decided. It stands once each node the subscriber can sit on refused it in
+   *  turn, at connect or at the first command: while a node of a Cluster may still let it in, the next socket goes
+   *  there, as after a drop. A login counts as let in once a sync of the channels succeeds on it, not when its socket
+   *  connects, which it does before Redis checks the login where the client has no ready check. */
   private lostSocket(id: number, error: unknown): void {
     if (!this.isCurrent(id)) return
     this.refusedLogins = isRefusal(error) ? this.refusedLogins + 1 : 0
     this.lost(id, error, this.refusedLogins >= this.connection.subscriberNodeCount())
   }
 
-  private lost(id: number, error: unknown, stands = isRefusal(error)): void {
+  private lost(id: number, error: unknown, stands: boolean): void {
     if (!this.isCurrent(id)) return
     // A refusal, such as a refused login, stands until an operator changes the password or the ACL: the subscriptions
     // end with it, and the backend doesn't connect again for them.
@@ -325,11 +329,13 @@ class RedisSubscriptions {
     try {
       await this.syncChannelsOnce(connection)
     } catch (error) {
-      // The connection dropped, or Redis can't serve it now (`BUSY`, `LOADING`): start over on a fresh one.
-      return this.lost(connection.id, this.failure(error))
+      // The connection dropped, Redis can't serve it now (`BUSY`, `LOADING`), or it refused the login: start over on a
+      // fresh one.
+      return this.lostSocket(connection.id, this.failure(error))
     }
     // Recovered once the channels are subscribed, not when the socket connects: a SUBSCRIBE Redis can't serve keeps
-    // backing off.
+    // backing off, and a node that refused the login at it counts as refusing.
+    this.refusedLogins = 0
     this.reconnectDelay = RECONNECT_DELAY_MIN_MS
     this.outageReported = false
   }
@@ -356,14 +362,15 @@ class RedisSubscriptions {
   }
 
   /** Redis refuses a whole SUBSCRIBE over one channel it denies, leaving the connection as it was: each channel then
-   *  goes alone, so only a denied one's attempts fail. */
+   *  goes alone, so only a denied one's attempts fail. A refused login is the node's, not a channel's: it ends the
+   *  socket (`lostSocket()`). */
   private async subscribeMissing(connection: ConnectedSocket, channels: string[]): Promise<void> {
     const { id, socket, subscribed } = connection
     try {
       await socket.subscribe(...channels)
     } catch (thrown) {
       const error = this.failure(thrown)
-      if (!isRefusal(error)) throw error
+      if (!isRefusal(error) || isLoginRefusal(error)) throw error
       if (!this.isCurrent(id)) return
       if (channels.length > 1) {
         await Promise.all(channels.map((channel) => this.subscribeMissing(connection, [channel])))

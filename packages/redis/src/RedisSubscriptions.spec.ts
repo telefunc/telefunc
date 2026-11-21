@@ -326,4 +326,49 @@ describe('a subscriber connection Redis refuses at its login', () => {
     expect({ state, logins }).toEqual({ state: 'closed', logins: 2 })
     expect(reason).toMatchObject({ name: 'BackendError', code: 'denied' })
   })
+
+  // With no ready check, a socket connects before Redis checks its login, and a node that requires a password the client
+  // doesn't send answers the first SUBSCRIBE with NOAUTH, as Redis 7.0.0 and 7.4.12 and Valkey 7.2.5 and 8.1.1 do.
+  it('at its first SUBSCRIBE, on a Cluster: goes to the next node, and is ready there', async () => {
+    let subscribes = 0
+    const { listen } = setup(
+      async () => {
+        if (++subscribes === 1) throw replyError('NOAUTH Authentication required.')
+      },
+      undefined,
+      2,
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const attempt = listen(TEXT)
+    const ready = new Promise<string>((resolve) => attempt.onStateChange((state) => resolve(state)))
+
+    expect({ state: await ready, subscribes }).toEqual({ state: 'ready', subscribes: 2 })
+  })
+
+  it('at its first SUBSCRIBE, on a Cluster: ends the subscription once each of its nodes refused the login in turn', async () => {
+    let connects = 0
+    const { listen } = setup(
+      async () => {
+        throw replyError('NOAUTH Authentication required.')
+      },
+      async () => {
+        connects++
+      },
+      2,
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const attempt = listen(TEXT)
+    const closed = new Promise<{ state: string; reason: unknown }>((resolve) =>
+      attempt.onStateChange((state, reason) => resolve({ state, reason })),
+    )
+
+    const { state, reason } = await closed
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect({ state, connects }).toEqual({ state: 'closed', connects: 2 })
+    expect(reason).toMatchObject({
+      name: 'BackendError',
+      code: 'denied',
+      message: expect.stringContaining("refused the login of Telefunc's Redis backend (NOAUTH)"),
+    })
+  })
 })

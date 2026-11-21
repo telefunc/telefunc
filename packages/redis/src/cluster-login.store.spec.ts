@@ -15,6 +15,7 @@ import { installRedis } from './index.js'
 
 const LOGIN_REFUSED =
   "refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()"
+const ACL_REFUSED = "refused Telefunc's Redis backend a command, key or channel by its user's ACL (NOPERM)"
 
 type Node = Awaited<ReturnType<typeof startStore>>
 type Forwarder = Awaited<ReturnType<typeof forwarder>>
@@ -131,11 +132,16 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
     return { nodes: await startCluster(store, proxies), proxies }
   }
   /** The row's Cluster, and the app's client of it, installed as the backend's, which connects once used. */
-  async function cluster(store: Store, primaryLogin: boolean, replicaLogin: boolean): Promise<Nodes> {
+  async function cluster(
+    store: Store,
+    primaryLogin: boolean,
+    replicaLogin: boolean,
+    options: ClusterOptions = {},
+  ): Promise<Nodes> {
     const { nodes, proxies } = await newCluster(store)
     await login(nodes.primary.admin, primaryLogin)
     await login(nodes.replica.admin, replicaLogin)
-    app = appCluster(proxies, nodes)
+    app = appCluster(proxies, nodes, options)
     installRedis(app)
     return nodes
   }
@@ -268,6 +274,87 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
         whileUnreachable: 'still waiting after 3000 ms',
         ready: 'resolved',
         after: true,
+      })
+    }, 60_000)
+
+    it(`${store.name}: where one node asks for a password at the first SUBSCRIBE, beside one that lets it in, the subscription lives on that one`, async () => {
+      // With no ready check, a socket connects before Redis checks its login, and a node that requires a password the
+      // client doesn't send answers its first command with NOAUTH. The app's client logs in as Redis's default user.
+      const nodes = await cluster(store, true, true, { redisOptions: { enableReadyCheck: false } })
+      const key = `noauth-${i}`
+      const received: unknown[] = []
+      const subscription = Broadcast.subscribe(key, (message) => void received.push(message))
+      let ready: unknown
+      const drops: Record<string, boolean> = {}
+      try {
+        ready = await settled(subscription.ready, 10_000)
+        drops.before = await delivered(key, 'before', received)
+        await nodes.replica.admin.call('CONFIG', 'SET', 'requirepass', 'another-password')
+        // Each drop moves the subscriber to the next node, so two drops take it to the replica whichever it began on.
+        for (const drop of ['after drop 1', 'after drop 2']) {
+          await Promise.all(
+            [nodes.primary, nodes.replica].map(({ admin }) => admin.call('CLIENT', 'KILL', 'TYPE', 'pubsub')),
+          )
+          drops[drop] = await delivered(key, drop, received)
+        }
+      } finally {
+        subscription()
+      }
+
+      expect({ ready, drops }).toEqual({
+        ready: 'resolved',
+        drops: { before: true, 'after drop 1': true, 'after drop 2': true },
+      })
+    }, 60_000)
+
+    it(`${store.name}: where every node refuses it once the backend's client is ready, with no ready check, a subscription ends with 'denied'`, async () => {
+      // With no ready check, a socket whose login Redis refuses connects first, and closes once the refusal comes.
+      const nodes = await cluster(store, true, true, {
+        redisOptions: { username: 'telefunc', password: 'pw', enableReadyCheck: false },
+      })
+      const key = `no-ready-check-${i}`
+      const warmed = await settled(Promise.resolve(Broadcast.publish(key, 'warm')), 10_000)
+      await login(nodes.primary.admin, false)
+      await login(nodes.replica.admin, false)
+      const subscription = Broadcast.subscribe(key, () => {})
+      let ready: unknown
+      try {
+        ready = await settled(subscription.ready, 10_000)
+      } finally {
+        subscription()
+      }
+
+      expect({ warmed, ready }).toMatchObject({
+        warmed: 'resolved',
+        ready: { name: 'BackendError', code: 'denied', message: expect.stringContaining(LOGIN_REFUSED) },
+      })
+    }, 60_000)
+
+    it(`${store.name}: a channel the ACL refuses fails only its own subscription`, async () => {
+      const nodes = await cluster(store, true, true)
+      for (const { admin } of [nodes.primary, nodes.replica]) {
+        await admin.call('ACL', 'SETUSER', 'telefunc', 'resetchannels', `&*allowed-${i}}*`)
+      }
+      const received: unknown[] = []
+      // Both before the subscriber connects, so they go in one SUBSCRIBE, which Redis refuses whole.
+      const allowed = Broadcast.subscribe(`allowed-${i}`, (message) => void received.push(message))
+      const refused = Broadcast.subscribe(`refused-${i}`, () => {})
+      let results: Record<string, unknown> = {}
+      try {
+        results = {
+          refused: await settled(refused.ready, 10_000),
+          allowed: await settled(allowed.ready, 10_000),
+          delivered: await delivered(`allowed-${i}`, 'x', received),
+        }
+      } finally {
+        allowed()
+        refused()
+      }
+
+      expect(results).toMatchObject({
+        refused: { name: 'BackendError', code: 'denied', message: expect.stringContaining(ACL_REFUSED) },
+        allowed: 'resolved',
+        delivered: true,
       })
     }, 60_000)
   }
