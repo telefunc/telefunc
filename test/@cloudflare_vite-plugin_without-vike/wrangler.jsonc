@@ -4,7 +4,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "telefunc_test_cloudflare_vite-plugin_without-vike",
   "main": "./worker.ts",
-  "compatibility_date": "2025-08-06",
+  "compatibility_date": "2025-08-15",
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
