@@ -156,6 +156,40 @@ test.each([
   },
 )
 
+test.each([
+  ['a batch POST', false],
+  ['a streaming upload', true],
+])(
+  "%s whose read of a frame is under way when another request ends the session, its body then cut mid-frame, is answered with the session's end",
+  async (_request, streamRequest) => {
+    const { connId, opened } = await openWire()
+    const reading = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
+    // A frame's length, then one of its 32 bytes: the server waits for the rest.
+    const metadata = streamRequest ? { connId, streamRequest: true } : { connId }
+    const chunks = [encodeSseRequestMetadata(metadata), encodeU32(32), new Uint8Array(1)]
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull: (controller) => {
+          const chunk = chunks.shift()
+          if (chunk === undefined) reading.resolve(controller)
+          else controller.enqueue(chunk)
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const answer = post(body)
+    const controller = await reading.promise
+    // An ATTACH_RESULT, which a page never sends: the server can't read it, and the session ends.
+    const ending = await post(encodeSseRequest({ connId }, [encode.attachResult(999, null)]))
+    controller.close()
+    expect([ending.contentType, (await answer).contentType]).toEqual([
+      expect.stringMatching(refusal('frames', '', UNREADABLE)),
+      expect.stringMatching(refusal('frames', '', UNREADABLE)),
+    ])
+    await cancel(opened)
+  },
+)
+
 test('a body the server cannot frame is refused `frames`, naming no channel', async () => {
   const { connId, opened } = await openWire()
   // A frame of no bytes: no tag, no header.

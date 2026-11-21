@@ -383,9 +383,7 @@ class SseServerTransport {
     this.sendNow(wire, encode.streamRequestOpenAck())
     // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
     await wire.ready
-    await this.readUpload(wire, reader)
-    // Its wire closed under it: refused, as a batch POST that met the close is, once the page ended its body.
-    return wire.closed ? closedUnder(wire) : okResponse()
+    return this.answerAfterBody(wire, this.readUpload(wire, reader))
   }
 
   /** Dispatches the upload's frames as they come, to the body's end; after its wire's end, what the page writes is read
@@ -429,11 +427,22 @@ class SseServerTransport {
     })
     wire.pendingDispatches.add(drain)
     try {
-      await drain
+      return await this.answerAfterBody(wire, drain)
     } finally {
       wire.pendingDispatches.delete(drain)
     }
-    // Frames after a close don't run: refused, as a POST for a wire closed before it is, so the page reconnects.
+  }
+
+  /** What a request whose frames `read` reads on `wire` is answered once the page ended its body. Its wire closed
+   *  meanwhile: refused as a request for a wire closed before it is, so the page reconnects, also where the body was cut
+   *  in the middle of a frame the server was reading as the wire ended. A cut on a wire still open is the truncation's
+   *  (`handleRequest`). */
+  private async answerAfterBody(wire: SseWire, read: Promise<void>): Promise<SseChannelHttpResponse> {
+    try {
+      await read
+    } catch (err) {
+      if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
+    }
     return wire.closed ? closedUnder(wire) : okResponse()
   }
 
