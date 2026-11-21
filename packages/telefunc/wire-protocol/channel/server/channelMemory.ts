@@ -204,9 +204,11 @@ function queueMemory(): QueueMemory {
  *  goes only with its last holder, so the level drops until the total does. A holder that can't reach it, its bytes on the
  *  wire, leaves this pass; 1, not 0, as its newest stays. */
 function reclaim(need: number, target: number): void {
-  for (const holder of [...memory.holders]) {
-    if (memory.total + need <= target) return
+  if (memory.total + need <= target) return
+  // A holder let go leaves the set as the walk reaches it, which the walk over the rest allows.
+  for (const holder of memory.holders) {
     holder.letGoKept?.()
+    if (memory.total + need <= target) return
   }
   const stuck = new Set<MemoryHolder>()
   while (memory.total + need > target) {

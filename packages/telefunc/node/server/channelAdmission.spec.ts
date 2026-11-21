@@ -2,7 +2,7 @@
 // fits makes no other page's channel let go of anything. A filler holder takes the budget down to the room each test
 // names; the real ServerChannel, ServerBroadcast and memory ledger run.
 
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
@@ -10,6 +10,7 @@ import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
 import { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 import { config, getChannelConfig } from './serverConfig.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 config.channel = { maxMemory: '2m' }
 
@@ -60,6 +61,25 @@ test("a reliable broadcast near the budget stays open when another channel's tex
     releaseHolder(filler)
     channel._end()
     channel._release()
+    broadcast._end()
+    broadcast._release()
+  }
+})
+
+test('a publish that fits walks none of the holders, and asks none to let go', async () => {
+  const { holders } = getGlobalObject('channelMemory.ts', { holders: new Set<MemoryHolder>() })
+  const broadcast = subscribedPage(crypto.randomUUID(), false)
+  let asked = 0
+  const kept: MemoryHolder = { heldBytes: 0, letGoKept: () => void asked++ }
+  hold(kept, 10_000)
+  const iterate = vi.spyOn(Set.prototype, Symbol.iterator)
+  try {
+    await broadcast.publish('a'.repeat(1_000))
+    expect(iterate.mock.contexts.filter((set) => set === holders)).toEqual([])
+    expect(asked).toBe(0)
+  } finally {
+    iterate.mockRestore()
+    releaseHolder(kept)
     broadcast._end()
     broadcast._release()
   }
