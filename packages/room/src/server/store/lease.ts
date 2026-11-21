@@ -207,11 +207,11 @@ async function reapLapsedLeases(room: RoomIncarnation): Promise<void> {
   await reapLeases(room, await readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX))
 }
 
-/** False once none of the leases read had lapsed. */
-async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt): Promise<boolean> {
+/** False once none of the leases read had lapsed. Each reap is a write of `call`, which a read that found none lapsed
+ *  doesn't mark as having written. */
+async function reapLeases(room: RoomIncarnation, { cells, now }: CellsAt, call = new BackendCall()): Promise<boolean> {
   const lapsed = Array.from(cells.keys()).filter((key) => decodeLeaseRecord(cells.get(key)!).until < now)
   const cleaner = crypto.randomUUID()
-  const call = new BackendCall()
   // The first lease's failure, told once every reap ended: one that went through may have come before it.
   await call.read(() => eachInFlight(lapsed, (key) => call.write(() => reapLease(room, key, cleaner))))
   return lapsed.length > 0

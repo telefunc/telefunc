@@ -29,7 +29,7 @@ type Roster = { members: MemberSnapshot[] }
 async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
   const call = new BackendCall()
   const [leases, roster] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), readRoster(room)])
-  return (await call.write(() => reapLeases(room, leases))) ? await call.read(() => readRoster(room)) : roster
+  return (await reapLeases(room, leases, call)) ? await call.read(() => readRoster(room)) : roster
 }
 
 async function readRoster(room: RoomIncarnation): Promise<Roster> {
@@ -65,9 +65,7 @@ async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Pro
     readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX),
     readMembersById(room, ids),
   ])
-  return (await call.write(() => reapLeases(room, leases)))
-    ? await call.read(() => readMembersById(room, ids))
-    : members
+  return (await reapLeases(room, leases, call)) ? await call.read(() => readMembersById(room, ids)) : members
 }
 
 async function readMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
@@ -116,11 +114,13 @@ function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantM
   return snapshot
 }
 
-/** Read again after a lapsed lease's members were removed. */
-async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
-  const call = new BackendCall()
-  const [leases, count] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), countPresence(room)])
-  return (await call.write(() => reapLeases(room, leases))) ? await call.read(() => countPresence(room)) : count
+/** Read again after a lapsed lease's members were removed; its reads and writes are steps of `call`. */
+async function reapAndCountPresence(room: RoomIncarnation, call = new BackendCall()): Promise<number> {
+  const [leases, count] = await Promise.all([
+    call.read(() => readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX)),
+    call.read(() => countPresence(room)),
+  ])
+  return (await reapLeases(room, leases, call)) ? await call.read(() => countPresence(room)) : count
 }
 
 /** The members not hidden, from their records alone: a count reads no meta. */

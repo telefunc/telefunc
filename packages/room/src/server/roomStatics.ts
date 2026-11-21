@@ -251,46 +251,68 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   )
   assertKnownOptions(options, ['prefix'], 'Room.list()')
   const plane = getRoomPlane()
+  // One account of the call's writes, over every page: a step that fails once a cleanup of a lapsed room or lease was
+  // handed over may have run.
+  const call = new BackendCall()
   const rooms: RoomInfo[] = []
   let cursor: string | undefined
   do {
-    const page = await plane.driver.directoryList(options?.prefix ?? '', cursor)
+    const page = await call.read(() => plane.driver.directoryList(options?.prefix ?? '', cursor))
     cursor = page.cursor
     // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
     for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
       const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
-      const listed = await Promise.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, roomId, incTag)))
+      const listed = await Promise.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, call, roomId, incTag)))
       for (const info of listed) if (info !== null) rooms.push(info)
     }
   } while (cursor !== undefined)
   return rooms
 }
 
-/** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. */
-async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Promise<RoomInfo | null> {
-  const head = await plane.driver.readHead(roomId)
-  const call = new BackendCall()
+/** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. Its
+ *  reads and writes are steps of the list's `call`. */
+async function listedRoom(
+  plane: RoomPlane,
+  call: BackendCall,
+  roomId: string,
+  incTag: string,
+): Promise<RoomInfo | null> {
+  const head = await call.read(() => plane.driver.readHead(roomId))
   const [, info] = await Promise.all([
     repairRoomIndex(plane, roomId, incTag, head, call),
-    call.read(() => openRoomInfo(plane, roomId, head)),
+    openRoomInfo(plane, call, roomId, head),
   ])
   return info
 }
 
-async function openRoomInfo(plane: RoomPlane, roomId: string, head: RoomHead | null): Promise<RoomInfo | null> {
+async function openRoomInfo(
+  plane: RoomPlane,
+  call: BackendCall,
+  roomId: string,
+  head: RoomHead | null,
+): Promise<RoomInfo | null> {
   const config = openConfig(head)
   if (config === null) return null
-  const [count, stored] = await Promise.all([countListedRoom(plane, roomId, config), readRoomMeta(roomId, config)])
+  const [count, stored] = await Promise.all([
+    countListedRoom(plane, call, roomId, config),
+    call.read(() => readRoomMeta(roomId, config)),
+  ])
   if (count === null || stored === null) return null
   return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
 }
 
 /** Null once the room began closing after its head read, as it is then no longer listed. */
-async function countListedRoom(plane: RoomPlane, roomId: string, config: RoomConfigRecord): Promise<number | null> {
+async function countListedRoom(
+  plane: RoomPlane,
+  call: BackendCall,
+  roomId: string,
+  config: RoomConfigRecord,
+): Promise<number | null> {
   try {
-    return await reapAndCountPresence({ id: roomId, ...config })
+    return await reapAndCountPresence({ id: roomId, ...config }, call)
   } catch (error) {
-    if (isRoomError(error) && openConfig(await plane.driver.readHead(roomId), config.inc) === null) return null
+    if (isRoomError(error) && openConfig(await call.read(() => plane.driver.readHead(roomId)), config.inc) === null)
+      return null
     throw error
   }
 }
