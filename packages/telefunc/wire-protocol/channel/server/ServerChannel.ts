@@ -1128,14 +1128,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  the close's outcome, where the network lost them. A page that never read the CLOSE learns from them alone that the
    *  channel ended. */
   letGoKept(): void {
-    if (this._phase === 'ended' && this.keepsOnlyTheClose()) this.mux?.letGoEnded(this.id)
+    if (this._phase !== 'ended' || !this.keepsOnlyTheClose()) return
+    assert(this.mux)
+    this.mux.letGoEnded(this.id)
   }
 
   /** Its page lacks nothing of it but the outcome of a close it is in: a CLOSE still kept is one its page never
    *  confirmed. So a page that sent a CLOSE of its own, crossing the server's, keeps its channel kept until it confirms
    *  the server's too: stricter than its own CLOSE alone, and it loses nothing. */
   private keepsOnlyTheClose(): boolean {
-    return this._replayBuffer !== null && this.nothingPending() && this._replayBuffer.holdsOnly(isCloseOutcomeFrame)
+    assert(this._replayBuffer)
+    return this.nothingPending() && this._replayBuffer.holdsOnly(isCloseOutcomeFrame)
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */

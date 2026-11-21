@@ -223,7 +223,8 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
   letGoEnded(id: string): void {
     const channel = this.channels.get(id)
-    if (channel) this.ended.release(channel)
+    assert(channel)
+    this.ended.release(channel)
   }
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
