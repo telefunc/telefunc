@@ -20,13 +20,15 @@ import { base64urlToUint8Array } from '../wire-protocol/wire/base64url.js'
 // to real Node servers, the offer read from the RECONCILED its SSE wire carries, the WebSocket from the page's own.
 
 const NativeWebSocket = globalThis.WebSocket
-/** The page's WebSockets, by the host each went to. */
+/** The page's WebSockets, by the host each went to, and those that failed (Node 22's fire `error` and no `close`). */
 const webSockets = new Map<string, WebSocket[]>()
+const failedWebSockets = new WeakSet<WebSocket>()
 class RecordedWebSocket extends NativeWebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols)
     const host = new URL(url).host
     webSockets.set(host, [...(webSockets.get(host) ?? []), this])
+    this.addEventListener('error', () => failedWebSockets.add(this))
   }
 }
 /** What the page's client sends as its own `x-telefunc-server` header, on each of its requests. */
@@ -346,6 +348,24 @@ test("a page that sends its own `x-telefunc-server` header is offered what its s
   expect(hono.markers.every((marker) => marker.startsWith('made-up, '))).toBe(true)
   expect(await openPage(other)).toEqual({ offer: ['sse'], webSocketOpened: false })
   expect(webSockets.get(other.host)).toBeUndefined()
+})
+
+test("a page that sends the token of the docs' Hono app to a Fetch-only app beside it is offered WebSocket there: its upgrade is refused, its channel answers over SSE, and the Hono app's server sees no upgrade", async () => {
+  const hono = await honoApp()
+  let honoUpgrades = 0
+  hono.server.on('upgrade', () => honoUpgrades++)
+  expect(await openPage(hono)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  expect(honoUpgrades).toBe(1)
+  const [token] = hono.markers
+  expect(token).toMatch(/^[0-9a-f-]{36}$/)
+  const other = await fetchApp()
+  clientMarker = token
+  const { page, offer } = await connectPage(other)
+  expect(offer).toEqual(['sse', 'ws'])
+  await expect.poll(() => webSockets.get(other.host)?.some((ws) => failedWebSockets.has(ws)) ?? false).toBe(true)
+  expect(await page.send('again', { ack: true })).toBe('ack:again')
+  expect(webSockets.get(other.host)?.some((ws) => ws.readyState === NativeWebSocket.OPEN)).toBe(false)
+  expect(honoUpgrades).toBe(1)
 })
 
 test('an app whose server closed and listens again offers WebSocket, and the token it marked requests with before names no server', async () => {

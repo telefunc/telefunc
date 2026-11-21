@@ -58,7 +58,10 @@ function isTelefuncUrl(url: string): boolean {
   return getRequestPathname(url) === telefuncUrl
 }
 
-/** The server the request came in on, where it marks its requests: a token no listening server has names none. */
+/** The server the request came in on, where it marks its requests: a token no listening server has names none. The
+ *  token names a server and proves nothing, as the app's handler for Telefunc's URL sees it: a request that carries
+ *  another taken server's token gets that server's answer, so a page of a server that takes no upgrades is offered
+ *  WebSocket there, its upgrade is refused, and its channel goes on over SSE. */
 function serverOfRequest(request: Request): HttpServer | undefined {
   const value = request.headers.get(SERVER_HEADER)
   if (value === null) return undefined
