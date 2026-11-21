@@ -230,26 +230,51 @@ test("a request that meets the wire a channel's over-limit frame closed is refus
 /** How a channel that sent nothing wrong ends on the page as the server ends its session. */
 const sessionEndOnPage = [['ChannelClosedError', told.unreadable]]
 
-/** The event stream without the channels' ERROR frames, held open past the server's end of it: the page learns of the
- *  session's end from the answer to its request alone. */
-function answerDecides(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const reader = withholding((frame) => frame[0] === TAG.ERROR)
-    .stream(body)
-    .getReader()
-  return new ReadableStream<Uint8Array>({
-    pull: async (controller) => {
-      const { done, value } = await reader.read()
-      if (done) return new Promise<void>(() => {})
-      controller.enqueue(value)
-    },
-    cancel: (reason) => reader.cancel(reason),
-  })
+/** The event stream without the channels' ERROR frames and its END, held open past the server's end of it: the page
+ *  learns of the session's end from the answer to its request alone. `withheld`: the tags of the frames it kept from the
+ *  page. */
+function answerDecides() {
+  const withheld: number[] = []
+  const stream = (body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
+    const reader = withholding((frame) => {
+      const terminal = frame[0] === TAG.ERROR || frame[0] === TAG.END
+      if (terminal) withheld.push(frame[0] ?? 0)
+      return terminal
+    })
+      .stream(body)
+      .getReader()
+    return new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        const { done, value } = await reader.read()
+        if (done) return new Promise<void>(() => {})
+        controller.enqueue(value)
+      },
+      cancel: (reason) => reader.cancel(reason),
+    })
+  }
+  return { stream, withheld }
 }
+
+/** The streaming upload with `bad` after the frame that carries `text`, then its end: the server answers it once it
+ *  read the body's end, which the page, kept from the stream's END, wouldn't send. */
+const endingAfter = (text: string, bad: Bad) => (body: ReadableStream<Uint8Array>) =>
+  body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform: (chunk, controller) => {
+        controller.enqueue(chunk)
+        const found = textOf(new Uint8Array(chunk), text)
+        if (found === null) return
+        for (const part of bad(found)) controller.enqueue(part)
+        controller.terminate()
+      },
+    }),
+  )
 
 test("a batch POST of two channels' data the server refuses `frames` naming no channel ends both on the page with the server's sentence of the connection", async () => {
   const carried: string[] = []
+  const decides = answerDecides()
   world.hooks = [
-    { kind: 'open', stream: answerDecides },
+    { kind: 'open', stream: decides.stream },
     {
       kind: 'post',
       text: 'b1',
@@ -265,17 +290,21 @@ test("a batch POST of two channels' data the server refuses `frames` naming no c
   sends(first.page, 'a1')
   sends(second.page, 'b1')
   await until(() => ends.every((each) => each.length > 0))
-  expect([carried, ends]).toEqual([
+  // From that answer alone: the stream's END was kept from the page, and no other wire opened to read the kept end.
+  expect([carried, ends, decides.withheld.includes(TAG.END), opens()]).toEqual([
     ['a1', 'b1'],
     [sessionEndOnPage, sessionEndOnPage],
+    true,
+    1,
   ])
 })
 
 test("the streaming upload the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
   world.uploads = true
+  const decides = answerDecides()
   world.hooks = [
-    { kind: 'open', stream: answerDecides },
-    { kind: 'upload', upload: uploadAfter('a1', overLimit(999)) },
+    { kind: 'open', stream: decides.stream },
+    { kind: 'upload', upload: endingAfter('a1', overLimit(999)) },
   ]
   const [first, second] = opening(crypto.randomUUID())
   await Promise.all([first.page.opened, second.page.opened])
@@ -283,13 +312,15 @@ test("the streaming upload the server refuses `frames` naming no channel ends ev
   const ends = [first, second].map(({ page }) => endsOf(page))
   sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
-  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
+  // From that answer alone: the stream's END was kept from the page, and no other wire opened to read the kept end.
+  expect([ends, decides.withheld.includes(TAG.END), opens()]).toEqual([[sessionEndOnPage, sessionEndOnPage], true, 1])
 })
 
 test("the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
   let requestsBefore = -1
+  const decides = answerDecides()
   world.hooks = [
-    { kind: 'open', stream: answerDecides },
+    { kind: 'open', stream: decides.stream },
     {
       kind: 'post',
       carries: TAG.BARRIER,
@@ -303,7 +334,11 @@ test("the barrier POST of a move to a WebSocket the server refuses `frames` nami
   const ends = [first, second].map(({ page }) => endsOf(page))
   await until(() => ends.every((each) => each.length > 0))
   // No request went after the barrier's, such as a PING meeting the end.
-  expect([world.started.slice(requestsBefore), ends]).toEqual([['post'], [sessionEndOnPage, sessionEndOnPage]])
+  expect([world.started.slice(requestsBefore), ends, decides.withheld.includes(TAG.END)]).toEqual([
+    ['post'],
+    [sessionEndOnPage, sessionEndOnPage],
+    true,
+  ])
 })
 
 test('a session the server ends tells each channel on the page its end on the event stream alone, and the page opens no other wire', async () => {
