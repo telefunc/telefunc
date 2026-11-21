@@ -49,6 +49,12 @@ function getCiJobs() {
       command: 'pnpm run test:released-api',
       setups: [ubuntu],
     },
+    // @telefunc/redis against Redis 7.0.0 and 7.4.12, Valkey 7.2.5 and 8.1.1, each store in Docker
+    {
+      name: 'Redis stores',
+      command: 'pnpm run test:redis-stores',
+      setups: [ubuntu],
+    },
 
     // @brillout/test-e2e
     {

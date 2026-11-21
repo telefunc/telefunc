@@ -10,6 +10,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { BackendError, Broadcast } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { installRedis } from './index.js'
+import { pullImage } from '../test/stores.js'
 
 const STORES = [
   { name: 'Redis 7.0.0', image: 'redis:7.0.0', server: 'redis-server' },
@@ -47,7 +48,7 @@ async function loading(admin: Redis): Promise<boolean> {
 
 /** The store, restarted with a data set it loads slowly; its admin client once the store answers LOADING. */
 async function loadingStore(store: (typeof STORES)[number]): Promise<{ host: string; admin: Redis }> {
-  docker('pull', '--quiet', store.image)
+  pullImage(store.image)
   const container = docker(
     'run',
     '--detach',

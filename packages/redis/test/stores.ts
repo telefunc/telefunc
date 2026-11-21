@@ -1,5 +1,5 @@
 // The stores the store specs (`pnpm run test:redis-stores`) run against, each in Docker, and what they share.
-export { STORES, runs, startStore, removeStores, forwarder, type Store }
+export { STORES, runs, pullImage, startStore, removeStores, forwarder, type Store }
 
 import { execFileSync } from 'node:child_process'
 import { connect, createServer, type Socket } from 'node:net'
@@ -31,11 +31,28 @@ const runs = (() => {
   }
 })()
 
+/** The store's image, pulled again once when a pull fails, as a registry does now and then; a second failure ends the
+ *  run with a sentence that says so. */
+function pullImage(image: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      docker('pull', '--quiet', image)
+      return
+    } catch (error) {
+      if (attempt === 2) {
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error(`Docker couldn't pull ${image}, tried twice: ${reason}`)
+      }
+    }
+  }
+}
+
 const containers: string[] = []
 
 /** The store in a container of its own, once it answers; its address, and an admin client of it. */
 async function startStore(store: Store, ...options: string[]): Promise<{ host: string; admin: Redis }> {
   const name = `tf-redis-stores-${process.pid}-${containers.length}`
+  pullImage(store.image)
   docker(
     'run',
     '--detach',

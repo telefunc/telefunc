@@ -10,6 +10,7 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { DEFAULT_PREFIX } from './keys.js'
 import { RedisConnection } from './RedisConnection.js'
+import { pullImage } from '../test/stores.js'
 
 const STORES = [
   { name: 'Redis 7.0.0', image: 'redis:7.0.0', server: 'redis-server' },
@@ -100,7 +101,7 @@ async function connected(host: string): Promise<Redis> {
 
 /** The store's container, once its server answers; it's removed after the tests, even when it never answered. */
 async function start(store: (typeof STORES)[number]): Promise<Store> {
-  docker('pull', '--quiet', store.image)
+  pullImage(store.image)
   // No protected mode: the tests connect from outside the container, without a password.
   const container = docker(
     'run',
