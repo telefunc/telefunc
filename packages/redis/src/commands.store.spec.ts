@@ -152,12 +152,14 @@ async function record(store: Store): Promise<void> {
   app.disconnect()
 }
 
-type Fault = { name: string; plant: (admin: Redis) => Promise<void> }
+/** `key`: the key the fault holds, which a call that runs leaves as it was, where the fault is that key's type. */
+type Fault = { name: string; key?: string; plant: (admin: Redis) => Promise<void> }
 
 /** Each key of the call in turn holding a list, a type Telefunc keeps nowhere. */
 function anotherType(call: Recorded): Fault[] {
   return [...new Set(call.keys)].map((key) => ({
     name: `${key} holds a list`,
+    key,
     plant: async (admin) => {
       await admin.del(key)
       await admin.rpush(key, 'x')
@@ -201,8 +203,8 @@ function corrupted(call: Recorded): Fault[] {
   return faults
 }
 
-/** The call from its store with `fault` planted: it runs, or it is refused before any write and says it didn't run, in
- *  the words given; anything else is a failure, described. */
+/** The call from its store with `fault` planted: it runs, leaving the key of a wrong type as it was, or it is refused
+ *  before any write and says it didn't run, in the words given; anything else is a failure, described. */
 async function trial(
   store: Store,
   call: Recorded,
@@ -226,7 +228,12 @@ async function trial(
   const after = await snapshot(store.admin)
   const diff = changed(base, after, Date.now() - started)
   listener.disconnect()
-  if (failure === undefined) return 'ran'
+  if (failure === undefined) {
+    const { key } = fault
+    // A script that has no use for the key leaves it; one that writes it refuses first.
+    if (key === undefined || !diff.some((changed) => changed === key || changed === `${key} (ttl)`)) return 'ran'
+    return { failure: `${call.name}, ${fault.name}: ran and changed ${key}` }
+  }
   const told =
     failure instanceof BackendError ? `${failure.code}/${failure.outcome}: ${failure.message}` : String(failure)
   const notRun = failure instanceof BackendError && failure.outcome === 'not-run'
@@ -345,6 +352,7 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       for (const [type, plant] of Object.entries(plants)) {
         const fault = {
           name: `${order} holds a ${type}`,
+          key: order,
           plant: async (admin: Redis) => {
             await admin.del(order)
             await plant(admin)
@@ -376,6 +384,7 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       for (const [type, plant] of Object.entries(plants)) {
         const fault = {
           name: `${manifest} holds a ${type}`,
+          key: manifest,
           plant: async (admin: Redis) => {
             await admin.del(manifest)
             await plant(admin)

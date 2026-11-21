@@ -50,6 +50,29 @@ describe("a write script's checks", () => {
     expect(named.filter((index) => index > (holds?.length ?? 0))).toEqual([])
   })
 
+  // A TYPE check names each key the script's holds give a type, by index or by the local the script gives it: what a
+  // pcall's reply refuses checks the key's type too (`heldReplyLua`). A channel holds no type.
+  it.each(writing)('$name checks the type of each key it names by index', ({ lua, holds }) => {
+    const aliases = new Map<string, string>()
+    for (const [, names = '', values = ''] of lua.matchAll(/local ([\w, ]+?)\s*=\s*((?:KEYS\[\d+\][,\s]*)+)/g)) {
+      const indexed = Array.from(values.matchAll(/KEYS\[\d+\]/g), ([key]) => key)
+      names.split(',').forEach((name, at) => {
+        const key = indexed[at]
+        if (key !== undefined) aliases.set(name.trim(), key)
+      })
+    }
+    const typed = new Set(
+      Array.from(
+        lua.matchAll(/redis\.call\('TYPE', ([^)]+)\)/g),
+        ([, key = '']) => aliases.get(key.trim()) ?? key.trim(),
+      ),
+    )
+    const unchecked = (holds ?? []).flatMap((hold, at) =>
+      hold === 'channel' || typed.has(`KEYS[${at + 1}]`) ? [] : [`KEYS[${at + 1}] (${hold})`],
+    )
+    expect(unchecked).toEqual([])
+  })
+
   it.each(writing)('$name refuses only with TFNOTRUN and its word at the start of the reply', ({ lua }) => {
     const refused = Array.from(lua.matchAll(/error\(\{ err = 'TFNOTRUN (WRONGTYPE|ERR) ' \.\. /g))
     expect(lua.split('TFNOTRUN').length - 1).toBe(refused.length)
