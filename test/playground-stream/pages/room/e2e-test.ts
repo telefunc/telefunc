@@ -108,7 +108,13 @@ type MemberResult = {
 /** `cam` received by `watchers` and `watcherCount` people in all. */
 const cam = (watchers: string[], watcherCount: number): NamedDemand => ({ track: 'cam', watchers, watcherCount })
 
-function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
+/** `settled` runs once, after the result passed `validate`: a check that no retry may hide. */
+function testRoomScenario<Result>(
+  id: string,
+  name: string,
+  validate: (result: Result) => void | Promise<void>,
+  settled?: () => Promise<void>,
+) {
   test(name, async () => {
     try {
       await retryOnNetworkChange(async (cut) => {
@@ -117,6 +123,7 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
         await autoRetry(async () => {
           if (!cut()) await validate(await getResult<Result>('#room-result'))
         })
+        if (!cut()) await settled?.()
       })
     } finally {
       // The page leaves with its connection, so a later test that kills its server meets no page errors.
@@ -1434,7 +1441,7 @@ function testRoom() {
   }>(
     'tracks',
     "room: each of 1,000 named tracks reaches its subscriber in order, me.demand follows the wants, and a selfDelivery:false member's own side is no demand",
-    async (r) => {
+    (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
       // The room tells each track's demand on its own, in no set order between tracks.
@@ -1450,6 +1457,8 @@ function testRoom() {
       expect(r.pubOwn).deep.equal([['own', true]])
       expect(r.otherOwn).deep.equal([])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
+    },
+    async () => {
       // The page still answers once it holds 5,097 tracks' demand: t1 to t999, `main`, `own` and `many`'s 4,096.
       expect(await page.evaluate(() => document.readyState)).toBe('complete')
     },
