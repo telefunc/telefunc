@@ -24,6 +24,13 @@ let wires: ServerResponse[]
 let channels: ClientChannel[]
 /** The upload POST is held, neither acknowledged nor answered, as by a proxy that buffers a request's body. */
 let holdUploads: boolean
+/** The upload POST is held until the wire's RECONCILED went, then ended: the page's frames go in batch POSTs, and a
+ *  RECONCILE among them is answered on the wire. */
+let endUploadsAfterWire: boolean
+let heldUploads: ServerResponse[]
+/** The wire's session and settings, which a RECONCILED on it names. */
+let session: string
+let settings: { pingInterval?: number; reconnectTimeout?: number }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -46,24 +53,32 @@ async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[]
   return frames
 }
 
+/** The event of a RECONCILED for the channel `ix`. */
+function reconciled(ix: number, { pingInterval = 100_000, reconnectTimeout = 60_000 } = {}): string {
+  const frame = encode.reconciled({
+    sessionId: session,
+    open: [{ ix, lastSeq: 0 }],
+    reconnectTimeout,
+    idleTimeout: 60_000,
+    pingInterval,
+    maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+    creditWindow: 1_000_000,
+    sseFlushThrottle: 300,
+    ssePostIdleFlushDelay: 50,
+    transports: ['sse'],
+  })
+  return `data: ${uint8ArrayToBase64url(frame)}\n\n`
+}
+
 /** A wire: the event stream, with the RECONCILED for the channel the open's RECONCILE names. */
-function wire({ pingInterval = 100_000, reconnectTimeout = 60_000 } = {}): Answer {
+function wire(ofWire: { pingInterval?: number; reconnectTimeout?: number } = {}): Answer {
   return (res, ix) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' })
-    const frame = encode.reconciled({
-      sessionId: crypto.randomUUID(),
-      open: [{ ix, lastSeq: 0 }],
-      reconnectTimeout,
-      idleTimeout: 60_000,
-      pingInterval,
-      maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-      creditWindow: 1_000_000,
-      sseFlushThrottle: 300,
-      ssePostIdleFlushDelay: 50,
-      transports: ['sse'],
-    })
-    res.write(`: open\n\ndata: ${uint8ArrayToBase64url(frame)}\n\n`)
+    session = crypto.randomUUID()
+    settings = ofWire
+    res.write(`: open\n\n${reconciled(ix, ofWire)}`)
     wires.push(res)
+    if (endUploadsAfterWire) setTimeout(() => void heldUploads.splice(0).forEach((upload) => upload.end()), 100)
   }
 }
 
@@ -77,15 +92,27 @@ beforeEach(async () => {
   wires = []
   channels = []
   holdUploads = false
+  endUploadsAfterWire = false
+  heldUploads = []
   server = createServer((req, res) => {
     // A page a redirect sent here.
     if (req.method === 'GET') return html(200)(res)
     // The upload POST that would stream: ended at once, its frames go in batch POSTs.
-    if (req.headers['transfer-encoding'] === 'chunked') return holdUploads ? undefined : void res.end()
+    if (req.headers['transfer-encoding'] === 'chunked') {
+      if (endUploadsAfterWire) return void heldUploads.push(res)
+      return holdUploads ? undefined : void res.end()
+    }
     void framesOf(req).then((frames) => {
       if (frames === null) return
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]))
-      if (!metadata.streamResponse) return void res.end()
+      if (!metadata.streamResponse) {
+        for (const frame of frames.slice(1).map((raw) => decode(raw))) {
+          if (frame.tag === TAG.PING) wires.at(-1)?.write(`data: ${uint8ArrayToBase64url(encode.pong())}\n\n`)
+          if (frame.tag === TAG.RECONCILE)
+            for (const { ix } of frame.payload.open) wires.at(-1)?.write(reconciled(ix, settings))
+        }
+        return void res.end()
+      }
       opens++
       const reconcile = frames
         .slice(1)
@@ -107,10 +134,10 @@ afterEach(async () => {
   await new Promise((resolve) => server.close(resolve))
 })
 
-function openChannel() {
+function openChannel(connectionKey = crypto.randomUUID()) {
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
-    connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey: crypto.randomUUID() },
+    connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey },
   })
   channels.push(channel)
   return channel
@@ -256,5 +283,27 @@ test.each([
     expect(opens, 'the page tried again before its deadline').toBeGreaterThan(1)
     expect(closed).toBeInstanceOf(Error)
     expect(closed?.message).toBe(message)
+  },
+)
+
+// SSE's RECONCILED comes before its open, which waits for it to confirm its upload: the first RECONCILED takes the
+// handshake's sample, and a later one on the same wire takes none. The recovery's window: 2.5 pings of 1 s, then 3 s.
+test(
+  'a RECONCILED after the first on a wire leaves the handshake the first measured, which a recovery then fits',
+  { timeout: 30_000 },
+  async () => {
+    endUploadsAfterWire = true
+    answers.push(wire({ pingInterval: 1000, reconnectTimeout: 3000 }), ...Array.from({ length: 20 }, () => html(502)))
+    const connectionKey = crypto.randomUUID()
+    const channel = openChannel(connectionKey)
+    expect(await openingOf(channel)).toBe('opened')
+    await delay(6_000)
+    expect(await openingOf(openChannel(connectionKey))).toBe('opened')
+    const opened = opens
+    wires.shift()?.end()
+    const closed = await channel.closed
+    // A handshake of some ms leaves room for attempts in the 5.5 s; one of 6 s, measured from the open, for none.
+    expect(opens, 'the page tried again before its deadline').toBeGreaterThan(opened)
+    expect(closed?.message).toBe('Server rejected SSE connection with 502 text/html')
   },
 )

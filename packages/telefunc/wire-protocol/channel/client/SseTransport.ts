@@ -252,6 +252,7 @@ class SseTransport implements UpgradeSource {
   }
 
   private async openStream(): Promise<void> {
+    const startedAt = performance.now()
     this.connId = randomUuid()
     this.uplink = new Uplink()
     this.downlink = new Downlink(this.uplink)
@@ -287,7 +288,7 @@ class SseTransport implements UpgradeSource {
     if (upload && !(await this.settleUpload(upload, handshakeOkP, abortController))) return
 
     this.connecting = false
-    this.owner.onTransportOpen(this)
+    this.owner.onTransportOpen(this, startedAt)
     if (this.outbox.length > 0) void this.flushOutbox()
   }
 

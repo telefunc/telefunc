@@ -40,7 +40,8 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
-  onTransportOpen(transport: ClientChannelTransport): void
+  /** `startedAt`: when the socket or request that opened started. */
+  onTransportOpen(transport: ClientChannelTransport, startedAt: number): void
   /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
    *  another `WIRE_VERSION`; `rejectedFrame`: it refused the wire for a frame it couldn't read. */
   onTransportClosed(
@@ -236,9 +237,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
-  onTransportOpen(transport: ClientChannelTransport): void {
+  onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (this.closed) return
     if (transport !== this.transport) return
+    // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
+    // have come first, and taken it.
+    if (this.attemptStartedAt !== null) this.attemptStartedAt = startedAt
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
       this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())

@@ -165,7 +165,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.openMs = performance.now() - socket.startedAt
     this.ws = socket.ws
     this.setupHandlers(socket.ws, socket.pieces)
-    this.owner.onTransportOpen(this)
+    this.owner.onTransportOpen(this, socket.startedAt)
   }
 
   /** A socket that closed before it opened; the attempt fails with the last. */

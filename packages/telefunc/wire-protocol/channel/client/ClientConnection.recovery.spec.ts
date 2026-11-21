@@ -400,6 +400,24 @@ describe("a page's recovery", () => {
     }
   })
 
+  test('measures a handshake on the socket that opened, not from the start of an attempt whose sockets hung', async () => {
+    const { lostAt } = await lostWire({ then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(3_500)
+    expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
+    const wire = ScriptedWebSocket.made[3]
+    if (!wire) throw new Error('no wire')
+    vi.spyOn(Math, 'random').mockReturnValue(0.35)
+    wire.drop()
+    const relostAt = performance.now()
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
+    // 0.35 of 500, 1,000, 2,000, 4,000, then of the 5,000 cap, each after the last refusal. The last two fit the
+    // deadline at 30,000 after the opened socket's own handshake, 0 ms, and wouldn't after the 3 s its attempt took.
+    expect(madeSince(relostAt)).toEqual([
+      175, 525, 1225, 2625, 4375, 6125, 7875, 9625, 11375, 13125, 14875, 16625, 18375, 20125, 21875, 23625, 25375,
+      27125, 28875,
+    ])
+  })
+
   test('a channel registered while a reconnect waits starts no attempt sooner', async () => {
     const { lostAt, register } = await lostWire({ then: [] })
     await vi.advanceTimersByTimeAsync(100)
