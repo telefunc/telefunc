@@ -12,6 +12,9 @@ import { isAbort } from '../../shared/Abort.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
+import { ClientConnection } from './client/ClientConnection.js'
+import { SseTransport } from './client/SseTransport.js'
+import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { queueMemory } from './server/channelMemory.js'
 import { TAG } from '../wire/tags.js'
@@ -19,9 +22,8 @@ import type { ChannelFrame } from '../wire/frame.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000, maxMemory: '2m' }
 
-/** The network between the page and the server: what it loses, whether it takes new connections, and how many it
- *  refused. */
-const network = { losing: false, refusing: false, refused: 0 }
+/** The network between the page and the server: what it loses, and whether it takes new connections. */
+const network = { losing: false, refusing: false }
 const sockets = new Set<Socket>()
 let server: Server
 let telefuncUrl: string
@@ -31,10 +33,7 @@ beforeAll(async () => {
   server = createServer((req, res) => void telefunc.serve({ req, res }))
   telefunc.installWebSocket(server)
   server.on('connection', (socket: Socket) => {
-    if (network.refusing) {
-      network.refused++
-      return void socket.destroy()
-    }
+    if (network.refusing) return void socket.destroy()
     sockets.add(socket)
     // What the server writes while the network loses bytes never reaches the page.
     socket.write = new Proxy(socket.write, {
@@ -76,31 +75,52 @@ const MAX_MEMORY = 2 * 1024 * 1024
 async function pair(transport: 'sse' | 'ws', idleTimeout = 0) {
   const channel = new ServerChannel<string, string>()
   getChannelMux().registerChannel(channel)
-  const page = new ClientChannel<string, string>({
-    channelId: channel.id,
-    connection: { telefuncUrl, transports: [transport], idleTimeout, connectionKey: crypto.randomUUID() },
-  })
+  const { page, lifecycle } = registering(
+    () =>
+      new ClientChannel<string, string>({
+        channelId: channel.id,
+        connection: { telefuncUrl, transports: [transport], idleTimeout, connectionKey: crypto.randomUUID() },
+      }),
+  )
   await Promise.all([channel.opened, page.opened])
-  return [channel, page] as const
+  return [channel, page, lifecycle] as const
 }
 
-// First, while no other row has left a page's connection to reconnect: these count the connections the network refuses.
+/** The page `open` makes, and the connection it registers on. */
+function registering<Page>(open: () => Page): { page: Page; lifecycle: WireLifecycle } {
+  const register = vi.spyOn(WireLifecycle.prototype, 'register')
+  try {
+    const page = open()
+    const lifecycle = register.mock.contexts[register.mock.calls.findIndex(([registered]) => registered === page)]
+    if (!(lifecycle instanceof WireLifecycle)) throw new Error('the page registered on no connection')
+    return { page, lifecycle }
+  } finally {
+    register.mockRestore()
+  }
+}
+
 // A page whose connection would stay up for the next channel, once a close the server decided ended its last one.
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, a page whose connection drops after a close the server decided`, () => {
     for (const late of [false, true])
       test(`${late ? 'having asked for a shorter deadline after its CLOSE_DONE, ' : ''}opens no connection only to report it`, async () => {
-        const [channel, page] = await pair(transport, 60_000)
+        const [channel, page, lifecycle] = await pair(transport, 60_000)
         if (late) page.onClose(() => void setImmediate(() => void page.close({ timeout: 100 })))
         expect(await channel.close({ timeout: 10_000 })).toBe(null)
         expect(await page.closed).toBe(null)
+        const wire = lifecycle.transport
+        const disposed = vi.spyOn(ClientConnection.prototype, 'onDisposed')
+        const starts = [vi.spyOn(SseTransport.prototype, 'start'), vi.spyOn(WsTransport.prototype, 'start')]
         const connections = dropConnections()
-        network.refused = 0
-        // Longer than its first reconnect waits.
-        await new Promise((resolve) => setTimeout(resolve, 1_000))
-        const refused = network.refused
-        connections.reconnect()
-        expect(refused).toBe(0)
+        try {
+          // Its wire's loss leaves it nothing to recover: it ends there, and starts no wire again.
+          await vi.waitFor(() => expect(disposed.mock.contexts).toContain(page._connection))
+          expect(starts.flatMap((start) => start.mock.contexts)).not.toContain(wire)
+        } finally {
+          disposed.mockRestore()
+          for (const start of starts) start.mockRestore()
+          connections.reconnect()
+        }
       })
   })
 }
@@ -202,17 +222,15 @@ for (const transport of ['sse', 'ws'] as const) {
         }
         const channel = new ServerReading()
         getChannelMux().registerChannel(channel)
-        const register = vi.spyOn(WireLifecycle.prototype, 'register')
         const connection = {
           telefuncUrl,
           transports: [transport],
           idleTimeout: 60_000,
           connectionKey: crypto.randomUUID(),
         }
-        const page = new ClientChannel<string, string>({ channelId: channel.id, connection })
-        const lifecycle = register.mock.contexts[register.mock.calls.findIndex(([registered]) => registered === page)]
-        register.mockRestore()
-        if (!(lifecycle instanceof WireLifecycle)) throw new Error('the page registered on no connection')
+        const { page, lifecycle } = registering(
+          () => new ClientChannel<string, string>({ channelId: channel.id, connection }),
+        )
         void page.closed.then(() => (pageHasVerdict = true))
         await Promise.all([channel.opened, page.opened])
         // The server's cleanup holds its verdict until the server reads nothing more of the page, and the network loses
