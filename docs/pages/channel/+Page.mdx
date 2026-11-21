@@ -56,6 +56,8 @@ export async function onClock() {
 
 > The server returns `channel.client`: the client gets the same API but with message directions flipped.
 
+> A channel's `id` is a random UUID unless you pass one with `new Channel({ id })`: it can be at most 256 bytes as JSON writes it, and a longer one throws.
+
 ```ts
 // Clock.tsx
 // Environment: client

@@ -10,8 +10,6 @@ import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
-  UPGRADE_MAX_ID_BYTES,
-  WIRE_MAX_CTRL_FRAME_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
@@ -31,12 +29,12 @@ import {
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
-import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import { frameRefusal, type Refusal } from '../../refusal.js'
 import { ChannelPageLeftError } from '../channelErrors.js'
 import { END_CAUSE, type FrameRefusalCause, type SessionCause } from '../endCause.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
+import { WIRE_MAX_CTRL_FRAME_BYTES, isChannelId } from '../../wire/payloads.js'
 import type {
   BarrierPayload,
   CallWant,
@@ -695,7 +693,7 @@ class ChannelMux implements UpgradeStagesOwner {
     try {
       // Admission policy — `decodeClientFrame` has already established the frame's shape.
       for (const channel of ctrl.open) {
-        assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
+        assertProtocol(isChannelId(channel.id), 'channel id over byte cap')
       }
       assertProtocol(ctrl.upgradeId === stage.upgradeId, 'barrier upgradeId mismatch', probe)
       assertProtocol(

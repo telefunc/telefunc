@@ -150,11 +150,8 @@ export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Longest channel id the wire will carry. */
+/** Longest channel id the wire will carry, as JSON writes it (`isChannelId`, wire/payloads.ts). */
 export const UPGRADE_MAX_ID_BYTES = 256
-
-/** Worst case for one open entry beyond its id: its other keys at their largest values, and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -166,15 +163,9 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
 /** The single channels-per-connection limit: the client refuses to open past it, a RECONCILE or barrier may
- *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
+ *  list no more, and the control-frame byte cap is derived from it (`WIRE_MAX_CTRL_FRAME_BYTES`, wire/payloads.ts). (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
-
-/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
- *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
- *  frame is worse than no cap. */
-export const WIRE_MAX_CTRL_FRAME_BYTES =
-  MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES

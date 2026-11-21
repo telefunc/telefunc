@@ -2,14 +2,14 @@ import { describe, expect, test } from 'vitest'
 
 import { ERROR_REASON, decode, decodeClientFrame, encode } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
-import type { BarrierPayload, ReconcilePayload, ReconciledPayload } from '../wire/payloads.js'
-import { ProtocolViolationError } from '../wire/protocolViolation.js'
 import {
-  CHANNEL_TRANSPORT,
-  MAX_CHANNELS_PER_CONNECTION,
-  UPGRADE_MAX_ID_BYTES,
   WIRE_MAX_CTRL_FRAME_BYTES,
-} from '../constants.js'
+  type BarrierPayload,
+  type ReconcilePayload,
+  type ReconciledPayload,
+} from '../wire/payloads.js'
+import { ProtocolViolationError } from '../wire/protocolViolation.js'
+import { CHANNEL_TRANSPORT, MAX_CHANNELS_PER_CONNECTION, UPGRADE_MAX_ID_BYTES } from '../constants.js'
 
 const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
@@ -41,10 +41,13 @@ describe('upgrade wire vocabulary', () => {
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
       id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
       ix: 0xffff - ix,
-      lastSeq: 0xffffffff,
+      lastSeq: Number.MAX_SAFE_INTEGER,
       initial: true as const,
+      want: { version: 0xffffffff, text: false, binary: false },
+      probe: 0xffffffff,
     }))
-    const max: BarrierPayload = { sessionId: 'x'.repeat(64), upgradeId: 'y'.repeat(64), open }
+    // Its ids at the length Telefunc issues them (`crypto.randomUUID()`'s), the longest the server takes.
+    const max: BarrierPayload = { sessionId: 'x'.repeat(36), upgradeId: 'y'.repeat(36), open }
     const encoded = encode.barrier(max)
     // The byte cap is derived from the entry caps precisely so this frame is admissible: a cap
     // that refuses the largest legal barrier would fail every client that hit the entry cap.

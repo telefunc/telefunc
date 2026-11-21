@@ -55,7 +55,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS, UPGRADE_MAX_ID_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -78,6 +78,7 @@ import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import { isChannelId } from '../../wire/payloads.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
 import type {
@@ -199,6 +200,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _validators: ShieldValidators = new Map()
 
   constructor({ ack = false, id }: { ack?: boolean; id?: string } = {}) {
+    // The control-frame cap counts each channel's id at this length (`WIRE_MAX_CTRL_FRAME_BYTES`).
+    assertUsage(
+      id === undefined || isChannelId(id),
+      `A channel's id is at most ${UPGRADE_MAX_ID_BYTES} bytes, as JSON writes it`,
+    )
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
     // Its credits send to the page attached, nothing while none is, and read that page's wire.

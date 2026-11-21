@@ -4,7 +4,8 @@ import { ServerChannel } from './server/ServerChannel.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
-import { CHANNEL_TRANSPORT, WIRE_MAX_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { WIRE_MAX_CTRL_FRAME_BYTES } from '../wire/payloads.js'
 
 function createHarness() {
   const mux = new ChannelMux()
