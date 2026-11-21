@@ -14,12 +14,13 @@ const RECOVERY_WINDOW_MS = 2 * PING_INTERVAL_MS + RECONNECT_TIMEOUT_MS
 
 /** What a socket the page makes does: reconciles `afterMs` after it opens; opens `afterMs` after it was made, then
  *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); closes at once as a refused
- *  connect; or never opens nor closes, as Node 22's after a reset at accept. */
+ *  connect; never opens nor closes, as Node 22's after a reset at accept; or can't be made: its constructor throws. */
 type Script =
   | { reconcile: { afterMs: number } }
   | { opens: { afterMs: number; despiteClose?: boolean } }
   | 'refused'
   | 'hangs'
+  | 'throws'
 
 /** A WebSocket that plays the next script: the page's sockets, when it made each, and whether it closed them. */
 class ScriptedWebSocket {
@@ -42,12 +43,16 @@ class ScriptedWebSocket {
   private readonly despiteClose: boolean
 
   constructor() {
+    if (ScriptedWebSocket.scripts[0] === 'throws') {
+      ScriptedWebSocket.scripts.shift()
+      throw new SyntaxError('scripted')
+    }
     ScriptedWebSocket.made.push(this)
     const connecting = ScriptedWebSocket.made.filter((ws) => ws.readyState === 0 && !ws.closedByPage).length
     ScriptedWebSocket.mostConnecting = Math.max(ScriptedWebSocket.mostConnecting, connecting)
     const script = ScriptedWebSocket.scripts.shift() ?? 'refused'
     this.despiteClose = typeof script === 'object' && 'opens' in script && script.opens.despiteClose === true
-    if (script === 'hangs') return
+    if (script === 'hangs' || script === 'throws') return
     if (script === 'refused') {
       queueMicrotask(() => this.drop())
       return
@@ -324,6 +329,17 @@ describe("a page's recovery", () => {
     expect(madeSince(lostAt)).toEqual([450, 1350, 3150, 6750, 11250, 15750, 20250, 24750])
     await vi.advanceTimersByTimeAsync(2)
     expect(ended).toHaveLength(1)
+  })
+
+  test('ends the attempt with a socket it could not make, the one still connecting too, and backs off from it', async () => {
+    const { lostAt, ended } = await lostWire({ then: ['hangs', 'throws', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(5_000)
+    // The race's socket, 1 s on, couldn't be made: the next comes 0.9 of the second delay, 1,000, after it.
+    expect(madeSince(lostAt)).toEqual([450, 2350])
+    const [, hung, next] = ScriptedWebSocket.made
+    expect([hung?.closedByPage, hung?.sent, next?.readyState]).toEqual([true, 0, 1])
+    expect(next?.sent).toBeGreaterThan(0)
+    expect(ended).toEqual([])
   })
 
   test('a page that leaves while it reconnects lets every socket it was opening go, and opens none after', async () => {

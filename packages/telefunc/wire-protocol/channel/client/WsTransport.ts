@@ -142,7 +142,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     try {
       ws = new WebSocket(this.wsUrl())
     } catch {
-      if (!this.connecting) this.owner.onTransportClosed(this)
+      // Whichever socket of the attempt it was, the attempt ends with it.
+      this.cancelAttempt()
+      this.owner.onTransportClosed(this)
       return
     }
     ws.binaryType = 'arraybuffer'
