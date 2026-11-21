@@ -6,7 +6,7 @@ import { noUpgrades, upgradesOfServer } from '../node/server/runTelefunc/takesUp
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { takeUpgrades, type HttpServer } from './nodeUpgrades.js'
-import { serverOfRequest, storeServerOfRequests } from './requestServer.js'
+import { markRequestsOfServer, serverOfRequest } from './requestServer.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
 import { getRequestPathname } from '../utils/getUrlPathname.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -54,8 +54,8 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     }
     takeUpgrades(httpServer)
     // The app's own call, which an app on `serve({ request })` makes to get WebSocket: that form reads the server off
-    // this store. The others read it off the request's socket, so the install `serve({ req, res })` does takes no store.
-    storeServerOfRequests(httpServer)
+    // the header this marks. The others read it off the request's socket, so `serve({ req, res })` marks none.
+    markRequestsOfServer(httpServer)
   }
 
   function inferServer(req: Req): HttpServer | undefined {
@@ -71,7 +71,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
     if (!isNodeServeInput(input)) {
       if (getTelefuncRequestUrl(input.request) === null) return undefined
-      const server = serverOfRequest()
+      const server = serverOfRequest(input.request)
       const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
         noTransportEvidence,

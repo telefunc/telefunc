@@ -26,26 +26,47 @@ class RecordedWebSocket extends NativeWebSocket {
     webSockets.set(host, [...(webSockets.get(host) ?? []), this])
   }
 }
+/** What the page's client sends as its own `x-telefunc-server` header, on each of its requests. */
+let clientMarker: string | undefined
+const nativeFetch = globalThis.fetch
 beforeAll(() => {
   globalThis.WebSocket = RecordedWebSocket
+  globalThis.fetch = (input, init) => {
+    if (clientMarker === undefined) return nativeFetch(input, init)
+    const headers = new Headers(init?.headers)
+    headers.append('x-telefunc-server', clientMarker)
+    return nativeFetch(input, { ...init, headers })
+  }
 })
 afterAll(() => {
   globalThis.WebSocket = NativeWebSocket
+  globalThis.fetch = nativeFetch
 })
 
 const closers: (() => Promise<void>)[] = []
 afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close()
   webSockets.clear()
+  clientMarker = undefined
 })
 
-type App = { telefunc: InstanceType<typeof Telefunc>; server: Server; host: string; offers: string[][] }
+/** `markers`: the `x-telefunc-server` header of each request the app's handler got with one. */
+type App = {
+  telefunc: InstanceType<typeof Telefunc>
+  server: Server
+  host: string
+  offers: string[][]
+  markers: string[]
+}
 
 /** An app that serves Telefunc with `serve({ request })` and no upgrade listener of its own. */
 async function fetchApp(port = 0): Promise<App> {
   const telefunc = new Telefunc()
   const offers: string[][] = []
+  const markers: string[] = []
   const server = createServer(async (req, res) => {
+    const marker = req.headers['x-telefunc-server']
+    if (typeof marker === 'string') markers.push(marker)
     const { request } = await nodeReadableToWebRequest(
       req,
       `http://${req.headers.host}${req.url}`,
@@ -73,7 +94,7 @@ async function fetchApp(port = 0): Promise<App> {
   })
   closers.push(closerOf(server))
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
-  return { telefunc, server, host: hostOf(server), offers }
+  return { telefunc, server, host: hostOf(server), offers, markers }
 }
 
 /** The setup the docs give for Hono (docs/pages/Telefunc/+Page.mdx): `serve()` of `@hono/node-server`, then
@@ -81,8 +102,13 @@ async function fetchApp(port = 0): Promise<App> {
 async function honoApp(): Promise<App> {
   const telefunc = new Telefunc()
   const offers: string[][] = []
+  const markers: string[] = []
   const app = new Hono()
-  app.all('/_telefunc', async (c) => (await telefunc.serve({ request: c.req.raw })) ?? c.notFound())
+  app.all('/_telefunc', async (c) => {
+    const marker = c.req.header('x-telefunc-server')
+    if (marker !== undefined) markers.push(marker)
+    return (await telefunc.serve({ request: c.req.raw })) ?? c.notFound()
+  })
   const server = honoServe({
     fetch: async (request) => {
       const response = await app.fetch(request)
@@ -100,7 +126,7 @@ async function honoApp(): Promise<App> {
   telefunc.installWebSocket(server)
   closers.push(closerOf(server))
   await once(server, 'listening')
-  return { telefunc, server, host: hostOf(server), offers }
+  return { telefunc, server, host: hostOf(server), offers, markers }
 }
 
 /** Records the transports each RECONCILED of an SSE stream offers, fed the stream's chunks in order. */
@@ -268,4 +294,32 @@ test("Telefunc wraps a server's events once, however often `installWebSocket()` 
 test("the docs' Hono app offers WebSocket, and its pages move to it", async () => {
   const app = await honoApp()
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+})
+
+test("a page that sends its own `x-telefunc-server` header is offered what its server takes: the docs' Hono app WebSocket, a Fetch-only app beside it SSE alone", async () => {
+  const hono = await honoApp()
+  const other = await fetchApp()
+  clientMarker = 'made-up'
+  expect(await openPage(hono)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  expect(hono.markers).not.toEqual([])
+  expect(hono.markers.every((marker) => marker.startsWith('made-up, '))).toBe(true)
+  expect(await openPage(other)).toEqual({ offer: ['sse'], webSocketOpened: false })
+  expect(webSockets.get(other.host)).toBeUndefined()
+})
+
+test('an app whose server closed and listens again offers WebSocket, and the token it marked requests with before names no server', async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  const [token] = app.markers
+  expect(token).toMatch(/^[0-9a-f-]{36}$/)
+  for (const close of closers.splice(0).reverse()) await close()
+  webSockets.clear()
+  const other = await fetchApp()
+  clientMarker = token
+  expect(await openPage(other)).toEqual({ offer: ['sse'], webSocketOpened: false })
+  clientMarker = undefined
+  closers.push(closerOf(app.server))
+  await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+  expect(await openPage({ ...app, host: hostOf(app.server) })).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })

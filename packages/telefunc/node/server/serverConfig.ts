@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { getTelefuncUrl }
 export { getManifestConfig }
 export { applyManifestConfig }
 export { getServerExtensionTypes }
@@ -327,6 +328,11 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
 })
 
+/** `config.telefuncUrl` as `getServerConfig()` resolves it, without the rest: a server reads it per request. */
+function getTelefuncUrl(): string {
+  return configState.telefuncUrl || '/_telefunc'
+}
+
 function getServerConfig(): ConfigResolved {
   return {
     disableEtag: configState.disableEtag ?? false,
@@ -345,7 +351,7 @@ function getServerConfig(): ConfigResolved {
         }
       })(),
     },
-    telefuncUrl: configState.telefuncUrl || '/_telefunc',
+    telefuncUrl: getTelefuncUrl(),
     telefuncFiles: (() => {
       if (configState.telefuncFiles) {
         return configState.telefuncFiles.map(toPosixPath)
