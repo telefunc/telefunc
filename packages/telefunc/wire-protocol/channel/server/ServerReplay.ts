@@ -87,6 +87,11 @@ class ServerReplay {
     return out
   }
 
+  /** It holds nothing: its page confirmed all it sent, or what it didn't went unsent. */
+  get isEmpty(): boolean {
+    return this.frames.length === 0 && this.publishes.length === 0
+  }
+
   /** Whether all it holds is frames `test` passes, no publish among them. */
   holdsOnly(test: (frame: Uint8Array<ArrayBuffer>) => boolean): boolean {
     if (this.publishes.length > 0) return false

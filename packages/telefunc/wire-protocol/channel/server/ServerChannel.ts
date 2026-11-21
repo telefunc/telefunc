@@ -182,8 +182,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private mux: ChannelMux | null = null
   /** The frames that end it, made while no page was attached, in order: the next attach sends them. */
   private pendingEnd: Array<(peer: IndexedPeer) => void> = []
-  /** The highest seq the page is known to have received from this channel. */
-  private pageLastSeq = 0
   /** The page closed its end, so it takes nothing more from this channel. */
   private pageClosed = false
   /** Its lossy sends while its page is attached, from the first one on. */
@@ -894,16 +892,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
   protected onPageHas(lastSeq: number): void {
-    if (lastSeq > this.pageLastSeq) this.pageLastSeq = lastSeq
     this._replayBuffer?.acknowledge(lastSeq)
     this.lossySends?.mayGo()
   }
 
-  /** True once the page needs nothing more: it closed its end, or it received every frame and nothing is pending. */
+  /** True once the page needs nothing more: it closed its end, or its replay holds nothing for it and nothing is
+   *  pending. */
   private pageNeedsNothing(): boolean {
     if (this._replayBuffer === null) return false
     if (this.pageClosed) return true
-    return this.pageLastSeq >= this._replayBuffer.seq && this.nothingPending()
+    return this._replayBuffer.isEmpty && this.nothingPending()
   }
 
   /** Nothing waits for its page outside its replay: no send buffered while it was away, no answer, no end. */
