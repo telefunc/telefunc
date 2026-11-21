@@ -194,7 +194,8 @@ for (const transport of ['sse', 'ws'] as const) {
 }
 
 // Once a following end has the other's verdict, it owes nothing more: not even a CLOSE it sent after its own CLOSE_DONE,
-// which the deciding end never reads. An end that decides still owes its verdict, and an end that aborts its ABORT.
+// which the deciding end, ended by then, would read and act on nothing of. An end that decides still owes its verdict,
+// and an end that aborts its ABORT.
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, the end of a close for what each end still owes`, () => {
     test('a server that follows and asks for a shorter deadline after its CLOSE_DONE holds nothing once the verdict arrives', async () => {
