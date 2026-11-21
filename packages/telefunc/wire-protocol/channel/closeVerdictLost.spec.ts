@@ -1,6 +1,6 @@
-// A close the server decides whose frames the network loses with the page's connection: the server keeps them for the
-// page's reconnect. Memory running short first lets go of a verdict, never of a message. Over a real server and page, on
-// SSE and on a WebSocket, with a network the spec can lose bytes on and cut.
+// A close whose frames the network loses with the page's connection: what an end still owes the other is kept for the
+// page's reconnect, and nothing else is. Memory running short first lets go of a verdict, never of a message. Over a real
+// server and page, on SSE and on a WebSocket, with a network the spec can lose bytes on and cut.
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'
@@ -16,8 +16,9 @@ import { queueMemory } from './server/channelMemory.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000, maxMemory: '2m' }
 
-/** The network between the page and the server: what it loses, and whether it takes new connections. */
-const network = { losing: false, refusing: false }
+/** The network between the page and the server: what it loses, whether it takes new connections, and how many it
+ *  refused. */
+const network = { losing: false, refusing: false, refused: 0 }
 const sockets = new Set<Socket>()
 let server: Server
 let telefuncUrl: string
@@ -27,7 +28,10 @@ beforeAll(async () => {
   server = createServer((req, res) => void telefunc.serve({ req, res }))
   telefunc.installWebSocket(server)
   server.on('connection', (socket: Socket) => {
-    if (network.refusing) return void socket.destroy()
+    if (network.refusing) {
+      network.refused++
+      return void socket.destroy()
+    }
     sockets.add(socket)
     // What the server writes while the network loses bytes never reaches the page.
     socket.write = new Proxy(socket.write, {
@@ -56,18 +60,46 @@ function dropConnections() {
   }
 }
 
+/** The server reads nothing more the page sends, on its connections or on new ones. */
+function deafenServer() {
+  network.refusing = true
+  for (const socket of sockets) socket.pause()
+}
+
 const MAX_MEMORY = 2 * 1024 * 1024
 
-/** A server channel and the page's end of it, both open, on a connection of their own. */
-async function pair(transport: 'sse' | 'ws') {
+/** A server channel and the page's end of it, both open, on a connection of their own that ends `idleTimeout` ms after
+ *  its last channel does. */
+async function pair(transport: 'sse' | 'ws', idleTimeout = 0) {
   const channel = new ServerChannel<string, string>()
   getChannelMux().registerChannel(channel)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
-    connection: { telefuncUrl, transports: [transport], idleTimeout: 0, connectionKey: crypto.randomUUID() },
+    connection: { telefuncUrl, transports: [transport], idleTimeout, connectionKey: crypto.randomUUID() },
   })
   await Promise.all([channel.opened, page.opened])
   return [channel, page] as const
+}
+
+// First, while no other row has left a page's connection to reconnect: these count the connections the network refuses.
+// A page whose connection would stay up for the next channel, once a close the server decided ended its last one.
+for (const transport of ['sse', 'ws'] as const) {
+  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, a page whose connection drops after a close the server decided`, () => {
+    for (const late of [false, true])
+      test(`${late ? 'having asked for a shorter deadline after its CLOSE_DONE, ' : ''}opens no connection only to report it`, async () => {
+        const [channel, page] = await pair(transport, 60_000)
+        if (late) page.onClose(() => void setImmediate(() => void page.close({ timeout: 100 })))
+        expect(await channel.close({ timeout: 10_000 })).toBe(null)
+        expect(await page.closed).toBe(null)
+        const connections = dropConnections()
+        network.refused = 0
+        // Longer than its first reconnect waits.
+        await new Promise((resolve) => setTimeout(resolve, 1_000))
+        const refused = network.refused
+        connections.reconnect()
+        expect(refused).toBe(0)
+      })
+  })
 }
 
 for (const transport of ['sse', 'ws'] as const) {
@@ -135,6 +167,53 @@ for (const transport of ['sse', 'ws'] as const) {
         else expect(isAbort(closed) && closed.abortValue).toBe('bye')
       })
     }
+  })
+}
+
+// Once a following end has the other's verdict, it owes nothing more: not even a CLOSE it sent after its own CLOSE_DONE,
+// which the deciding end never reads. An end that decides still owes its verdict, and an end that aborts its ABORT.
+for (const transport of ['sse', 'ws'] as const) {
+  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, the end of a close for what each end still owes`, () => {
+    test('a server that follows and asks for a shorter deadline after its CLOSE_DONE holds nothing once the verdict arrives', async () => {
+      const [channel, page] = await pair(transport)
+      // Its CLOSE_DONE has gone, and the page's verdict can't have come back yet.
+      let late: Promise<unknown> = Promise.resolve()
+      channel.onClose(() => void setImmediate(() => (late = channel.close({ timeout: 100 }))))
+      expect(await page.close({ timeout: 10_000 })).toBe(null)
+      expect(await channel.closed).toBe(null)
+      expect(await late).toBe(null)
+      expect(channel.heldBytes).toBe(0)
+    })
+
+    test("a page that follows and asks for a shorter deadline after its CLOSE_DONE shortens the deciding server's", async () => {
+      const [channel, page] = await pair(transport)
+      // The server's cleanup outlasts the shorter deadline, not its own.
+      channel.onClose(() => new Promise<void>(() => {}))
+      page.onClose(() => void setImmediate(() => void page.close({ timeout: 100 })))
+      void channel.close({ timeout: 60_000 })
+      expect(await channel.closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+      expect(await page.closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+    })
+
+    test('a page whose verdict the network lost reconnects, and the server reads it', async () => {
+      const [channel, page] = await pair(transport, 60_000)
+      // The server's CLOSE_DONE has gone; what the page sends after it, its verdict, the server never reads.
+      channel.onClose(() => void setImmediate(deafenServer))
+      expect(await page.close({ timeout: 10_000 })).toBe(null)
+      const connections = dropConnections()
+      connections.reconnect()
+      expect(await channel.closed).toBe(null)
+    })
+
+    test('a page whose abort the network lost reconnects, and the server reads it', async () => {
+      const [channel, page] = await pair(transport, 60_000)
+      deafenServer()
+      page.abort('bye')
+      const connections = dropConnections()
+      connections.reconnect()
+      const closed = await channel.closed
+      expect(isAbort(closed) && closed.abortValue).toBe('bye')
+    })
   })
 }
 

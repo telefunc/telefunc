@@ -25,7 +25,7 @@ import { TAG } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
-import { ChannelTable } from './ChannelTable.js'
+import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
@@ -631,10 +631,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private closeRemoteChannel(ix: number, err?: Error): void {
     const record = this.channels.get(ix)
     if (!record) return
+    this.endedByServer(record)
+    record.channel._onEnded(err)
+  }
+
+  /** The server ended `channel`, as its verdict does, which the page then sends nothing more on. */
+  serverEnded(channel: MuxChannel): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined) this.endedByServer(record)
+  }
+
+  private endedByServer(record: ChannelRecord): void {
     this.unregister(record.channel)
     assert(record.state.tag === 'closed')
     this.channels.serverEnded(record.state)
-    record.channel._onEnded(err)
   }
 
   /** No wire can reach the server again: its channels' connection is lost for good. */

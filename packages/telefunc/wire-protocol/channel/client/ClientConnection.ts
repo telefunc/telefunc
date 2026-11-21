@@ -103,6 +103,8 @@ interface MuxConnection {
   /** The server confirmed every want `channel` sent: a call carries none of it. */
   wantSettled(channel: MuxChannel): void
   unregister(channel: MuxChannel): void
+  /** The server ended `channel`, which then sends nothing more: the server needs nothing more of what it sent. */
+  serverEnded(channel: MuxChannel): void
   reconnectWindow(): number
 }
 
@@ -231,6 +233,10 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   unregister(channel: MuxChannel): void {
     this.wantSettled(channel)
     this.lifecycle.unregister(channel)
+  }
+
+  serverEnded(channel: MuxChannel): void {
+    this.lifecycle.serverEnded(channel)
   }
 
   /** Encodes `data` with `encodeFrame` at the next seq and only then takes the seq, so a refused frame uses none.

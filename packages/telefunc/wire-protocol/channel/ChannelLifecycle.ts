@@ -17,6 +17,8 @@ interface ChannelLifecycleOwner {
   _sendEnding(frame: EndingFrame): void
   /** The channel ended, with `err` where it didn't close gracefully: the end lets go of what it holds. */
   _finalize(err: Error | undefined): void
+  /** The other end's verdict ended the close, and that end with it: it needs nothing more of what this end sent. */
+  _otherEnded(): void
   /** A callback threw `Abort` before the channel ended. */
   _abortFromCallback(err: AbortError): void
 }
@@ -92,6 +94,7 @@ class ChannelLifecycle {
         stop: () => this.owner._stopSending(),
         startCleanup: (err) => this.fireClose(err),
         end: (err) => this.onEnded(err),
+        otherEnded: () => this.owner._otherEnded(),
         armTimer: (at) => this.timer.arm(at, () => this.ending.timerFired()),
         disarmTimer: () => this.timer.disarm(),
         now: () => performance.now(),

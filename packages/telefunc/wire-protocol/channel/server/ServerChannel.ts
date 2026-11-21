@@ -878,6 +878,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.wireRequest = request
   }
 
+  /** @internal */
+  _otherEnded(): void {
+    this.pageClosed = true
+  }
+
   /** @internal The page closed its end after receiving this channel's frames through `lastSeq`, the low 32 bits a PING
    *  carries. */
   _onPageClosed(lastSeq: number): void {

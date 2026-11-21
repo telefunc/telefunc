@@ -29,6 +29,9 @@ interface EndingPort {
   startCleanup(err: Error | undefined): void
   /** The channel ended: with `err`, or gracefully. Called once. */
   end(err: Error | undefined): void
+  /** The other end's verdict ended the close, and that end with it: it needs nothing more of what this end sent.
+   *  Called once, before `end`. */
+  otherEnded(): void
   /** Calls `timerFired()` at `at`, on the clock `now()` reads, in place of the timer it armed before. */
   armTimer(at: number): void
   disarmTimer(): void
@@ -155,7 +158,10 @@ class ChannelEnding {
 
   peerCloseDone(): void {
     assertProtocol(this.role === 'decider' || this.role === 'follower', 'CLOSE_DONE before its boundary')
-    if (this.role === 'follower') return this.finish(undefined)
+    if (this.role === 'follower') {
+      this.port.otherEnded()
+      return this.finish(undefined)
+    }
     this.peerDone = true
     this.progress()
   }

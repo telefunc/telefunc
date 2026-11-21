@@ -600,6 +600,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal */
+  _otherEnded(): void {
+    this.connection.serverEnded(this)
+  }
+
+  /** @internal */
   _finalize(err: Error | undefined): void {
     this.heldLossy = null
     this.listeners.clear()
