@@ -349,13 +349,16 @@ test.each([
   "the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection: %s",
   async (_order, first, requests) => {
     let requestsBefore = -1
-    // Each batch POST after the barrier's that carries PINGs alone, by where it went among the requests.
+    // Each batch POST after the barrier's that carries PINGs and nothing else, by where it went among the requests: a
+    // close POST carries no frame, so it is counted.
     const pingsAt: number[] = []
     const pings: (typeof world.hooks)[number] = {
       kind: 'post',
       body: (bytes) => {
         const tags = Array.from(framesOf(bytes), ({ frame }) => frame[0])
-        if (requestsBefore >= 0 && tags.every((tag) => tag === TAG.PING)) pingsAt.push(world.started.length)
+        if (requestsBefore >= 0 && tags.length > 0 && tags.every((tag) => tag === TAG.PING)) {
+          pingsAt.push(world.started.length)
+        }
         return [bytes]
       },
     }
