@@ -8,8 +8,8 @@ import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 interface WireQueue {
   /** How many of channel `ix`'s publishes wait here, counted by their heads: its newest ones. */
   waitingPublishes(ix: number): number
-  /** Drops channel `ix`'s publishes that wait here, but its oldest `keep`. */
-  dropWaitingPublishes(ix: number, keep: number): void
+  /** Drops channel `ix`'s publishes that wait here, but its oldest `keep`, and with `upTo` all from the `upTo`th on. */
+  dropWaitingPublishes(ix: number, keep: number, upTo?: number): void
   /** Drops what of channel `ix` waits here, receipts too: from its oldest publish on, or from the start. */
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void
   /** For an aborted channel: drops channel `ix`'s lossy sends and publishes of which the socket has been given no byte,
@@ -59,10 +59,10 @@ function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array
   }
 }
 
-/** Tells, in the queue's order, whether each frame goes: channel `ix`'s heads past its first `keep`, and the body after
- *  each. */
-function droppingPublishes(ix: number, keep: number): (frame: Uint8Array) => boolean {
-  let kept = 0
+/** Tells, in the queue's order, whether each frame goes: channel `ix`'s heads past its first `keep` and before its
+ *  `upTo`th, and the body after each. */
+function droppingPublishes(ix: number, keep: number, upTo = Number.POSITIVE_INFINITY): (frame: Uint8Array) => boolean {
+  let heads = 0
   let bodyNext = false
   return (frame) => {
     if (bodyNext) {
@@ -70,12 +70,10 @@ function droppingPublishes(ix: number, keep: number): (frame: Uint8Array) => boo
       return true
     }
     if (!isHeadOf(frame, ix)) return false
-    if (kept < keep) {
-      kept++
-      return false
-    }
-    bodyNext = true
-    return true
+    const goes = heads >= keep && heads < upTo
+    heads++
+    bodyNext = goes
+    return goes
   }
 }
 

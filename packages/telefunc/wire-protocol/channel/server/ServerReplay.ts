@@ -131,6 +131,16 @@ class ServerReplay {
     return { units, bytes }
   }
 
+  /** Of its newest `count` publishes, all but the newest go: the page's `info.seq` shows what it skipped. */
+  dropBeforeNewestPublish(count: number): void {
+    const waiting = Math.min(this.publishes.length, count)
+    if (waiting < 2) return
+    const seq = this.publishes.seqAt(this.publishes.length - 1)
+    const newest = this.publishes.pop()
+    for (let i = 1; i < waiting; i++) this.letPublishGo(this.publishes.pop())
+    this.publishes.push(seq, newest)
+  }
+
   /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
    *  publishes waits (any at 0; above 0, where more than one waits), the oldest of them goes with every frame after it,
    *  receipts too, so nothing reaches the page past the gap. Returns how many publishes went. */

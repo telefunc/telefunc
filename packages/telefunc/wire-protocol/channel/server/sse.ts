@@ -133,8 +133,8 @@ class EventStream implements WireQueue {
     return countWaitingPublishes(this.waiting, ix)
   }
 
-  dropWaitingPublishes(ix: number, keep: number): void {
-    this.dropWaiting(droppingPublishes(ix, keep))
+  dropWaitingPublishes(ix: number, keep: number, upTo?: number): void {
+    this.dropWaiting(droppingPublishes(ix, keep, upTo))
   }
 
   dropWaitingFrom(ix: number, from: 'publish' | 'start'): void {

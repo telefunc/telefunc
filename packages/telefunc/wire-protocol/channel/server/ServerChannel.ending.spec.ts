@@ -151,6 +151,16 @@ function leaveRoom(room: number): () => void {
   }
 }
 
+/** As `leaveRoom`, but `room` below `maxMemory` itself, past the shedding target. */
+function leaveRoomUnderMax(room: number): () => void {
+  const filler: MemoryHolder = { heldBytes: 0 }
+  hold(filler, getChannelConfig().maxMemory - ledgerTotal() - room)
+  return () => {
+    letGo(filler, filler.heldBytes)
+    releaseHolder(filler)
+  }
+}
+
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
  *  yet: past the first frame, what the wire sends waits for headroom. `requests[index]` opened that channel's wire. A lossy
  *  page is behind once its oldest unconfirmed frame is older than `behindAfter` ms. */
@@ -402,11 +412,11 @@ const PUBLISHES: Record<string, (key: string, data: string) => unknown> = {
 }
 
 /** A subscriber that began to close, near the server's budget: each publish waiting for its wire, and what its page
- *  reads after a publish that would take room the closing subscriber holds. A reliable one may miss nothing published
- *  before its close; a lossy one's close goes behind the newest. */
+ *  reads after a publish that would take room the closing subscriber holds. Lossy or not, it misses nothing published
+ *  before its close: no other subscriber of its key needs that room. */
 const NEAR_THE_BUDGET: Record<string, { lossy: boolean; after: number; pageReads: string[] }> = {
   reliable: { lossy: false, after: 600_000, pageReads: ['0:p1', '0:p2', '0:p3', '0:CLOSE'] },
-  lossy: { lossy: true, after: 900_000, pageReads: ['0:p1', '0:p3', '0:CLOSE'] },
+  lossy: { lossy: true, after: 900_000, pageReads: ['0:p1', '0:p2', '0:p3', '0:CLOSE'] },
 }
 
 for (const [kind, publish] of Object.entries(PUBLISHES)) {
@@ -430,28 +440,66 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     })
   }
 
-  test(`on a WebSocket, a ${kind} publish near the budget for an open lossy subscriber replaces nothing a closing one owes`, async () => {
-    const key = crypto.randomUUID()
-    const channel = new ServerBroadcast<string>({ key, lossy: true })
-    const open = new ServerBroadcast<string>({ key, lossy: true })
-    const page = overWebSocket([channel, open])
-    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
-    const closing = channel.close()
-    const release = leaveRoom(450_000)
-    try {
-      // Its body is admitted for the open one, which lets go of what it replaces there.
-      await publish(key, 'p4' + 'x'.repeat(900_000))
-      const pageReads = await page.readAll()
-      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
-      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
-      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
-      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
-      expect(await closing).toBeNull()
-    } finally {
-      release()
-      open.abort()
-    }
-  })
+  // Near the shedding target, and near `maxMemory` itself, where a closing subscriber that kept all it held would be cut.
+  for (const [near, leave] of [
+    ['the budget', leaveRoom],
+    ['maxMemory', leaveRoomUnderMax],
+  ] as const)
+    test(`on a WebSocket, a ${kind} publish near ${near} for an open lossy subscriber leaves a closing one its newest, and its close ends gracefully`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key, lossy: true })
+      const open = new ServerBroadcast<string>({ key, lossy: true })
+      const page = overWebSocket([channel, open])
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+      const closing = channel.close()
+      const release = leave(450_000)
+      try {
+        // Its body is admitted for the open one, which lets go of what it replaces there, and the closing one of all but
+        // its newest.
+        await publish(key, 'p4' + 'x'.repeat(900_000))
+        const pageReads = await page.readAll()
+        expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
+        expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+        expect(await closing).toBeNull()
+      } finally {
+        release()
+        open.abort()
+      }
+    })
+
+  for (const [near, leave] of [
+    ['the budget', leaveRoom],
+    ['maxMemory', leaveRoomUnderMax],
+  ] as const)
+    test(`on a WebSocket, a ${kind} publish near ${near} for an open lossy subscriber leaves a closing one whose page is away its newest, and its page back reads that and the close`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key, lossy: true })
+      const open = new ServerBroadcast<string>({ key, lossy: true })
+      const request = new Request('http://one.test/')
+      const page = overWebSocket([channel, open], [request])
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+      const [peer] = page.peers
+      if (peer === undefined) throw new Error('no peer')
+      channel._onPeerDisconnect(peer, 60_000)
+      // Its page is away, so the CLOSE waits for it to attach again.
+      const closing = channel.close()
+      const release = leave(450_000)
+      try {
+        await publish(key, 'p4' + 'x'.repeat(900_000))
+        const back = overWebSocket([])
+        // The page has p1.
+        back.attach(channel, 0, 1, request)
+        expect(await back.readAll()).toEqual(['0:p3', '0:CLOSE'])
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+        expect(await closing).toBeNull()
+      } finally {
+        release()
+        open.abort()
+      }
+    })
 }
 
 for (const [kind, publish] of Object.entries(PUBLISHES)) {

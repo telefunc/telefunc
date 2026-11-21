@@ -315,27 +315,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return super.close(opts)
   }
 
-  /** @internal What waits for a lossy page is replaced with the newest first. */
+  /** @internal */
   override _stopSending(): void {
     super._stopSending()
-    this.sendNewestOnly()
+    this.lossyPublishes?.flush()
   }
 
   override abort(abortValue?: unknown, message?: string): void {
     this.endOverflowed()
     super.abort(abortValue, message)
-  }
-
-  /** Leaves a lossy page only the newest publish to wait for: what waits for its wire goes, and the newest is sent again. */
-  private sendNewestOnly(): void {
-    const publishes = this.lossyPublishes
-    if (publishes === null) return
-    if (this.peer !== null && publishes.held === null && this.unhanded() > 1) {
-      const newest = this._replayBuffer!.newestPublish()!
-      publishes.letWaitingGo()
-      this.peer.sendPublish(newest)
-    }
-    publishes.flush()
   }
 
   protected override onPageHas(lastSeq: number): void {
@@ -361,14 +349,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     else this._replayBuffer?.dropNewestPublishes(this.unhanded())
   }
 
-  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
-   *  replaces. */
+  /** Where `holder` is a lossy page of this publish's key, on its object, it lets go of what the publish replaces; one
+   *  that is closing, which the publish doesn't reach, of all that waits for its wire but its newest. */
   private replaceIn(holder: MemoryHolder, binary: boolean): void {
     if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
-    if (holder.takesPublish(binary ? holder.pageWant.binary : holder.pageWant.text)) {
+    if (holder.takesPublish(binary ? holder.pageWant.binary : holder.pageWant.text))
       holder.lossyPublishes.letWaitingGo()
-    }
+    else if (holder._phase === 'closing') holder.keepOnlyNewest()
+  }
+
+  /** What waits for its wire goes but its newest. */
+  private keepOnlyNewest(): void {
+    if (this.peer) this.peer.dropUnhandedButNewest()
+    else this._replayBuffer?.dropBeforeNewestPublish(this.unhanded())
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. Ended, those of the wire its page

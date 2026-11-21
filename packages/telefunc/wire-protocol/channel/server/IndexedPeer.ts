@@ -138,6 +138,13 @@ class IndexedPeer {
     return this.drop(waiting, waiting)
   }
 
+  /** As `dropUnhanded`, but the newest. */
+  dropUnhandedButNewest(): void {
+    const waiting = this.unhanded()
+    this.replay.dropBeforeNewestPublish(waiting)
+    this.sender.queue.dropWaitingPublishes(this.index, 0, waiting - 1)
+  }
+
   /** As `dropUnhanded`, of those only the ones sent after the channel's last frame. */
   dropReplaceable(): { units: number; bytes: number } {
     const waiting = this.unhanded()
