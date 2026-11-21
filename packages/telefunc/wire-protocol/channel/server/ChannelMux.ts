@@ -50,6 +50,7 @@ import { Deliveries } from '../../flowControl/Deliveries.js'
 import { creditWindowOf } from '../../flowControl/credit.js'
 import { WireSender } from './WireSender.js'
 import { EndedChannels } from './EndedChannels.js'
+import { EndedSessions } from './EndedSessions.js'
 import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
@@ -188,6 +189,8 @@ class ChannelMux implements UpgradeStagesOwner {
       channel._release()
     },
   })
+  /** Kept `reconnectTimeout`, for a page that reopens naming a session the server ended. */
+  private readonly endedSessions = new EndedSessions()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -524,9 +527,12 @@ class ChannelMux implements UpgradeStagesOwner {
     if (fault.scope === 'channel' && channelEnded) {
       return entry.transport.close(wire, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
     }
-    // The session's channels end as its wire closes with the cause (`detachHandle`); those it awaits, as they register.
+    // The session's channels end as its wire closes with the cause (`detachHandle`); those it awaits, as they register;
+    // and its page, should it miss the wire's last word, at its reopen.
     const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
     entry.state.awaited.refuseAll(cause)
+    const sessionId = entry.transport.getSessionId(wire)
+    if (sessionId !== undefined) this.endedSessions.keep(sessionId, cause, this.options.reconnectTimeout)
     entry.transport.close(wire, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
@@ -586,6 +592,13 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
+      // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or awaited.
+      const ended =
+        frame.payload.sessionId === undefined ? undefined : this.endedSessions.causeOf(frame.payload.sessionId)
+      if (ended !== undefined) {
+        this.endFault(entry.wire, { scope: 'session', cause: ended })
+        return null
+      }
       this.claimSessionForReconcile(frame.payload, entry)
       return this.reconcile(entry, frame.payload)
     }
