@@ -240,8 +240,10 @@ test('an app behind a proxy that forwards upgrades on its public port offers Web
 
 test("Telefunc wraps a server's events once, however often `installWebSocket()` runs on it, and every other event reaches its listeners with its arguments and `emit()`'s answer", () => {
   const server = createServer()
+  const own = server.emit
   new Telefunc().installWebSocket(server)
   const wrapped = server.emit
+  expect(wrapped).not.toBe(own)
   new Telefunc().installWebSocket(server)
   server.removeAllListeners('upgrade')
   new Telefunc().installWebSocket(server)
