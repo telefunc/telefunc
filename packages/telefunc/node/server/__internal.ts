@@ -92,6 +92,7 @@ export {
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   dropLeaseScopes,
+  renewsAfterPause,
   grantHolder,
   initLeaseSchema,
   leaseAnswer,

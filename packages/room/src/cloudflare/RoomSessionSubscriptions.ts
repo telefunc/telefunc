@@ -13,6 +13,7 @@ import {
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   TransientRetry,
+  renewsAfterPause,
   type CallOptions,
   type Invoke,
   type LeaseOrder,
@@ -169,6 +170,19 @@ class RoomSessionSubscriptions {
     renewal.attempts.add(attempt)
   }
 
+  /** `attempts`' renewal, which the room's overload pause kept from being sent, goes once the pause ends, with whatever
+   *  else of the room is due by then. */
+  private renewAfterPause(roomId: string, attempts: CloudflareRoomAttempt[]): void {
+    const renewal = this.renewals.get(roomId)
+    if (renewal !== undefined) clearTimeout(renewal.timer)
+    const next = {
+      attempts: renewal?.attempts ?? new Set<CloudflareRoomAttempt>(),
+      timer: setTimeout(() => void this.renewRoutes(roomId), this.pausedFor(roomId)),
+    }
+    for (const attempt of attempts) next.attempts.add(attempt)
+    this.renewals.set(roomId, next)
+  }
+
   stopRenewing(attempt: CloudflareRoomAttempt): void {
     const { roomId } = attempt.route
     const renewal = this.renewals.get(roomId)
@@ -180,6 +194,7 @@ class RoomSessionSubscriptions {
   private async renewRoutes(roomId: string): Promise<void> {
     const attempts = [...this.renewals.get(roomId)!.attempts]
     this.renewals.delete(roomId)
+    const sentAt = Date.now()
     let results: RenewWire[]
     try {
       results = await this.callAuthority(roomId, (authority) => authority.renewRoutes(attempts.map((a) => a.route)), {
@@ -187,10 +202,13 @@ class RoomSessionSubscriptions {
         paused: true,
       })
     } catch (error) {
-      for (const attempt of attempts) attempt.lose(error)
+      const live = attempts.filter((attempt) => attempt.state() !== 'closed')
+      const again = live.filter((attempt) => attempt.renewsAfterPause(error))
+      for (const attempt of live) if (!again.includes(attempt)) attempt.lose(error)
+      if (again.length > 0) this.renewAfterPause(roomId, again)
       return
     }
-    attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!))
+    attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!, sentAt))
   }
 }
 
@@ -219,6 +237,8 @@ class CloudflareRoomAttempt extends DriverAttempt {
   /** Whether an operation that carried its route registered it, after its own registration was sent: what that one
    *  answers then is moot, until the route is lost. */
   private carried = false
+  /** When the authority last confirmed its route, by this session's clock: registered, or renewed. */
+  private confirmedAt = 0
 
   constructor({ owner, route, stopDeliveries }: CloudflareRoomAttemptOptions) {
     super()
@@ -246,6 +266,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
     if (registration === 'stale') return this.lose(new Error(`Cloudflare route '${this.route.laneKey}' was overtaken`))
     this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
+    this.confirmedAt = Date.now()
     this.transition('ready')
     this.owner.renewWithRoom(this)
   }
@@ -260,6 +281,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.sent = true
     this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
+    this.confirmedAt = Date.now()
     this.transition('ready')
     this.owner.renewWithRoom(this)
   }
@@ -270,12 +292,20 @@ class CloudflareRoomAttempt extends DriverAttempt {
     return this.owner.removeRoute(this.route)
   }
 
-  onRenewal(renewal: RenewWire): void {
+  onRenewal(renewal: RenewWire, sentAt: number): void {
     if (this.state() === 'closed') return
-    if (renewal === 'renewed') return this.owner.renewWithRoom(this)
+    if (renewal === 'renewed') {
+      this.confirmedAt = sentAt
+      return this.owner.renewWithRoom(this)
+    }
     // A route that went with its dropped incarnation ends on purpose; a lapsed one is registered again.
     if (renewal === 'dropped') this.end()
     else this.lose(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+  }
+
+  /** Whether its renewal, which failed with `error`, is made again once its room's overload pause ends. */
+  renewsAfterPause(error: unknown): boolean {
+    return renewsAfterPause(error, this.confirmedAt)
   }
 
   /** What is committed until its route is registered again may miss it: lost if it was ready, then registered again

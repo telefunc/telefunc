@@ -41,6 +41,7 @@ import {
   registerLease,
   removeLease,
   renewLease,
+  renewsAfterPause,
   sweepLeases,
   type LeaseOrder,
   type LeaseRegistered,
@@ -99,13 +100,18 @@ class MemberRoute {
   readonly lease = crypto.randomUUID()
   /** Its presence lapsed and was reported, and is recorded again before it is renewed. */
   private lapsed = false
+  /** When its key's authority last confirmed its presence, by this DO's clock: recorded, or renewed. */
+  private confirmedAt = 0
   private refreshTimer: ReturnType<typeof setInterval> | undefined
+  /** A refresh its key's authority's overload pause kept from being sent, made once the pause ends. */
+  private refreshAfterPause: ReturnType<typeof setTimeout> | undefined
 
   constructor({ route }: MemberRouteOptions) {
     this.route = route
   }
 
-  presenceRecorded(): void {
+  presenceRecorded(confirmedAt = Date.now()): void {
+    this.confirmedAt = confirmedAt
     if (this.state === 'ready') return
     this.state = 'ready'
     this.attempt?.presence('ready')
@@ -118,8 +124,12 @@ class MemberRoute {
     this.attempt?.presence('lost')
   }
 
-  startRefresh(renew: () => Promise<LeaseRenewed>, hold: () => Promise<LeaseRegistered>): void {
-    this.refreshTimer = setInterval(() => void this.refreshPresence(renew, hold), LEASE_RENEW_EVERY_MS)
+  startRefresh(
+    renew: () => Promise<LeaseRenewed>,
+    hold: () => Promise<LeaseRegistered>,
+    pausedFor: () => number,
+  ): void {
+    this.refreshTimer = setInterval(() => void this.refreshPresence(renew, hold, pausedFor), LEASE_RENEW_EVERY_MS)
   }
 
   /** A lapse its key's authority answers is reported once, however many renewals it answers it to, until the presence
@@ -127,10 +137,14 @@ class MemberRoute {
   private async refreshPresence(
     renew: () => Promise<LeaseRenewed>,
     hold: () => Promise<LeaseRegistered>,
+    pausedFor: () => number,
   ): Promise<void> {
+    clearTimeout(this.refreshAfterPause)
+    this.refreshAfterPause = undefined
+    const sentAt = Date.now()
     try {
       if (!this.lapsed) {
-        if ((await renew()) === 'renewed') return this.presenceRecorded()
+        if ((await renew()) === 'renewed') return this.presenceRecorded(sentAt)
         this.lapsed = true
         const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
         reportBroadcastDeliveryLost(this.route.key, reason)
@@ -138,14 +152,19 @@ class MemberRoute {
       // Else a later write of this DO's on the route came first: its release.
       if ((await hold()) !== 'registered') return
     } catch (error) {
+      if (!this.lapsed && renewsAfterPause(error, this.confirmedAt)) {
+        this.refreshAfterPause = setTimeout(() => void this.refreshPresence(renew, hold, pausedFor), pausedFor())
+        return
+      }
       return this.presenceLost(error)
     }
     this.lapsed = false
-    this.presenceRecorded()
+    this.presenceRecorded(sentAt)
   }
 
   stopRefresh(): void {
     clearInterval(this.refreshTimer)
+    clearTimeout(this.refreshAfterPause)
   }
 }
 
@@ -398,9 +417,11 @@ class CloudflareBroadcastMember {
     }
     memberRoute.presenceRecorded()
     if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
+    const name = this.broadcast.authorityName(memberRoute.route.key)
     memberRoute.startRefresh(
       () => this.renew(memberRoute),
       () => this.hold(memberRoute),
+      () => this.calls.pausedFor(name),
     )
   }
 

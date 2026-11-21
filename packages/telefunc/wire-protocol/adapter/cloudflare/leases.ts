@@ -3,6 +3,7 @@ export {
   LEASE_CALL_DEADLINE_MS,
   LEASE_RENEW_EVERY_MS,
   HolderGrants,
+  renewsAfterPause,
   dropLeaseScopes,
   grantHolder,
   initLeaseSchema,
@@ -19,6 +20,7 @@ export {
 export type { Lease, LeaseOrder, LeaseRegistered, LeaseRemoved, LeaseRenewed, LeaseWritten }
 
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { CallNotSent, type Invoke } from './OrderedStubs.js'
 
 // A Durable Object's leases at an authority (a Room route, a Broadcast presence): one row per scope and holder DO. A
 // call can reach the authority any time after it was sent, so the authority tells a late write from a current one by
@@ -33,6 +35,13 @@ const LEASE_TTL_MS = 90_000
 const LEASE_RENEW_EVERY_MS = LEASE_TTL_MS / 3
 /** How long a registration's or removal's call is waited for, as long as Cloudflare's runtime retries one itself. */
 const LEASE_CALL_DEADLINE_MS = 10_000
+
+/** Whether a renewal that failed with `error` was only kept from being sent by its target's overload pause, while its
+ *  lease, last confirmed at `confirmedAt` by this side's clock, still lasts: it is made again once the pause ends, and
+ *  nothing is lost. */
+function renewsAfterPause(error: unknown, confirmedAt: number): boolean {
+  return error instanceof CallNotSent && error.reason === 'paused' && Date.now() - confirmedAt < LEASE_TTL_MS
+}
 
 const LEASE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS telefunc_lease_grant (id INTEGER PRIMARY KEY CHECK (id = 0), last INTEGER NOT NULL);

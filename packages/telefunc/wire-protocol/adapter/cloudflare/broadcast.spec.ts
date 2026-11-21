@@ -760,6 +760,82 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         subscriber()
       })
 
+      // A publish the authority answered overloaded pauses this Durable Object's calls to it for 10 s.
+      const overloadedPublish = async (inObject: <T>(run: () => T) => T) => {
+        vi.spyOn(CloudflareBroadcast.prototype, 'publishToSubscribers').mockRejectedValueOnce(transient(true))
+        await Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).catch(() => {})
+      }
+
+      it('a held presence whose refresh falls in a pause a publish answered overloaded caused is not reported lost, is tried no more while the pause lasts, and is refreshed once it ends', async () => {
+        vi.useFakeTimers()
+        const tried = vi.spyOn(OrderedStubs.prototype, 'call')
+        const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const lost = () => reported.mock.calls.filter(([error]) => String(error).includes('presence for')).length
+        const { inObject, present, presences } = worker()
+        const renewals = () => presences.filter((call) => call.op === 'renew').length
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        await subscriber.ready
+        await vi.advanceTimersByTimeAsync(29_000)
+        await overloadedPublish(inObject)
+        const before = tried.mock.calls.length
+        await vi.advanceTimersByTimeAsync(9_500)
+        expect({
+          present: present('room:test').length,
+          lost: lost(),
+          renewals: renewals(),
+          tries: tried.mock.calls.length - before,
+        }).toEqual({ present: 1, lost: 0, renewals: 0, tries: 1 })
+        await vi.advanceTimersByTimeAsync(2_500)
+        expect({ present: present('room:test').length, lost: lost(), renewals: renewals() }).toEqual({
+          present: 1,
+          lost: 0,
+          renewals: 1,
+        })
+        subscriber()
+      })
+
+      it('a held presence whose refreshes the pause keeps from being sent for longer than its 90 s is reported lost, and recorded again once the authority takes calls', async () => {
+        vi.useFakeTimers()
+        const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const lost = () => reported.mock.calls.filter(([error]) => String(error).includes('presence for')).length
+        const { inObject, present, presences } = worker()
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        await subscriber.ready
+        // A publish answered overloaded every 9 s keeps the authority paused from 25 s to 107 s.
+        await vi.advanceTimersByTimeAsync(25_000)
+        for (let at = 25_000; at < 100_000; at += 9_000) {
+          await overloadedPublish(inObject)
+          await vi.advanceTimersByTimeAsync(9_000)
+        }
+        expect({ lost: lost(), renewals: presences.filter((call) => call.op === 'renew').length }).toEqual({
+          lost: 1,
+          renewals: 0,
+        })
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(present('room:test').map(({ member }) => member)).toEqual(['telefunc-shard-weur-0'])
+        subscriber()
+      })
+
+      it('a held presence whose refresh waits for a pause is refreshed no more, and leaves no timer, once its last subscriber left', async () => {
+        vi.useFakeTimers()
+        vi.spyOn(console, 'error').mockImplementation(() => {})
+        const { inObject, presences } = worker()
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(0)
+        await subscriber.ready
+        await vi.advanceTimersByTimeAsync(29_000)
+        await overloadedPublish(inObject)
+        await vi.advanceTimersByTimeAsync(2_000)
+        subscriber()
+        await vi.advanceTimersByTimeAsync(20_000)
+        expect({
+          renewals: presences.filter((call) => call.op === 'renew').length,
+          timers: vi.getTimerCount(),
+        }).toEqual({ renewals: 0, timers: 0 })
+      })
+
       it("a first presence write the key's authority never answers rejects the subscriber's `ready` within 10 s", async () => {
         vi.useFakeTimers()
         vi.spyOn(console, 'error').mockImplementation(() => {})

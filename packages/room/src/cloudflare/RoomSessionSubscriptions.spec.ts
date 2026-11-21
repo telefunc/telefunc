@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS,
+  OrderedStubs,
   type BackendReceiver,
   type CloudflareMember,
   type TelefuncExtensionNamespace,
@@ -22,6 +23,8 @@ function setup(
     carry?: Array<OperationWire | Error | Promise<OperationWire>>
     /** The grant's answer, where it isn't at once. */
     grant?: Promise<number>
+    /** The answers to the session's commits. */
+    commit?: Array<Error>
   },
   lane: LaneId = { kind: 'semantic' },
 ) {
@@ -44,6 +47,7 @@ function setup(
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
     unsubscribeRoute: () => Promise.resolve('removed'),
+    commitLane: () => answer(answers.commit ?? []),
   }
   const namespace: TelefuncExtensionNamespace = {
     idFromName: (name) => name,
@@ -82,6 +86,11 @@ function setup(
   const handOn = (seq: number) => {
     for (const taker of takes.values()) taker.deliver(new Uint8Array(), { seq, timestamp: seq })
   }
+  /** A commit of the session's to the room, through its ordered stub, as the driver's `commitLane` sends it. */
+  const commit = () =>
+    subscriptions
+      .callAuthority('room', (stub) => stub.commitLane('room', 'inc', { kind: 'semantic' }, new Uint8Array()))
+      .catch(() => {})
   /** The session's attempt on `lane`, as its driver finds it. */
   const attemptOn = () => {
     const found = subscriptions.attemptOf('room', 'inc', lane)
@@ -100,6 +109,7 @@ function setup(
     handOn,
     subscriptions,
     attemptOn,
+    commit,
   }
 }
 
@@ -408,6 +418,64 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     subscribe({ kind: 'control' })
     await vi.advanceTimersByTimeAsync(500)
     expect(calls).toEqual({ register: 1, renew: 1 })
+  })
+
+  it('whose renewal falls in a pause another call of the session caused stays ready, is tried no more while the pause lasts, and renews once it ends', async () => {
+    const tried = vi.spyOn(OrderedStubs.prototype, 'call')
+    const { attempt, calls, states, subscribe } = setup(
+      { register: ['registered', transient(true)], renew: ['renewed'] },
+      { kind: 'control' },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS - 1_000)
+    // Another lane's first registration is answered overloaded, 1 s before this lane's renewal: the room is paused 10 s.
+    subscribe({ kind: 'semantic' })
+    await vi.advanceTimersByTimeAsync(0)
+    const before = tried.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9_500)
+    expect({ states, renew: calls.renew, tries: tried.mock.calls.length - before }).toEqual({
+      states: ['ready'],
+      renew: 0,
+      tries: 1,
+    })
+    await vi.advanceTimersByTimeAsync(2_500)
+    expect({ states, renew: calls.renew, state: attempt.state() }).toEqual({
+      states: ['ready'],
+      renew: 1,
+      state: 'ready',
+    })
+  })
+
+  it('whose renewals the pause keeps from being sent for longer than its 90 s lease is lost, and registers again once the room takes calls', async () => {
+    const { calls, states, commit } = setup(
+      { register: ['registered', 'registered'], renew: [], commit: Array.from({ length: 9 }, () => transient(true)) },
+      { kind: 'control' },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    // A commit answered overloaded every 9 s keeps the room paused from 25 s to 107 s.
+    await vi.advanceTimersByTimeAsync(25_000)
+    for (let at = 25_000; at < 100_000; at += 9_000) {
+      void commit()
+      await vi.advanceTimersByTimeAsync(9_000)
+    }
+    expect({ states, calls }).toEqual({ states: ['ready', 'lost'], calls: { register: 1, renew: 0 } })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect({ states, calls }).toEqual({ states: ['ready', 'lost', 'ready'], calls: { register: 2, renew: 0 } })
+  })
+
+  it('whose renewal waits for a pause sends none once it is unsubscribed, and leaves no timer once the pause is over', async () => {
+    const { attempt, calls, subscribe } = setup(
+      { register: ['registered', transient(true)], renew: ['renewed'] },
+      { kind: 'control' },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS - 1_000)
+    subscribe({ kind: 'semantic' })
+    await vi.advanceTimersByTimeAsync(2_000)
+    await attempt.unsubscribe()
+    // The routes' removals wait for the pause too.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ renew: calls.renew, timers: vi.getTimerCount() }).toEqual({ renew: 0, timers: 0 })
   })
 
   it('whose first registration the room refused as overloaded is followed by no other call to it at once', async () => {
