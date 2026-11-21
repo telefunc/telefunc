@@ -4,7 +4,8 @@
 import { expect, test } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
-import { encode } from '../../wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -17,12 +18,14 @@ function page() {
   const wire: { id?: string } = {}
   const ends: ServerEnd[] = []
   const transport: ServerTransport<typeof wire> = {
-    getSessionId: (w) => w.id,
-    setSessionId: (w, id) => {
-      w.id = id
-    },
     getConnId: () => null,
-    sendNow: () => {},
+    // The wire keeps the id the last RECONCILED gave it.
+    sendNow: (w, message) => {
+      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+        const decoded = frame[0] === TAG.RECONCILED ? decode(frame) : null
+        if (decoded?.tag === TAG.RECONCILED) w.id = decoded.payload.sessionId
+      }
+    },
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     bufferedAmount: () => 0,

@@ -603,12 +603,9 @@ test("on a WebSocket, an aborted subscriber whose wire closed is cut for another
 async function muxWebSocket(channels: ServerChannel[], request: Request) {
   const mux = getChannelMux()
   const wire = {}
-  let sessionId: string | undefined
   mux.onWireOpen(
     wire,
     {
-      getSessionId: () => sessionId,
-      setSessionId: (_, id) => (sessionId = id),
       getConnId: () => null,
       type: CHANNEL_TRANSPORT.WS,
       wholeMessages: true,

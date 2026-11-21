@@ -7,7 +7,7 @@ import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { ServerChannel } from './ServerChannel.js'
 import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
-import type { SessionRegistry } from './SessionRegistry.js'
+import type { ChannelHandle } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
 import {
   countWaitingPublishes,
@@ -31,8 +31,8 @@ type WireSenderOptions = {
   sseFlushThrottle: number
   /** What the wire delivered. */
   deliveries: Deliveries
-  /** The mux's sessions, whose channels on the wire its headroom counts. */
-  sessions: SessionRegistry
+  /** The channels of the session the wire carries, which its headroom counts; undefined before its RECONCILED. */
+  heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   /** The channels attaching to the wire in this turn, which its headroom counts too. */
   attaching: ReadonlySet<ServerChannel>
 }
@@ -54,7 +54,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
-  private readonly sessions: SessionRegistry
+  private readonly heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   private readonly attaching: ReadonlySet<ServerChannel>
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
@@ -72,7 +72,15 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** Their bytes, which the backlog counts as it does what the socket holds. */
   private heldBytes = 0
 
-  constructor({ wire, transport, pingInterval, sseFlushThrottle, deliveries, sessions, attaching }: WireSenderOptions) {
+  constructor({
+    wire,
+    transport,
+    pingInterval,
+    sseFlushThrottle,
+    deliveries,
+    heldChannels,
+    attaching,
+  }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
     this.pieces = transport.wholeMessages
@@ -84,7 +92,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.wireQueue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
     this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
-    this.sessions = sessions
+    this.heldChannels = heldChannels
     this.attaching = attaching
   }
 
@@ -275,10 +283,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
 
   /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
   private channels(): Set<ServerChannel> {
-    const sessionId = this.transport.getSessionId(this.wire)
-    const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
     const channels = new Set(this.attaching)
-    for (const { channel } of session?.values() ?? []) channels.add(channel)
+    for (const { channel } of this.heldChannels()?.values() ?? []) channels.add(channel)
     return channels
   }
 }

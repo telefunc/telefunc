@@ -12,12 +12,6 @@ import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
 import { upgradeRefusal } from './upgradeOrigin.js'
 
-declare module 'crossws' {
-  interface PeerContext {
-    telefuncSessionId?: string
-  }
-}
-
 /** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's: `undefined` on workerd, whose
  *  WebSocket has none. `wireRequest` is the request the upgrade hook got, which crossws's peer carries as `peer.request`
  *  on every runtime but Node. */
@@ -39,10 +33,6 @@ function getTelefuncChannelOptions({
   enableChannelTransports(['ws'])
   const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
-    getSessionId: (peer) => peer.context.telefuncSessionId,
-    setSessionId: (peer, sessionId) => {
-      peer.context.telefuncSessionId = sessionId
-    },
     /** Persistent bidirectional WebSocket: no out-of-band POSTs to route, so no need for a
      *  connId-based reverse lookup. */
     getConnId: () => null,

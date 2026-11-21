@@ -55,7 +55,6 @@ type SseWire = {
   connId: string
   events: EventStream
   closed: boolean
-  sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed. Data
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
@@ -259,10 +258,6 @@ class SseServerTransport {
   private readonly closedWires = new Map<string, { at: number; sessionId: string | null; refused: Refusal | null }>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseWire> = {
-    getSessionId: (wire) => wire.sessionId ?? undefined,
-    setSessionId: (wire, sessionId) => {
-      wire.sessionId = sessionId
-    },
     getConnId: (wire) => wire.connId,
     sendNow: (wire, frame) => this.sendNow(wire, frame),
     type: CHANNEL_TRANSPORT.SSE,
@@ -342,7 +337,6 @@ class SseServerTransport {
       connId,
       events,
       closed: false,
-      sessionId: null,
       ready,
       resolveReady,
       pendingDispatches: new Set(),
@@ -513,7 +507,7 @@ class SseServerTransport {
     return await this.waitForWire(connId)
   }
 
-  private rememberClosed({ connId, sessionId, refused }: SseWire): void {
+  private rememberClosed({ connId, refused }: SseWire, sessionId: string | null): void {
     const now = performance.now()
     for (const [closed, { at }] of this.closedWires) {
       if (now - at < this.mux.connectTtl) break
@@ -590,10 +584,9 @@ class SseServerTransport {
     if (wire.closed) return
     wire.closed = true
     wire.refused = refused
-    this.rememberClosed(wire)
+    this.rememberClosed(wire, this.mux.onWireClosed(wire, how) ?? null)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
-    this.mux.onWireClosed(wire, how)
     wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))
   }
 }

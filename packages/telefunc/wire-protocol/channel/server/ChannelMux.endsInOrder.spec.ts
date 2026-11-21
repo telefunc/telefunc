@@ -41,13 +41,9 @@ async function tagsOf(events: ReadableStream<Uint8Array>): Promise<number[]> {
 /** A WebSocket wire the test holds, which records each frame its transport is handed and its close, in order. */
 function webSocketWire() {
   const mux = getChannelMux()
-  const wire: { id?: string } = {}
+  const wire = {}
   const handed: (number | 'close')[] = []
   const transport: ServerTransport<typeof wire> = {
-    getSessionId: (w) => w.id,
-    setSessionId: (w, id) => {
-      w.id = id
-    },
     getConnId: () => null,
     sendNow: (_w, message) => {
       for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) handed.push(frame[0] ?? -1)

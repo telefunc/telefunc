@@ -12,11 +12,8 @@ function createHarness() {
   const wire = () => {
     const conn = {}
     const sent: DecodedFrame[] = []
-    let sessionId: string | undefined
     let terminated = false
     const transport: ServerTransport<object> = {
-      getSessionId: () => sessionId,
-      setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
       type: CHANNEL_TRANSPORT.SSE,
       wholeMessages: false,
@@ -33,7 +30,11 @@ function createHarness() {
     mux.onWireOpen(conn, transport)
     return {
       sent,
-      sessionId: () => sessionId,
+      /** The id the last RECONCILED gave this wire. */
+      sessionId: () => {
+        const reconciled = sent.filter((frame) => frame.tag === TAG.RECONCILED).at(-1)
+        return reconciled?.tag === TAG.RECONCILED ? reconciled.payload.sessionId : undefined
+      },
       terminated: () => terminated,
       deliver: (frame: Uint8Array<ArrayBuffer>) => mux.onWireMessage(conn, frame),
     }

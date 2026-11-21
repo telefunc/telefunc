@@ -68,14 +68,13 @@ function order(frames: Uint8Array[]): string[] {
   })
 }
 
-type FakeWire = { sessionId: string | undefined }
-
 /** A WebSocket the real mux sends on: the frames it was handed, in order, and whether the mux ended it. Its socket keeps
  *  all it is handed, unread, unless `reads`; `knowsBacklog: false` is a runtime that can't tell the socket's backlog
  *  (workerd). */
 function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
   const mux = getChannelMux()
-  const wire: FakeWire = { sessionId: undefined }
+  // The wire keeps the id the last RECONCILED gave it.
+  const wire: { sessionId?: string } = {}
   const frames: Uint8Array[] = []
   // `closedAs`: how the server ended the wire, where it did.
   const state: { buffered: number; terminated: boolean; closedAs: ServerEnd['how'] | null } = {
@@ -83,15 +82,15 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
     terminated: false,
     closedAs: null,
   }
-  const transport: ServerTransport<FakeWire> = {
-    getSessionId: (w) => w.sessionId,
-    setSessionId: (w, sessionId) => {
-      w.sessionId = sessionId
-    },
+  const transport: ServerTransport<typeof wire> = {
     getConnId: () => null,
     sendNow: (_, message) => {
       if (!reads) state.buffered += message.byteLength
-      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) frames.push(frame)
+      for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+        frames.push(frame)
+        const decoded = frame[0] === TAG.RECONCILED ? decode(frame) : null
+        if (decoded?.tag === TAG.RECONCILED) wire.sessionId = decoded.payload.sessionId
+      }
     },
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
