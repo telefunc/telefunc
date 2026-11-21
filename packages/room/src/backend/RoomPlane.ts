@@ -68,9 +68,10 @@ class RoomPlane {
     inc: string,
     lane: LaneId | EveryTrackLane | EveryMemberLane,
     listener: BackendListener<Uint8Array>,
+    registeredBy?: RoomSubscriptionSource['registeredBy'],
   ): BackendSubscription {
     // The shared subscriptions checked that a lane delivers bytes.
-    return this.subscriptions.subscribe({ roomId, inc, lane }, listener as BackendListener)
+    return this.subscriptions.subscribe({ roomId, inc, lane, registeredBy }, listener as BackendListener)
   }
 
   dispose(): void {

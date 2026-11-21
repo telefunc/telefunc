@@ -271,6 +271,10 @@ type RoomSubscriptionSource = {
   roomId: string
   inc: string
   lane: LaneId | EveryTrackLane | EveryMemberLane
+  /** Set where a member's admission opens its inbox: the caller promises to send the operation that carries the inbox
+   *  (`OperationOptions.inbox`) or to unsubscribe it, so a driver that registers the inbox in that operation sends no
+   *  registration of its own. */
+  registeredBy?: 'operation'
 }
 
 /** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions.

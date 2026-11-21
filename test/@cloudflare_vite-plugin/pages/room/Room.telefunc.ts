@@ -242,19 +242,26 @@ async function onJoinClosing() {
   return { ...outcome, seconds: Math.round((Date.now() - startedAt) / 100) / 10 }
 }
 
-/** Joins a room whose authority refuses the join's inbox registration: what the join gets, and who is in the room. */
+/** Joins a room whose authority refuses the join's write of its inbox, while another participant is in it: what the
+ *  join gets, who is left in the room, and the joins the other participant saw up to the next one, which its room's
+ *  control lane delivers after any it announced before. */
 async function onJoinRefused() {
   const roomId = `join-refused:${crypto.randomUUID()}`
   const room = await Room.create(roomId)
+  await room.join({ meta: { name: 'other' } })
+  const seen: unknown[] = []
+  room.onJoin((member) => void seen.push(member.meta.name))
   const refusal = 'Test: the authority refused the inbox'
   authorityCalls.set(authorityOf(roomId), { matches: isInboxRegistration, kind: 'refuse', refusal })
-  const outcome = await room.join().then(
+  const outcome = await room.join({ meta: { name: 'refused' } }).then(
     () => ({ joined: true, failure: null }),
     (error: unknown) => ({ joined: false, failure: failureOf(error) }),
   )
+  const next = await room.join({ meta: { name: 'next' } })
+  await next.leave()
   const members = (await Room.get(roomId)).count
   await Room.close(roomId)
-  return { ...outcome, members }
+  return { ...outcome, members, seen }
 }
 
 // The calls the size tests make, each with one value of `length` characters in a new room. A Durable Object's SQLite

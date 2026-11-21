@@ -13,7 +13,7 @@ import type { LaneId } from '../backend/contract.js'
 import type { RoomOperationRequest } from '../server/store/roomOperations.js'
 
 /** A session's Room subscriptions against an authority that answers each call from `answers`, in order; opening a stub
- *  to it throws the next of `answers.open`, while one is left. */
+ *  to it throws the next of `answers.open`, while one is left. Its lane is `lane`, subscribed as `registeredBy` says. */
 function setup(
   answers: {
     register: Array<RegisterWire | Error | Promise<RegisterWire>>
@@ -27,8 +27,11 @@ function setup(
     commit?: Array<Error>
   },
   lane: LaneId = { kind: 'semantic' },
+  registeredBy?: 'operation',
 ) {
   const calls = { register: 0, renew: 0 }
+  /** The routes the session removed at the authority. */
+  const removed: unknown[] = []
   /** The operations that carried an inbox's route, as the authority got them. */
   const carried: unknown[] = []
   const startedAt = Date.now()
@@ -46,7 +49,7 @@ function setup(
     runOperationWithInbox: (args) => (carried.push(args[1]), answer(answers.carry ?? [])),
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
-    unsubscribeRoute: () => Promise.resolve('removed'),
+    unsubscribeRoute: (args) => (removed.push(args[0]), Promise.resolve('removed')),
     commitLane: () => answer(answers.commit ?? []),
   }
   const namespace: TelefuncExtensionNamespace = {
@@ -73,7 +76,7 @@ function setup(
   /** The seq of each frame the lane's receiver got. */
   const delivered: number[] = []
   const receiver: BackendReceiver = { deliver: (_payload, info) => void delivered.push(info.seq) }
-  const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane }, receiver)
+  const attempt = subscriptions.subscribe({ roomId: 'room', inc: 'inc', lane, registeredBy }, receiver)
   const states: string[] = []
   const reasons: unknown[] = []
   attempt.onStateChange((state, reason) => {
@@ -101,6 +104,7 @@ function setup(
     attempt,
     calls,
     carried,
+    removed,
     registeredAt,
     states,
     reasons,
@@ -344,33 +348,155 @@ describe('a call of a Cloudflare Room lane to its room', () => {
   }
   const joined: OperationWire = { kind: 'done', value: 'joined', counters: new Map(), registered: true }
 
+  const inbox: LaneId = { kind: 'inbox', member: 'm' }
+  const refused = () => new Error('Test: the room refused the join')
+
   // A member's join carries its inbox's route: the join applies with the inbox's lease, or not at all.
-  it("that carries an inbox's route makes the inbox ready, whatever the inbox's own registration answers after", async () => {
-    const own = Promise.withResolvers<RegisterWire>()
+  it("that is a member's join is the one write of the member's inbox, which is then ready and renews", async () => {
     const { attempt, calls, carried, subscriptions, states, attemptOn } = setup(
-      { register: [own.promise], renew: ['renewed', 'renewed'], carry: [joined] },
-      { kind: 'inbox', member: 'm' },
+      { register: [], renew: ['renewed', 'renewed'], carry: [joined] },
+      inbox,
+      'operation',
     )
+    await vi.advanceTimersByTimeAsync(0)
     expect(await subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).toBe(joined)
-    expect(attempt.state()).toBe('ready')
-    own.resolve('stale')
     await vi.advanceTimersByTimeAsync(60_000)
     expect(states).toEqual(['ready'])
-    expect({ ...calls, carried }).toEqual({ register: 1, renew: 2, carried: [join] })
+    expect({ ...calls, carried }).toEqual({ register: 0, renew: 2, carried: [join] })
+    expect(attempt.state()).toBe('ready')
   })
 
-  it("that carries an inbox's route is not sent once the join it makes was given up while it waited", async () => {
+  // A refusal the inbox's own registration would have got, which closed the inbox its join had registered.
+  for (const [label, refusal] of [
+    ['unmarked', () => new Error('Test: the authority refused the inbox')],
+    ['overloaded', () => transient(true)],
+  ] as const) {
+    it(`that is a member's join keeps the inbox it registered where the room would refuse the inbox's own registration (${label})`, async () => {
+      const answer = Promise.withResolvers<OperationWire>()
+      const { attempt, calls, removed, reasons, subscriptions, attemptOn } = setup(
+        { register: [refusal()], renew: ['renewed'], carry: [answer.promise] },
+        inbox,
+        'operation',
+      )
+      const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+      await vi.advanceTimersByTimeAsync(0)
+      answer.resolve(joined)
+      expect(await carrying).toBe(joined)
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect({ state: attempt.state(), register: calls.register, removed, reasons }).toEqual({
+        state: 'ready',
+        register: 0,
+        removed: [],
+        reasons: [],
+      })
+    })
+  }
+
+  // The join's rejection is the refusal's one report: the inbox closes with no reason, so core reports nothing of it.
+  it("that is a member's join the room refused reports the refusal once, to the join, and leaves no route, timer or attempt once the member's admission unsubscribes the inbox", async () => {
+    const logged = vi.spyOn(console, 'error')
+    const { attempt, calls, removed, states, reasons, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [refused()] },
+      inbox,
+      'operation',
+    )
+    await expect(subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).rejects.toThrow(
+      'Test: the room refused the join',
+    )
+    await attempt.unsubscribe()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ states, reasons, logged: logged.mock.calls.length }).toEqual({
+      states: ['closed'],
+      reasons: [],
+      logged: 0,
+    })
+    expect({ register: calls.register, removed: removed.length, timers: vi.getTimerCount() }).toEqual({
+      register: 0,
+      removed: 1,
+      timers: 0,
+    })
+    expect(subscriptions.attemptOf('room', 'inc', inbox)).toBeUndefined()
+  })
+
+  it("that is a member's join never sent, as it was given up while it waited, leaves nothing at the room once the member's admission unsubscribes the inbox", async () => {
     const grant = Promise.withResolvers<number>()
-    const { carried, subscriptions, attemptOn } = setup(
-      { register: ['registered'], renew: [], carry: [joined], grant: grant.promise },
-      { kind: 'inbox', member: 'm' },
+    const { attempt, calls, carried, removed, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [joined], grant: grant.promise },
+      inbox,
+      'operation',
     )
     let wanted = true
     const sent = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000, wanted: () => wanted })
     wanted = false
     grant.resolve(1)
     await expect(sent).rejects.toThrow('not sent: unwanted')
-    expect(carried).toEqual([])
+    await attempt.unsubscribe()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ register: calls.register, carried, removed, timers: vi.getTimerCount() }).toEqual({
+      register: 0,
+      carried: [],
+      removed: [],
+      timers: 0,
+    })
+  })
+
+  it("that is a member's join whose inbox was unsubscribed while the join waited in its line isn't sent, and leaves nothing at the room", async () => {
+    const grant = Promise.withResolvers<number>()
+    const { attempt, carried, removed, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [joined], grant: grant.promise },
+      inbox,
+      'operation',
+    )
+    const sent = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await attempt.unsubscribe()
+    grant.resolve(1)
+    await expect(sent).rejects.toThrow('not sent: unwanted')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ carried, removed, timers: vi.getTimerCount() }).toEqual({ carried: [], removed: [], timers: 0 })
+  })
+
+  it("that is a member's join unsubscribed while the join is sent removes the inbox's route behind the join", async () => {
+    const answer = Promise.withResolvers<OperationWire>()
+    const { attempt, carried, removed, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [answer.promise] },
+      inbox,
+      'operation',
+    )
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(carried).toEqual([join])
+    const unsubscribed = attempt.unsubscribe()
+    answer.resolve(joined)
+    await carrying
+    await unsubscribed
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect({ state: attempt.state(), removed: removed.length, timers: vi.getTimerCount() }).toEqual({
+      state: 'closed',
+      removed: 1,
+      timers: 0,
+    })
+  })
+
+  it("that is a member's join that wrote nothing, its hosting lease lost, leaves the inbox waiting, and the join sent again registers it", async () => {
+    const wroteNothing: OperationWire = { kind: 'done', value: 'lease-lost', counters: new Map() }
+    const { attempt, calls, carried, states, subscriptions, attemptOn } = setup(
+      { register: [], renew: ['renewed'], carry: [wroteNothing, joined] },
+      inbox,
+      'operation',
+    )
+    expect(await subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).toBe(wroteNothing)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect({ state: attempt.state(), register: calls.register, timers: vi.getTimerCount() }).toEqual({
+      state: 'establishing',
+      register: 0,
+      timers: 0,
+    })
+    expect(await subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).toBe(joined)
+    expect({ states, register: calls.register, carried: carried.length }).toEqual({
+      states: ['ready'],
+      register: 0,
+      carried: 2,
+    })
   })
 
   it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {

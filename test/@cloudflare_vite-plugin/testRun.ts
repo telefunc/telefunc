@@ -33,9 +33,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // testRoomStorage()'s server listener throws, as a test of what Room does then.
       log.logText.includes('Test: a listener throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
-      log.logText.includes('Test: the session refused the delivery') ||
-      // testRoomJoinInbox()'s authority refuses an inbox's registration, and the subscription it ended is reported.
-      log.logText.includes('Backend subscription closed: join-refused'),
+      log.logText.includes('Test: the session refused the delivery'),
   })
   testTodolist()
   testChannel()
@@ -534,7 +532,7 @@ function testRoomOrderAcrossSessions() {
 }
 
 function testRoomJoinRoundTrip() {
-  test("Room: a join reaches the room's authority once its inbox's route is stored, after its registration's reply", async () => {
+  test("Room: a join reaches the room's authority as one write, which stores its inbox's route", async () => {
     const id = crypto.randomUUID()
     const [session] = await openSessions(id, ['p1'])
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
@@ -545,11 +543,8 @@ function testRoomJoinRoundTrip() {
         method: string
       }[]
       const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
-      const registered = methods.indexOf('registerRoute(inbox)')
-      const replied = methods.indexOf('registerRoute(inbox) replied')
-      expect(registered).greaterThan(-1)
-      expect(replied).greaterThan(registered)
-      expect(methods.indexOf('runOperation')).greaterThan(replied)
+      const writes = methods.filter((method) => method === 'registerRoute(inbox)' || method.startsWith('runOperation'))
+      expect(writes).deep.equal(['runOperationWithInbox'])
     })
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
     await session!.context().close()
@@ -565,11 +560,15 @@ function testRoomJoinInbox() {
     expect(result.seconds).lessThan(5)
   })
 
-  test("Room: a join whose inbox's registration the authority refuses rejects with the refusal, and leaves no member", async () => {
+  test('Room: a join the authority refuses rejects with the refusal, leaves no member, and the other participant sees no join of it', async () => {
     await openRoomPage()
     const result = await clickRoomCard(page, 'join-refused')
-    expect({ joined: result.joined, members: result.members }).deep.equal({ joined: false, members: 0 })
-    expect(result.failure.cause).toContain('Test: the authority refused the inbox')
+    expect({ joined: result.joined, members: result.members, seen: result.seen }).deep.equal({
+      joined: false,
+      members: 1,
+      seen: ['next'],
+    })
+    expect(result.failure.message).toBe('Test: the authority refused the inbox')
   })
 }
 

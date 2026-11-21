@@ -53,7 +53,6 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
   }
 
   // Test-only: the Room Durable Objects called while `/__room-calls` traces, by name, with the room a listing call names.
-  // An inbox's registration replies slowly, so what waits for that reply comes after it in the trace.
   override async telefuncDurableObjectCall(name: string, method: string, args: unknown[]) {
     const room = name === 'room-directory' ? args[0] : null
     const object = this.ctx.id.name ?? null
@@ -73,12 +72,7 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     // Test-only: the room's authority reads its clock ahead by what a test set, while it serves the call.
     const ahead = object !== null ? authorityClocks.get(object) : undefined
     const call = () => super.telefuncDurableObjectCall(name, method, args)
-    const result = ahead === undefined ? await call() : await withClockAhead(ahead, call)
-    if (inbox && roomCalls !== null) {
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      roomCalls?.push({ object, method: 'registerRoute(inbox) replied', room })
-    }
-    return result
+    return ahead === undefined ? await call() : await withClockAhead(ahead, call)
   }
 }
 export { TodoListDurableObject } from './database/todoItems'

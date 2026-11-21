@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { BackendError, createDeferred, type BackendSubscription } from 'telefunc/__internal'
+import { BackendError, createDeferred, type BackendListener, type BackendSubscription } from 'telefunc/__internal'
 import { SEMANTIC_LANE } from './lanes.js'
-import { LaneSubscription, type LaneSubscriptionOwner } from './LaneSubscription.js'
+import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
+import type { RoomSubscriptionSource } from '../../backend/contract.js'
 
 type AttemptState = ReturnType<BackendSubscription['state']>
 
@@ -64,9 +65,12 @@ function fakeSubscription() {
 function setup() {
   const subscriptions: ReturnType<typeof fakeSubscription>[] = []
   const calls = { ended: 0, recovered: 0, terminal: 0 }
+  /** What each subscription said registers it. */
+  const registeredBy: Array<RoomSubscriptionSource['registeredBy']> = []
   const owner = {
     roomId: 'room',
-    subscribeLane() {
+    subscribeLane(_address: LaneAddress, _listener: BackendListener<Uint8Array>, by?: 'operation') {
+      registeredBy.push(by)
       const fake = fakeSubscription()
       subscriptions.push(fake)
       return fake.subscription
@@ -78,12 +82,21 @@ function setup() {
     onLanePending() {},
   } as LaneSubscriptionOwner
   const lane = new LaneSubscription({ owner, address: SEMANTIC_LANE })
-  return { lane, subscriptions, calls }
+  return { lane, subscriptions, calls, registeredBy }
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('a Room lane', () => {
+  it("started for the operation that registers it says so on that start's subscription only: one made again after a stop registers itself", () => {
+    const { lane, registeredBy } = setup()
+    lane.start('operation')
+    lane.start('operation')
+    lane.stop()
+    lane.start()
+    expect(registeredBy).toEqual(['operation', undefined])
+  })
+
   it('that Redis refuses fails its consumer at once with the refusal itself, and nothing subscribes it again', async () => {
     const { lane, subscriptions, calls } = setup()
     lane.start()

@@ -119,9 +119,9 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. An
-   *  operation that waits for this session's inbox of a member carries the inbox's exact route instead, which the
-   *  authority registers in the operation's own transaction: sent right behind the inbox's own registration, it needs
-   *  no answer of it, and both or neither hold. */
+   *  operation that waits for this session's inbox of a member, which the operation registers (a member's join),
+   *  carries the inbox's exact route instead, which the authority registers in the operation's own transaction: the
+   *  inbox's one write, so both or neither hold. */
   async runOperation<Args, Value>(
     roomId: string,
     inc: string,
@@ -136,7 +136,7 @@ class CloudflareRoomDriver implements RoomDriver {
         ? undefined
         : session?.attemptOf(roomId, inc, { kind: 'inbox', member: options.inbox.member })
     let wire: OperationWire
-    if (session !== null && inbox !== undefined) {
+    if (session !== null && inbox?.registeredByOperation === true) {
       wire = await rowLimited(
         session.runCarrying(inbox, request, { deadline: Date.now() + LEASE_CALL_DEADLINE_MS, wanted: options?.wanted }),
       )

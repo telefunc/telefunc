@@ -13,6 +13,7 @@ import type { DemandExchange } from './DemandExchange.js'
 import type { PageIndex } from './PageIndex.js'
 import type { RoomIncarnation } from '../protocol.js'
 import type { RoomModel } from '../../shared/RoomModel.js'
+import type { RoomSubscriptionSource } from '../../backend/contract.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
 import { BinaryLanes, type PairShape } from './BinaryLanes.js'
@@ -226,9 +227,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.syncLanes()
   }
 
-  /** A member this instance now owns gets its inbox. */
+  /** A member this instance admits gets its inbox, which the member's join registers. */
   memberOwned(member: string): void {
-    this.openInbox(member)
+    this.openInbox(member, 'operation')
     this.syncLanes()
   }
 
@@ -572,10 +573,10 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return count !== undefined && count > ROOM_MEMBER_NAMED_LANES_MAX
   }
 
-  private openInbox(member: string): void {
+  private openInbox(member: string, registeredBy?: RoomSubscriptionSource['registeredBy']): void {
     if (this.model.closed || !this.roles.owned.has(member)) return
     const address = { kind: 'inbox', member } as const
-    getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start()
+    getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, address })).start(registeredBy)
   }
 
   private closeInbox(member: string): void {
@@ -599,8 +600,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     return this.incarnation.id
   }
 
-  subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription {
-    return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, listener)
+  subscribeLane(
+    address: LaneAddress,
+    listener: BackendListener<Uint8Array>,
+    registeredBy?: RoomSubscriptionSource['registeredBy'],
+  ): BackendSubscription {
+    return getRoomPlane().subscribeLane(this.incarnation.id, this.incarnation.inc, address, listener, registeredBy)
   }
 
   /** `LaneSubscriptionOwner`: what a lane carries goes to the replica, the demand lane's to the exchange. */

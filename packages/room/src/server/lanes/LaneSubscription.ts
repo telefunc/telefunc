@@ -13,8 +13,12 @@ assertIsNotBrowser()
 interface LaneSubscriptionOwner {
   /** The room whose lanes it subscribes. */
   readonly roomId: string
-  /** One attempt at `address`, delivering to `listener`. */
-  subscribeLane(address: LaneAddress, listener: BackendListener<Uint8Array>): BackendSubscription
+  /** One attempt at `address`, delivering to `listener`, registered as `registeredBy` says. */
+  subscribeLane(
+    address: LaneAddress,
+    listener: BackendListener<Uint8Array>,
+    registeredBy?: RoomSubscriptionSource['registeredBy'],
+  ): BackendSubscription
   onLaneDelivery(lane: LaneSubscription, payload: Uint8Array, info: OrderingInfo): void
   /** The lane ended for good: its incarnation was dropped, or it failed. */
   onLaneEnded(lane: LaneSubscription): void
@@ -66,15 +70,16 @@ class LaneSubscription {
     return this.readyPromise
   }
 
-  /** The lane is wanted: it subscribes unless it has a subscription, which its driver keeps or which ended for good. */
-  start(): void {
+  /** The lane is wanted: it subscribes unless it has a subscription, which its driver keeps or which ended for good. A
+   *  subscription it makes is registered as `registeredBy` says. */
+  start(registeredBy?: RoomSubscriptionSource['registeredBy']): void {
     this.isWanted = true
-    if (this.subscription === null) this.subscribe()
+    if (this.subscription === null) this.subscribe(registeredBy)
   }
 
-  private subscribe(): void {
+  private subscribe(registeredBy: RoomSubscriptionSource['registeredBy']): void {
     this.ensurePendingReady()
-    const subscription = this.owner.subscribeLane(this.address, this.listener)
+    const subscription = this.owner.subscribeLane(this.address, this.listener, registeredBy)
     this.subscription = subscription
     let wasReady = subscription.state() === 'ready'
     if (wasReady) this.settleReady()
