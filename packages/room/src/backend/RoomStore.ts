@@ -1,4 +1,4 @@
-export { RoomStore }
+export { RoomStore, CallStore }
 export type { RoomReads }
 
 import { assertDriverOrdering, type BackendCall, type OrderingInfo } from 'telefunc/__internal'
@@ -37,73 +37,112 @@ type RoomReads = Pick<
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
 }
 
-/** The store as one call sees it: the driver's writes, each counted in the call's account as it is handed over, with
- *  the head writes and the orderings checked; and its reads. Work that tells no answer has the store with no account
- *  (`RoomPlane.direct`), whose writes go straight through. A helper takes the store it is given: it can't tell which
- *  it has. */
+/** The store as work that tells no answer sees it (`RoomPlane.direct`): the driver's writes, with the head writes and
+ *  the orderings checked, and its reads. A call sees a `CallStore`, which counts each write in its account. A helper
+ *  takes the store it is given: it can't tell which it has. */
 class RoomStore {
   readonly reads: RoomReads
 
   constructor(
-    private readonly driver: RoomDriver,
+    protected readonly driver: RoomDriver,
     reads: RoomReads,
-    private readonly account: BackendCall | null,
   ) {
     this.reads = reads
   }
 
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
     assertHeadNextWellFormed(next)
-    return this.write(() => this.driver.compareExchangeHead(roomId, expected, next))
+    return this.driver.compareExchangeHead(roomId, expected, next)
   }
 
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    return this.write(() => this.driver.compareExchangeCells(roomId, inc, exchange))
+    return this.driver.compareExchangeCells(roomId, inc, exchange)
   }
 
-  commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    return this.write(async () => {
-      const result = await this.driver.commitLane(target, payload, opts)
-      if (result.kind === 'accepted') assertDriverOrdering(result)
-      return result
-    })
+  async commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    const result = await this.driver.commitLane(target, payload, opts)
+    if (result.kind === 'accepted') assertDriverOrdering(result)
+    return result
   }
 
-  runOperation<Args, Value>(
+  async runOperation<Args, Value>(
     roomId: string,
     inc: string,
     operation: RoomOperation<Args, Value>,
     args: Args,
     options?: OperationOptions,
   ): Promise<OperationResult<Value>> {
-    return this.write(async () => {
-      const result = await this.driver.runOperation(roomId, inc, operation, args, options)
-      if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
-      return result
-    })
+    const result = await this.driver.runOperation(roomId, inc, operation, args, options)
+    if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
+    return result
   }
 
   dropIncarnation(roomId: string, inc: string): Promise<void> {
-    return this.write(() => this.driver.dropIncarnation(roomId, inc))
+    return this.driver.dropIncarnation(roomId, inc)
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    return this.write(() => this.driver.directoryPut(roomId, incTag, checkAt, minDelayMs))
+    return this.driver.directoryPut(roomId, incTag, checkAt, minDelayMs)
   }
 
   directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.write(() => this.driver.directoryDelete(roomId, incTag))
+    return this.driver.directoryDelete(roomId, incTag)
   }
 
-  /** The value of `work`, which runs on the store `shared` and may be shared with other calls, once it settled: a
-   *  write of `shared`'s call counts as this call's, and this call's close waits for `work`. */
-  async join<T>(shared: RoomStore, work: Promise<T>): Promise<T> {
-    if (this.account === null || shared.account === null) return await work
-    return await this.account.join(shared.account, work)
+  /** The value of `work`, which runs on the store `shared` and may be shared with other calls, once it settled. */
+  join<T>(_shared: RoomStore, work: Promise<T>): Promise<T> {
+    return work
+  }
+}
+
+/** The store as one call sees it: each write is counted in the call's account as it is handed over. */
+class CallStore extends RoomStore {
+  constructor(
+    driver: RoomDriver,
+    reads: RoomReads,
+    private readonly account: BackendCall,
+  ) {
+    super(driver, reads)
   }
 
-  private write<T>(step: () => Promise<T>): Promise<T> {
-    return this.account === null ? step() : this.account.write(step)
+  override compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
+    assertHeadNextWellFormed(next)
+    return this.account.write(() => this.driver.compareExchangeHead(roomId, expected, next))
+  }
+
+  override compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
+    return this.account.write(() => super.compareExchangeCells(roomId, inc, exchange))
+  }
+
+  override commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
+    return this.account.write(() => super.commitLane(target, payload, opts))
+  }
+
+  override runOperation<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+    options?: OperationOptions,
+  ): Promise<OperationResult<Value>> {
+    return this.account.write(() => super.runOperation(roomId, inc, operation, args, options))
+  }
+
+  override dropIncarnation(roomId: string, inc: string): Promise<void> {
+    return this.account.write(() => super.dropIncarnation(roomId, inc))
+  }
+
+  override directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
+    return this.account.write(() => super.directoryPut(roomId, incTag, checkAt, minDelayMs))
+  }
+
+  override directoryDelete(roomId: string, incTag: string): Promise<void> {
+    return this.account.write(() => super.directoryDelete(roomId, incTag))
+  }
+
+  /** A write of `shared`'s call counts as this call's, and this call's close waits for `work`. */
+  override join<T>(shared: RoomStore, work: Promise<T>): Promise<T> {
+    return shared instanceof CallStore ? this.account.join(shared.account, work) : work
   }
 }
 
