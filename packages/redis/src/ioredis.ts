@@ -4,7 +4,9 @@
 export {
   createCommandClient,
   createSubscriberSocket,
+  subscriberNodeCount,
   nextReady,
+  ClusterNodesFailed,
   isCluster,
   rawWrites,
   deploymentOf,
@@ -196,7 +198,7 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled
     // until the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after
     // the last node used.
-    const nodes = redis.nodes('all').filter((candidate) => candidate.status !== 'end')
+    const nodes = subscriberNodesOf(redis)
     const last = subscriberNodes.get(redis)
     const node = nodes[last === undefined ? 0 : (nodes.indexOf(last) + 1) % nodes.length]
     if (node === undefined) throw new Error('Redis Cluster has no available nodes')
@@ -213,6 +215,18 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
+/** The nodes a Cluster's subscriber may sit on, in its pool's order: a failed node stays pooled until the Cluster uses
+ *  it. */
+function subscriberNodesOf(redis: Cluster): Redis[] {
+  return redis.nodes('all').filter((candidate) => candidate.status !== 'end')
+}
+
+/** How many nodes the subscriber tries in turn before a refusal of its login stands: each node of a Cluster, as each
+ *  reconnect starts after the last node used (`createSubscriberSocket()`), and a server's one. */
+function subscriberNodeCount(redis: RedisClient): number {
+  return isCluster(redis) ? Math.max(subscriberNodesOf(redis).length, 1) : 1
+}
+
 const { subscriberNodes, readyWaits } = getGlobalObject('ioredis.ts', () => ({
   /** The node each Cluster's subscriber was last duplicated from. */
   subscriberNodes: new WeakMap<Cluster, Redis>(),
@@ -220,9 +234,20 @@ const { subscriberNodes, readyWaits } = getGlobalObject('ioredis.ts', () => ({
   readyWaits: new WeakMap<RedisClient, Promise<void>>(),
 }))
 
+/** A Cluster's connect that closed after its nodes failed, with each node's last error (`nextReady()`): what the nodes
+ *  replied tells a refused login from a node that is only unreachable (`redisFailure()`). Only the backend reads it. */
+class ClusterNodesFailed extends Error {
+  readonly nodeErrors: readonly unknown[]
+  constructor(nodeErrors: readonly unknown[]) {
+    super('Every node of the Redis Cluster that was tried failed')
+    this.nodeErrors = nodeErrors
+  }
+}
+
 /** The client's next `ready`, one wait for everything that waits meanwhile: the commands made while it reconnects, and
- *  the subscriber sockets a Cluster opens before it is ready. It rejects with the client's last error once the
- *  connection closes first, which is when ioredis would fail a command it held; every failed connect of a Cluster
+ *  the subscriber sockets a Cluster opens before it is ready. It rejects once the connection closes first, which is when
+ *  ioredis would fail a command it held: with the client's last error, or for a Cluster whose nodes failed, with each
+ *  node's (`ClusterNodesFailed`), as ioredis's own error keeps only the last node's. Every failed connect of a Cluster
  *  closes, whether it retries or ends. A client made with `lazyConnect` connects here. */
 function nextReady(client: RedisClient): Promise<void> {
   const waiting = readyWaits.get(client)
@@ -230,11 +255,19 @@ function nextReady(client: RedisClient): Promise<void> {
   if (client.status === 'end') return Promise.reject(new Error('Connection is closed.'))
   const promise = new Promise<void>((resolve, reject) => {
     let lastError: unknown = new Error('Connection is closed.')
+    // By node: what each answered since the Cluster last read its slots, which it does from the first node that answers.
+    const nodeErrors = new Map<string, unknown>()
     const onError = (error: unknown) => {
       lastError = error
     }
+    const onNodeError = (error: unknown, node: string) => {
+      nodeErrors.set(node, error)
+    }
+    const onRefresh = () => nodeErrors.clear()
     const settle = () => {
       client.off('error', onError)
+      client.off('node error', onNodeError)
+      client.off('refresh', onRefresh)
       client.off('ready', onReady)
       client.off('close', onClose)
       client.off('end', onClose)
@@ -246,9 +279,13 @@ function nextReady(client: RedisClient): Promise<void> {
     }
     const onClose = () => {
       settle()
-      reject(lastError)
+      reject(nodeErrors.size === 0 ? lastError : new ClusterNodesFailed([...nodeErrors.values()]))
     }
     client.on('error', onError)
+    if (isCluster(client)) {
+      client.on('node error', onNodeError)
+      client.on('refresh', onRefresh)
+    }
     client.once('ready', onReady)
     client.once('close', onClose)
     client.once('end', onClose)

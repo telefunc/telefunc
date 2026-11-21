@@ -8,6 +8,7 @@ import {
   isCluster,
   nextReady,
   rawWrites,
+  subscriberNodeCount,
   type RawCommand,
   type RedisClient,
   type SubscriberSocket,
@@ -52,6 +53,11 @@ class RedisConnection {
   /** A fresh, unconnected subscriber socket on the current command client, which never retries on its own. */
   openSubscriberSocket(): Promise<SubscriberSocket> {
     return createSubscriberSocket(this.commands)
+  }
+
+  /** How many nodes the subscriber tries in turn, one per socket, before a refusal of its login stands. */
+  subscriberNodeCount(): number {
+    return subscriberNodeCount(this.commands)
   }
 
   /** The command client, which the drivers ask whether it is a Cluster and the subscriber names in its failures;

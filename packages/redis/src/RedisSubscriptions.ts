@@ -105,6 +105,8 @@ class RedisSubscriptions {
   private reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private outageReported = false
+  /** The subscriber's logins refused in a row, each on the node after the last one's. */
+  private refusedLogins = 0
   /** The next try of start reads that failed, the wait before it, and whether this run of failures was reported. */
   private readRetry: ReturnType<typeof setTimeout> | null = null
   private readRetryDelay = RECONNECT_DELAY_MIN_MS
@@ -214,13 +216,14 @@ class RedisSubscriptions {
     socket.on('error', (error: unknown) => {
       lastError = this.failure(error)
     })
-    socket.on('close', () => this.lost(id, lastError))
+    socket.on('close', () => this.lostSocket(id, lastError))
     try {
       await socket.connect()
     } catch (error) {
-      return this.lost(id, this.failure(error))
+      return this.lostSocket(id, this.failure(error))
     }
     if (!this.isCurrent(id)) return
+    this.refusedLogins = 0
     const connected: ConnectedSocket = {
       phase: 'connected',
       id,
@@ -262,11 +265,20 @@ class RedisSubscriptions {
     }
   }
 
-  private lost(id: number, error: unknown): void {
+  /** The subscriber socket's end. A refused login stands once each node the subscriber can sit on refused it in turn:
+   *  while a node of a Cluster may still let it in, the next socket goes there, as after a drop. */
+  private lostSocket(id: number, error: unknown): void {
+    if (!this.isCurrent(id)) return
+    this.refusedLogins = isRefusal(error) ? this.refusedLogins + 1 : 0
+    this.lost(id, error, this.refusedLogins >= this.connection.subscriberNodeCount())
+  }
+
+  private lost(id: number, error: unknown, stands = isRefusal(error)): void {
     if (!this.isCurrent(id)) return
     // A refusal, such as a refused login, stands until an operator changes the password or the ACL: the subscriptions
     // end with it, and the backend doesn't connect again for them.
-    if (isRefusal(error)) {
+    if (stands) {
+      this.refusedLogins = 0
       this.disconnect()
       for (const attempt of this.attempts()) attempt.fail(error)
       return

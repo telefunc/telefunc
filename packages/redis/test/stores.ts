@@ -1,5 +1,5 @@
 // The stores the store specs (`pnpm run test:redis-stores`) run against, each in Docker, and what they share.
-export { STORES, runs, pullImage, startStore, removeStores, forwarder, type Store }
+export { STORES, runs, docker, pullImage, startStore, removeStores, forwarder, type Store }
 
 import { execFileSync } from 'node:child_process'
 import { connect, createServer, type Socket } from 'node:net'
@@ -49,8 +49,8 @@ function pullImage(image: string): void {
 
 const containers: string[] = []
 
-/** The store in a container of its own, once it answers; its address, and an admin client of it. */
-async function startStore(store: Store, ...options: string[]): Promise<{ host: string; admin: Redis }> {
+/** The store in a container of its own, once it answers; the container's name, its address, and an admin client of it. */
+async function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
   const name = `tf-redis-stores-${process.pid}-${containers.length}`
   pullImage(store.image)
   docker(
@@ -74,7 +74,7 @@ async function startStore(store: Store, ...options: string[]): Promise<{ host: s
     if (tries > 200) throw new Error(`${store.name} never answered`)
     await sleep(25)
   }
-  return { host, admin }
+  return { name, host, admin }
 }
 
 /** Removes every store this process started. */

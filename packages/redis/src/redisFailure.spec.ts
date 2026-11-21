@@ -1,12 +1,24 @@
 // Every wording of a store's reply the backend reads, as the backend reports it: its code, its outcome for a command
 // that may write (one that can't write is always 'not-run'), whether it is a refusal that stands, and its sentence.
 // Written against the backend as it was before its replies moved into one table, so the table keeps each answer.
-import { Redis } from 'ioredis'
+import { inspect } from 'node:util'
+import { Cluster, Redis } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
+import { ClusterNodesFailed } from './ioredis.js'
 import { isRefusal, redisFailure } from './redisFailure.js'
 
 const redis = new Redis({ lazyConnect: true, host: '127.0.0.1', port: 6390 })
-afterAll(() => redis.disconnect())
+const cluster = new Cluster(
+  [
+    { host: '127.0.0.1', port: 7001 },
+    { host: '127.0.0.1', port: 7002 },
+  ],
+  { lazyConnect: true },
+)
+afterAll(() => {
+  redis.disconnect()
+  cluster.disconnect()
+})
 
 /** A reply as ioredis gives it. */
 function reply(message: string): Error {
@@ -279,5 +291,29 @@ describe("a store's reply, as the backend reports it", () => {
     expect(written).toMatchObject({ name: 'BackendError', code, outcome, message: sentence })
     expect(unwritten).toMatchObject({ name: 'BackendError', code, outcome: 'not-run', message: sentence })
     expect([isRefusal(written), isRefusal(unwritten)]).toEqual([refusal, refusal])
+  })
+})
+
+describe("a Cluster's connect that failed on its nodes, as the backend reports it", () => {
+  const refusedLogin = () => reply('WRONGPASS invalid username-password pair or user is disabled.')
+  const timedOut = () => new Error('timeout')
+
+  it('is the refused login, which stands, where every node refused it; it holds no node error', () => {
+    const failure = redisFailure(new ClusterNodesFailed([refusedLogin(), refusedLogin()]), cluster, false)
+    expect(failure).toMatchObject({
+      name: 'BackendError',
+      code: 'denied',
+      outcome: 'not-run',
+      message:
+        "Redis at 127.0.0.1:7001, 127.0.0.1:7002 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    })
+    expect(isRefusal(failure)).toBe(true)
+    expect(inspect(failure, { depth: 8 })).not.toContain('invalid username-password pair')
+  })
+
+  it("is unreachable, which passes, where a node didn't answer beside one that refused", () => {
+    const failure = redisFailure(new ClusterNodesFailed([refusedLogin(), timedOut()]), cluster, false)
+    expect(failure).toMatchObject({ name: 'BackendError', code: 'unreachable', outcome: 'not-run' })
+    expect(isRefusal(failure)).toBe(false)
   })
 })

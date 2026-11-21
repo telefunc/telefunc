@@ -4,7 +4,7 @@ export { redisFailure, isRefusal }
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
-import { addressOf, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
+import { addressOf, ClusterNodesFailed, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
 
 type Code = BackendError['code']
 
@@ -86,6 +86,13 @@ const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
  *  it. An error the backend's own `assert()` threw passes as it is, and so does one this made. */
 function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unknown {
   if (error instanceof BackendError || isBug(error)) return error
+  if (error instanceof ClusterNodesFailed) {
+    // A refusal stands for the Cluster once every node it tried refused: a node that is only unreachable may let the
+    // backend in once it is back.
+    const failures = error.nodeErrors.map((nodeError) => redisFailure(nodeError, redis, writes))
+    const [first] = failures
+    if (first !== undefined && failures.every(isRefusal)) return first
+  }
   const where = addressOf(redis)
   const outcome = (proof: boolean): BackendError['outcome'] => (!writes || proof ? 'not-run' : 'may-have-run')
   if (!isReplyError(error)) {

@@ -56,6 +56,8 @@ const PASSING = [
 function setup(
   subscribe: SubscriberSocket['subscribe'] = async () => {},
   connect: SubscriberSocket['connect'] = async () => {},
+  /** How many nodes the subscriber can sit on: a Cluster's, or a server's one. */
+  nodes = 1,
 ) {
   /** What Redis sends the subscriber socket: a frame on a channel. */
   let publish = (_channel: string, _frame: Buffer) => {}
@@ -72,6 +74,7 @@ function setup(
   }
   const connection = {
     openSubscriberSocket: async () => socket,
+    subscriberNodeCount: () => nodes,
     client: { options: { host: '127.0.0.1', port: 6390 } },
   } as unknown as RedisConnection
   const subscriptions = new RedisSubscriptions({ connection })
@@ -284,5 +287,43 @@ describe('a subscriber connection Redis refuses at its login', () => {
         "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
     })
     expect(inspect(reason, { depth: 8 })).not.toContain('pw-SECRET')
+  })
+
+  it('on a Cluster, goes to the next node, and is ready there', async () => {
+    let logins = 0
+    const { listen } = setup(
+      undefined,
+      async () => {
+        if (++logins === 1) throw replyError('WRONGPASS invalid username-password pair or user is disabled.')
+      },
+      2,
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const attempt = listen(TEXT)
+    const ready = new Promise<string>((resolve) => attempt.onStateChange((state) => resolve(state)))
+
+    expect({ state: await ready, logins }).toEqual({ state: 'ready', logins: 2 })
+  })
+
+  it('on a Cluster, ends the subscription once each of its nodes refused the login in turn', async () => {
+    let logins = 0
+    const { listen } = setup(
+      undefined,
+      async () => {
+        logins++
+        throw replyError('WRONGPASS invalid username-password pair or user is disabled.')
+      },
+      2,
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const attempt = listen(TEXT)
+    const closed = new Promise<{ state: string; reason: unknown }>((resolve) =>
+      attempt.onStateChange((state, reason) => resolve({ state, reason })),
+    )
+
+    const { state, reason } = await closed
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect({ state, logins }).toEqual({ state: 'closed', logins: 2 })
+    expect(reason).toMatchObject({ name: 'BackendError', code: 'denied' })
   })
 })
