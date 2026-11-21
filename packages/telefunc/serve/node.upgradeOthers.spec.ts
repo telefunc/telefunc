@@ -176,6 +176,36 @@ test.runIf(nodeHasTheCallback)(
   },
 )
 
+test.runIf(nodeHasTheCallback)(
+  "a request the app's own `shouldUpgradeCallback` upgrades with no listener there to take it stays an upgrade, before a second `installWebSocket()` and after it: it is answered as a page the server doesn't have",
+  async () => {
+    const { server: s, port } = await server({ telefunc: true })
+    const own = (req: IncomingMessage) => req.url === '/app-ws'
+    // What an app's `server.shouldUpgradeCallback = …` does after the install, which the typings here don't know.
+    Reflect.set(s, 'shouldUpgradeCallback', own)
+    const unanswered = { status: 404, body: '', open: false }
+    expect(await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).toEqual(unanswered)
+    new Telefunc().installWebSocket(s)
+    expect(await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).toEqual(unanswered)
+    expect((await answer(port, requests["Telefunc's WebSocket handshake"])).status).toBe(101)
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "an app's own `shouldUpgradeCallback` that reads the server's `listening` gets the server's value",
+  async () => {
+    const seen: boolean[] = []
+    function own(this: { listening: boolean }, req: IncomingMessage) {
+      seen.push(this.listening)
+      return req.url === '/app-ws'
+    }
+    const { server: s, port } = await server({ telefunc: true, shouldUpgradeCallback: own })
+    s.on('upgrade', appUpgrade)
+    expect((await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).status).toBe(418)
+    expect(seen).toEqual([true])
+  },
+)
+
 // Node before 22.21 and 24.9 has no `shouldUpgradeCallback`: it hands every request with `Upgrade` to the `upgrade`
 // listeners once there is one.
 test.skipIf(nodeHasTheCallback)(

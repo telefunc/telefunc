@@ -47,10 +47,11 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
   handshakes: new WeakMap<IncomingMessage, Handshake>(),
 })
 
-/** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), a request with `Upgrade` that isn't
- *  Telefunc's is upgraded only where another `upgrade` listener is there to take it and the server's own callback (the
- *  app's, or Node's default) accepts it; any other goes to the app's `request` listeners, as on the same server without
- *  Telefunc's WebSocket. Puts Telefunc's callback in front of the server's current one. */
+/** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), Telefunc's callback goes in front of the
+ *  server's current one: it upgrades Telefunc's handshake, and the server's own callback (the app's, or Node's default)
+ *  decides every other request with `Upgrade`, as on the same server without Telefunc's listener. So Node's default
+ *  upgrades a request only where another `upgrade` listener is there to take it, and sends any other to the app's
+ *  `request` listeners. */
 function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
@@ -58,7 +59,7 @@ function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServ
     const handshake = readHandshake(req)
     handshakes.set(req, handshake)
     if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
-    return server.listenerCount('upgrade') > 1 && Boolean(own.call(server, req))
+    return Boolean(own.call(taken.withoutTelefunc, req))
   }
   server.shouldUpgradeCallback = callback
   taken.callback = callback
@@ -104,9 +105,10 @@ function takeUpgrades(httpServer: HttpServer): void {
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { url, config } = handshakes.get(req) ?? readHandshake(req)
     if (url?.pathname !== config.telefuncUrl) {
-      // Here on a Node that doesn't read `shouldUpgradeCallback` (before 22.21 and 24.9), which hands every request
-      // with `Upgrade` to the `upgrade` listeners, or where the app's own callback is in place of Telefunc's: one that
-      // no other listener is there to take is answered as a page the server doesn't have.
+      // Here where Node upgraded a request that isn't Telefunc's: on a Node that doesn't read `shouldUpgradeCallback`
+      // (before 22.21 and 24.9), which hands every request with `Upgrade` to the `upgrade` listeners, or where the
+      // server's own callback upgraded it. One that no other listener is there to take is answered as a page the
+      // server doesn't have.
       if (httpServer.listenerCount('upgrade') === 1) {
         socket.once('finish', socket.destroy)
         socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
@@ -126,11 +128,18 @@ function takeUpgrades(httpServer: HttpServer): void {
     sockets.set(request, socket)
     adapter.handleUpgrade(req, socket, head, request)
   }
+  const listenerCount = (event: string | symbol, listener?: (...args: never[]) => void) => {
+    if (event !== 'upgrade' || (listener !== undefined && listener !== onUpgrade))
+      return httpServer.listenerCount(event, listener)
+    if (listener === onUpgrade) return 0
+    return httpServer.listenerCount('upgrade') - httpServer.listenerCount('upgrade', onUpgrade)
+  }
   const taken: TakenServer = {
     server: httpServer,
     listener: onUpgrade,
     callback: undefined,
     own: undefined,
+    withoutTelefunc: Object.create(httpServer, { listenerCount: { value: listenerCount } }),
     holdsRegistry: true,
   }
   registeredServers.add(httpServer)

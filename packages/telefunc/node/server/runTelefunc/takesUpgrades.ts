@@ -32,6 +32,8 @@ type TakenServer = {
   listener: (...args: never[]) => void
   callback: ((req: IncomingMessage) => boolean) | undefined
   own: ((req: IncomingMessage) => unknown) | undefined
+  /** The server as `own` is called on: the server itself, but for `listenerCount`, which leaves Telefunc's out. */
+  withoutTelefunc: object
   holdsRegistry: boolean
 }
 
