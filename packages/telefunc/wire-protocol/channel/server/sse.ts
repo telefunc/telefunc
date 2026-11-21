@@ -167,13 +167,17 @@ class EventStream implements WireQueue {
 
   /** What waits goes no more: past a wire only lost, the page's reconnect gets it from its channels' replay, and it could
    *  wait here for as long as the socket stays open taking nothing. An end the server decided goes as the `last` event,
-   *  after the event under way, which nothing passes once it started: what waits ended with the wire. */
+   *  after the event under way, which nothing passes once it started: what waits ended with the wire, but for the
+   *  channels' ends decided before it (`ERROR`), which go ahead of it in the order they were decided, so the page reads
+   *  each channel's end as its server channel settled with it. */
   close(last: Uint8Array<ArrayBuffer> | null): void {
+    const ends = last === null ? [] : [...this.passing, ...this.waiting].filter((frame) => frame[0] === TAG.ERROR)
     this.passing = new Fifo()
     this.waiting = new Fifo()
     this.waitingBytes = 0
     if (last !== null) {
       while (this.current !== null) this.pushChunks()
+      for (const end of ends) this.stream.push(encodeChunk(end, 0, end.byteLength))
       this.stream.push(encodeChunk(last, 0, last.byteLength))
     }
     this.current = null

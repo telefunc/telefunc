@@ -104,7 +104,7 @@ class FakeWebSocket {
   static scripts: Script[] = []
   static made: FakeWebSocket[] = []
   onopen: (() => void) | null = null
-  onclose: ((event: { code: number }) => void) | null = null
+  onclose: ((event: { code: number; reason?: string }) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
   binaryType = 'blob'
@@ -152,6 +152,12 @@ class FakeWebSocket {
     if (this.readyState === 3) return
     this.readyState = 3
     this.onclose?.({ code: 1006 })
+  }
+  /** The server ends the wire with its refusal `reason`, as Telefunc's close 4002 does. */
+  refuse(reason: string): void {
+    if (this.readyState === 3) return
+    this.readyState = 3
+    this.onclose?.({ code: 4002, reason })
   }
   deliver(frame: Uint8Array<ArrayBuffer>): void {
     if (this.readyState === 1) this.onmessage?.({ data: frame.slice().buffer })

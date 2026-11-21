@@ -222,13 +222,30 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     return this.closed ? 0 : this.deliveries.beforeHandled(ms)
   }
 
-  /** The wire closed: drops what is sent from now on, and stops its headroom. */
-  close(): void {
+  /** The wire closed: drops what is sent from now on, and stops its headroom. `ends: 'first'`, at an end the server
+   *  decided: the channels' ends decided before it (`ERROR`) that the socket has no byte of go to the transport first,
+   *  in their order, as they did on the wire. What it holds for a RECONCILED goes after what its piece sender holds. */
+  close(ends: 'first' | 'dropped' = 'dropped'): void {
+    const first = ends === 'first' ? this.ungivenEnds() : []
     this.closed = true
     this.owed = false
     this.held.length = 0
     this.heldBytes = 0
     this.pieces?.headroom.close()
+    for (const frame of first) this.transport.sendNow(this.wire, frame)
+  }
+
+  /** The channels' ends the socket has no byte of, taken from what holds them, in the order they go. */
+  private ungivenEnds(): Uint8Array<ArrayBuffer>[] {
+    const ends: Uint8Array<ArrayBuffer>[] = []
+    const take = (frame: Uint8Array<ArrayBuffer>) => {
+      if (frame[0] !== TAG.ERROR) return false
+      ends.push(frame)
+      return true
+    }
+    this.pieces?.headroom.sender.dropUngiven(take)
+    for (const frame of this.held) take(frame)
+    return ends
   }
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
