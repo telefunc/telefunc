@@ -1,14 +1,13 @@
 export { Telefunc }
 
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
 import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
 import { noUpgrades, upgradesOfServer } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
 import { takeUpgrades, type HttpServer } from './nodeUpgrades.js'
+import { serverOfRequest, storeServerOfRequests } from './requestServer.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRequestPathname } from '../utils/getUrlPathname.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
@@ -34,30 +33,12 @@ interface TelefuncServe<Req extends NodeRequest, Res extends ServerResponse> {
   serve(input: ServeInputRequest): Promise<Response | undefined>
 }
 
-const { requestServer, serversWithRequestStore } = getGlobalObject('serve/node.ts', {
-  /** The server whose `request` event is running, for `serve({ request })`, which gets a `Request` without it. */
-  requestServer: new AsyncLocalStorage<HttpServer>(),
-  serversWithRequestStore: new WeakSet<HttpServer>(),
-})
-
 interface Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>
   extends TelefuncServe<Req, Res> {}
 class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse> {
   constructor() {
     return telefunc<Req, Res>()
   }
-}
-
-/** Runs the server's `request` event in `requestServer`'s store, once per server: every other event, and the event's
- *  arguments and return value, pass through as they are. */
-function storeServerOfRequests(server: HttpServer): void {
-  if (serversWithRequestStore.has(server)) return
-  serversWithRequestStore.add(server)
-  const emit = server.emit
-  Reflect.set(server, 'emit', function (this: unknown, event: unknown, ...args: unknown[]): unknown {
-    const pass = () => Reflect.apply(emit, this, [event, ...args])
-    return event === 'request' ? requestServer.run(server, pass) : pass()
-  })
 }
 
 function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>(): TelefuncServe<
@@ -90,7 +71,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
     if (!isNodeServeInput(input)) {
       if (getTelefuncRequestUrl(input.request) === null) return undefined
-      const server = requestServer.getStore()
+      const server = serverOfRequest()
       const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
         noTransportEvidence,
