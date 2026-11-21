@@ -151,7 +151,9 @@ test("an over-limit frame of a channel the server still awaits ends that channel
   const awaited = awaitedPair(key)
   sends(awaited.page, 'b1')
   sends(other.page, 'a1')
-  await until(() => awaited.pageEnds.length > 0)
+  // The other's text may go again on the next wire, after a reconnect: its arrival is waited for, then whether it came
+  // once.
+  await until(() => awaited.pageEnds.length > 0 && other.got.length > 0)
   await delay(500)
   expect(awaited.pageEnds).toEqual([['ChannelClosedError', told.overLimit]])
   expect([other.ended, otherEnds, other.got]).toEqual([[], [], ['a1']])
