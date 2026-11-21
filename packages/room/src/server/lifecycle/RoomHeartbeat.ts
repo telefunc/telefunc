@@ -89,7 +89,7 @@ class RoomHeartbeat {
       if (head !== null) {
         const { id, inc } = this.incarnation
         await Promise.all([
-          dropReplacedMetaGenerations(id, inc),
+          getRoomPlane().call((store) => dropReplacedMetaGenerations(store, id, inc)),
           getRoomPlane().call((store) => reapLapsedLeases(store, this.incarnation)),
         ])
         // Each reads what the reap left.

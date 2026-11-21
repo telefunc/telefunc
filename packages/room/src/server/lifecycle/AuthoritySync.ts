@@ -4,8 +4,9 @@ export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 import { assert } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { BackendCall, createDeferred, unrefTimer } from 'telefunc/__internal'
+import { createDeferred, unrefTimer } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import type { RoomHead } from '../../backend/contract.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
@@ -45,7 +46,7 @@ type AuthoritySyncOptions = {
 type Repair = 'control' | 'meta' | 'memberMeta'
 
 /** A roster refresh under way, with its account of writes: the calls that wait on it take its writes into theirs. */
-type Refresh = { call: BackendCall; done: Promise<void> }
+type Refresh = { store: RoomStore; done: Promise<void> }
 
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and what
  *  the control lane covers, which the heartbeat checks. */
@@ -85,17 +86,22 @@ class AuthoritySync {
   }
 
   /** What a new handle reads of a view it shares: nothing while the view is current, else the meta and the roster. The
-   *  roster's refresh, which another caller may have started, is work of `call`'s: its writes count as `call`'s. */
-  async catchUp(call: BackendCall): Promise<void> {
+   *  roster's refresh, which another caller may have started, is work of the call `store` is of: its writes count as
+   *  that call's. */
+  async catchUp(store: RoomStore): Promise<void> {
     if (this.model.closed || this.current()) return
     if (!(await this.reconcileMeta())) return
     const refresh = this.refresh()
-    await call.join(refresh.call, refresh.done)
+    await store.join(refresh.store, refresh.done)
   }
 
   async reconcileAuthority(): Promise<void> {
     if (this.model.closed || !(await this.reconcileMeta())) return
-    await Promise.all([dropReplacedMetaGenerations(this.incarnation.id, this.incarnation.inc), this.refreshMembers()])
+    const { id, inc } = this.incarnation
+    await Promise.all([
+      getRoomPlane().call((store) => dropReplacedMetaGenerations(store, id, inc)),
+      this.refreshMembers(),
+    ])
   }
 
   /** The heartbeat's check, after the meta and the lapsed leases: the roster read again only once the control lane
@@ -200,20 +206,20 @@ class AuthoritySync {
 
   private refresh(): Refresh {
     if (this.pendingRefresh === null) {
-      let account: BackendCall | undefined
-      const done = BackendCall.run((call) => {
-        account = call
-        return this.refreshOnce(call)
+      let opened: RoomStore | undefined
+      const done = getRoomPlane().call((store) => {
+        opened = store
+        return this.refreshOnce(store)
       })
-      assert(account !== undefined) // `run()` hands its work the account before it awaits anything
-      this.pendingRefresh = { call: account, done }
+      assert(opened !== undefined) // `call()` hands its work the store before it awaits anything
+      this.pendingRefresh = { store: opened, done }
     }
     return this.pendingRefresh
   }
 
-  private async refreshOnce(call: BackendCall): Promise<void> {
+  private async refreshOnce(store: RoomStore): Promise<void> {
     try {
-      await this.runMemberRefresh(call)
+      await this.runMemberRefresh(store)
     } finally {
       this.pendingRefresh = null
     }
@@ -280,13 +286,12 @@ class AuthoritySync {
 
   /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. It covers
    *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
-  private async runMemberRefresh(call: BackendCall): Promise<void> {
+  private async runMemberRefresh(store: RoomStore): Promise<void> {
     if (this.model.closed) return
     const mark = await this.controlMark()
     // The events grow while the roster is read and reconciled.
     const events = this.model.recordMembership()
     try {
-      const store = getRoomPlane().storeOf(call)
       const roster = await reapAndReadRoster(store, this.incarnation)
       const listed = new Set(roster.members.map((member) => member.id))
       const unlisted = [...this.model.memberIds()].filter((id) => !listed.has(id))

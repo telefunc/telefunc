@@ -7,7 +7,8 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { hostLocal, type BackendCall, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
+import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
+import type { RoomStore } from '../backend/RoomStore.js'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
@@ -183,9 +184,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   /** A new handle on a view other handles share, which catches up with the authority first unless it is current: its
-   *  reads and writes, and those of a refresh it waits on, are steps of `call`. */
-  async sharedHandle(call: BackendCall): Promise<ServerRoom> {
-    await call.read(() => this.authority.catchUp(call))
+   *  reads and writes, and those of a refresh it waits on, are steps of the call `store` is of. */
+  async sharedHandle(store: RoomStore): Promise<ServerRoom> {
+    await this.authority.catchUp(store)
     this.staleReads.caughtUp()
     return this.handle()
   }

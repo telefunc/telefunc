@@ -13,16 +13,20 @@
 //   was then refused: it may have run, as the reap wrote.
 // - A call whose reap of a lapsed lease is refused while it still removes the lease's views rejects only once those
 //   removals ended: the store doesn't change after the rejection.
+// - `Room.removeParticipant()` whose room closed after it planned the leave: the leave reaches the store, which
+//   changes nothing, and the call resolves, as the close ended the participant.
 import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual, promisify } from 'node:util'
 import { Redis } from 'ioredis'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
+import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
+import { RedisConnection } from './RedisConnection.js'
 
 /** Every key of Telefunc's in the store, with its value as DUMP gives it. */
 async function snapshot(admin: Redis): Promise<Map<string, Buffer | null>> {
@@ -233,25 +237,44 @@ describe.runIf(runs)('a Room call refused after it reaped a lapsed lease', () =>
   }
 })
 
-/** A participant that another server joined to room `id` under its own lease, which it then left behind, as a server
- *  that stopped does: the participant's id. The server is a process of its own, on the built packages. */
-async function joinedByAnotherServer(host: string, id: string): Promise<string> {
+/** What `work` prints, run on room `id` by another server: a process of its own, on the built packages, which then
+ *  stops. */
+async function atAnotherServer(host: string, id: string, work: string): Promise<string[]> {
   const server = `
 import { Redis } from 'ioredis'
 import { Room } from '@telefunc/room'
 import { installRedis } from '@telefunc/redis'
 installRedis(new Redis({ host: process.argv[1], username: 'telefunc', password: 'pw' }))
-const participant = await Room.join(process.argv[2])
-console.log(participant.id)
+const id = process.argv[2]
+${work}
 process.exit(0)
 `
   const cwd = fileURLToPath(new URL('..', import.meta.url))
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', server, host, id], {
     cwd,
   })
-  const participant = stdout.trim().split('\n').at(-1)
-  if (participant === undefined || participant === '') throw new Error(`the other server joined no one: ${stdout}`)
+  return stdout.trim().split('\n')
+}
+
+/** A participant that another server joined to room `id` under its own lease, which it then left behind, as a server
+ *  that stopped does: the participant's id. */
+async function joinedByAnotherServer(host: string, id: string): Promise<string> {
+  const printed = await atAnotherServer(host, id, 'console.log((await Room.join(id)).id)')
+  const participant = printed.at(-1)
+  if (participant === undefined || participant === '') throw new Error(`the other server joined no one: ${printed}`)
   return participant
+}
+
+/** The ids `Room.getParticipants()` of room `id` lists at another server. */
+async function listedByAnotherServer(host: string, id: string): Promise<string[]> {
+  const printed = await atAnotherServer(
+    host,
+    id,
+    "console.log('listed:' + (await Room.getParticipants(id)).map((participant) => participant.id).join(','))",
+  )
+  const listed = printed.find((line) => line.startsWith('listed:'))
+  if (listed === undefined) throw new Error(`the other server listed nothing: ${printed}`)
+  return listed.slice('listed:'.length).split(',').filter(Boolean)
 }
 
 describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up reaped a lapsed lease', () => {
@@ -352,8 +375,17 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       const [seconds, micros] = await admin.time()
       const claimMs =
         Number(/"until":(\d+)/.exec(claim)?.[1]) - (Number(seconds) * 1000 + Math.floor(Number(micros) / 1000))
-      // Once the store allows the read and the claim lapses, two reapers come at once: one removes the rest.
+      // What the apps see while the claim lasts, once the store allows the read: another server's list of the room's
+      // participants, `Room.list()`'s count, and the roster of a member that joins then.
       await admin.call('ACL', 'SETUSER', 'telefunc', '+hkeys')
+      const anotherServerLists = (await listedByAnotherServer(String(admin.options.host), room.id)).includes(member)
+      const listedCount = (await Room.list({ prefix: room.id })).find((info) => info.id === room.id)?.count
+      const watcher = await room.join()
+      const rosterLists = room.getParticipants().some(({ id }) => id === member)
+      await watcher.leave()
+      const whileClaimed = { anotherServerLists, listedCount, rosterLists }
+      console.log(`${store.name}: while the failed call's claim lasts: ${JSON.stringify(whileClaimed)}`)
+      // Once the claim lapses, two reapers come at once: one removes the rest.
       await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
       await Promise.all([Room.getParticipants(room.id), Room.getParticipants(room.id)])
       const afterNextReap = {
@@ -380,6 +412,47 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
         someLeftAtRejection: true,
         claimedForALease: true,
         afterNextReap: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: String(Number(held) - 1) },
+      })
+    }, 60_000)
+  }
+})
+
+describe.runIf(runs)('Room.removeParticipant() whose room closed after it planned the leave', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: the leave reaches the store, which changes nothing, and the call resolves`, async () => {
+      const admin = await reached(store)
+      const room = await Room.create(`closed-${i}`)
+      const member = await joinedByAnotherServer(String(admin.options.host), room.id)
+      const run = RedisConnection.prototype.run
+      let armed = true
+      let closed: Map<string, Buffer | null> | undefined
+      let leaveAnswer: unknown
+      vi.spyOn(RedisConnection.prototype, 'run').mockImplementation(async function <Input, Output>(
+        this: RedisConnection,
+        command: RedisCommand<Input, Output>,
+        input: Input,
+      ): Promise<Output> {
+        if (!armed || command.name !== REDIS_COMMANDS.operation.name) return await run.bind(this)(command, input)
+        armed = false
+        // The leave is planned: the room closes before its script runs.
+        await Room.close(room.id)
+        closed = await snapshot(admin)
+        const answer = await run.bind(this)(command, input)
+        leaveAnswer = answer
+        return answer
+      })
+      const removed = await Room.removeParticipant(room.id, { id: member }).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      vi.restoreAllMocks()
+      const unchanged = closed !== undefined && isDeepStrictEqual(await snapshot(admin), closed)
+      admin.disconnect()
+
+      expect({ removed, leaveAnswer, unchanged }).toMatchObject({
+        removed: 'resolved',
+        leaveAnswer: { kind: 'stale-incarnation' },
+        unchanged: true,
       })
     }, 60_000)
   }

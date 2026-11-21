@@ -95,6 +95,13 @@ class RoomStore {
     return this.write(() => this.driver.directoryDelete(roomId, incTag))
   }
 
+  /** The value of `work`, which runs on the store `shared` and may be shared with other calls, once it settled: a
+   *  write of `shared`'s call counts as this call's, and this call's close waits for `work`. */
+  async join<T>(shared: RoomStore, work: Promise<T>): Promise<T> {
+    if (this.account === null || shared.account === null) return await work
+    return await this.account.join(shared.account, work)
+  }
+
   private write<T>(step: () => Promise<T>): Promise<T> {
     return this.account === null ? step() : this.account.write(step)
   }

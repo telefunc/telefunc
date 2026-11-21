@@ -3,10 +3,10 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
-import { BackendCall } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomHead } from '../../backend/contract.js'
 import type { RoomPlane } from '../../backend/RoomPlane.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import { Slice } from '../../shared/Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
@@ -19,30 +19,24 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
  *  lease from now. */
 async function listRoom(
-  plane: RoomPlane,
+  store: RoomStore,
   { id, inc, hold }: RoomIncarnation,
   expiresAt: number | undefined,
 ): Promise<void> {
-  if (hold === null) return await plane.driver.directoryPut(id, inc, Infinity, 0)
-  if (expiresAt === undefined) return await plane.driver.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
-  await plane.driver.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
+  if (hold === null) return await store.directoryPut(id, inc, Infinity, 0)
+  if (expiresAt === undefined) return await store.directoryPut(id, inc, 0, ROOM_LEASE_TTL_MS)
+  await store.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
- *  tombstone lapsed), so it is dropped with its listing. Its writes are steps of `call`, which a listing that needs no
- *  repair doesn't mark as having written. */
-async function repairRoomIndex(
-  plane: RoomPlane,
-  id: string,
-  listedInc: string,
-  head: RoomHead | null,
-  call: BackendCall,
-): Promise<void> {
+ *  tombstone lapsed), so it is dropped with its listing. Its writes are steps of the call `store` is of, which a
+ *  listing that needs no repair doesn't mark as having written. */
+async function repairRoomIndex(store: RoomStore, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
   if (head?.currentInc === listedInc) return
-  await call.write(() => plane.driver.dropIncarnation(id, listedInc))
+  await store.dropIncarnation(id, listedInc)
   const live = openConfig(head)
-  if (live) await call.write(() => listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt))
-  else await call.write(() => plane.driver.directoryDelete(id, listedInc))
+  if (live && head) await listRoom(store, { id, inc: live.inc, hold: live.hold }, head.expiresAt)
+  else await store.directoryDelete(id, listedInc)
 }
 
 const globalObject = getGlobalObject('server/store/directory.ts', {
@@ -70,6 +64,6 @@ async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
 
 async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
   const head = await plane.driver.readHead(roomId)
-  if (head?.currentInc !== incTag) await BackendCall.run((call) => repairRoomIndex(plane, roomId, incTag, head, call))
-  else await listRoom(plane, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
+  if (head?.currentInc !== incTag) await plane.call((store) => repairRoomIndex(store, roomId, incTag, head))
+  else await listRoom(plane.direct, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
 }

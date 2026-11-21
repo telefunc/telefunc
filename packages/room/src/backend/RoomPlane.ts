@@ -78,11 +78,6 @@ class RoomPlane {
     return BackendCall.run((account) => work(new RoomStore(this.driver, this.reads, account)))
   }
 
-  /** The store on `account`, for code that still holds an account rather than a store. */
-  storeOf(account: BackendCall): RoomStore {
-    return new RoomStore(this.driver, this.reads, account)
-  }
-
   compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
     return this.direct.compareExchangeHead(roomId, expected, next)
   }

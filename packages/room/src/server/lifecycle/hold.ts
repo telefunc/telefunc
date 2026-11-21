@@ -174,5 +174,5 @@ async function closeIfUnheld(room: RoomIncarnation): Promise<void> {
   const record = await readHoldRecord(room)
   if (record?.closesIn === undefined) return // held again
   if (record.closesIn > 0) return scheduleClose(room, record.closesIn)
-  await closeIncarnation(room.id, room.inc)
+  await getRoomPlane().call((store) => closeIncarnation(store, room.id, room.inc))
 }

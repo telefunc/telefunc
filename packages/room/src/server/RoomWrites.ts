@@ -6,7 +6,7 @@ import type { CommitAccepted } from '../backend/contract.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { RoomStore } from '../backend/RoomStore.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { BackendCall, type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
+import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
 import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -262,8 +262,7 @@ class RoomWrites {
   ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     // One account of the call's writes: the reap that finding the recipient may do, and the send.
-    return await BackendCall.run(async (call) => {
-      const store = getRoomPlane().storeOf(call)
+    return await getRoomPlane().call(async (store) => {
       const target = await this.resolveMember(to, store)
       if (!target) throw participantGoneError(to)
       const sender = this.memberSender(from)
