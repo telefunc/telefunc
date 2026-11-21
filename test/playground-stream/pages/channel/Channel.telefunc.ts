@@ -854,11 +854,11 @@ async function onChannelTextBurst() {
   return { channel: ch.client, channelId: id }
 }
 
-/** As it opens, sends 500 small messages without awaiting them. */
+/** As it opens, sends 2,000 small messages without awaiting them. */
 async function onChannelOpenBurst() {
   const ch = new Channel<never, number>()
   ch.onOpen(() => {
-    for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
+    for (let seq = 0; seq < 2000; seq++) void ch.send(seq).catch(() => {})
   })
   return { channel: ch.client }
 }
