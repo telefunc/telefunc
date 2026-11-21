@@ -1,4 +1,4 @@
-export { END_CAUSE, endCauseOf }
+export { END_CAUSE, endCauseOf, refusalCauseOf }
 export type { EndCause, FrameRefusalCause, RefusalCause, SessionCause }
 
 import { assert } from '../../utils/assert.js'
@@ -73,8 +73,12 @@ type FrameRefusalCause = 'frameOverLimit' | 'frameRefused'
 type SessionCause = 'unreadable' | 'receiveBudget'
 /** The causes a `frames` refusal names. */
 type RefusalCause = FrameRefusalCause | SessionCause
+/** What a `frames` refusal's cause ends: the channel it names, or the page's session, naming none. */
+type RefusalScope = 'channel' | 'session'
 
-const causeOfCode: ReadonlyMap<number, EndCause> = new Map(Object.values(END_CAUSE).map((cause) => [cause.code, cause]))
+const causeOfCode: ReadonlyMap<number, (typeof END_CAUSE)[keyof typeof END_CAUSE]> = new Map(
+  Object.values(END_CAUSE).map((cause) => [cause.code, cause]),
+)
 // Two causes on one code would end a channel with one cause's error on one end and the other's on the other.
 assert(causeOfCode.size === Object.keys(END_CAUSE).length)
 
@@ -83,13 +87,21 @@ function endCauseOf(code: number): EndCause | undefined {
   return causeOfCode.get(code)
 }
 
+/** The cause of a `frames` refusal `code` names, with its scope; undefined for a code no refusal names. */
+function refusalCauseOf(code: number) {
+  const cause = causeOfCode.get(code)
+  return cause !== undefined && 'scope' in cause ? cause : undefined
+}
+
 /** A frame the server can't take for `reason`, the sentence its refusal carries. */
 function frameCause<Code extends number>(code: Code, reason: string) {
-  return { code, reason, error: () => framesRefusedError(reason) }
+  const scope: RefusalScope = 'channel'
+  return { code, reason, scope, error: () => framesRefusedError(reason) }
 }
 
 /** The page's connection ends for `reason`, the sentence its refusal carries: of the connection, so that it is true of
  *  every channel that ends with it, the ones that sent nothing wrong too. */
 function sessionCause<Code extends number>(code: Code, errorClass: new (message: string) => Error, reason: string) {
-  return { code, reason, error: () => new errorClass(`Channel closed: the page's connection ended: ${reason}`) }
+  const scope: RefusalScope = 'session'
+  return { code, reason, scope, error: () => new errorClass(`Channel closed: the page's connection ended: ${reason}`) }
 }

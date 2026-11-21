@@ -3,13 +3,19 @@
 
 import { expect, test } from 'vitest'
 import { END_CAUSE, type RefusalCause } from './channel/endCause.js'
-import { endOfWire } from './channel/client/readAnswer.js'
-import { REFUSAL_MEDIA_TYPE, frameRefusal, wireEnd } from './refusal.js'
+import { endOfWire, readAnswer } from './channel/client/readAnswer.js'
+import { REFUSAL_MEDIA_TYPE, frameRefusal, refusalContentType, wireEnd } from './refusal.js'
 
-/** Every cause a refusal names, and the greatest channel index a RECONCILE may give (wire/payloads.ts, a u16). */
-const causes: RefusalCause[] = ['frameOverLimit', 'frameRefused', 'unreadable', 'receiveBudget']
-const channels = [undefined, 0xffff]
-const rows = causes.flatMap((cause) => channels.map((channel): [RefusalCause, number | undefined] => [cause, channel]))
+/** Every end the server writes: a frame's cause naming its channel, the least and the greatest index a RECONCILE may
+ *  give (wire/payloads.ts, a u16), and a session's cause naming none. */
+const rows: [RefusalCause, number | undefined][] = [
+  ['frameOverLimit', 0],
+  ['frameOverLimit', 0xffff],
+  ['frameRefused', 0],
+  ['frameRefused', 0xffff],
+  ['unreadable', undefined],
+  ['receiveBudget', undefined],
+]
 
 test.each(rows)(
   'the end of %s, naming channel %s, fits a WebSocket close reason (123 bytes of UTF-8), and the page reads it whole',
@@ -41,3 +47,49 @@ test.each([
 ])('a last word %s is no end the page reads: the wire ends as a loss', (_case, told) => {
   expect(endOfWire(told)).toBeUndefined()
 })
+
+/** What the server never writes, after `kind=frames; `: a scope its cause isn't written with, a cause no refusal names,
+ *  a channel empty, valueless or named twice, a quote left open (the review of b06824dee, R2.1). */
+const unwritten = [
+  'cause=6',
+  'channel=3; cause=8',
+  'cause=1',
+  'channel=; cause=8',
+  'channel; cause=8',
+  'channel=3; cause="6',
+  'channel=3; channel=4; cause=6',
+]
+
+test.each(unwritten)("a last word the server's writer never writes (`%s`) is no end the page reads", (suffix) => {
+  expect(endOfWire(`${media}; kind=frames; ${suffix}`)).toBeUndefined()
+})
+
+const answerOf = (contentType: string) =>
+  readAnswer(new Response('refused', { status: 400, headers: { 'Content-Type': contentType } }), 'ok')
+
+test.each(unwritten.map((suffix) => `${media}; kind=frames; ${suffix}; reason="${END_CAUSE.frameRefused.reason}"`))(
+  "an answer's `frames` refusal the server's writer never writes (`%s`) ends no channel: the page reads it as a refusal it doesn't know",
+  (contentType) => {
+    expect(answerOf(contentType).tag).toBe('route')
+  },
+)
+
+test("an answer's `frames` refusal whose reason is another sentence than its cause's still ends the channel it names: the reason is prose, as another deploy may word it", () => {
+  expect(answerOf(`${media}; kind=frames; channel=3; cause=6; reason="Unreadable."`)).toEqual({
+    tag: 'frames',
+    channel: 3,
+    cause: 6,
+  })
+})
+
+test.each(rows)(
+  "the server's own `frames` refusal of %s, naming channel %s, is read from an answer as from a wire's end",
+  (cause, channel) => {
+    const { code } = END_CAUSE[cause]
+    expect(answerOf(refusalContentType(frameRefusal(cause, channel)))).toEqual({
+      tag: 'frames',
+      channel: channel ?? null,
+      cause: code,
+    })
+  },
+)

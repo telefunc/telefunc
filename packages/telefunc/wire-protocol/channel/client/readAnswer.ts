@@ -1,8 +1,8 @@
 export { readAnswer, asksLater, endOfWire, telefuncAnswer, telefuncEndOf }
 export type { HttpAnswer, TelefuncAnswer }
 
-import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
-import { endCauseOf } from '../endCause.js'
+import { REFUSAL_MEDIA_TYPE, type Refusal, refusalContentType, wireEnd } from '../../refusal.js'
+import { refusalCauseOf } from '../endCause.js'
 import type { TransportEnd } from './WireLifecycle.js'
 
 /** What the answer to a request of the page's SSE transport means. */
@@ -32,7 +32,7 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
       ? response.ok
       : response.status === 200 && type?.essence === 'text/event-stream' && response.body !== null
   if (expected) return { tag: 'expected' }
-  if (type?.essence === REFUSAL_MEDIA_TYPE) return readRefusal(response.status, type.parameters)
+  if (type?.essence === REFUSAL_MEDIA_TYPE) return readRefusal(response.status, type)
   if (response.status === 413) {
     return { tag: 'tooLarge', answer: describeAnswer(response), retryAfterMs: retryAfterMsOf(response) }
   }
@@ -66,18 +66,33 @@ function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
 }
 
 /** The end the server decided for a wire, as the wire's own end carries it (a WebSocket's close reason, the event
- *  stream's last event: `refusal.ts`'s `wireEnd`): a `frames` refusal whose cause is one of `END_CAUSE`'s, naming a
- *  channel's index or none. Undefined for anything else, such as a reason cut short, and the wire ends as a loss, which
- *  the server's kept end answers at the page's reopen. */
+ *  stream's last event: `refusal.ts`'s `wireEnd`). Undefined for anything the server doesn't write so, such as a reason
+ *  cut short, and the wire ends as a loss, which the server's kept end answers at the page's reopen. */
 function endOfWire(value: string): TransportEnd | undefined {
-  const type = parseMimeType(value)
-  if (type?.essence !== REFUSAL_MEDIA_TYPE || type.parameters.get('kind') !== 'frames') return undefined
-  const cause = decimalOf(type.parameters.get('cause'))
-  if (cause === null || endCauseOf(cause) === undefined) return undefined
+  const end = writtenEnd(parseMimeType(value), wireEnd)
+  if (end === null) return undefined
+  if (end.channel === undefined) return { sessionEnded: end.cause }
+  return { framesRefused: { channel: end.channel, cause: end.cause } }
+}
+
+/** The channel and the cause of a `frames` refusal, read only from what the server writes: `written`, the carrier's
+ *  writer, writes the end read back the same as it came, and its cause names a channel exactly where it ends one
+ *  (`refusalCauseOf`'s scope). Null for anything else: a channel empty, named twice or of a cause of the session's, a
+ *  quote left open. */
+function writtenEnd(
+  type: MimeType | null,
+  written: (refusal: Refusal) => string,
+): { channel: number | undefined; cause: number } | null {
+  const code = decimalOf(type?.parameters.get('cause'))
+  const cause = code === null ? undefined : refusalCauseOf(code)
+  if (type === null || cause === undefined) return null
   const named = type.parameters.get('channel')
-  if (named === undefined) return { sessionEnded: cause }
-  const channel = indexOf(named)
-  return channel === null ? undefined : { framesRefused: { channel, cause } }
+  const channel = named === undefined ? undefined : indexOf(named)
+  if (channel === null || (channel === undefined) !== (cause.scope === 'session')) return null
+  const reason = type.parameters.get('reason') ?? ''
+  return written({ kind: 'frames', channel, cause: cause.code, reason }) === type.value
+    ? { channel, cause: cause.code }
+    : null
 }
 
 /** Whether a refusal asks the page to come back later rather than refusing what it sent (RFC 9110 sections 15.5.9 and
@@ -88,17 +103,17 @@ function asksLater(status: number): boolean {
 }
 
 /** What Telefunc's own refusal says, by its `kind` (`refusal.ts`). A kind the page doesn't know, or none, ends SSE for
- *  this connection rather than loops, naming the status; so does a `frames` refusal that names no cause. */
-function readRefusal(status: number, parameters: ReadonlyMap<string, string>): HttpAnswer {
-  const kind = parameters.get('kind')
-  const reason = parameters.get('reason') ?? `The server refused the request with ${status}.`
-  const cause = decimalOf(parameters.get('cause'))
+ *  this connection rather than loops, naming the status; so does a `frames` refusal the server doesn't write so
+ *  (`writtenEnd`). */
+function readRefusal(status: number, type: MimeType): HttpAnswer {
+  const kind = type.parameters.get('kind')
+  const reason = type.parameters.get('reason') ?? `The server refused the request with ${status}.`
+  const end = kind === 'frames' ? writtenEnd(type, refusalContentType) : null
   if (kind === 'reload') return { tag: 'otherWireVersion' }
   if (kind === 'retry') return { tag: 'retry', reason }
-  if (kind === 'frames' && cause !== null)
-    return { tag: 'frames', channel: decimalOf(parameters.get('channel')), cause }
+  if (end !== null) return { tag: 'frames', channel: end.channel ?? null, cause: end.cause }
   if (kind === 'route') return { tag: 'route', reason }
-  return { tag: 'route', reason: `${reason} (refused with ${status}, of a kind this page doesn't know)` }
+  return { tag: 'route', reason: `${reason} (refused with ${status}, in words this page can't read)` }
 }
 
 /** A channel's index, a u16 as `wireEnd` writes it; null where `value` isn't one. */
@@ -125,8 +140,8 @@ function mimeTypeOf(response: Response): MimeType | null {
 }
 
 /** `essence`: `type/subtype`, lowercased (`text/event-stream; charset=utf-8` is `text/event-stream`). `parameters`: by
- *  name, lowercased, each the first of its name. */
-type MimeType = { essence: string; parameters: ReadonlyMap<string, string> }
+ *  name, lowercased, each the first of its name. `value`: the type as it came. */
+type MimeType = { essence: string; parameters: ReadonlyMap<string, string>; value: string }
 
 /** A MIME type, as MIME Sniffing parses one (https://mimesniff.spec.whatwg.org/#parse-a-mime-type); null where its
  *  type or subtype is empty or holds more than HTTP token code points. A parameter that doesn't parse is skipped, never
@@ -165,7 +180,7 @@ function parseMimeType(value: string): MimeType | null {
     i++
     if (/^[-!#$%&'*+.^_`|~0-9A-Za-z]+$/.test(name) && !parameters.has(name)) parameters.set(name, parameterValue)
   }
-  return { essence: `${match[1]}/${match[2]}`.toLowerCase(), parameters }
+  return { essence: `${match[1]}/${match[2]}`.toLowerCase(), parameters, value }
 }
 
 /** A header's values: split at each comma outside a quoted string, each without the spaces and tabs around it
