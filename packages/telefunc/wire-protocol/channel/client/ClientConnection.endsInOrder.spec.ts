@@ -43,3 +43,42 @@ test("on a WebSocket, a channel's ERROR read before the session's 4002 close: it
   await advance(1_000)
   expect([endsOf(refused, other), FakeWebSocket.made.length]).toEqual([[[told.refused], [told.unreadable]], 1])
 })
+
+// The server drops a channel's data queued ahead of its ERROR when the session ends: the ERROR can come with a gap
+// before its seq. The page ends the channel with the ERROR's cause as it reads it, holding it for nothing.
+
+test("on SSE, a channel's ERROR read with a gap before its seq ends that channel with its cause at once, and the session's END leaves it", async () => {
+  serveSse()
+  const refused = openChannel(['sse'])
+  const other = openChannel(['sse'])
+  await advance(500)
+  const stream = world.streams.at(-1)
+  stream?.frame(encode.error(0, ERROR_REASON.FRAME_REFUSED, 3))
+  await advance(100)
+  const atOnce = endsOf(refused, other)
+  stream?.frame(encode.end(sessionEnd))
+  stream?.end()
+  await advance(1_000)
+  expect([atOnce, endsOf(refused, other), world.opens]).toEqual([
+    [[told.refused], []],
+    [[told.refused], [told.unreadable]],
+    1,
+  ])
+})
+
+test("on a WebSocket, a channel's ERROR read with a gap before its seq ends that channel with its cause at once, and the session's 4002 close leaves it", async () => {
+  const refused = openChannel(['ws'])
+  const other = openChannel(['ws'])
+  await advance(500)
+  const socket = FakeWebSocket.open
+  socket?.deliver(encode.error(0, ERROR_REASON.FRAME_REFUSED, 3))
+  await advance(100)
+  const atOnce = endsOf(refused, other)
+  socket?.refuse(sessionEnd)
+  await advance(1_000)
+  expect([atOnce, endsOf(refused, other), FakeWebSocket.made.length]).toEqual([
+    [[told.refused], []],
+    [[told.refused], [told.unreadable]],
+    1,
+  ])
+})
