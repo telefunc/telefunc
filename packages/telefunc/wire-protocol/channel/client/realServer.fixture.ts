@@ -21,7 +21,7 @@ export {
 }
 
 import { afterAll, afterEach, beforeAll } from 'vitest'
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { Telefunc } from '../../../serve/node.js'
 import { config as serverConfig, type ChannelConfigUser } from '../../../node/server/serverConfig.js'
 import { base64urlToUint8Array } from '../../wire/base64url.js'
@@ -60,6 +60,11 @@ const world: {
    *  `status` is its own answer's, once it came. */
   hooked: { again: () => Promise<Response>; status: number | null }[]
   sockets: number
+  /** The server's reads of a request's body not yet settled, over every request. */
+  pendingBodyReads: number
+  /** Each request whose body streamed (chunked), as its connection closed: the status the server had written, null
+   *  where it had written none. */
+  closedStreaming: (number | null)[]
   /** What the page's WebSockets send in place of each message, where set. */
   wsSends: ((message: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>[]) | null
   telefuncUrl: string
@@ -70,6 +75,8 @@ const world: {
   started: [],
   hooked: [],
   sockets: 0,
+  pendingBodyReads: 0,
+  closedStreaming: [],
   wsSends: null,
   telefuncUrl: '',
 }
@@ -201,7 +208,13 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
     globalThis.fetch = proxyFetch
     globalThis.WebSocket = CountedWebSocket
     const telefunc = new Telefunc()
-    server = createServer((req, res) => void telefunc.serve({ req, res }))
+    server = createServer((req, res) => {
+      countBodyReads(req)
+      if (req.headers['transfer-encoding'] === 'chunked') {
+        res.on('close', () => void world.closedStreaming.push(res.headersSent ? res.statusCode : null))
+      }
+      void telefunc.serve({ req, res })
+    })
     telefunc.installWebSocket(server)
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address()
@@ -216,6 +229,7 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
       started: [],
       hooked: [],
       sockets: 0,
+      closedStreaming: [],
       wsSends: null,
     })
   })
@@ -225,6 +239,25 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
     server.closeAllConnections()
     server.close()
   })
+}
+
+/** Counts the server's reads of `req`'s body as they wait (`world.pendingBodyReads`): the body is read through its
+ *  async iterator, by `next()` alone (`BodyReader`). */
+function countBodyReads(req: IncomingMessage): void {
+  const iterate = req[Symbol.asyncIterator].bind(req)
+  req[Symbol.asyncIterator] = () => {
+    const reads = iterate()
+    return {
+      next: () => {
+        world.pendingBodyReads++
+        return reads.next().finally(() => void world.pendingBodyReads--)
+      },
+      [Symbol.asyncIterator]() {
+        return this
+      },
+      [Symbol.asyncDispose]: () => reads[Symbol.asyncDispose](),
+    }
+  }
 }
 
 /** Resolves once `done()` holds, checked every 10 ms; rejects after `ms`. */

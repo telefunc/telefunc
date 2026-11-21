@@ -60,9 +60,6 @@ type SseWire = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Resolved as the wire closes: a POST whose body the page keeps open is answered then, not at its next frame. */
-  ended: Promise<void>
-  resolveEnded: () => void
   /** Dispatches in flight for this wire. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
@@ -322,8 +319,10 @@ class SseServerTransport {
       if (fault === null) throw err
       const wire = this.mux.getWireByConnId<SseWire>(connId)
       if (!wire) return refuse(this.answerFor(connId))
-      // The mux decides what the fault ends; the request is answered as any request that meets that end is.
+      // The mux decides what the fault ends; the request is answered as any request that meets that end is, once the
+      // page ended its body, read off from the frame the fault stopped at.
       this.mux.endFault(wire, fault)
+      await reader.discardRest()
       return closedUnder(wire)
     }
   }
@@ -346,7 +345,6 @@ class SseServerTransport {
     const events = new EventStream({ useNodeStream, onCancel })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
-    const { promise: ended, resolve: resolveEnded } = createDeferred()
     const wire: SseWire = {
       connId,
       events,
@@ -354,8 +352,6 @@ class SseServerTransport {
       sessionId: null,
       ready,
       resolveReady,
-      ended,
-      resolveEnded,
       pendingDispatches: new Set(),
       refused: null,
     }
@@ -387,19 +383,20 @@ class SseServerTransport {
     this.sendNow(wire, encode.streamRequestOpenAck())
     // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
     await wire.ready
-    if (wire.closed) return closedUnder(wire)
-    await untilReadOrEnded(wire, this.readUpload(wire, reader))
-    // Its wire closed under it, with a frame it read left unrun: refused, as a batch POST that met the close is.
+    await this.readUpload(wire, reader)
+    // Its wire closed under it: refused, as a batch POST that met the close is, once the page ended its body.
     return wire.closed ? closedUnder(wire) : okResponse()
   }
 
-  /** Dispatches the upload's frames as they come, to the body's end or the first frame after the wire's. */
+  /** Dispatches the upload's frames as they come, to the body's end; after its wire's end, what the page writes is read
+   *  off and not run. */
   private async readUpload(wire: SseWire, reader: BodyReader): Promise<void> {
     try {
       while (true) {
+        if (wire.closed) return await reader.discardRest()
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
-        if (!raw || wire.closed) break
-        this.dispatchAndReport(wire, raw)
+        if (!raw) return
+        if (!wire.closed) this.dispatchAndReport(wire, raw)
       }
     } finally {
       await this.settlePendingDispatches(wire)
@@ -432,7 +429,7 @@ class SseServerTransport {
     })
     wire.pendingDispatches.add(drain)
     try {
-      await untilReadOrEnded(wire, drain)
+      await drain
     } finally {
       wire.pendingDispatches.delete(drain)
     }
@@ -482,15 +479,17 @@ class SseServerTransport {
   }
 
   /** Reads `reader`'s frames and dispatches each with `dispatchWireMessage`; a RECONCILE's outcome goes to
-   *  `onReconciled` before the next frame is read. */
+   *  `onReconciled` before the next frame is read. After the wire's end, what the page writes is read off and not run. */
   private async drain(
     wire: SseWire,
     reader: BodyReader,
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {
+      if (wire.closed) return reader.discardRest()
       const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
-      if (!raw || wire.closed) break
+      if (!raw) return
+      if (wire.closed) continue
       const outcome = await this.mux.dispatchWireMessage(wire, raw)
       if (outcome !== null) await onReconciled(outcome)
     }
@@ -576,7 +575,6 @@ class SseServerTransport {
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
-    wire.resolveEnded()
     this.mux.onWireClosed(wire, how)
     wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))
   }
@@ -600,14 +598,6 @@ function faultOf(err: unknown): Fault | null {
   return err instanceof OversizeFrameError
     ? { scope: 'channel', ix: channelOf(err.head), cause: 'frameOverLimit', wire: 'loss' }
     : null
-}
-
-/** Waits for a POST's `read` of its body, or for its wire's end where that comes first: a body the page keeps open and
- *  idle would park the answer until the page writes again, and the read then runs nothing more. A read that fails after
- *  the answer is reported as any dispatch is. */
-async function untilReadOrEnded(wire: SseWire, read: Promise<void>): Promise<void> {
-  await Promise.race([read, wire.ended])
-  if (wire.closed) void read.catch(reportDispatchBug)
 }
 
 function reportDispatchBug(err: unknown): void {

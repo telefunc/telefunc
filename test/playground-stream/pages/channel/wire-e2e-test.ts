@@ -1,4 +1,4 @@
-export { testWire, testWireSlowPing, testWireShortReconnect }
+export { testWire, testWireSlowPing, testWireShortReconnect, testUploadSessionEnd }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
@@ -21,8 +21,10 @@ import {
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
+  sleep,
 } from '../../e2e-utils'
-import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { cardOf } from './upload-refusal-e2e-test'
+import { sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
@@ -645,5 +647,122 @@ function testWireShortReconnect() {
     // Past the 2 s the server waits for the page.
     await new Promise((resolve) => setTimeout(resolve, 3_000))
     await expectServerRuns()
+  })
+}
+
+/** What the page's upload and event stream did once the frame went: when each settled, and how, in ms from the frame. */
+type UploadEnd = {
+  sentAt: number | null
+  upload: { at: number; how: string } | null
+  stream: { at: number; how: string } | null
+}
+declare global {
+  interface Window {
+    uploadEnd?: UploadEnd
+    sendUnreadableOnUpload?: () => boolean
+  }
+}
+
+/** For `addInitScript`: `window.sendUnreadableOnUpload()` writes a frame of a tag no version has on the page's newest
+ *  streaming upload (packages/telefunc/wire-protocol/wire/tags.ts), after its u32 length; `window.uploadEnd` says how
+ *  the upload and the event stream ended after it. */
+function watchUploadEnd() {
+  const seen: UploadEnd = { sentAt: null, upload: null, stream: null }
+  window.uploadEnd = seen
+  const at = () => Math.round(performance.now() - (seen.sentAt ?? performance.now()))
+  let upload: TransformStreamDefaultController<Uint8Array> | null = null
+  const fetchPage = window.fetch
+  window.fetch = (input, init) => {
+    const body = init?.body
+    if (body instanceof ReadableStream) {
+      const tap = new TransformStream<Uint8Array, Uint8Array>({ start: (controller) => void (upload = controller) })
+      return fetchPage(input, { ...init, body: body.pipeThrough(tap) }).then(
+        (response) => {
+          if (seen.sentAt !== null) seen.upload = { at: at(), how: `answered ${response.status}` }
+          return response
+        },
+        (err: unknown) => {
+          if (seen.sentAt !== null) seen.upload = { at: at(), how: `failed ${String(err)}` }
+          throw err
+        },
+      )
+    }
+    if (new Headers(init?.headers).get('accept') !== 'text/event-stream') return fetchPage(input, init)
+    return fetchPage(input, init).then((response) => {
+      if (response.body === null) return response
+      const reader = response.body.getReader()
+      const tracked = new ReadableStream<Uint8Array>({
+        pull: (controller) =>
+          reader.read().then(
+            ({ done, value }) => {
+              if (!done) return controller.enqueue(value)
+              if (seen.sentAt !== null) seen.stream = { at: at(), how: 'ended' }
+              controller.close()
+            },
+            (err: unknown) => {
+              if (seen.sentAt !== null) seen.stream = { at: at(), how: `failed ${String(err)}` }
+              controller.error(err)
+            },
+          ),
+        cancel: (reason) => {
+          if (seen.sentAt !== null) seen.stream = { at: at(), how: 'cancelled by the page' }
+          return reader.cancel(reason)
+        },
+      })
+      return new Response(tracked, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    })
+  }
+  window.sendUnreadableOnUpload = () => {
+    if (upload === null) return false
+    seen.sentAt = performance.now()
+    upload.enqueue(new Uint8Array([0, 0, 0, 3, 0x0f, 0, 0]))
+    return true
+  }
+}
+
+/** Docker lanes on SSE only: there the browser reaches the server over HTTP/2, the only way Chromium streams an upload. */
+function testUploadSessionEnd() {
+  test("channel: over HTTP/2, a session the server ends while the page's streaming upload is open and idle reaches every channel with its cause by the event stream's last event; the upload fails no fetch before it, and the page opens nothing more", async () => {
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('no browser')
+    // A page of its own: its fetch stays wrapped for as long as it lives.
+    const context = await browser.newContext({ ignoreHTTPSErrors: true })
+    try {
+      const own = await context.newPage()
+      await own.addInitScript(watchUploadEnd)
+      const requests: string[] = []
+      let counting = false
+      own.on(
+        'request',
+        (request) => void (counting && requests.push(`${request.method()} ${new URL(request.url()).pathname}`)),
+      )
+      await navigate(`${getServerUrl()}/channel`, undefined, own)
+      await own.click('#wire-upload-refused-open')
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.close).toBe('open')
+      })
+      // The upload idle: the page writes nothing on it meanwhile.
+      await sleep(1_000)
+      counting = true
+      expect(await own.evaluate(() => window.sendUnreadableOnUpload?.() ?? false)).toBe(true)
+      await autoRetry(async () => {
+        const card = await cardOf(own)
+        expect([card?.refused.close, card?.kept.close]).deep.equal([sessionEndedByUnreadable, sessionEndedByUnreadable])
+      })
+      await sleep(1_000)
+      const seen = await own.evaluate(() => window.uploadEnd)
+      if (!seen?.stream) throw new Error('the event stream did not end')
+      // The upload settles, where it does, no sooner than the stream's end, and not as a failed fetch.
+      expect(seen.upload === null || (seen.upload.at >= seen.stream.at && !seen.upload.how.includes('TypeError'))).toBe(
+        true,
+      )
+      expect(requests).deep.equal([])
+    } finally {
+      await context.close()
+    }
   })
 }

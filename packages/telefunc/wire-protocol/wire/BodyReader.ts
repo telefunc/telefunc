@@ -87,6 +87,13 @@ class BodyReader {
     return this.readExact(length)
   }
 
+  /** Reads the rest of the body and drops it, a chunk at a time, to its end or its client's leaving. */
+  async discardRest(): Promise<void> {
+    this.buffer = EMPTY
+    let chunk = await this.pullChunk()
+    while (chunk !== null) chunk = await this.pullChunk()
+  }
+
   /** Register a file's size (called during deserialization). */
   registerFile(index: number, size: number) {
     this.fileSizes.set(index, size)

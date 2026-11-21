@@ -224,7 +224,7 @@ test("a channel's frame the server refuses is refused `frames`, naming the chann
   await cancel(opened)
 })
 
-test('a streaming upload whose wire closes under it is answered `retry` at the frame it reads after the close, which is not dispatched, without reading the rest of its body', async () => {
+test('a streaming upload whose wire closes under it is answered `retry` once the page ends its body, and the frame it reads after the close is not dispatched', async () => {
   const { connId, opened, channel } = await openWire()
   const got: unknown[] = []
   channel.listen((message) => void got.push(message))
@@ -250,13 +250,16 @@ test('a streaming upload whose wire closes under it is answered `retry` at the f
   const text = encode.text(0, JSON.stringify('after the close'), 1)
   controller.enqueue(encodeU32(text.byteLength))
   controller.enqueue(text)
-  // The body stays open: the answer comes without its end.
-  const answered = await Promise.race([answer, new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000))])
+  // While the body stays open, nothing answers it; the answer comes with its end.
+  const whileOpen = await Promise.race([answer, new Promise<null>((resolve) => setTimeout(() => resolve(null), 300))])
   controller.close()
-  if (answered === null) throw new Error('no answer while the body was open')
-  expect(answered.statusCode).toBe(400)
-  expect(answered.contentType).toMatch(refusal('retry'))
-  expect(got).toEqual([])
+  const answered = await answer
+  expect([whileOpen, answered.statusCode, answered.contentType, got]).toEqual([
+    null,
+    400,
+    expect.stringMatching(refusal('retry')),
+    [],
+  ])
 })
 
 test("a body whose source fails with Telefunc's own protocol error is the server's bug: the request throws, and the session's channels live on", async () => {
@@ -280,7 +283,7 @@ test.each([
   ['the streaming upload', (connId: string) => encodeSseRequestMetadata({ connId, streamRequest: true })],
   ['a batch POST whose body streams', (connId: string) => encodeSseRequestMetadata({ connId })],
 ])(
-  'a session the server ends under %s that stays open and idle is answered at once, `frames` naming no channel, with no write of the page',
+  "a session the server ends under %s that stays open and idle is answered once the page ends its body, after the event stream's last event, `frames` naming no channel; what the page writes meanwhile is read and not run",
   async (_request, metadata) => {
     const { connId, opened, channel } = await openWire()
     const idle = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
@@ -302,10 +305,16 @@ test.each([
     void answer.then(() => void (answered = true))
     const controller = await idle.promise
     await channel.closed
-    await new Promise<void>((resolve) => setImmediate(resolve))
-    const answeredIdle = answered
+    const last = (await framesOfStream(opened)).at(-1)?.tag
+    const answeredOpen = answered
+    // The page ends its body on the last event; a frame it wrote first is read off, not run.
+    controller.enqueue(encodeU32(serverOnly.byteLength))
+    controller.enqueue(serverOnly)
     controller.close()
-    expect([answeredIdle, (await answer).contentType]).toEqual([true, expect.stringMatching(refusal('frames', '', 8))])
-    await cancel(opened)
+    expect([last, answeredOpen, (await answer).contentType]).toEqual([
+      TAG.END,
+      false,
+      expect.stringMatching(refusal('frames', '', 8)),
+    ])
   },
 )

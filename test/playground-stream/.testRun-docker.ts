@@ -19,6 +19,7 @@ import { testRedisReconnect } from './pages/publish/redis-e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUploadRefusal } from './pages/channel/upload-refusal-e2e-test'
 import { testSessionEnd } from './pages/channel/session-end-e2e-test'
+import { testUploadSessionEnd } from './pages/channel/wire-e2e-test'
 import { parseChannelTransports } from './channelTransports'
 
 // Caddy serves https://localhost:8443 with its own internal CA — skip cert validation.
@@ -122,7 +123,10 @@ function testRunDocker() {
   testPublish(false, true)
   testRedisReconnect()
   testRefIdentity()
-  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') testUploadRefusal()
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
+    testUploadRefusal()
+    testUploadSessionEnd()
+  }
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testSessionEnd()
 }
 

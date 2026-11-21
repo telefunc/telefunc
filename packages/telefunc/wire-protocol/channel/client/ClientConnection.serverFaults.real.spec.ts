@@ -76,6 +76,25 @@ const uploadAfter = (text: string, bad: Bad) => (body: ReadableStream<Uint8Array
     }),
   )
 
+/** The streaming upload with `bad` after the frame that carries `text`, which stays open once the page ends its body,
+ *  as a page's that is gone before its end reached the server; `vanish()` drops its connection. */
+function vanishingAfter(text: string, bad: Bad) {
+  let vanish = () => {}
+  const upload = (body: ReadableStream<Uint8Array>) =>
+    body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        start: (controller) => void (vanish = () => controller.error(new Error('the page is gone'))),
+        transform: (chunk, controller) => {
+          controller.enqueue(chunk)
+          const found = textOf(new Uint8Array(chunk), text)
+          if (found !== null) for (const part of bad(found)) controller.enqueue(part)
+        },
+        flush: () => new Promise<void>(() => {}),
+      }),
+    )
+  return { upload, vanish: () => vanish() }
+}
+
 /** How `channel` ended, each time: its error's class and message. */
 function endsOf(channel: ServerChannel<string, string> | ClientChannel<string, string>): [string, string][] {
   const ends: [string, string][] = []
@@ -399,4 +418,21 @@ test('a session the server ends on a WebSocket ends a channel of it still awaiti
   await until(() => serverEnds.length > 0)
   await delay(300)
   expect([pageEnds, serverEnds, world.sockets]).toEqual([sessionEndOnPage, sessionEndOnPage, 1])
+})
+
+test("a page gone with its streaming upload open after the server ended its session: the server's read of that upload ends with the connection, and no answer is written to it", async () => {
+  world.uploads = true
+  const vanishing = vanishingAfter('a1', serverOnly(999))
+  world.hooks = [{ kind: 'upload', upload: vanishing.upload }]
+  const live = pair(crypto.randomUUID())
+  await live.page.opened
+  await until(() => uploads() === 1)
+  const pageEnds = endsOf(live.page)
+  sends(live.page, 'a1')
+  await until(() => pageEnds.length > 0)
+  await delay(300)
+  vanishing.vanish()
+  await until(() => world.closedStreaming.length > 0).catch(() => {})
+  await delay(300)
+  expect([pageEnds, world.pendingBodyReads, world.closedStreaming]).toEqual([sessionEndOnPage, 0, [null]])
 })
