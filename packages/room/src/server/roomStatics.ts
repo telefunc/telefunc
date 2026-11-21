@@ -170,14 +170,14 @@ async function applyGetOptions(room: ServerRoom, { tail }: RoomGetOptions = {}):
 async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord, call: BackendCall): Promise<ServerRoom> {
   const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
-  if (held !== undefined) return await call.read(() => held.sharedHandle())
+  if (held !== undefined) return await held.sharedHandle(call)
   const [roster, meta] = await call.all([
     reapAndReadRoster(incarnation, call),
     call.read(() => requireRoomMeta(id, incarnation)),
   ])
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
   // One seeded meanwhile for a join alone has read no roster: its catch-up is a step of the call too.
-  return replica.model.rosterKnown ? replica.handle() : await call.read(() => replica.sharedHandle())
+  return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle(call)
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {

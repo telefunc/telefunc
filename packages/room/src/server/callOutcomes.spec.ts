@@ -10,6 +10,8 @@ import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
 import { newRoomHold } from './lifecycle/hold.js'
 import { RoomReplica } from './RoomReplica.js'
 import { LEASE_CELL_PREFIX, META_SEQ_CELL_KEY } from './store/cells.js'
+import { RoomLease } from './store/lease.js'
+import { joinMember } from './store/members.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -47,6 +49,43 @@ async function lapsedLease(id: string): Promise<() => Promise<boolean>> {
     const read = await plane.driver.readCells(id, inc, { keys: [key] })
     return read.kind !== 'stale-incarnation' && read.cells.has(key)
   }
+}
+
+/** A member of room `id` that another server hosts under its own lease; lapsing that lease, and whether it is still
+ *  there. */
+async function otherServersMember(
+  id: string,
+): Promise<{ member: string; lapse: () => Promise<void>; leaseStays: () => Promise<boolean> }> {
+  const plane = getRoomPlane()
+  const head = await plane.driver.readHead(id)
+  if (head === null) throw new Error(`room ${id} has no head`)
+  const room = { id, ...configFromHead(head) }
+  const lease = new RoomLease()
+  const member = crypto.randomUUID()
+  const joinedAt = Date.now()
+  await joinMember(
+    room,
+    lease,
+    {
+      id: member,
+      record: { joinedAt, metaSeq: 0, metaGen: 0 },
+      meta: {},
+      join: { __r: 'join', id: member, meta: {}, joinedAt },
+    },
+    {},
+  )
+  const bytes = new TextEncoder().encode(JSON.stringify({ until: 0 }))
+  const lapse = async () => {
+    await plane.driver.compareExchangeCells(id, room.inc, {
+      expect: [],
+      mutations: [{ key: `${LEASE_CELL_PREFIX}${lease.id}`, bytes }],
+    })
+  }
+  const leaseStays = async () => {
+    const read = await plane.driver.readCells(id, room.inc, { keys: [`${LEASE_CELL_PREFIX}${lease.id}`] })
+    return read.kind !== 'stale-incarnation' && read.cells.has(`${LEASE_CELL_PREFIX}${lease.id}`)
+  }
+  return { member, lapse, leaseStays }
 }
 
 /** The store refuses each read of the room's meta. */
@@ -115,6 +154,41 @@ describe('a Room call whose later step the store refuses after the call reaped a
 
     expect({ got: await outcomeOf(Room.get(id)), leaseStays: await leaseStays() }).toEqual({
       got: { code: 'denied', outcome: 'may-have-run' },
+      leaseStays: false,
+    })
+  })
+
+  it("Room.get() of a view this process holds: the refresh's read refused after its reap says it may have run", async () => {
+    const room = await Room.create(`outcome-${crypto.randomUUID()}`)
+    const { member, lapse, leaseStays } = await otherServersMember(room.id)
+    // The held view lists the member, then the server hosting it stops.
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toContain(member)
+    await Room.get(room.id)
+    await lapse()
+    // The store refuses the read of why members left, which the view's refresh makes for the member its reap removed.
+    const { driver } = getRoomPlane()
+    vi.spyOn(driver, 'readExpiringCells').mockRejectedValue(refused())
+
+    expect({ got: await outcomeOf(Room.get(room.id)), leaseStays: await leaseStays() }).toEqual({
+      got: { code: 'denied', outcome: 'may-have-run' },
+      leaseStays: false,
+    })
+  })
+
+  it("Room.get() that joins the refresh another call started: the refresh's read refused after its reap says it may have run", async () => {
+    const room = await Room.create(`outcome-${crypto.randomUUID()}`)
+    const { member, lapse, leaseStays } = await otherServersMember(room.id)
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toContain(member)
+    await Room.get(room.id)
+    await lapse()
+    const { driver } = getRoomPlane()
+    vi.spyOn(driver, 'readExpiringCells').mockRejectedValue(refused())
+
+    // The view refreshes one at a time: the second call waits on the first one's refresh, and its reap.
+    const [first, second] = await Promise.all([outcomeOf(Room.get(room.id)), outcomeOf(Room.get(room.id))])
+    expect({ first, second, leaseStays: await leaseStays() }).toEqual({
+      first: { code: 'denied', outcome: 'may-have-run' },
+      second: { code: 'denied', outcome: 'may-have-run' },
       leaseStays: false,
     })
   })

@@ -129,6 +129,55 @@ describe('BackendCall', () => {
     })
   })
 
+  describe('join(): work under another account, which other calls may share', () => {
+    it("tells 'may-have-run' for a later step's 'not-run' once the shared work wrote and succeeded", async () => {
+      const call = new BackendCall()
+      const shared = new BackendCall()
+      await call.join(shared, shared.write(answered))
+
+      const failure = await call.read(failingWith(notRun())).catch((error: unknown) => error)
+
+      expect(outcomeOf(failure)).toBe('may-have-run')
+    })
+
+    it("tells 'may-have-run' for the shared work's 'not-run' after its own write", async () => {
+      const call = new BackendCall()
+      const shared = new BackendCall()
+      const work = async () => {
+        await shared.write(answered)
+        throw notRun()
+      }
+
+      const failure = await call.join(shared, work()).catch((error: unknown) => error)
+
+      expect(outcomeOf(failure)).toBe('may-have-run')
+    })
+
+    it("keeps 'not-run' where the shared work only read", async () => {
+      const call = new BackendCall()
+      const shared = new BackendCall()
+      await call.join(shared, shared.read(answered))
+
+      const failure = await call.read(failingWith(notRun())).catch((error: unknown) => error)
+
+      expect(outcomeOf(failure)).toBe('not-run')
+    })
+
+    it("gives a second call that joins the same work the same account: 'may-have-run' after its write", async () => {
+      const shared = new BackendCall()
+      const work = shared.write(answered)
+      const first = new BackendCall()
+      const second = new BackendCall()
+      await Promise.all([first.join(shared, work), second.join(shared, work)])
+
+      const failures = await Promise.all(
+        [first, second].map((call) => call.read(failingWith(notRun())).catch((error: unknown) => error)),
+      )
+
+      expect(failures.map(outcomeOf)).toEqual(['may-have-run', 'may-have-run'])
+    })
+  })
+
   it('passes a failure that is not a BackendError through', async () => {
     const call = new BackendCall()
     await call.write(answered)

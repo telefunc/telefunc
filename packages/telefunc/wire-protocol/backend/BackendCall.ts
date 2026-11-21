@@ -3,7 +3,8 @@ export { BackendCall }
 import { BackendError } from './BackendError.js'
 
 /** One public call of several steps against the backend's store: a failure says the call may have run once a write of
- *  it was handed over without a proof that it didn't run, whatever the failing step proves of itself. */
+ *  it was handed over without a proof that it didn't run, whatever the failing step proves of itself. It waits on
+ *  other work in two ways: `all()`, for its own steps side by side, and `join()`, for work under another account. */
 class BackendCall {
   /** Writes handed over and not settled yet. */
   private writing = 0
@@ -39,6 +40,16 @@ class BackendCall {
       if (result.status === 'rejected') throw this.failure(result.reason, 0)
     }
     return await Promise.all(steps)
+  }
+
+  /** The value of `work`, which runs under the account `shared` and may be shared with other calls, once it settled:
+   *  a write `shared` counted then counts as this call's, so a failure of `work`, or of a later step of this call, is
+   *  told as this call stands with it. */
+  async join<T>(shared: BackendCall, work: Promise<T>): Promise<T> {
+    const [settled] = await Promise.allSettled([work])
+    if (shared.wrote || shared.writing > 0) this.wrote = true
+    if (settled.status === 'rejected') throw this.failure(settled.reason, 0)
+    return settled.value
   }
 
   /** What `error` of a step tells of the whole call; `own` is the step's own write, still counted in `writing`. */

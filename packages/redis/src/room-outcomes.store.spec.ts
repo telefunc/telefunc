@@ -9,8 +9,12 @@
 //   another error means the participant is no longer in the room.
 // - `Room.removeParticipant()` and `Room.send()` that reaped a lapsed lease while finding the participant, then were
 //   refused: they may have run, as the reap wrote.
+// - `Room.get()` of a room this process holds a view of, whose catch-up reaped a lapsed lease of another server and
+//   was then refused: it may have run, as the reap wrote.
+import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isDeepStrictEqual } from 'node:util'
+import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual, promisify } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
 import { BackendError } from 'telefunc'
@@ -224,5 +228,70 @@ describe.runIf(runs)('a Room call refused after it reaped a lapsed lease', () =>
         })
       }, 60_000)
     }
+  }
+})
+
+/** A participant that another server joined to room `id` under its own lease, which it then left behind, as a server
+ *  that stopped does: the participant's id. The server is a process of its own, on the built packages. */
+async function joinedByAnotherServer(host: string, id: string): Promise<string> {
+  const server = `
+import { Redis } from 'ioredis'
+import { Room } from '@telefunc/room'
+import { installRedis } from '@telefunc/redis'
+installRedis(new Redis({ host: process.argv[1], username: 'telefunc', password: 'pw' }))
+const participant = await Room.join(process.argv[2])
+console.log(participant.id)
+process.exit(0)
+`
+  const cwd = fileURLToPath(new URL('..', import.meta.url))
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', server, host, id], {
+    cwd,
+  })
+  const participant = stdout.trim().split('\n').at(-1)
+  if (participant === undefined || participant === '') throw new Error(`the other server joined no one: ${stdout}`)
+  return participant
+}
+
+describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up reaped a lapsed lease', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: refused after the reap, may have run`, async () => {
+      const admin = await reached(store)
+      const id = `held-${i}`
+      // The view this process holds: no participant or page of its own observes it, so a get catches it up.
+      const room = await Room.create(id)
+      const member = await joinedByAnotherServer(String(admin.options.host), room.id)
+      expect((await Room.getParticipants(room.id)).map((participant) => participant.id)).toEqual([member])
+      await Room.get(room.id)
+      const [values] = await admin.keys(`tf:0:room:{${id}}:g:*:values`)
+      if (values === undefined) throw new Error(`room ${id} has no cells`)
+      const incarnation = values.slice(0, -':values'.length)
+      const marks = (await admin.hkeys(values)).filter((key) => key.endsWith(`:${member}`) && key.startsWith('sm:'))
+      const lease = marks[0]?.split(':')[1]
+      if (lease === undefined) throw new Error(`no lease hosts ${member}`)
+      // The other server's lease lapses.
+      await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+      // GET is refused on the departing records alone: the refresh reads the member's after its reap removed it.
+      await admin.call(
+        'ACL',
+        'SETUSER',
+        'telefunc',
+        '-get',
+        `(+get ~tf:0:room:{${id}}:[^g]* ~${incarnation}:[^x]* ~${incarnation}:x:[^d]* ~tf:0:room-dir:*)`,
+      )
+      const refused = await Room.get(room.id).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      const reaped = {
+        lease: await admin.hexists(values, `session:${lease}`),
+        member: await admin.hexists(values, `m:${member}`),
+      }
+      admin.disconnect()
+
+      expect({ refused, reaped }).toMatchObject({
+        refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
+        reaped: { lease: 0, member: 0 },
+      })
+    }, 60_000)
   }
 })

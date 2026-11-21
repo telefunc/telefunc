@@ -3,7 +3,7 @@ export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { createDeferred, unrefTimer } from 'telefunc/__internal'
+import { BackendCall, createDeferred, unrefTimer } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomHead } from '../../backend/contract.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
@@ -43,10 +43,13 @@ type AuthoritySyncOptions = {
 /** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */
 type Repair = 'control' | 'meta' | 'memberMeta'
 
+/** A roster refresh under way, with its account of writes: the calls that wait on it take its writes into theirs. */
+type Refresh = { call: BackendCall; done: Promise<void> }
+
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and what
  *  the control lane covers, which the heartbeat checks. */
 class AuthoritySync {
-  private pendingRefresh: Promise<void> | null = null
+  private pendingRefresh: Refresh | null = null
   /** The repairs due `ROOM_META_REPAIR_MS` after the first gap that asked for each. */
   private readonly repairsDue = new Set<Repair>()
   /** Every control seq at or below it reached this view, as a frame or through a roster read started after it. */
@@ -75,15 +78,18 @@ class AuthoritySync {
   }
 
   ensureRoster(): Promise<void> {
-    if (this.pendingRefresh !== null) return this.pendingRefresh
+    if (this.pendingRefresh !== null) return this.pendingRefresh.done
     if (this.model.closed || this.current()) return Promise.resolve()
     return this.refreshMembers()
   }
 
-  /** What a new handle reads of a view it shares: nothing while the view is current, else the meta and the roster. */
-  async catchUp(): Promise<void> {
+  /** What a new handle reads of a view it shares: nothing while the view is current, else the meta and the roster. The
+   *  roster's refresh, which another caller may have started, is work of `call`'s: its writes count as `call`'s. */
+  async catchUp(call: BackendCall): Promise<void> {
     if (this.model.closed || this.current()) return
-    if (await this.reconcileMeta()) await this.refreshMembers()
+    if (!(await this.reconcileMeta())) return
+    const refresh = this.refresh()
+    await call.join(refresh.call, refresh.done)
   }
 
   async reconcileAuthority(): Promise<void> {
@@ -105,7 +111,7 @@ class AuthoritySync {
     const covered = () => this.current() && mark <= this.covered
     if (covered()) return
     // A read already running may predate the mark.
-    await this.pendingRefresh?.catch(() => {})
+    await this.pendingRefresh?.done.catch(() => {})
     if (!covered()) await this.refreshMembers()
   }
 
@@ -186,15 +192,22 @@ class AuthoritySync {
     })
   }
 
-  /** One roster refresh at a time; concurrent callers join it. */
+  /** One roster refresh at a time; concurrent callers join it. A wait that tells no outcome awaits it alone. */
   refreshMembers(): Promise<void> {
-    this.pendingRefresh ??= this.refreshOnce()
+    return this.refresh().done
+  }
+
+  private refresh(): Refresh {
+    if (this.pendingRefresh === null) {
+      const call = new BackendCall()
+      this.pendingRefresh = { call, done: this.refreshOnce(call) }
+    }
     return this.pendingRefresh
   }
 
-  private async refreshOnce(): Promise<void> {
+  private async refreshOnce(call: BackendCall): Promise<void> {
     try {
-      await this.runMemberRefresh()
+      await this.runMemberRefresh(call)
     } finally {
       this.pendingRefresh = null
     }
@@ -261,13 +274,13 @@ class AuthoritySync {
 
   /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. It covers
    *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
-  private async runMemberRefresh(): Promise<void> {
+  private async runMemberRefresh(call: BackendCall): Promise<void> {
     if (this.model.closed) return
     const mark = await this.controlMark()
     // The events grow while the roster is read and reconciled.
     const events = this.model.recordMembership()
     try {
-      const roster = await reapAndReadRoster(this.incarnation)
+      const roster = await reapAndReadRoster(this.incarnation, call)
       const listed = new Set(roster.members.map((member) => member.id))
       const unlisted = [...this.model.memberIds()].filter((id) => !listed.has(id))
       const [departing, behind] = await Promise.all([
