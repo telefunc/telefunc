@@ -32,7 +32,8 @@ afterAll(() => {
   removeStores()
 })
 
-/** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. */
+/** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last
+ *  row's store goes first, so the file never removes more than one at its end. */
 async function reached(store: Store): Promise<Redis> {
   if (proxy === undefined) {
     proxy = await forwarder()
@@ -40,6 +41,7 @@ async function reached(store: Store): Promise<Redis> {
     app.on('error', () => {})
     installRedis(app)
   }
+  removeStores()
   const { host, admin } = await startStore(store)
   await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
   proxy.to(host)
