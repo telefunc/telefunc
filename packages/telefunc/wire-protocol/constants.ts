@@ -124,13 +124,6 @@ export const WIRE_VERSION = 3
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
 
-/** A wire whose page's session the server ended: a WebSocket's close code and its reason, within the 123 bytes a close
- *  frame's reason may hold (an SSE stream ends with a `REJECTED` event, and a request that meets the end is answered
- *  with its `frames` refusal naming no channel). The page ends its channels with `END_CAUSE.unreadable` and doesn't
- *  reconnect. */
-export const WS_CLOSE_REJECTED = 4002
-export const WIRE_REJECTED_REASON = 'Invalid channel frame. Reload the page.'
-
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'

@@ -61,9 +61,6 @@ const world: {
   sockets: number
   /** What the page's WebSockets send in place of each message, where set. */
   wsSends: ((message: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>[]) | null
-  /** Whether the page hears its WebSocket's close with `code`, where set: one it doesn't hear leaves the socket open
-   *  for the page. */
-  wsHears: ((code: number) => boolean) | null
   telefuncUrl: string
 } = {
   hooks: [],
@@ -73,7 +70,6 @@ const world: {
   hooked: [],
   sockets: 0,
   wsSends: null,
-  wsHears: null,
   telefuncUrl: '',
 }
 
@@ -175,21 +171,12 @@ function heldAnswer(sent: Promise<Response>, signal: AbortSignal | null | undefi
   )
 }
 
-/** Counts the WebSockets the page makes, sends what `world.wsSends` makes of each message, and tells the page of the
- *  closes `world.wsHears` lets through. */
+/** Counts the WebSockets the page makes, and sends what `world.wsSends` makes of each message. */
 const RealWebSocket = globalThis.WebSocket
 class CountedWebSocket extends RealWebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols)
     world.sockets++
-    let onclose: ((event: CloseEvent) => void) | null = null
-    Object.defineProperty(this, 'onclose', {
-      get: () => onclose,
-      set: (next: typeof onclose) => (onclose = next),
-    })
-    this.addEventListener('close', (event: CloseEvent) => {
-      if (world.wsHears?.(event.code) ?? true) onclose?.(event)
-    })
   }
   override send(data: string | Blob | ArrayBufferLike | ArrayBufferView): void {
     if (typeof data === 'string' || data instanceof Blob) return super.send(data)
@@ -225,7 +212,6 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
       hooked: [],
       sockets: 0,
       wsSends: null,
-      wsHears: null,
     })
   })
   afterAll(() => {

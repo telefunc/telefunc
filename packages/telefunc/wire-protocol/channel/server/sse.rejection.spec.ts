@@ -6,7 +6,8 @@ import { WIRE_VERSION } from '../../constants.js'
 import { frameRefusal, refusalContentType } from '../../refusal.js'
 import { END_CAUSE } from '../endCause.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
-import { encode } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
@@ -16,7 +17,7 @@ const post = (body: BodyInit) =>
 /** A wire-level frame of a tag no version has: it names no channel. */
 const unreadable = new Uint8Array([0x0f, 0, 0])
 
-test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, ends the page's event stream with a REJECTED event, and ends its channels with the connection's sentence", async () => {
+test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, and ends its channels with the connection's sentence, each told on the event stream before it ends", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
   getChannelMux().registerChannel(channel)
   const connId = crypto.randomUUID()
@@ -35,13 +36,14 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
     contentType: refusalContentType(refusal),
     body: refusal.reason,
   })
-  const events: Uint8Array[] = []
+  const events: Uint8Array<ArrayBuffer>[] = []
   const decoder = new SseEvents()
   if (!(opened.body instanceof ReadableStream)) throw new Error('Expected the event stream as a web stream')
   const reader = opened.body.getReader()
   for (let read = await reader.read(); !read.done; read = await reader.read()) {
     decoder.push(read.value, (event) => events.push(event))
   }
-  expect(events.at(-1)).toEqual(encode.rejected())
+  const last = events.at(-1)
+  expect(last && decode(last)).toEqual({ tag: TAG.ERROR, index: 0, seq: 1, reason: END_CAUSE.unreadable.code })
   await expect(channel.closed).resolves.toHaveProperty('message', END_CAUSE.unreadable.error().message)
 })

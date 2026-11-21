@@ -222,6 +222,11 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     return this.closed ? 0 : this.deliveries.beforeHandled(ms)
   }
 
+  /** Hands the transport what the wire's headroom gathered for its next message, ahead of the wire's end. */
+  flush(): void {
+    this.pieces?.headroom.sender.flush()
+  }
+
   /** The wire closed: drops what is sent from now on, and stops its headroom. */
   close(): void {
     this.closed = true

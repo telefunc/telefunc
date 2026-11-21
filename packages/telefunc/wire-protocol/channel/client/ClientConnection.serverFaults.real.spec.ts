@@ -6,7 +6,7 @@
 // what the page makes of one carrier of the end, the wrapper keeps the others from it.
 
 import { expect, test } from 'vitest'
-import { WIRE_MAX_RAW_FRAME_BYTES, WS_CLOSE_REJECTED } from '../../constants.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 import { encodeU32 } from '../../wire/envelope.js'
 import { ERROR_REASON, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -209,10 +209,10 @@ test("a request that meets the wire a channel's over-limit frame closed is refus
 /** How a channel that sent nothing wrong ends on the page as the server ends its session. */
 const sessionEndOnPage = [['ChannelClosedError', told.unreadable]]
 
-/** The event stream without the server's REJECTED, held open past the server's end of it: the page learns of the
+/** The event stream without the channels' ERROR frames, held open past the server's end of it: the page learns of the
  *  session's end from the answer to its request alone. */
 function answerDecides(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const reader = withholding((frame) => frame[0] === TAG.REJECTED)
+  const reader = withholding((frame) => frame[0] === TAG.ERROR)
     .stream(body)
     .getReader()
   return new ReadableStream<Uint8Array>({
@@ -266,8 +266,6 @@ test("the streaming upload the server refuses `frames` naming no channel ends ev
 })
 
 test("the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
-  // The answer alone tells the page: the probe's close is kept from it as the event stream's REJECTED is.
-  world.wsHears = (code) => code !== WS_CLOSE_REJECTED
   let requestsBefore = -1
   world.hooks = [
     { kind: 'open', stream: answerDecides },
@@ -287,26 +285,57 @@ test("the barrier POST of a move to a WebSocket the server refuses `frames` nami
   expect([world.started.slice(requestsBefore), ends]).toEqual([['post'], [sessionEndOnPage, sessionEndOnPage]])
 })
 
-test("the REJECTED event alone ends every channel on the page with the server's sentence of the connection", async () => {
+test('a session the server ends tells each channel on the page its end on the event stream alone, and the page opens no other wire', async () => {
   world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', severalFrames), held: true }]
   const [first, second] = opening(crypto.randomUUID())
   await Promise.all([first.page.opened, second.page.opened])
   const ends = [first, second].map(({ page }) => endsOf(page))
   sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
-  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
+  await delay(500)
+  expect([ends, opens()]).toEqual([[sessionEndOnPage, sessionEndOnPage], 1])
 })
 
-/** Whether a WebSocket message carries the frame of `text`. */
-const carriesText = (message: Uint8Array<ArrayBuffer>, text: string) =>
-  (isOneFrame(message) ? [message] : Array.from(messageFrames(message))).some((frame) => textOf(frame, text) !== null)
+/** The channel and seq of the frame of `text` a WebSocket message carries; null where it carries none. */
+function textIn(message: Uint8Array<ArrayBuffer>, text: string): { ix: number; seq: number } | null {
+  for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+    const found = textOf(frame, text)
+    if (found !== null) return found
+  }
+  return null
+}
 
-test("the 4002 close ends every channel of a page on WebSocket with the server's sentence of the connection", async () => {
-  world.wsSends = (message) => (carriesText(message, 'a1') ? [message, encode.attachResult(999, null)] : [message])
+test('a session the server ends on a WebSocket tells each channel on the page its end, and the page opens no other socket', async () => {
+  world.wsSends = (message) => (textIn(message, 'a1') ? [message, encode.attachResult(999, null)] : [message])
   const [first, second] = opening(crypto.randomUUID(), ['ws'])
   await Promise.all([first.page.opened, second.page.opened])
   const ends = [first, second].map(({ page }) => endsOf(page))
   sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
-  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
+  await delay(500)
+  expect([ends, world.sockets]).toEqual([[sessionEndOnPage, sessionEndOnPage], 1])
+})
+
+test("a frame of one channel the server refuses on a WebSocket ends that channel on the page with its cause before the page opens another socket, and the other's texts arrive once each", async () => {
+  world.wsSends = (message) => {
+    const found = textIn(message, 'a1')
+    return found ? [message, encode.error(found.ix, ERROR_REASON.UNCONFIRMED, found.seq + 1)] : [message]
+  }
+  const [refused, other] = opening(crypto.randomUUID(), ['ws'])
+  await Promise.all([refused.page.opened, other.page.opened])
+  const [refusedEnds, otherEnds] = [endsOf(refused.page), endsOf(other.page)]
+  let socketsAtEnd = 0
+  refused.page.onClose(() => void (socketsAtEnd = world.sockets))
+  sends(other.page, 'b1')
+  sends(refused.page, 'a1')
+  await until(() => refusedEnds.length > 0)
+  sends(other.page, 'b2')
+  await until(() => other.got.length === 2)
+  await delay(300)
+  expect([refusedEnds, socketsAtEnd, otherEnds, other.got]).toEqual([
+    [['ChannelClosedError', told.refused]],
+    1,
+    [],
+    ['b1', 'b2'],
+  ])
 })

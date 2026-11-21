@@ -5,13 +5,7 @@ import { enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { assert } from '../../../utils/assert.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
-import {
-  CHANNEL_TRANSPORT,
-  WIRE_REJECTED_REASON,
-  WS_CLOSE_PAGE_LEFT,
-  WS_CLOSE_REJECTED,
-  WS_CLOSE_WIRE_VERSION,
-} from '../../constants.js'
+import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
@@ -57,10 +51,11 @@ function getTelefuncChannelOptions({
     copiesOnSend,
     bufferedAmount,
     // A loss closes at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
-    // A page whose session the server ended is told so, and doesn't reconnect.
-    close: (peer, { how }) => {
-      if (how === 'transient') terminate(peer)
-      else peer.close(WS_CLOSE_REJECTED, WIRE_REJECTED_REASON)
+    // An end the server told its channels closes after what was sent, which `terminate()` would drop: a plain close,
+    // which the page reads as a loss, reconnecting only for a channel the server didn't end.
+    close: (peer, { how, refusal }) => {
+      if (refusal === null) terminate(peer)
+      else peer.close(1000)
       mux.onWireClosed(peer, how)
     },
   }

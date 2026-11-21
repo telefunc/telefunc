@@ -94,6 +94,8 @@ const ERROR_REASON = {
   FRAME_OVER_LIMIT: END_CAUSE.frameOverLimit.code,
   FRAME_REFUSED: END_CAUSE.frameRefused.code,
   UNCONFIRMED: END_CAUSE.unconfirmed.code,
+  UNREADABLE: END_CAUSE.unreadable.code,
+  RECEIVE_BUDGET: END_CAUSE.receiveBudget.code,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
@@ -153,7 +155,6 @@ type WireCtrlFrame =
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
-  | { tag: typeof TAG.REJECTED }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
@@ -274,7 +275,6 @@ const encode = {
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
-  rejected: () => encodeBareFrame(TAG.REJECTED),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
   piece(total: number, piece: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -412,7 +412,6 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
   [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
-  [TAG.REJECTED]: encode.rejected().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
   [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
@@ -551,8 +550,6 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILED, payload: parseJsonPayload(payload) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
-    case TAG.REJECTED:
-      return { tag: TAG.REJECTED }
     case TAG.PREPARE:
       return { tag: TAG.PREPARE, payload: parsePreparePayload(parseJsonPayload(payload)) }
     case TAG.READY:

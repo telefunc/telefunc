@@ -45,7 +45,6 @@ import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { asksLater, readAnswer, type HttpAnswer } from './readAnswer.js'
-import { END_CAUSE } from '../endCause.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -464,16 +463,10 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
     const pair = pairPublishes()
-    // The server ended the page's session: its last event before it let the wire go.
-    let sessionEnded: number | undefined
     try {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
-        if (raw[0] === TAG.REJECTED) {
-          sessionEnded = END_CAUSE.unreadable.code
-          break
-        }
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
           onOpenAck()
           continue
@@ -506,7 +499,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, { sessionEnded })
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
   }
 

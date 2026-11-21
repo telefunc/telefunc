@@ -84,8 +84,9 @@ type ServerTransport<TWire> = {
   close(wire: TWire, end: ServerEnd): void
 }
 
-/** How the server ends a wire: lost, or for good for a session cause; `refusal` is what an HTTP transport answers the
- *  page's requests that meet the end with, null for a plain loss. */
+/** How the server ends a wire: lost, or for good for a session cause. `refusal`: what the server told the channels it
+ *  ends, each on its own down stream, which the transport sends before the wire ends, and what an HTTP transport answers
+ *  the page's requests that meet the end with; null for a plain loss, which tells nothing. */
 type ServerEnd = { how: Exclude<WireClose, 'pageLeft'>; refusal: Refusal | null }
 
 /** What the server can't go on with on a wire, which `endFault` ends. */
@@ -516,20 +517,32 @@ class ChannelMux implements UpgradeStagesOwner {
     if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
     if (fault.scope === 'loss') return entry.transport.close(wire, { how: 'transient', refusal: null })
     if (fault.scope === 'channel' && channelEnded) {
-      return entry.transport.close(wire, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
+      return this.closeTold(entry, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
     }
     const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
-    entry.transport.close(wire, { how: cause, refusal: frameRefusal(cause, undefined) })
+    for (const handle of [...(this.sessionOf(entry)?.values() ?? [])]) handle.channel._onServerEnd(cause)
+    this.closeTold(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
+  }
+
+  /** Closes the wire after what its channels were told: the frames its sender gathered go to the transport first. */
+  private closeTold(entry: WireEntry, end: ServerEnd): void {
+    entry.sender.flush()
+    entry.transport.close(entry.wire, end)
+  }
+
+  /** The channels of the session `entry`'s wire carries, by index; undefined before its RECONCILE. */
+  private sessionOf(entry: WireEntry): ReadonlyMap<number, ChannelHandle> | undefined {
+    const sessionId = entry.transport.getSessionId(entry.wire)
+    return sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
   }
 
   /** Ends the channel at `ix` with `cause` where the session holds it, or keeps the cause for its registration where
    *  the wire awaits it; false where neither, as for a frame that names no channel. */
   private endChannelAt(entry: WireEntry, ix: number | undefined, cause: FrameRefusalCause): boolean {
     if (ix === undefined) return false
-    const sessionId = entry.transport.getSessionId(entry.wire)
-    const handle = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)?.get(ix)
+    const handle = this.sessionOf(entry)?.get(ix)
     if (handle) {
-      handle.channel._onFrameRefused(cause)
+      handle.channel._onServerEnd(cause)
       return true
     }
     const awaited = entry.state.awaited.get(ix)
@@ -850,7 +863,7 @@ class ChannelMux implements UpgradeStagesOwner {
    *  the channel. */
   private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
     // Its page sent it a frame the server can't take while it was awaited: it ends with that cause, unattached.
-    if (awaited.refused !== null) return channel._onFrameRefused(awaited.refused)
+    if (awaited.refused !== null) return channel._onServerEnd(awaited.refused)
     const { entry } = awaited
     const sessionId = entry.transport.getSessionId(entry.wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')

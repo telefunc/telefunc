@@ -50,7 +50,7 @@ import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-import { END_CAUSE, type FrameRefusalCause } from '../endCause.js'
+import { END_CAUSE, type RefusalCause } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
@@ -867,15 +867,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.loseConnection(new NetworkError('Channel not acknowledged by client after reconnect', true))
   }
 
-  /** @internal The server can't take a frame of the channel's that its page sent: the channel ends, told to its page
-   *  now or at its next attach, as the page's refusal tells it. */
-  _onFrameRefused(cause: FrameRefusalCause): void {
+  /** @internal The server ended the channel for `cause`: a frame of the channel's it can't take, or the end of its
+   *  page's session. Told to its page now or at its next attach, as the page's refusal tells it. */
+  _onServerEnd(cause: RefusalCause): void {
     const { code, error } = END_CAUSE[cause]
     this.endWithError(code, error())
   }
 
   /** @internal The page's wire ended for good, and the channel with it: with `ChannelPageLeftError` where the page left,
-   *  a session cause's error where the server ended the page's session. */
+   *  a session cause's error where it attached as the server ended the page's session (a wire closed mid-reconcile),
+   *  with no wire left to tell it on. */
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null

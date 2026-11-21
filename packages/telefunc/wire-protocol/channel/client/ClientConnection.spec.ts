@@ -8,10 +8,8 @@ import {
   RECONCILE_TIMEOUT_MS,
 } from '../../constants.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
-import { ChannelClosedError } from '../channelErrors.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { encode } from '../../wire/frame.js'
-import { END_CAUSE } from '../endCause.js'
 import { ClientConnection } from './ClientConnection.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
@@ -168,37 +166,5 @@ describe('WebSocket reconcile watchdog', () => {
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 2 * CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     clearInterval(trickle)
     expect(SilentWebSocket.opened).toHaveLength(3)
-  })
-})
-
-describe('a wire the server refused for a frame it could not read', () => {
-  afterEach(() => {
-    vi.clearAllTimers()
-    vi.useRealTimers()
-  })
-
-  test("its event stream's REJECTED event ends the channels with the end of the page's connection, and the page opens no other wire", async () => {
-    vi.useFakeTimers()
-    const { fetchImpl, downstreams } = createStalledTransport()
-    const ended: unknown[] = []
-    ClientConnection.getOrCreate(
-      'http://test.local/_telefunc',
-      fakeMuxChannel({ _onEnded: (err) => ended.push(err) }),
-      {
-        transports: [CHANNEL_TRANSPORT.SSE],
-        fetchImpl,
-        connectionKey: crypto.randomUUID(),
-      },
-    )
-    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_INITIAL_DELAY_MS)
-    expect(downstreams).toHaveLength(1)
-
-    downstreams.at(0)?.deliver(new TextEncoder().encode(`data: ${uint8ArrayToBase64url(encode.rejected())}\n\n`))
-    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS)
-
-    expect(ended).toHaveLength(1)
-    expect(ended[0]).toBeInstanceOf(ChannelClosedError)
-    expect(ended[0]).toHaveProperty('message', END_CAUSE.unreadable.error().message)
-    expect(downstreams).toHaveLength(1)
   })
 })

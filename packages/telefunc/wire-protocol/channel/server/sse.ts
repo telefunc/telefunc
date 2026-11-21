@@ -161,15 +161,10 @@ class EventStream implements WireQueue {
 
   /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
    *  channels' replay, and it could wait here for as long as the socket stays open taking nothing. */
-  /** `last`: the event that ends the stream, after all that waits, which it then flushes too. */
-  close({ flush, last }: { flush: boolean; last?: Uint8Array<ArrayBuffer> }): void {
-    while ((flush || last !== undefined) && (this.current !== null || this.waiting.length > 0)) {
+  close({ flush }: { flush: boolean }): void {
+    while (flush && (this.current !== null || this.waiting.length > 0)) {
       if (this.current !== null) this.pushChunks()
       else this.startEvent(this.waiting.shift()!)
-    }
-    if (last !== undefined) {
-      this.startEvent(last)
-      while (this.current !== null) this.pushChunks()
     }
     this.current = null
     this.passing = new Fifo()
@@ -554,8 +549,8 @@ class SseServerTransport {
     })
   }
 
-  /** `refused`: what the POSTs that meet the close are answered, where the server decided it. An end for good the
-   *  server decided sends what the stream holds, then says so last, as a WebSocket's close code does. */
+  /** `refused`: what the POSTs that meet the close are answered, where the server decided it and told the channels it
+   *  ends: then the stream sends what it holds before it ends. */
   private closeWire(wire: SseWire, how: WireClose, refused: Refusal | null = null): void {
     if (wire.closed) return
     wire.closed = true
@@ -564,8 +559,7 @@ class SseServerTransport {
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     this.mux.onWireClosed(wire, how)
-    const forGood = how !== 'transient' && how !== 'pageLeft'
-    wire.events.close({ flush: forGood, last: forGood ? encode.rejected() : undefined })
+    wire.events.close({ flush: refused !== null })
   }
 }
 

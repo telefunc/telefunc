@@ -3,23 +3,33 @@
 // the server knows it), `route` (it doesn't serve SSE this way: the page leaves SSE) and `reload` (another wire
 // version), each with a reason for the page's error (decisions/516-sse-carrier.md, step 6 at 13:08Z and 13:14Z).
 
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import { createDeferred } from '../../../utils/createDeferred.js'
 
 import {
   CREDIT_MSG_WINDOW_MAX,
+  WIRE_GATHER_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   WIRE_VERSION,
 } from '../../constants.js'
+import { base64urlToUint8Array } from '../../wire/base64url.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
-import { ERROR_REASON, encode } from '../../wire/frame.js'
+import { ERROR_REASON, decode, encode, type DecodedFrame } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './ChannelMux.js'
 import { END_CAUSE } from '../endCause.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
+
+// The receive backlog's budget, small enough that a row passes it in a few hundred frames.
+vi.mock('../../constants.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../constants.js')>()),
+  CREDIT_MSG_WINDOW_MAX: 64,
+  WIRE_RECV_BACKLOG_BASE_FRAMES: 64,
+}))
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 
@@ -55,6 +65,16 @@ async function openWire() {
 
 async function cancel(answer: SseChannelHttpResponse): Promise<void> {
   if (answer.body instanceof ReadableStream) await answer.body.cancel()
+}
+
+/** The frames an event stream carried, read to its end. */
+async function framesOfStream(answer: SseChannelHttpResponse): Promise<DecodedFrame[]> {
+  if (!(answer.body instanceof ReadableStream)) throw new Error('no event stream')
+  const text = await new Response(answer.body).text()
+  return text
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => decode(base64urlToUint8Array(line.slice(6))))
 }
 
 /** The refusal's `Content-Type`, read as the page reads it: kind, then the channel where named, then the code of the
@@ -139,7 +159,25 @@ test('a body the server cannot frame is refused `frames`, naming no channel', as
   await cancel(opened)
 })
 
-test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, and the POST is refused `frames` naming no channel", async () => {
+test('a channel the server ends for a frame over the limit is told at the end of an event stream its page reads none of: what waited for the page goes first', async () => {
+  const { connId, opened, channel } = await openWire()
+  await channel.opened
+  // Past what goes at once, and the page reads none of its event stream: the text waits for the stream to ask, and the
+  // channel's ERROR waits behind it.
+  const waits = 'x'.repeat(WIRE_GATHER_BYTES)
+  void channel.send(waits).catch(() => {})
+  const answer = await post(
+    bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), encode.close(0, 0, 1)),
+  )
+  expect(answer.contentType).toMatch(refusal('frames', '0', END_CAUSE.frameOverLimit.code))
+  const frames = await framesOfStream(opened)
+  expect(frames.slice(-2)).toEqual([
+    expect.objectContaining({ tag: TAG.TEXT, index: 0, text: JSON.stringify(waits) }),
+    expect.objectContaining({ tag: TAG.ERROR, index: 0, reason: END_CAUSE.frameOverLimit.code }),
+  ])
+})
+
+test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told on the event stream, and the POST is refused `frames` naming no channel", async () => {
   const attached = new ServerChannel()
   getChannelMux().registerChannel(attached)
   const ends: [string, string][] = []
@@ -168,7 +206,8 @@ test("a receive backlog past what the server holds for the page's connection end
     ],
   ])
   expect(answer.contentType).toMatch(refusal('frames', '', 0x09))
-  await cancel(opened)
+  const told = (await framesOfStream(opened)).filter(({ tag }) => tag === TAG.ERROR)
+  expect(told).toEqual([expect.objectContaining({ index: 0, reason: END_CAUSE.receiveBudget.code })])
 })
 
 test("a channel's frame the server refuses is refused `frames`, naming the channel", async () => {
