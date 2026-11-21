@@ -54,8 +54,8 @@ type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: RoomResul
 /** Where the inbox delivers once it attaches: the local listeners, or the client holding the participant. */
 type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
 
-/** What `onChange` tells a change of. */
-type Shown = { meta: ParticipantMeta; connected: boolean; demand: readonly TrackDemand[] }
+/** What `onChange` tells a change of; `demand` counts the changes of its entries. */
+type Shown = { meta: ParticipantMeta; connected: boolean; demand: number }
 /** Who receives some tracks, counted as `demand` counts one. */
 type TracksWatchers = { watchers: RemoteParticipant[]; watcherCount: number }
 const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
@@ -97,6 +97,14 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private seen: Shown | null = null
   private changeDue = false
   private shownDemand: readonly TrackDemand[] = NO_DEMAND
+  /** `demand`'s entries by track, as last read. */
+  private readonly demandEntries = new Map<TrackKey, TrackDemand>()
+  /** The tracks whose entry may have changed since: each of them while who its room shows may have changed. */
+  private readonly staleTracks = new Set<TrackKey>()
+  private allTracksStale = true
+  /** The entries that changed since `shownDemand` was made, `null` for one that went. */
+  private readonly listChanges = new Map<TrackKey, TrackDemand | null>()
+  private demandChanges = 0
   private disconnectListeners: Listeners<() => unknown> | null = null
   private reconnectListeners: Listeners<() => unknown> | null = null
   private listenerCleanups: Set<() => void> | null = null
@@ -330,22 +338,55 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   /** Who receives each of its tracks, by track name: each entry the same object until its watchers or count change, and
    *  the list the same array until an entry does. */
   get demand(): readonly TrackDemand[] {
-    const shown = this.shownDemand
-    const next: TrackDemand[] = []
-    for (const [key, watch] of this.watchesNow) {
-      const track = publicTrack(key)
-      next.push(
-        this.demandEntry(
-          track,
-          watch,
-          shown.find((entry) => entry.track === track),
-        ),
-      )
+    this.refreshDemand()
+    if (this.listChanges.size > 0) {
+      this.shownDemand = Object.freeze(this.demandList())
+      this.listChanges.clear()
     }
-    next.sort(byTrack)
-    const same = next.length === shown.length && next.every((entry, i) => entry === shown[i])
-    if (!same) this.shownDemand = Object.freeze(next)
     return this.shownDemand
+  }
+
+  /** @internal Who receives `track`, or any of its tracks where none is named, may have changed. */
+  protected _demandStale(track?: TrackKey): void {
+    if (track === undefined) this.allTracksStale = true
+    else this.staleTracks.add(track)
+  }
+
+  /** Reads again the entries of the tracks that may have changed, and only those. */
+  private refreshDemand(): void {
+    // Only `onChange`'s listeners follow the room: without them, who it shows may have changed at any time.
+    if (this.changeListeners === null) this.allTracksStale = true
+    const watches = this.watchesNow
+    const tracks = this.allTracksStale ? new Set([...this.demandEntries.keys(), ...watches.keys()]) : this.staleTracks
+    for (const key of tracks) {
+      const watch = watches.get(key)
+      const was = this.demandEntries.get(key)
+      const entry = watch === undefined ? undefined : this.demandEntry(publicTrack(key), watch, was)
+      if (entry === was) continue
+      if (entry === undefined) this.demandEntries.delete(key)
+      else this.demandEntries.set(key, entry)
+      this.listChanges.set(key, entry ?? null)
+      this.demandChanges++
+    }
+    this.allTracksStale = false
+    this.staleTracks.clear()
+  }
+
+  /** `shownDemand` with `listChanges` in it, in track order: each change put in its place, or, where there are more
+   *  changes than a sort's log n, the entries sorted again. */
+  private demandList(): TrackDemand[] {
+    if (this.listChanges.size > Math.log2(this.demandEntries.size + 1))
+      return [...this.demandEntries.values()].sort(byTrack)
+    const list = [...this.shownDemand]
+    for (const [key, entry] of this.listChanges) {
+      const track = publicTrack(key)
+      const at = placeOf(list, track)
+      const there = list[at]?.track === track
+      if (entry === null) {
+        if (there) list.splice(at, 1)
+      } else list.splice(at, there ? 1 : 0, entry)
+    }
+    return list
   }
 
   /** The entry of `track`, which is `was` while nothing in it changed. */
@@ -393,7 +434,12 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     if (!this.changeListeners?.size) this.seen = this.shown()
     if (this.changeListeners === null) {
       this.changeListeners = new Listeners()
-      ;(this.listenerCleanups ??= new Set()).add(this._followRoom(() => this._changed()))
+      ;(this.listenerCleanups ??= new Set()).add(
+        this._followRoom(() => {
+          this._demandStale()
+          this._changed()
+        }),
+      )
     }
     return this.register(this.changeListeners, callback, options)
   }
@@ -416,7 +462,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   }
 
   private shown(): Shown {
-    return { meta: this.meta, connected: this.isConnected, demand: this.demand }
+    this.refreshDemand()
+    return { meta: this.meta, connected: this.isConnected, demand: this.demandChanges }
   }
 
   onDisconnect(callback: () => void, options?: ListenerOptions): () => void {
@@ -450,6 +497,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     if (this.leftCause) return
     const ownedCause = ownLeaveCause(cause)
     this.leftCause = ownedCause
+    this._demandStale()
     // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
     const held = this.pendingInbox
     this.pendingInbox = null
@@ -488,4 +536,17 @@ function watchersOf(me: LocalParticipant, tracks: readonly string[]): TracksWatc
 /** In code-unit order, as `sort()` orders strings; no two entries share a track. */
 function byTrack(a: TrackDemand, b: TrackDemand): number {
   return a.track < b.track ? -1 : 1
+}
+
+/** Where `track`'s entry is in `list`, in `byTrack` order, or would go. */
+function placeOf(list: readonly TrackDemand[], track: string): number {
+  let low = 0
+  let high = list.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    const entry = list[mid]
+    if (entry !== undefined && entry.track < track) low = mid + 1
+    else high = mid
+  }
+  return low
 }

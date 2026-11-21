@@ -1,14 +1,16 @@
 export { pageRoom }
 
-import type { ClientBroadcast } from 'telefunc/__internal'
+import type { ClientBroadcast, ChannelPublishInfo } from 'telefunc/__internal'
 import { ClientRoom } from '../client/room.js'
 import type { RoomStubRequest } from '../shared/protocol.js'
 
 /** A page's room of `members`, each with its join time, on a channel that answers a join as `me` and each meta write
- *  as the server does, at the next seq, and sends nothing else; the requests it was sent; and what ends the channel's
- *  wire. */
+ *  as the server does, at the next seq, and sends nothing else; the requests it was sent; what ends the channel's
+ *  wire; and what hands the room an event as the server sends one. */
 function pageRoom(members: Record<string, number> = {}) {
   const closes: Array<() => void> = []
+  let onText: ((envelope: unknown, info: ChannelPublishInfo) => void) | null = null
+  let seq = 0
   const requests: RoomStubRequest[] = []
   let metaSeq = 0
   const end = {
@@ -21,7 +23,10 @@ function pageRoom(members: Record<string, number> = {}) {
       if (req.__r === 'req-update-meta') return { ok: true, value: { seq: ++metaSeq, attrs: req.attrs } }
       throw new Error(`Unexpected request ${req.__r}`)
     },
-    _subscribeLocal: () => () => {},
+    _subscribeLocal: (kind: string, callback: (envelope: unknown, info: ChannelPublishInfo) => void) => {
+      if (kind === 'text') onText = callback
+      return () => {}
+    },
     _setSubscribed: () => {},
     _setWantParts: () => {},
     onClose: (callback: () => void) => {
@@ -48,5 +53,6 @@ function pageRoom(members: Record<string, number> = {}) {
       })),
     },
   })
-  return { room, requests, endWire: () => closes.forEach((close) => close()) }
+  const deliver = (envelope: object) => onText?.(envelope, { key: 'room', seq: ++seq, timestamp: 0 })
+  return { room, requests, endWire: () => closes.forEach((close) => close()), deliver }
 }

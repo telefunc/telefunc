@@ -1427,13 +1427,14 @@ function testRoom() {
     defaultTrack: number[]
     demand: Array<[string, boolean]>
     wanted: number
+    manyWanted: number
     pubOwn: Array<[string, boolean]>
     otherOwn: Array<[string, boolean]>
     tooMany: string | null
   }>(
     'tracks',
     "room: each of 1,000 named tracks reaches its subscriber in order, me.demand follows the wants, and a selfDelivery:false member's own side is no demand",
-    (r) => {
+    async (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
       // The room tells each track's demand on its own, in no set order between tracks.
@@ -1445,9 +1446,12 @@ function testRoom() {
       expect(named.slice(2)).deep.equal([['t0', false]])
       expect(r.demand.filter(([track]) => track === 'main')).deep.equal([['main', true]])
       expect(r.wanted).toBe(1_002)
+      expect(r.manyWanted).toBe(4_096)
       expect(r.pubOwn).deep.equal([['own', true]])
       expect(r.otherOwn).deep.equal([])
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
+      // The page still answers once it holds 5,098 tracks' demand.
+      expect(await page.evaluate(() => document.readyState)).toBe('complete')
     },
   )
   test('room: a page back from offline gets what its room sent meanwhile, in order, and the leaves, kick and close that happened while it was away, with their causes', async () => {

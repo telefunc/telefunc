@@ -2713,12 +2713,19 @@ function Room() {
             return (err as Error).message
           }
         })()
+        const manyWanted = () =>
+          new Set(demand.filter(([track, wanted]) => wanted && track.startsWith('x')).map(([track]) => track)).size
+        // Pub's demand follows the 4,096 tracks `many` wants as well.
+        await pollUntil(() => ({ done: manyWanted() === 4_096 }))
         setResult(
           JSON.stringify({
             inOrder: tracks.filter((track) => frames[track]!.join() === '1,2').length,
             defaultTrack,
             demand: demand.filter(([track]) => track === 'main' || track === 't0' || track === 't999'),
-            wanted: new Set(demand.filter(([, wanted]) => wanted).map(([track]) => track)).size,
+            wanted: new Set(
+              demand.filter(([track, wanted]) => wanted && !track.startsWith('x')).map(([track]) => track),
+            ).size,
+            manyWanted: manyWanted(),
             pubOwn: demand.filter(([track]) => track === 'own'),
             otherOwn: otherDemand.filter(([track]) => track === 'own'),
             tooMany,

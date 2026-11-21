@@ -110,6 +110,7 @@ class ClientParticipant extends ParticipantBase<PageLink> {
     const watch = { watchers: withChange(was?.watchers, change), pages: withChange(was?.pages, change.pages) }
     if (watch.watchers.size === 0 && watch.pages.size === 0) this.watches.delete(track)
     else this.watches.set(track, watch)
+    this._demandStale(track)
     this._changed()
   }
 
@@ -119,6 +120,7 @@ class ClientParticipant extends ParticipantBase<PageLink> {
     for (const { track, watchers, pages } of tracks) {
       this.watches.set(track, { watchers: new Set(watchers), pages: new Set(pages) })
     }
+    this._demandStale()
     this._changed()
   }
 

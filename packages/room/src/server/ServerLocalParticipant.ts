@@ -75,6 +75,7 @@ class ServerLocalParticipant extends ParticipantBase {
 
   /** @internal Who receives one of its tracks changed, which the client holding it hears too. */
   _demandChanged(track: TrackKey, change: DemandChange): void {
+    this._demandStale(track)
     this._changed()
     this.holder?.demandChanged(track, change)
   }
