@@ -271,3 +271,37 @@ test("a body whose source fails with Telefunc's own protocol error is the server
   expect(ended).toBe(false)
   await cancel(opened)
 })
+
+test.each([
+  ['the streaming upload', (connId: string) => encodeSseRequestMetadata({ connId, streamRequest: true })],
+  ['a batch POST whose body streams', (connId: string) => encodeSseRequestMetadata({ connId })],
+])(
+  'a session the server ends under %s that stays open and idle is answered at once, `frames` naming no channel, with no write of the page',
+  async (_request, metadata) => {
+    const { connId, opened, channel } = await openWire()
+    const idle = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
+    // A frame only a server sends ends the session; then the page writes nothing more and keeps the body open.
+    const serverOnly = encode.attachResult(999, null)
+    const chunks = [metadata(connId), encodeU32(serverOnly.byteLength), serverOnly]
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull: (controller) => {
+          const chunk = chunks.shift()
+          if (chunk === undefined) idle.resolve(controller)
+          else controller.enqueue(chunk)
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    let answered = false
+    const answer = post(body)
+    void answer.then(() => void (answered = true))
+    const controller = await idle.promise
+    await channel.closed
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    const answeredIdle = answered
+    controller.close()
+    expect([answeredIdle, (await answer).contentType]).toEqual([true, expect.stringMatching(refusal('frames', '', 8))])
+    await cancel(opened)
+  },
+)
