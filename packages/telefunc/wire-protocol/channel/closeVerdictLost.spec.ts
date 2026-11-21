@@ -1,6 +1,6 @@
-// A close the server decides whose verdict the network loses with the page's connection: the server keeps the verdict
-// for the page's reconnect, unless memory runs short first. Over a real server and page, on SSE and on a WebSocket, with
-// a network the spec can lose bytes on and cut.
+// A close the server decides whose frames the network loses with the page's connection: the server keeps them for the
+// page's reconnect. Memory running short first lets go of a verdict, never of a message. Over a real server and page, on
+// SSE and on a WebSocket, with a network the spec can lose bytes on and cut.
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'
@@ -57,6 +57,18 @@ function dropConnections() {
 
 const MAX_MEMORY = 2 * 1024 * 1024
 
+/** A server channel and the page's end of it, both open, on a connection of their own. */
+async function pair(transport: 'sse' | 'ws') {
+  const channel = new ServerChannel<string, string>()
+  getChannelMux().registerChannel(channel)
+  const page = new ClientChannel<string, string>({
+    channelId: channel.id,
+    connection: { telefuncUrl, transports: [transport], idleTimeout: 0, connectionKey: crypto.randomUUID() },
+  })
+  await Promise.all([channel.opened, page.opened])
+  return [channel, page] as const
+}
+
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, a close the server decided whose verdict the network lost with the connection`, () => {
     for (const short of [true, false]) {
@@ -64,13 +76,7 @@ for (const transport of ['sse', 'ws'] as const) {
         ? "with memory short before the page is back, the page's closed resolves with ChannelCloseUnknownError"
         : 'with memory not short, the page back reads the verdict, and its closed resolves with null'
       test(title, async () => {
-        const channel = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(channel)
-        const page = new ClientChannel<string, string>({
-          channelId: channel.id,
-          connection: { telefuncUrl, transports: [transport], idleTimeout: 0, connectionKey: crypto.randomUUID() },
-        })
-        await Promise.all([channel.opened, page.opened])
+        const [channel, page] = await pair(transport)
         // The server's cleanup holds its verdict until the network loses what the server writes.
         let cleanedUp = () => {}
         channel.onClose(() => new Promise<void>((resolve) => (cleanedUp = resolve)))
@@ -94,5 +100,29 @@ for (const transport of ['sse', 'ws'] as const) {
         else expect(closed).toBe(null)
       })
     }
+  })
+}
+
+// Last: what these rows keep, their messages, stays held while their pages are away.
+for (const transport of ['sse', 'ws'] as const) {
+  describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, a close that timed out after the network lost its CLOSE and the messages before it`, () => {
+    test('with memory short before the page is back, the messages stay kept, and the page back reads each once', async () => {
+      const [channel, page] = await pair(transport)
+      const received: string[] = []
+      page.listen((message) => void received.push(message))
+      network.losing = true
+      for (const message of ['m1', 'm2', 'm3']) void channel.send(message)
+      await channel.close({ timeout: 100 })
+      const connections = dropConnections()
+
+      const queue = queueMemory()
+      const held = queue.tryHold(MAX_MEMORY)
+      connections.reconnect()
+      expect(held).toBe(false)
+
+      const closed = await page.closed
+      expect(received).toEqual(['m1', 'm2', 'm3'])
+      expect(closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+    })
   })
 }
