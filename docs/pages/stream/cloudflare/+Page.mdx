@@ -52,7 +52,7 @@ export default {
 }
 ```
 
-> `nodejs_als` (or `nodejs_compat`, which includes it) is needed only when your server code subscribes to a broadcast. Without it, `Broadcast.subscribe()` throws an error that names the flag. So does `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
+> `nodejs_als` (or `nodejs_compat`, which includes it) is needed only when your server code subscribes to a broadcast or to a room, as `Broadcast.subscribe()`, `room.join()` and a server-side Room listener (`subscribe()`, `onJoin()`, …) do. Without it, `Broadcast.subscribe()` throws an error that names the flag, and Room's calls fail with it. So does `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
 
 {/* spellcheck-ignore:off */}
 
