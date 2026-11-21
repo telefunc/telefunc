@@ -12,7 +12,7 @@ afterAll(() => redis.disconnect())
 
 describe('a call Redis fails, caught as an app catches it', () => {
   it("Broadcast.publish() rejects with a BackendError that says what failed and that it didn't run", async () => {
-    const failure = await Broadcast.publish('chat', 'hi').catch((error: unknown) => error)
+    const failure = await Promise.resolve(Broadcast.publish('chat', 'hi')).catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(BackendError)
     expect(failure).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
   })

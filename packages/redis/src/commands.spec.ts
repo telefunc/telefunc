@@ -8,7 +8,7 @@ const reads = (name: string) => name === 'TIME' || hasFlag(name.toLowerCase(), '
 
 describe('a script marked as only reading', () => {
   it.each(Object.values(REDIS_COMMANDS).filter((command) => !command.writes))('$name calls only reads', ({ lua }) => {
-    const called = Array.from(lua.matchAll(/redis\.p?call\(([^,)]*)/g), ([, name]) => name)
+    const called = Array.from(lua.matchAll(/redis\.p?call\(([^,)]*)/g), (match) => match[1] ?? '')
     expect(called.length).toBeGreaterThan(0)
     expect(called.filter((name) => !reads(name.replace(/^'(\w+)'$/, '$1')))).toEqual([])
   })

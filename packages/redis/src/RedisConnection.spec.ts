@@ -51,7 +51,8 @@ describe('a client installed again', () => {
   it('with TLS where the first had none: the backend connects with TLS', () => {
     const connection = installed(client())
     connection.holdFor(client({ tls: { servername: 'redis.example' } }))
-    expect(connection.client.options.tls).toEqual({ servername: 'redis.example' })
+    const { options } = connection.client
+    expect('tls' in options ? options.tls : undefined).toEqual({ servername: 'redis.example' })
   })
 
   it('a client of the same options: the backend keeps its connection', () => {
