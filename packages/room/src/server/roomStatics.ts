@@ -176,8 +176,8 @@ async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord, call: B
     call.read(() => requireRoomMeta(id, incarnation)),
   ])
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
-  // One seeded meanwhile for a join alone has read no roster.
-  return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle()
+  // One seeded meanwhile for a join alone has read no roster: its catch-up is a step of the call too.
+  return replica.model.rosterKnown ? replica.handle() : await call.read(() => replica.sharedHandle())
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {

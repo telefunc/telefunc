@@ -8,6 +8,7 @@ import type { OperationOptions, OperationResult, RoomOperation } from '../backen
 import { Room } from '../index.js'
 import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
 import { newRoomHold } from './lifecycle/hold.js'
+import { RoomReplica } from './RoomReplica.js'
 import { LEASE_CELL_PREFIX, META_SEQ_CELL_KEY } from './store/cells.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -88,6 +89,29 @@ describe('a Room call whose later step the store refuses after the call reaped a
     const id = await storedRoom()
     const leaseStays = await lapsedLease(id)
     refuseMetaReads()
+
+    expect({ got: await outcomeOf(Room.get(id)), leaseStays: await leaseStays() }).toEqual({
+      got: { code: 'denied', outcome: 'may-have-run' },
+      leaseStays: false,
+    })
+  })
+
+  it("Room.get() of a room whose view a join seeded meanwhile: the view's head read refused says it may have run", async () => {
+    const id = await storedRoom()
+    const leaseStays = await lapsedLease(id)
+    // A join of another call seeds the view, with no roster, between this call's look for a held view and its own.
+    const seeded = RoomReplica.seeded.bind(RoomReplica)
+    vi.spyOn(RoomReplica, 'seeded').mockImplementationOnce((roomId, config, stored, seed) => {
+      seeded(roomId, config, stored, { count: 0 })
+      return seeded(roomId, config, stored, seed)
+    })
+    // The store refuses the head read once the call's reap removed the lease: the view's catch-up reads it.
+    const { driver } = getRoomPlane()
+    const readHead = driver.readHead.bind(driver)
+    vi.spyOn(driver, 'readHead').mockImplementation(async (roomId) => {
+      if (roomId === id && !(await leaseStays())) throw refused()
+      return await readHead(roomId)
+    })
 
     expect({ got: await outcomeOf(Room.get(id)), leaseStays: await leaseStays() }).toEqual({
       got: { code: 'denied', outcome: 'may-have-run' },
