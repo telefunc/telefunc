@@ -62,7 +62,7 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   holds: CellPagesHold[]
   holding: WeakSet<RoomDriver>
   retainedHolds: RetainedReadsHold[]
-  holdingRetained: WeakSet<RoomPlane>
+  holdingRetained: WeakSet<RoomPlane['direct']['reads']>
 }
 
 type FailingAttemptOptions = {
@@ -232,11 +232,12 @@ function holdRetainedReads(roomId: string): { held: () => number; release: () =>
   const released = createDeferred()
   const hold: RetainedReadsHold = { roomId, waiting: 0, released: released.promise }
   retainedHolds.push(hold)
-  const plane = getRoomPlane()
-  if (!holdingRetained.has(plane)) {
-    holdingRetained.add(plane)
-    const read = plane.readRetained.bind(plane)
-    plane.readRetained = async (roomId, inc, lane) => {
+  // Room reads retained frames through the plane's reads, which every store of the plane shares.
+  const { reads } = getRoomPlane().direct
+  if (!holdingRetained.has(reads)) {
+    holdingRetained.add(reads)
+    const read = reads.readRetained.bind(reads)
+    reads.readRetained = async (roomId, inc, lane) => {
       const hold = lane.kind === 'binary' ? retainedHolds.find((hold) => hold.roomId === roomId) : undefined
       if (hold !== undefined) {
         hold.waiting++
