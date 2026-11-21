@@ -148,7 +148,7 @@ test('a WebSocket message of a RECONCILE and a BARRIER ends its wire: a page has
 
 test('a reconcile that throws a bug ends its wire, transiently: nothing stays held on a wire that is up', async () => {
   const page = openWebSocket()
-  vi.spyOn(SessionRegistry.prototype, 'setSession').mockImplementationOnce(() => {
+  vi.spyOn(SessionRegistry.prototype, 'setChannels').mockImplementationOnce(() => {
     throw new Error('a bug in reconcile')
   })
   vi.spyOn(console, 'error').mockImplementation(() => {})

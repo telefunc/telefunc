@@ -5,12 +5,11 @@ import { UPGRADE_MAX_STAGED_BYTES, UPGRADE_MAX_STAGED_RECORDS, UPGRADE_STAGE_TTL
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { PreparePayload } from '../../wire/payloads.js'
-import type { Wire } from './ChannelMux.js'
+import type { Fault, Wire } from './ChannelMux.js'
 
 /** The mux, which ends a probe whose stage is abandoned. */
 interface UpgradeStagesOwner {
-  /** Ends the probe for good. */
-  endProbe(probe: Wire): void
+  endFault(wire: Wire, fault: Fault): void
 }
 
 type UpgradeStagesOptions = {
@@ -86,11 +85,12 @@ class UpgradeStages {
     this.abandon(staleProbe)
   }
 
-  /** Forgets the stage and ends the probe holding it. No-op once the stage is committing. */
+  /** Forgets the stage and ends the probe holding it, as a loss: it holds no session. No-op once the stage is
+   *  committing. */
   abandon(probe: Wire): void {
     if (this.byProbe.get(probe)?.phase !== 'staged') return
     this.clear(probe)
-    this.owner.endProbe(probe)
+    this.owner.endFault(probe, { scope: 'loss' })
   }
 
   /** Forgets the stage and leaves the probe wire alone. */

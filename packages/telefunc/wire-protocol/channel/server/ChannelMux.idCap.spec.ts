@@ -52,11 +52,11 @@ test("an app's channel id over 256 bytes as JSON writes it is a usage error at i
   expect(() => new ServerChannel({ id: quotes })).toThrow('256 bytes')
 })
 
-test('a RECONCILE entry naming an id over the bound ends its wire as a protocol violation', async () => {
+test('a first RECONCILE entry naming an id over the bound ends its wire as a loss: the wire holds no session yet', async () => {
   const wire = page()
   try {
     await wire.send(encode.reconcile({ open: [{ id: 'x'.repeat(257), ix: 0, lastSeq: 0, initial: true }] }))
-    expect([wire.ends.map(({ how }) => how), wire.wire.id]).toEqual([['unreadable'], undefined])
+    expect([wire.ends.map(({ how }) => how), wire.wire.id]).toEqual([['transient'], undefined])
   } finally {
     wire.end()
   }
