@@ -7,9 +7,12 @@ import { ROOM_BACKEND_CALLS_IN_FLIGHT_MAX } from '../constants.js'
 // failed.
 
 /** Runs `task` on each item in turn, `ROOM_BACKEND_CALLS_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
- *  turn; throws the first failure once every task ran. */
+ *  turn; throws the first failure once every task ran. Each worker starts with an item of its own: no more run than
+ *  there are items, and none for an empty list. */
 async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<unknown>): Promise<void> {
   const pending = items[Symbol.iterator]()
+  const first = pending.next()
+  if (first.done === true) return
   const slice = new Slice()
   let turn: Promise<void> | null = null
   let failure = null as { error: unknown } | null
@@ -17,8 +20,8 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
     await slice.next()
     turn = null
   }
-  const worker = async () => {
-    for (let next = pending.next(); next.done !== true; next = pending.next()) {
+  const worker = async (own: IteratorResult<T>) => {
+    for (let next = own; next.done !== true; next = pending.next()) {
       if (slice.over) await (turn ??= nextTurn())
       try {
         await task(next.value)
@@ -27,7 +30,12 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
       }
     }
   }
-  await Promise.all(Array.from({ length: ROOM_BACKEND_CALLS_IN_FLIGHT_MAX }, worker))
+  const workers: Promise<void>[] = []
+  for (let next: IteratorResult<T> = first; next.done !== true; next = pending.next()) {
+    workers.push(worker(next))
+    if (workers.length === ROOM_BACKEND_CALLS_IN_FLIGHT_MAX) break
+  }
+  await Promise.all(workers)
   if (failure) throw failure.error
 }
 
