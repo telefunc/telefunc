@@ -8,7 +8,7 @@ import type { Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ChannelCloseUnknownError } from './channelErrors.js'
-import { isAbort } from '../../shared/Abort.js'
+import { Abort } from '../../shared/Abort.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -132,7 +132,7 @@ for (const transport of ['sse', 'ws'] as const) {
         const closed = await page.closed
         if (ending === 'close')
           expect(closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
-        else expect(isAbort(closed) && closed.abortValue).toBe('bye')
+        else expect(closed instanceof Abort && closed.abortValue).toBe('bye')
       })
     }
   })
