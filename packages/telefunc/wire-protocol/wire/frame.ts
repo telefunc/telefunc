@@ -13,6 +13,7 @@ export {
   decodeClientFrame,
   isSequencedFrame,
   peekTag,
+  isCloseFrame,
 }
 export type {
   AckResultStatus,
@@ -464,6 +465,13 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
 /** The tag is the first header byte — readable before the frame is known to be well-formed. */
 function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
+}
+
+/** One of a close's own frames: CLOSE, CLOSE_ACK, CLOSE_DONE, or the ERROR of a close that timed out. */
+function isCloseFrame(frame: Uint8Array): boolean {
+  const tag = frame[0]
+  if (tag === TAG.ERROR) return frame[HEADER] === ERROR_REASON.CLOSE_TIMED_OUT
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE
 }
 
 function decode(frame: Uint8Array): DecodedFrame {

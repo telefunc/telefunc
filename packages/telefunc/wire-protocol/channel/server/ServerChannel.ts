@@ -75,7 +75,7 @@ import { getChannelConfig, reconnectWindow } from '../../../node/server/serverCo
 import { closeTimedOutError, type EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, encode, isCloseFrame, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -653,8 +653,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.lifecycle.peerCloseAck()
         return
       case TAG.CLOSE_DONE:
-        // After its own, the page's CLOSE_DONE is the verdict, sent once the page had all the server sent.
-        if (this.closeDoneSeq !== 0) this.onPageHas(this.closeDoneSeq)
+        // The page sends it once it has the server's last frame of the close: as decider, the server's CLOSE_DONE; as
+        // follower, the server's CLOSE, which its cleanup waits for.
+        this.onPageHas(this.closeDoneSeq || this.closeRequestSeq)
         this.lifecycle.peerCloseDone()
         return
       case TAG.ABORT:
@@ -1129,11 +1130,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.answering.clear()
   }
 
-  /** @internal `MemoryHolder`: ended after a close whose CLOSE its page confirmed, it keeps only the close's tail, its
-   *  verdict among it, which a page that has it loses nothing of. */
+  /** @internal `MemoryHolder`: ended, it keeps only its close's own frames, no message, answer or abort, so letting go
+   *  costs its page at most the close's outcome, where the network lost them. */
   letGoKept(): void {
-    if (this._phase === 'ended' && this.closeRequestSeq !== 0 && this.pageLastSeq >= this.closeRequestSeq)
-      this.mux?.letGoEnded(this.id)
+    if (this._phase === 'ended' && this.keepsOnlyTheClose()) this.mux?.letGoEnded(this.id)
+  }
+
+  /** Its page lacks nothing of it but frames of its close. */
+  private keepsOnlyTheClose(): boolean {
+    if (this._replayBuffer === null) return false
+    if (this.offlineBuffer.size > 0 || this.pendingAckRes.length > 0 || this.pendingEnd.length > 0) return false
+    return this._replayBuffer.holdsOnly(isCloseFrame)
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */
