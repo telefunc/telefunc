@@ -4,8 +4,8 @@
 import { expect, it } from 'vitest'
 import { CallStore, type RoomStore } from './RoomStore.js'
 
-/** The writes of `RoomStore`: its public members but its reads and `join`. */
-type RoomStoreWrite = Exclude<keyof RoomStore, 'reads' | 'join'>
+/** The writes of `RoomStore`: its public members but its reads, its size rule, which writes nothing, and `join`. */
+type RoomStoreWrite = Exclude<keyof RoomStore, 'reads' | 'assertCommittable' | 'join'>
 
 const WRITES = {
   compareExchangeHead: true,

@@ -48,7 +48,7 @@ import {
   type CommitChannels,
   type FenceTokens,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering, type CommitInput } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, assertCommittable, parseOrdering, type CommitInput } from './commands.js'
 import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { neverReachedSubscription } from './RedisSubscriptions.js'
@@ -265,6 +265,10 @@ class RedisRoomDriver implements RoomDriver {
     const waiting = sends.waitTurn(commitWaitRule(channels), payload)
     if (waiting === null) return this.commitNow(target, payload, opts)
     return this.commitInTurn(target, waiting, opts)
+  }
+
+  assertCommittable(lane: LaneId, payload: Uint8Array): void {
+    assertCommittable({ lane, payload, kit: this.kit })
   }
 
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {

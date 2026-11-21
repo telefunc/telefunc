@@ -65,6 +65,11 @@ class RoomStore {
     return result
   }
 
+  /** The commit's size rule, asked before the call writes anything else: it writes nothing, so it counts for nothing. */
+  assertCommittable(lane: LaneId, payload: Uint8Array): void {
+    this.driver.assertCommittable(lane, payload)
+  }
+
   async runOperation<Args, Value>(
     roomId: string,
     inc: string,

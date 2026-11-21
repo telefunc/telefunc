@@ -104,6 +104,9 @@ class CloudflareRoomDriver implements RoomDriver {
     return wire.kind === 'accepted' ? acceptedCommit(lane, wire) : wire
   }
 
+  /** The authority has no size rule: every payload is committable. */
+  assertCommittable(): void {}
+
   /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. An
    *  operation that waits for this session's inbox of a member carries the inbox's exact route instead, which the
    *  authority registers in the operation's own transaction: sent right behind the inbox's own registration, it needs

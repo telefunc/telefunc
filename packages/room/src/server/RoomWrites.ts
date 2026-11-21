@@ -2,11 +2,17 @@ export { RoomWrites, runAfterHook }
 export type { RoomWritesOptions, RoomWritesOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import type { CommitAccepted } from '../backend/contract.js'
+import type { CommitAccepted, LaneId } from '../backend/contract.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { RoomStore } from '../backend/RoomStore.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
+import {
+  type ChannelPublishAck,
+  handleCallbackBug,
+  createDeferred,
+  isChannelOverflowError,
+  unrefTimer,
+} from 'telefunc/__internal'
 import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -288,15 +294,15 @@ class RoomWrites {
     })
   }
 
-  /** A sender that left had its wait failed by its leave; only a closed room is an error. */
+  /** A sender that left had its wait failed by its leave; only a closed room is an error. The stored reply and the
+   *  frame are the same bytes, so whichever the sender reads first, it reads the same answer. */
   async publishDmAck(to: string, ackId: string, reply: RoomResult): Promise<void> {
-    await storeDmReply(this.incarnation.id, this.incarnation.inc, to, ackId, reply)
     const { id, inc } = this.incarnation
-    const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
-    const requiredCellKeys = [memberCellKey(to)]
-    const acked = await commitLane(getRoomPlane().direct, inboxOf(id, inc, to), encodeRoomRecord(envelope), {
-      requiredCellKeys,
-    })
+    const { direct } = getRoomPlane()
+    const target = inboxOf(id, inc, to)
+    const frame = dmAckFrame(direct, target.lane, { __r: 'dm-ack', to, ackId, ...reply })
+    await storeDmReply(id, inc, to, ackId, frame)
+    const acked = await commitLane(direct, target, frame, { requiredCellKeys: [memberCellKey(to)] })
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
@@ -306,6 +312,27 @@ class RoomWrites {
     if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
     const [member] = await reapAndReadMembersById(store, this.incarnation, [id])
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
+  }
+}
+
+/** `envelope` encoded once; one the store would refuse on `lane` is replaced by its refusal, as the sender's answer. */
+function dmAckFrame(store: RoomStore, lane: LaneId, envelope: RoomDmAckEnvelope): Uint8Array {
+  const frame = encodeRoomRecord(envelope)
+  try {
+    store.assertCommittable(lane, frame)
+    return frame
+  } catch (error) {
+    if (!isChannelOverflowError(error)) throw error
+    const { to, ackId } = envelope
+    const overflow: RoomDmAckEnvelope = {
+      __r: 'dm-ack',
+      to,
+      ackId,
+      ok: false,
+      kind: 'overflow',
+      message: error.message,
+    }
+    return encodeRoomRecord(overflow)
   }
 }
 

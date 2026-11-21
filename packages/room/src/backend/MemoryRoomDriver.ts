@@ -408,6 +408,9 @@ class MemoryRoomDriver implements RoomDriver {
     return await this.commitOn(incarnation, lane, payload, opts)
   }
 
+  /** The memory store has no size rule: every payload is committable. */
+  assertCommittable(): void {}
+
   /** Assigns the commit's seq and queues its delivery in one synchronous step, so deliveries run in seq order. */
   private async commitOn(
     incarnation: Incarnation,

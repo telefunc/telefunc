@@ -5,12 +5,14 @@ import type { RoomOperation } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
 import type { RoomResult } from '../../shared/protocol.js'
+import type { RoomDmAckEnvelope } from '../protocol.js'
 import { deleteCells, readOpenCells } from './cellStore.js'
 import { runOperation } from './operations.js'
-import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord } from '../lanes/lanes.js'
 import { ackIdOfDmReplyCellKey, dmReplyCellKey, dmReplyCellPrefix, memberCellKey } from './cells.js'
 
-// A DM's reply, stored for its sender to take until the sender leaves.
+// A DM's reply, stored for its sender to take until the sender leaves: the `dm-ack` frame's own bytes, which read as the
+// reply they carry.
 
 type StoreDmReplyArgs = { sender: string; ackId: string; reply: Uint8Array }
 
@@ -27,13 +29,9 @@ async function storeDmReply(
   inc: string,
   sender: string,
   ackId: string,
-  reply: RoomResult,
+  reply: Uint8Array,
 ): Promise<void> {
-  await runOperation(getRoomPlane().direct, { id: roomId, inc }, STORE_DM_REPLY, {
-    sender,
-    ackId,
-    reply: encodeRoomRecord(reply),
-  })
+  await runOperation(getRoomPlane().direct, { id: roomId, inc }, STORE_DM_REPLY, { sender, ackId, reply })
 }
 
 /** The reply stored for `ackId`, deleted as it is read, or null if none is. */
@@ -42,7 +40,7 @@ async function takeDmReply(roomId: string, inc: string, sender: string, ackId: s
   const raw = (await readOpenCells(getRoomPlane().direct, roomId, inc, [key])).cells.get(key)
   if (raw === undefined) return null
   await dropDmReply(roomId, inc, sender, ackId)
-  return decodeRoomRecord<RoomResult>(raw)
+  return decodeRoomRecord<RoomDmAckEnvelope>(raw)
 }
 
 /** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
@@ -52,7 +50,8 @@ async function takeDmReplies(roomId: string, inc: string, sender: string): Promi
   const slice = new Slice()
   for await (const page of store.reads.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
-    for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomResult>(raw))
+    for (const [key, raw] of page.cells)
+      replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomDmAckEnvelope>(raw))
     if (!(await deleteCells(store, roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)
     if (slice.over) await slice.next()
   }

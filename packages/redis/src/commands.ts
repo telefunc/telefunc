@@ -1,4 +1,11 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering }
+export {
+  REDIS_DELIVERY_FENCE_BYTE,
+  REDIS_DELIVERY_FENCE_TOKEN_LENGTH,
+  LANE_PAGE_SIZE,
+  REDIS_COMMANDS,
+  assertCommittable,
+  parseOrdering,
+}
 export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
@@ -1641,7 +1648,7 @@ function assertPublishable(bytes: number): void {
 
 /** A Room commit's ceiling counts what its publisher published, as a broadcast's does, and bounds what Room puts beside
  *  it, which a sender's meta can make as large as it is. */
-function assertCommittable({ lane, payload, kit }: CommitInput): void {
+function assertCommittable({ lane, payload, kit }: Pick<CommitInput, 'lane' | 'payload' | 'kit'>): void {
   if (payload.byteLength <= PUBLISH_MAX_BYTES) return
   const published = kit.publishedBytes(lane, payload)
   assertPublishable(published)
