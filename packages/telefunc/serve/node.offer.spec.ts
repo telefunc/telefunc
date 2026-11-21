@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
-import { createServer, type Server } from 'node:http'
+import { once } from 'node:events'
+import { createServer, Server } from 'node:http'
 import { connect, createServer as createTcpServer, type Socket } from 'node:net'
+import { serve as honoServe } from '@hono/node-server'
+import { Hono } from 'hono'
 import { Telefunc } from './node.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
@@ -54,19 +57,13 @@ async function fetchApp(port = 0): Promise<App> {
     res.writeHead(response.status, Object.fromEntries(response.headers))
     res.flushHeaders()
     if (!response.body) return void res.end()
-    const isEventStream = response.headers.get('content-type') === 'text/event-stream'
+    const record = response.headers.get('content-type') === 'text/event-stream' ? offerRecorder(offers) : () => {}
     const reader = response.body.getReader()
-    let events = ''
     try {
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
-        if (isEventStream) {
-          events += new TextDecoder().decode(value)
-          const complete = events.split('\n\n')
-          events = complete.pop() ?? ''
-          for (const event of complete) offers.push(...offersIn(event))
-        }
+        record(value)
         res.write(value)
       }
       res.end()
@@ -74,14 +71,58 @@ async function fetchApp(port = 0): Promise<App> {
       res.destroy()
     }
   })
+  closers.push(closerOf(server))
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
+  return { telefunc, server, host: hostOf(server), offers }
+}
+
+/** The setup the docs give for Hono (docs/pages/Telefunc/+Page.mdx): `serve()` of `@hono/node-server`, then
+ *  `installWebSocket()` on the server it returns. */
+async function honoApp(): Promise<App> {
+  const telefunc = new Telefunc()
+  const offers: string[][] = []
+  const app = new Hono()
+  app.all('/_telefunc', async (c) => (await telefunc.serve({ request: c.req.raw })) ?? c.notFound())
+  const server = honoServe({
+    fetch: async (request) => {
+      const response = await app.fetch(request)
+      if (response.headers.get('content-type') !== 'text/event-stream' || !response.body) return response
+      const [toPage, toTest] = response.body.tee()
+      const record = offerRecorder(offers)
+      void toTest.pipeTo(new WritableStream({ write: record })).catch(() => {}) // Fails once the page aborts.
+      return new Response(toPage, response)
+    },
+    port: 0,
+    hostname: '127.0.0.1',
+  })
+  // `serve()` is typed as returning any of Node's HTTP servers, and `installWebSocket()` doesn't take its HTTP/2 one.
+  if (!(server instanceof Server)) throw new Error('@hono/node-server made no `http.Server`')
+  telefunc.installWebSocket(server)
+  closers.push(closerOf(server))
+  await once(server, 'listening')
+  return { telefunc, server, host: hostOf(server), offers }
+}
+
+/** Records the transports each RECONCILED of an SSE stream offers, fed the stream's chunks in order. */
+function offerRecorder(offers: string[][]): (chunk: Uint8Array) => void {
+  const decoder = new TextDecoder()
+  let events = ''
+  return (chunk) => {
+    events += decoder.decode(chunk, { stream: true })
+    const complete = events.split('\n\n')
+    events = complete.pop() ?? ''
+    for (const event of complete) offers.push(...offersIn(event))
+  }
+}
+
+/** Closes the server and destroys the connections still open to it. */
+function closerOf(server: Server | ReturnType<typeof createTcpServer>): () => Promise<void> {
   const sockets = new Set<Socket>()
-  server.on('connection', (socket) => {
+  server.on('connection', (socket: Socket) => {
     sockets.add(socket)
     socket.once('close', () => sockets.delete(socket))
   })
-  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
-  closers.push(() => closeServer(server, sockets))
-  return { telefunc, server, host: hostOf(server), offers }
+  return () => closeServer(server, sockets)
 }
 
 /** The transports each RECONCILED in an SSE event offers. */
@@ -210,4 +251,9 @@ test("Telefunc wraps a server's events once, however often `installWebSocket()` 
   expect(server.emit('app-event', 1, 'two')).toBe(true)
   expect(server.emit('no-listener')).toBe(false)
   expect(got).toEqual([[1, 'two']])
+})
+
+test("the docs' Hono app offers WebSocket, and its pages move to it", async () => {
+  const app = await honoApp()
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
