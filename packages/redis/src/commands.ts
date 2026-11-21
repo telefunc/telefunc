@@ -484,10 +484,11 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-// UNLINK, the first write, takes a key of any type.
+// UNLINK takes a key of any type: a manifest of another type is refused before it.
 const DROP_INCARNATION_HOLDS = ['channel', 'set'] as const
 const DROP_INCARNATION_LUA = `${ALLOWED_LUA}
 tf_allowed('PUBLISH', KEYS[1], '')
+${holdsCheckLua('KEYS[2]', DROP_INCARNATION_HOLDS[1])}
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `

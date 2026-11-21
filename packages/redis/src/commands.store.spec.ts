@@ -289,7 +289,7 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
         tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
         tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
         tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
-        tfRoomDropIncarnation: ['2 commands, 0 TYPE', '2 commands, 0 TYPE'],
+        tfRoomDropIncarnation: ['3 commands, 1 TYPE', '3 commands, 1 TYPE'],
         tfRoomHeadExchange: [
           '20 commands, 3 TYPE',
           '4 commands, 0 TYPE',
@@ -358,6 +358,37 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
         ),
       }
       expect(verdicts).toEqual({ list: refused, hash: refused, set: refused, zset: refused })
+    }, 300_000)
+
+    it(`${name}: an incarnation's drop whose manifest holds another type is refused before its first write`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      if (store === undefined) throw new Error(`${name} didn't start`)
+      // The script alone, as after the driver's last scan of the manifest: a type that scan met it refuses by itself.
+      const drop = recorded.find((call) => call.name === REDIS_COMMANDS.dropIncarnation.name)
+      const manifest = drop?.keys[1]
+      if (drop === undefined || manifest === undefined) throw new Error('the scenario made no drop of an incarnation')
+      const plants: Record<string, (admin: Redis) => Promise<unknown>> = {
+        string: (admin) => admin.set(manifest, 'x'),
+        list: (admin) => admin.rpush(manifest, 'x'),
+        hash: (admin) => admin.hset(manifest, 'x', '1'),
+      }
+      const verdicts: Record<string, unknown> = {}
+      for (const [type, plant] of Object.entries(plants)) {
+        const fault = {
+          name: `${manifest} holds a ${type}`,
+          plant: async (admin: Redis) => {
+            await admin.del(manifest)
+            await plant(admin)
+          },
+        }
+        verdicts[type] = await trial(store, drop, fault)
+      }
+      const refused = {
+        refused: expect.stringMatching(
+          /^Redis at .+ holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing \(WRONGTYPE\): keep that prefix to Telefunc$/,
+        ),
+      }
+      expect(verdicts).toEqual({ string: refused, list: refused, hash: refused })
     }, 300_000)
 
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {
