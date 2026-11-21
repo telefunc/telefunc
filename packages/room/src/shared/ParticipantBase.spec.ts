@@ -5,8 +5,10 @@ import { RoomRemotes } from './RoomView.js'
 import { ClientParticipant } from '../client/ClientParticipant.js'
 import { RoomDemand } from '../server/lanes/RoomDemand.js'
 import { ServerLocalParticipant } from '../server/ServerLocalParticipant.js'
+import { RoomReplica } from '../server/RoomReplica.js'
+import { RoomModel } from './RoomModel.js'
 import type { DemandChange, TrackWatch, TrackWatchState } from './protocol.js'
-import type { LocalParticipant, RemoteParticipant, TrackDemand } from '../types.js'
+import type { LocalParticipant, RemoteParticipant, RoomSnapshotView, TrackDemand } from '../types.js'
 
 /** A member and who receives each of its tracks, as the room told it. */
 type DemandReader = LocalParticipant & { readonly _watches: ReadonlyMap<string, TrackWatch> }
@@ -233,14 +235,21 @@ describe("a participant's demand, as its room shows its watchers", () => {
   /** The `meta.step` of each track's first watcher, in track order. */
   const watcherSteps = (me: LocalParticipant) => me.demand.map((entry) => entry.watchers[0]?.meta.step)
 
+  function onServer(me: LocalParticipant): ServerLocalParticipant {
+    if (!ServerLocalParticipant.isServerLocalParticipant(me)) throw new Error('Expected a server-side member')
+    return me
+  }
+  /** The demand `me`'s replica takes from other processes. */
+  function incomingOf(me: ServerLocalParticipant): RoomDemand {
+    const incoming: unknown = Reflect.get(me.room.replica, 'incomingDemand')
+    if (!(incoming instanceof RoomDemand)) throw new Error("Expected the replica's demand")
+    return incoming
+  }
   /** A server-side room, its member `me`, and the demand its replica takes from other processes. */
   async function serverMember() {
     const room = await Room.create(`demand-${crypto.randomUUID()}`)
-    const me = await room.join()
-    if (!ServerLocalParticipant.isServerLocalParticipant(me)) throw new Error('Expected a server-side member')
-    const incoming: unknown = Reflect.get(me.room.replica, 'incomingDemand')
-    if (!(incoming instanceof RoomDemand)) throw new Error("Expected the replica's demand")
-    return { room, me, incoming, model: me.room.model }
+    const me = onServer(await room.join())
+    return { room, me, incoming: incomingOf(me), model: me.room.model }
   }
   /** Another process's page receives `track` of `member` for `by`, or for nobody it names, or stops. */
   function report(incoming: RoomDemand, member: string, track: string, by: string | undefined, on: boolean) {
@@ -288,6 +297,126 @@ describe("a participant's demand, as its room shows its watchers", () => {
     const after = watcherSteps(me)
     await Room.close(room.id)
     expect({ before, heard, after }).toEqual({ before: [undefined], heard: [[1]], after: [1] })
+  })
+
+  it("on the server, shows a watcher as disconnected to the watcher's own disconnect listener", async () => {
+    const { room, me, incoming } = await serverMember()
+    const watcher = onServer(await room.join())
+    report(incoming, me.id, 'a', watcher.id, true)
+    await settle()
+    const connected = () => me.demand[0]?.watchers[0]?.isConnected
+    const before = connected()
+    const heard: unknown[] = []
+    watcher.onDisconnect(() => heard.push({ own: watcher.isConnected, demand: connected() }))
+    await watcher.room.writes.setMemberConnected(watcher.id, false)
+    const after = connected()
+    await Room.close(room.id)
+    expect({ before, heard, after }).toEqual({ before: true, heard: [{ own: false, demand: false }], after: false })
+  })
+
+  /** `watcher`'s room as a process that holds no replica of it sees it: its member `me` joined with a count alone, and
+   *  the roster the row loads a step at a time, its own read of it held back. */
+  async function joinedWithoutRoster(watcher: ServerLocalParticipant) {
+    vi.spyOn(RoomModel.prototype, 'reconcileRoster').mockReturnValue(new Promise(() => {}))
+    const replicas = vi.spyOn(RoomReplica, 'of').mockReturnValueOnce(undefined).mockReturnValueOnce(undefined)
+    const me = onServer(await Room.join(watcher.room.model.roomId))
+    replicas.mockRestore()
+    return { me, model: me.room.model, remotes: me.room.remotes }
+  }
+
+  it('on a server that joined without its roster, shows a watcher the first roster brings while it loads', async () => {
+    const room = await Room.create(`demand-${crypto.randomUUID()}`)
+    const watcher = onServer(await room.join())
+    const { me, model } = await joinedWithoutRoster(watcher)
+    report(incomingOf(me), me.id, 'a', watcher.id, true)
+    await settle()
+    const watchers = () => me.demand[0]?.watchers.map(({ id }) => id)
+    const before = { rosterKnown: model.rosterKnown, watchers: watchers() }
+    const roster = {
+      members: [watcher.room.model.memberSnapshot(watcher.id), model.memberSnapshot(me.id)],
+      departing: new Map(),
+    }
+    const load = model.reconcilingRoster(roster, [])
+    while (!model.hasMember(watcher.id) && load.next().done !== true) {}
+    const loading = watchers()
+    while (load.next().done !== true) {}
+    const loaded = watchers()
+    await Room.close(room.id)
+    expect({ before, loading, loaded }).toEqual({
+      before: { rosterKnown: false, watchers: [] },
+      loading: [watcher.id],
+      loaded: [watcher.id],
+    })
+  })
+
+  it("on the server, shows a watcher as disconnected to its own disconnect listener in the room's snapshot too", async () => {
+    const { room, me, incoming } = await serverMember()
+    const watcher = onServer(await room.join())
+    report(incoming, me.id, 'a', watcher.id, true)
+    await settle()
+    const held = room.snapshot()
+    const shown = (snapshot: RoomSnapshotView) => snapshot.participants.find(({ id }) => id === watcher.id)?.isConnected
+    const heard: unknown[] = []
+    watcher.onDisconnect(() =>
+      heard.push({
+        snapshot: shown(room.snapshot()),
+        participant: room.getParticipant(watcher.id)?.isConnected,
+        demand: me.demand[0]?.watchers[0]?.isConnected,
+      }),
+    )
+    await watcher.room.writes.setMemberConnected(watcher.id, false)
+    await Room.close(room.id)
+    expect({ before: shown(held), heard }).toEqual({
+      before: true,
+      heard: [{ snapshot: false, participant: false, demand: false }],
+    })
+  })
+
+  it("on a server that joined without its roster, lists a watcher the first roster brings in the room's snapshot too", async () => {
+    const room = await Room.create(`demand-${crypto.randomUUID()}`)
+    const watcher = onServer(await room.join())
+    const { me, model, remotes } = await joinedWithoutRoster(watcher)
+    report(incomingOf(me), me.id, 'a', watcher.id, true)
+    await settle()
+    const held = remotes.snapshot()
+    const listed = (snapshot: RoomSnapshotView) => snapshot.participants.some(({ id }) => id === watcher.id)
+    const roster = {
+      members: [watcher.room.model.memberSnapshot(watcher.id), model.memberSnapshot(me.id)],
+      departing: new Map(),
+    }
+    const load = model.reconcilingRoster(roster, [])
+    while (!model.hasMember(watcher.id) && load.next().done !== true) {}
+    const loading = {
+      snapshot: listed(remotes.snapshot()),
+      participant: remotes.get(watcher.id)?.id,
+      demand: me.demand[0]?.watchers.map(({ id }) => id),
+    }
+    while (load.next().done !== true) {}
+    await Room.close(room.id)
+    expect({ before: listed(held), loading }).toEqual({
+      before: false,
+      loading: { snapshot: true, participant: watcher.id, demand: [watcher.id] },
+    })
+  })
+
+  it('on a server that joined without its roster, tells its room once that the first roster came, at its end', async () => {
+    const room = await Room.create(`demand-${crypto.randomUUID()}`)
+    const watcher = onServer(await room.join())
+    const others = [onServer(await room.join()), onServer(await room.join())]
+    const { me, model, remotes } = await joinedWithoutRoster(watcher)
+    const heard: boolean[] = []
+    remotes.state.onChange(() => heard.push(model.rosterKnown), undefined, remotes.adder)
+    const members = [watcher, ...others].map((member) => member.room.model.memberSnapshot(member.id))
+    const load = model.reconcilingRoster(
+      { members: [...members, model.memberSnapshot(me.id)], departing: new Map() },
+      [],
+    )
+    // Each step in a task of its own, so a notice a step queued is heard before the next.
+    while (load.next().done !== true) await settle()
+    await settle()
+    const rosterKnown = model.rosterKnown
+    await Room.close(room.id)
+    expect({ rosterKnown, heard }).toEqual({ rosterKnown: true, heard: [true] })
   })
 
   const names = ['', 'A', 'aaa', 'z', 'alpha', 'a', 'Ω', 'é', '😀', 't0', 't2', 't10']

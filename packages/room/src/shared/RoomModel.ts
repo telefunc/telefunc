@@ -241,6 +241,11 @@ class RoomModel {
     for (const state of [...this.states]) state.changed()
   }
 
+  /** The first roster changed what a read shows: the version moves, and `onChange` hears of it once the roster is in. */
+  private loadedQuietly(): void {
+    this.stateVersion++
+  }
+
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
   isConnected(entry: MemberEntry): boolean {
     return this.owner.heldConnection?.(entry.id) ?? entry.meta.connected
@@ -334,10 +339,10 @@ class RoomModel {
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this.owner.onMemberMetaGap?.()
     if (applied === 'stale' || applied === 'gap') return false
-    this.owner.onMemberMeta(id, update)
     // An equal value, as a write that raced another may bring, changes nothing anyone reads.
+    if (applied === 'changed') this.bumpState()
+    this.owner.onMemberMeta(id, update)
     if (applied === 'unchanged') return true
-    this.bumpState()
     const connectionChanged = this.isConnected(entry) !== wasConnected
     // The room's record of a connection this side holds itself changes nothing it shows.
     if (connectionChanged || !('connected' in update)) this.memberChanged(entry)
@@ -485,6 +490,7 @@ class RoomModel {
     if (!entry) {
       if (!narrate) {
         this.createEntry(member)
+        this.loadedQuietly()
         return false
       }
       this.applyJoin(member)
@@ -497,6 +503,7 @@ class RoomModel {
       return true
     }
     const applied = entry.meta.apply(update)
+    if (applied === 'changed') this.loadedQuietly()
     if (applied !== 'stale' && applied !== 'gap') this.owner.onMemberMeta(member.id, update)
     return false
   }
