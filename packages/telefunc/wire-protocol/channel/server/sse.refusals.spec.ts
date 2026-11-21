@@ -324,19 +324,42 @@ test.each([
   },
 )
 
-test('a session end finishes the event its stream started, and what waits behind that event, control or data, goes with the wire', async () => {
-  const { connId, opened, channel } = await openWire()
-  await channel.opened
-  if (!(opened.body instanceof ReadableStream)) throw new Error('no event stream')
+/** The page's event stream, read through its RECONCILED: the stream asks for more. */
+async function caughtUp(answer: SseChannelHttpResponse) {
+  if (!(answer.body instanceof ReadableStream)) throw new Error('no event stream')
   const decoder = new TextDecoder()
-  const events = opened.body.getReader()
-  // The stream's comment and the RECONCILED: read, the stream asks for more.
+  const events = answer.body.getReader()
   let text = ''
   while (!text.includes('\n\ndata: ') || !text.endsWith('\n\n')) {
     const { value } = await events.read()
     text += decoder.decode(value)
   }
   await new Promise<void>((resolve) => setImmediate(resolve))
+  /** The stream's frames, read to its end. */
+  const frames = async () => {
+    for (let read = await events.read(); !read.done; read = await events.read()) text += decoder.decode(read.value)
+    return framesOfEvents(text)
+  }
+  return { frames }
+}
+
+test("a channel's frame the server refuses, on a stream its page has read: the channel's end goes once, as the stream's last event", async () => {
+  const { connId, opened, channel } = await openWire()
+  await channel.opened
+  const stream = await caughtUp(opened)
+  // A page sends no ERROR but a lost one.
+  const answer = await post(encodeSseRequest({ connId }, [encode.error(0, ERROR_REASON.UNCONFIRMED, 1)]))
+  const tags = (await stream.frames()).map(({ tag }) => tag)
+  expect([answer.contentType, tags]).toEqual([
+    expect.stringMatching(refusal('frames', '0', END_CAUSE.frameRefused.code)),
+    [TAG.RECONCILED, TAG.END],
+  ])
+})
+
+test('a session end finishes the event its stream started, and what waits behind that event, control or data, goes with the wire', async () => {
+  const { connId, opened, channel } = await openWire()
+  await channel.opened
+  const stream = await caughtUp(opened)
   // An event of two slices starts, and the stream takes its first; a PONG then waits to pass it, and a text behind it.
   void channel.send('x'.repeat(SSE_EVENT_SLICE_BYTES)).catch(() => {})
   await post(encodeSseRequest({ connId }, [encode.ping([])]))
@@ -344,6 +367,5 @@ test('a session end finishes the event its stream started, and what waits behind
   // A frame only a server sends ends the session.
   const serverOnly = encode.attachResult(999, null)
   await post(encodeSseRequest({ connId }, [serverOnly]))
-  for (let read = await events.read(); !read.done; read = await events.read()) text += decoder.decode(read.value)
-  expect(framesOfEvents(text).map(({ tag }) => tag)).toEqual([TAG.RECONCILED, TAG.TEXT, TAG.END])
+  expect((await stream.frames()).map(({ tag }) => tag)).toEqual([TAG.RECONCILED, TAG.TEXT, TAG.END])
 })

@@ -516,6 +516,9 @@ class ChannelMux implements UpgradeStagesOwner {
   endFault(wire: Wire, fault: Fault): void {
     const entry = this.wires.get(wire)
     if (!entry) return
+    // A wire the end closes says it as its last word: what its channels send on it from here goes no more, kept in
+    // their replay for their next attach.
+    if (fault.scope !== 'channel' || fault.wire !== 'kept') entry.sender.close()
     const channelEnded = fault.scope === 'channel' && this.endChannelAt(entry, fault.ix, fault.cause)
     if (channelEnded && fault.wire === 'kept') return
     if (fault.scope === 'loss') return entry.transport.close(wire, { how: 'transient', refusal: null })
