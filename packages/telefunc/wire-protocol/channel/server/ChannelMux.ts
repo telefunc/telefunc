@@ -331,12 +331,14 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** The one close the server decides on a wire, as `end` says, the only caller of `transport.close`. The mux forgets
-   *  the wire first, so a later decision, its sender's included, finds nothing; the transport then ends it; what the
-   *  wire held goes last, once its bytes were handed, and also where the transport throws. */
+   *  the wire first, so a later decision, its sender's included, finds nothing; the transport then gets the channels'
+   *  ends its sender kept, and ends it; what the wire held goes last, once its bytes were handed, and also where the
+   *  transport throws. */
   private closeWire(entry: WireEntry, end: ServerEnd): void {
     if (this.wires.get(entry.wire) !== entry) return
     const held = this.decideClose(entry, end.how)
     try {
+      entry.sender.handLastEnds()
       entry.transport.close(entry.wire, end, held)
     } finally {
       this.dispose(entry, end.how)
