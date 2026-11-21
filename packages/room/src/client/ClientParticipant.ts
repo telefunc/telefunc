@@ -133,6 +133,10 @@ class ClientParticipant extends ParticipantBase<PageLink> {
     return this.link.remotes.shownOf(ids)
   }
 
+  protected get _rosterVersion(): number {
+    return this.link.remotes.state.model.version
+  }
+
   protected _followRoom(onChange: () => void): () => void {
     return this.link.remotes.state.onChange(onChange, undefined, 'app')
   }

@@ -65,6 +65,10 @@ class ServerLocalParticipant extends ParticipantBase {
     return this.room.remotes.shownOf(ids)
   }
 
+  protected get _rosterVersion(): number {
+    return this.room.remotes.state.model.version
+  }
+
   protected _followRoom(onChange: () => void): () => void {
     return this.room.state.onChange(onChange, undefined, 'app')
   }

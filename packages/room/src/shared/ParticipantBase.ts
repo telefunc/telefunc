@@ -99,9 +99,11 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private shownDemand: readonly TrackDemand[] = NO_DEMAND
   /** `demand`'s entries by track, as last read. */
   private readonly demandEntries = new Map<TrackKey, TrackDemand>()
-  /** The tracks whose entry may have changed since: each of them while who its room shows may have changed. */
+  /** The tracks whose entry may have changed since it was read. */
   private readonly staleTracks = new Set<TrackKey>()
-  private allTracksStale = true
+  private allTracksStale = false
+  /** The version of its room's roster the entries were read at. */
+  private demandRosterVersion = -1
   /** The entries that changed since `shownDemand` was made, `null` for one that went. */
   private readonly listChanges = new Map<TrackKey, TrackDemand | null>()
   private demandChanges = 0
@@ -352,10 +354,12 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     else this.staleTracks.add(track)
   }
 
-  /** Reads again the entries of the tracks that may have changed, and only those. */
+  /** Reads again the entries of the tracks that may have changed, and only those: every one where its room's roster
+   *  changed since. */
   private refreshDemand(): void {
-    // Only `onChange`'s listeners follow the room: without them, who it shows may have changed at any time.
-    if (this.changeListeners === null) this.allTracksStale = true
+    const rosterVersion = this._rosterVersion
+    if (rosterVersion !== this.demandRosterVersion) this.allTracksStale = true
+    this.demandRosterVersion = rosterVersion
     const watches = this.watchesNow
     const tracks = this.allTracksStale ? new Set([...this.demandEntries.keys(), ...watches.keys()]) : this.staleTracks
     for (const key of tracks) {
@@ -431,6 +435,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   /** The participants of `ids` as its room lists them now, in its order: none that left, is hidden, or whose join this
    *  side hasn't seen yet. */
   protected abstract _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[]
+  /** The version of the roster `_shownParticipants` reads: the same while it shows the same participants. */
+  protected abstract get _rosterVersion(): number
   /** Calls `onChange` at each change of the room it lists participants by; returns what stops it. */
   protected abstract _followRoom(onChange: () => void): () => void
 
@@ -439,12 +445,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     if (!this.changeListeners?.size) this.seen = this.shown()
     if (this.changeListeners === null) {
       this.changeListeners = new Listeners()
-      ;(this.listenerCleanups ??= new Set()).add(
-        this._followRoom(() => {
-          this._demandStale()
-          this._changed()
-        }),
-      )
+      ;(this.listenerCleanups ??= new Set()).add(this._followRoom(() => this._changed()))
     }
     return this.register(this.changeListeners, callback, options)
   }
