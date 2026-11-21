@@ -110,6 +110,11 @@ export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
 export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
 
+/** A WebSocket attempt races a socket past 3 × its last open R: TCP's first timeout from R (RFC 6298 §2.2). */
+export const WS_RACE_AFTER_OPENS = 3
+/** …and never sooner, however fast the last open: TCP's least timeout, and its first (RFC 6298 §2.4, §2.1). */
+export const WS_RACE_AFTER_MIN_MS = 1_000
+
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
 

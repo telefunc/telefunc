@@ -5,11 +5,14 @@ import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_TRANSPORT,
   LOSSY_CONFIRM_SLACK_MS,
+  TIMER_DELAY_MAX_MS,
   WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
   WS_CLOSE_REJECTED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
+  WS_RACE_AFTER_MIN_MS,
+  WS_RACE_AFTER_OPENS,
 } from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
 import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/ClientHeadroom.js'
@@ -36,6 +39,9 @@ type WirePieces = {
   pair: ReturnType<typeof pairPublishes>
 }
 
+/** A socket of the attempt under way, not open yet, with what its frames go through once it is the wire. */
+type Connecting = { ws: WebSocket; pieces: WirePieces; startedAt: number }
+
 type WsTransportOptions = {
   telefuncUrl: string
   owner: TransportOwner
@@ -52,7 +58,12 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   private ws: WebSocket | null = null
   /** The wire the page left, still read until the next takes over; its headroom's timers may still send. */
   private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
-  private connecting = false
+  /** The attempt's newest socket, none open yet, and the one before it, still connecting beside it (see `connect`). */
+  private connecting: Connecting | null = null
+  private racing: Connecting | null = null
+  private raceTimer: ReturnType<typeof setTimeout> | null = null
+  /** How long the last socket that became the wire took from its start to its open. */
+  private openMs: number | null = null
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
@@ -112,39 +123,79 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.probed = null
     const { ws, pieces } = probed.handOver()
     this.ws = ws
-    this.connecting = false
     this.setupHandlers(ws, pieces)
   }
 
   start(): void {
     if (this.connecting || this.hasWire()) return
+    this.connect(Math.max(WS_RACE_AFTER_MIN_MS, WS_RACE_AFTER_OPENS * (this.openMs ?? 0)))
+  }
 
-    this.connecting = true
-
+  /** Opens a socket for the attempt, and, if none opened within `raceAfterMs`, another beside it, given twice as long:
+   *  a socket the network reset or holds unanswered may never say so. The older of two still connecting goes. */
+  private connect(raceAfterMs: number): void {
+    this.letGo(this.racing)
+    this.racing = null
     let ws: WebSocket
     try {
       ws = new WebSocket(this.wsUrl())
     } catch {
-      this.connecting = false
-      this.owner.onTransportClosed(this)
+      if (!this.connecting) this.owner.onTransportClosed(this)
       return
     }
-
-    this.ws = ws
     ws.binaryType = 'arraybuffer'
-
-    ws.onopen = () => {
-      if (this.ws !== ws) return
-      this.handleOpen(ws)
-    }
-
-    this.setupHandlers(ws, this.wirePieces(ws))
+    const socket: Connecting = { ws, pieces: this.wirePieces(ws), startedAt: performance.now() }
+    this.racing = this.connecting
+    this.connecting = socket
+    this.pieces = socket.pieces
+    ws.onopen = () => this.adopt(socket)
+    ws.onclose = () => this.connectFailed(socket)
+    ws.onerror = () => {}
+    this.raceTimer = setTimeout(() => this.connect(Math.min(TIMER_DELAY_MAX_MS, raceAfterMs * 2)), raceAfterMs)
   }
 
-  private handleOpen(ws: WebSocket): void {
-    if (this.ws !== ws) return
-    this.connecting = false
+  /** The first socket to open is the wire; the other still connecting goes. */
+  private adopt(socket: Connecting): void {
+    this.letGo(socket === this.connecting ? this.racing : this.connecting)
+    this.endAttempt()
+    this.openMs = performance.now() - socket.startedAt
+    this.ws = socket.ws
+    this.setupHandlers(socket.ws, socket.pieces)
     this.owner.onTransportOpen(this)
+  }
+
+  /** A socket that closed before it opened; the attempt fails with the last. */
+  private connectFailed(socket: Connecting): void {
+    socket.pieces.headroom.close()
+    if (socket === this.racing) this.racing = null
+    else {
+      this.connecting = this.racing
+      this.racing = null
+    }
+    if (this.connecting) {
+      this.pieces = this.connecting.pieces
+      return
+    }
+    this.endAttempt()
+    this.owner.onTransportClosed(this)
+  }
+
+  private endAttempt(): void {
+    if (this.raceTimer) clearTimeout(this.raceTimer)
+    this.raceTimer = null
+    this.connecting = this.racing = null
+  }
+
+  /** A socket the attempt no longer needs: closed, and closed again should it open all the same, before any frame. */
+  private letGo(socket: Connecting | null): void {
+    if (!socket) return
+    const { ws } = socket
+    ws.onopen = () => ws.close()
+    ws.onclose = ws.onerror = null
+    socket.pieces.headroom.close()
+    try {
+      ws.close()
+    } catch {}
   }
 
   attachHeartbeat(heartbeat: Heartbeat): void {
@@ -227,7 +278,6 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     ws.onclose = ({ code }: CloseEvent) => {
       headroom.close()
       if (this.ws === ws) this.ws = null
-      this.connecting = false
       this.settleDrained()
       this.owner.onTransportClosed(this, {
         otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
@@ -260,7 +310,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   }
 
   isConnecting(): boolean {
-    return this.connecting
+    return this.connecting !== null
   }
 
   sendFrame(frame: OutboundFrame): void {
@@ -336,7 +386,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   dispose(): void {
     globalThis.removeEventListener?.('pagehide', this.onPageHide)
-    this.connecting = false
+    this.letGo(this.connecting)
+    this.letGo(this.racing)
+    this.endAttempt()
     // A socket sends what it was handed before its close.
     this.probed?.discard()
     if (this.ws) this.pieces?.sender.flush()

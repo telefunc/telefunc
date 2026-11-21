@@ -351,6 +351,32 @@ function testWire(isDev: boolean) {
         expect(end!.received).deep.equal([])
       })
     })
+
+    if (canCutWire())
+      test('channel: a channel whose reconnect the network takes and never answers gets what the server sends on another WebSocket', async () => {
+        const proxy = await startBlackHoleProxy(getServerUrl())
+        try {
+          await navigate(`${proxy.url}/channel`)
+          await page.click('#wire-end-open')
+          let channelId = ''
+          await autoRetry(async () => {
+            const { end } = await getResult<WireState>('#wire-state')
+            if (!end) throw new Error('no end card yet')
+            expect((await getCleanupState())[`wireEnd_${end.channelId}_onOpen`]).toBe('true')
+            channelId = end.channelId
+          })
+          // Chrome holds a WebSocket whose upgrade gets no answer for 240 s before it gives up.
+          proxy.holdNextWebSocket()
+          await cutWire()
+          await runServerAction(`wireEnd_${channelId}_close`)
+          await autoRetry(async () => {
+            const { end } = await getResult<WireState>('#wire-state')
+            expect(end?.received).deep.equal([...sentBefore, 'onClose:none'])
+          })
+        } finally {
+          await proxy.close()
+        }
+      })
   }
 
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {

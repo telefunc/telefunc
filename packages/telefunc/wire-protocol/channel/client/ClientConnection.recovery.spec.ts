@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { ClientConnection } from './ClientConnection.js'
+import { WireLifecycle } from './WireLifecycle.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 const PING_INTERVAL_MS = 5_000
@@ -11,9 +12,14 @@ const RECONNECT_TIMEOUT_MS = 20_000
  *  then `reconnectTimeout` (wire/pingDeadline.ts `reconnectWindowOf`). */
 const RECOVERY_WINDOW_MS = 2 * PING_INTERVAL_MS + RECONNECT_TIMEOUT_MS
 
-/** What a socket the page makes does: reconciles `afterMs` after it opens, or closes at once as a refused connect, or
- *  never opens nor closes. */
-type Script = { reconcile: { afterMs: number } } | 'refused' | 'hangs'
+/** What a socket the page makes does: reconciles `afterMs` after it opens; opens `afterMs` after it was made, then
+ *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); closes at once as a refused
+ *  connect; or never opens nor closes, as Node 22's after a reset at accept. */
+type Script =
+  | { reconcile: { afterMs: number } }
+  | { opens: { afterMs: number; despiteClose?: boolean } }
+  | 'refused'
+  | 'hangs'
 
 /** A WebSocket that plays the next script: the page's sockets, when it made each, and whether it closed them. */
 class ScriptedWebSocket {
@@ -29,24 +35,44 @@ class ScriptedWebSocket {
   bufferedAmount = 0
   readonly at = performance.now()
   closedByPage = false
+  /** The messages the page sent on it. */
+  sent = 0
+  /** The most of the page's sockets connecting at once, none open yet. */
+  static mostConnecting = 0
+  private readonly despiteClose: boolean
 
   constructor() {
     ScriptedWebSocket.made.push(this)
+    const connecting = ScriptedWebSocket.made.filter((ws) => ws.readyState === 0 && !ws.closedByPage).length
+    ScriptedWebSocket.mostConnecting = Math.max(ScriptedWebSocket.mostConnecting, connecting)
     const script = ScriptedWebSocket.scripts.shift() ?? 'refused'
+    this.despiteClose = typeof script === 'object' && 'opens' in script && script.opens.despiteClose === true
     if (script === 'hangs') return
     if (script === 'refused') {
       queueMicrotask(() => this.drop())
       return
     }
-    queueMicrotask(() => {
-      this.readyState = 1
-      this.onopen?.()
-    })
+    if ('opens' in script) {
+      // A page that took no open sends no RECONCILE, so the server answers none.
+      setTimeout(() => this.open() && this.deliver(reconciled()), script.opens.afterMs)
+      return
+    }
+    queueMicrotask(() => this.open())
     setTimeout(() => this.deliver(reconciled()), script.reconcile.afterMs)
   }
-  send(): void {}
+  /** Whether the page took the open. */
+  private open(): boolean {
+    if (this.readyState !== 0 || (this.closedByPage && !this.despiteClose) || !this.onopen) return false
+    this.readyState = 1
+    this.onopen()
+    return this.readyState === 1
+  }
+  send(): void {
+    this.sent++
+  }
   close(): void {
     this.closedByPage = true
+    if (this.readyState === 0 && this.despiteClose) return
     this.readyState = 3
   }
   /** The wire goes, as when a proxy restarts. */
@@ -76,8 +102,9 @@ function reconciled() {
 
 /** A page whose first socket reconciles `handshakeMs` after it opens, then sockets as `then` scripts them; its wire
  *  drops once it reconciled. Returns when the wire dropped, and what ended its channel. */
-async function lostWire({ handshakeMs = 0, then }: { handshakeMs?: number; then: Script[] }) {
-  ScriptedWebSocket.scripts = [{ reconcile: { afterMs: handshakeMs } }, ...then]
+async function lostWire({ handshakeMs = 0, openMs, then }: { handshakeMs?: number; openMs?: number; then: Script[] }) {
+  const first: Script = openMs === undefined ? { reconcile: { afterMs: handshakeMs } } : { opens: { afterMs: openMs } }
+  ScriptedWebSocket.scripts = [first, ...then]
   const ended: unknown[] = []
   const connectionKey = crypto.randomUUID()
   const options = { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey }
@@ -86,18 +113,19 @@ async function lostWire({ handshakeMs = 0, then }: { handshakeMs?: number; then:
     fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) }),
     options,
   )
-  await vi.advanceTimersByTimeAsync(handshakeMs + 10)
-  const first = ScriptedWebSocket.made[0]
-  if (!first) throw new Error('the page made no socket')
-  first.drop()
+  await vi.advanceTimersByTimeAsync(Math.max(handshakeMs, openMs ?? 0) + 10)
+  const wire = ScriptedWebSocket.made[0]
+  if (!wire) throw new Error('the page made no socket')
+  wire.drop()
   const lostAt = performance.now()
   /** Registers another channel on the same connection. */
   const register = () => ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), options)
   return { lostAt, ended, register }
 }
 
-/** When each socket after the first was made, from the loss. */
-const madeSince = (lostAt: number) => ScriptedWebSocket.made.slice(1).map((ws) => Math.round(ws.at - lostAt))
+/** When each socket made since the loss was made, from the loss. */
+const madeSince = (lostAt: number) =>
+  ScriptedWebSocket.made.filter((ws) => ws.at >= lostAt).map((ws) => Math.round(ws.at - lostAt))
 
 describe("a page's reconnects", () => {
   const realWebSocket = globalThis.WebSocket
@@ -112,6 +140,7 @@ describe("a page's reconnects", () => {
     globalThis.WebSocket = realWebSocket
     ScriptedWebSocket.made = []
     ScriptedWebSocket.scripts = []
+    ScriptedWebSocket.mostConnecting = 0
   })
 
   test('wait a random part of each delay of the backoff, the first and those at the cap too', async () => {
@@ -152,6 +181,7 @@ describe("a page's recovery", () => {
     globalThis.WebSocket = realWebSocket
     ScriptedWebSocket.made = []
     ScriptedWebSocket.scripts = []
+    ScriptedWebSocket.mostConnecting = 0
   })
 
   test('ends its channels at the deadline the server holds them to, not before', async () => {
@@ -163,11 +193,94 @@ describe("a page's recovery", () => {
     expect(ended[0]).toMatchObject({ message: 'Connection dropped' })
   })
 
-  test('ends an attempt that never opens at that deadline', async () => {
-    const { ended } = await lostWire({ then: ['hangs'] })
-    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1)
+  test('ends an attempt that never opens at that deadline, with every socket it raced, never two connecting at once', async () => {
+    const { lostAt, ended } = await lostWire({ then: Array<Script>(8).fill('hangs') })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
+    expect(ended).toEqual([])
+    // 0.9 of 500, then a socket more 1 s, 2 s, 4 s and 8 s on; the next, 16 s on, would come past the deadline.
+    expect(madeSince(lostAt)).toEqual([450, 1450, 3450, 7450, 15450])
+    expect(ScriptedWebSocket.mostConnecting).toBe(2)
+    await vi.advanceTimersByTimeAsync(2)
     expect(ended).toHaveLength(1)
-    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([false, true])
+    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([false, true, true, true, true, true])
+  })
+
+  test('races a socket beside an attempt that never opens, 1 s on with no backoff, and the one that opens is the wire', async () => {
+    const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+    const { lostAt, ended } = await lostWire({ then: ['hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(madeSince(lostAt)).toEqual([450, 1450])
+    const [, hung, raced] = ScriptedWebSocket.made
+    expect([hung?.closedByPage, hung?.sent]).toEqual([true, 0])
+    expect([raced?.closedByPage, raced?.readyState]).toEqual([false, 1])
+    expect(raced?.sent).toBeGreaterThan(0)
+    // The first wire's open, then the raced socket's alone.
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(ended).toEqual([])
+  })
+
+  test('races a socket three times as long as the last open after an attempt started, where that is past 1 s', async () => {
+    // The first connect races a socket 1 s on, which hangs.
+    const { lostAt, ended } = await lostWire({ openMs: 3_000, then: ['hangs', 'hangs', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(13_000)
+    expect(madeSince(lostAt)).toEqual([450, 9450])
+    expect(ended).toEqual([])
+  })
+
+  test('takes the first socket of a link that got slower than 1 s and three times its last open, when it opens', async () => {
+    const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+    const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 1_500 } }) })
+    // The first wire opened; the first socket after the loss opens at 450 + 1,500, as it would without a race.
+    expect(open).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1_949)
+    expect(open).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(open).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(madeSince(lostAt)).toEqual([450, 1450])
+    const [, first, raced] = ScriptedWebSocket.made
+    expect([first?.readyState, first?.closedByPage]).toEqual([1, false])
+    expect([raced?.closedByPage, raced?.sent]).toEqual([true, 0])
+    expect(open).toHaveBeenCalledTimes(2)
+    expect(ended).toEqual([])
+  })
+
+  test('over a link whose open outlasts two races, ends on a socket it opened, having made three', async () => {
+    const { lostAt, ended } = await lostWire({ then: Array<Script>(4).fill({ opens: { afterMs: 3_500 } }) })
+    await vi.advanceTimersByTimeAsync(9_000)
+    // The third, 2 s after the second, lets the first go; the second opens 3.5 s after it was made.
+    expect(madeSince(lostAt)).toEqual([450, 1450, 3450])
+    expect(ScriptedWebSocket.made.slice(1).map((ws) => [ws.readyState, ws.closedByPage])).toEqual([
+      [3, true],
+      [1, false],
+      [3, true],
+    ])
+    expect(ended).toEqual([])
+  })
+
+  test('closes a socket it let go that opens all the same, before any frame', async () => {
+    const open = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+    await lostWire({ then: [{ opens: { afterMs: 3_000, despiteClose: true } }, { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(5_000)
+    const [, late, raced] = ScriptedWebSocket.made
+    expect([late?.readyState, late?.sent]).toEqual([3, 0])
+    expect(raced?.readyState).toBe(1)
+    expect(open).toHaveBeenCalledTimes(2)
+  })
+
+  test('races a first connect that never opens 1 s on, as it measured no open', async () => {
+    ScriptedWebSocket.scripts = ['hangs', { reconcile: { afterMs: 0 } }]
+    const ended: unknown[] = []
+    ClientConnection.getOrCreate(
+      'http://test.local/_telefunc',
+      fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) }),
+      { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey: crypto.randomUUID() },
+    )
+    const startedAt = performance.now()
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - startedAt))).toEqual([0, 1_000])
+    expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([true, false])
+    expect(ended).toEqual([])
   })
 
   test("starts no attempt that couldn't reconcile before the deadline, as long as the last handshake took", async () => {
