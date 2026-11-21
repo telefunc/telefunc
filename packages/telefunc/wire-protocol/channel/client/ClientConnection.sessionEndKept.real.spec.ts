@@ -6,9 +6,11 @@
 // the session's end.
 
 import { expect, test } from 'vitest'
-import { encodeU32 } from '../../wire/envelope.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { encodeSseRequest, encodeU32 } from '../../wire/envelope.js'
 import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../../wire/requestKind.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
 import { ServerChannel } from '../server/ServerChannel.js'
@@ -16,6 +18,7 @@ import { ClientChannel } from './ClientChannel.js'
 import {
   delay,
   findText,
+  framesStart,
   opens,
   pair,
   rewriting,
@@ -60,36 +63,49 @@ function carriesError(data: unknown): boolean {
   return frames.some((frame) => frame[0] === TAG.ERROR)
 }
 
-/** The page's WebSockets, whose first close reaches the page as 1006 with no reason, or as 4002 with the reason `told`,
- *  and whose first socket's messages carrying a channel's ERROR (where one carried the end) never reach it. */
-function losingFirstClose(told: string | null): () => void {
+/** A close as the page reads it in place of its socket's: `told` with 4002, or none (null) with 1006, as where the
+ *  connection dies before the close frame. Node 22 has no `CloseEvent`: an `Event` with its fields. */
+function closeOf(told: string | null) {
+  const fields =
+    told === null ? { code: 1006, reason: '', wasClean: false } : { code: 4002, reason: told, wasClean: true }
+  return Object.assign(new Event('close'), fields)
+}
+
+/** The page's WebSockets as `script` says, by the order the page makes them, from 0: whether a message the server sent
+ *  reaches the page, and the close the page reads in place of the socket's, where one. `sockets` holds them. */
+function scriptedSockets(script: {
+  heard: (n: number, data: unknown) => boolean
+  closed: (n: number) => ReturnType<typeof closeOf> | undefined
+}) {
   const Counted = globalThis.WebSocket
-  let lost = false
-  globalThis.WebSocket = class LostClose extends Counted {
+  const sockets: WebSocket[] = []
+  globalThis.WebSocket = class Scripted extends Counted {
+    private readonly n = sockets.push(this) - 1
     override set onmessage(handler: ((event: MessageEvent) => void) | null) {
       super.onmessage = (event: MessageEvent) => {
-        if (!lost && carriesError(event.data)) return
-        handler?.(event)
+        if (script.heard(this.n, event.data)) handler?.(event)
       }
     }
     override get onmessage() {
       return super.onmessage
     }
     override set onclose(handler: ((event: CloseEvent) => void) | null) {
-      super.onclose = (event: CloseEvent) => {
-        const first = !lost
-        lost = true
-        // Node 22 has no `CloseEvent`: an `Event` with its fields.
-        const firstClose =
-          told === null ? { code: 1006, reason: '', wasClean: false } : { code: 4002, reason: told, wasClean: true }
-        handler?.(first ? Object.assign(new Event('close'), firstClose) : event)
-      }
+      super.onclose = (event: CloseEvent) => handler?.(script.closed(this.n) ?? event)
     }
     override get onclose() {
       return super.onclose
     }
   }
-  return () => void (globalThis.WebSocket = Counted)
+  return { sockets, restore: () => void (globalThis.WebSocket = Counted) }
+}
+
+/** The page's WebSockets, whose first close reaches the page as `closeOf(told)`, and whose first socket's messages
+ *  carrying a channel's ERROR (where one carried the end) never reach it. */
+function losingFirstClose(told: string | null): () => void {
+  return scriptedSockets({
+    heard: (n, data) => n > 0 || !carriesError(data),
+    closed: (n) => (n === 0 ? closeOf(told) : undefined),
+  }).restore
 }
 
 const transports: ('ws' | 'sse')[] = ['ws', 'sse']
@@ -189,5 +205,70 @@ test.each(unreadRows)(
     const { live, serverEnds, wires } = await endLosingLastWord(transport, false, told)
     const pageEnds = live.ended.map(({ name, message }) => [name, message])
     expect([pageEnds, serverEnds, wires]).toEqual([sessionEnd, sessionEnd, 2])
+  },
+)
+
+/** Whether a message the page sends carries its RECONCILE. */
+function carriesReconcile(message: Uint8Array<ArrayBuffer>): boolean {
+  const frames = isOneFrame(message) ? [message] : [...messageFrames(message)]
+  return frames.some((frame) => frame[0] === TAG.RECONCILE)
+}
+
+test.each(transports)(
+  "a session the server ended on a reopen whose RECONCILED the page never read, on %s, and whose last word the page missed too: the page reopens naming the session it had, and that reopen is answered with the session's end",
+  async (transport) => {
+    const key = crypto.randomUUID()
+    const unattached = encode.attachResult(999, null)
+    // The first wire is lost; its reopen reads nothing, and ends with the session.
+    const scripted = scriptedSockets({ heard: (n) => n !== 1, closed: (n) => (n < 2 ? closeOf(null) : undefined) })
+    world.wsSends = (message) =>
+      scripted.sockets.length === 2 && carriesReconcile(message) ? [message, unattached] : [message]
+    const first = rewriting((frame) => frame)
+    const reopen = rewriting(() => null)
+    // The reopen's URL and its wire's `connId`, for a POST on that wire the page doesn't send.
+    const reopened = createDeferred<{ at: string; connId: string }>()
+    // The wrapper reads a request's body before its URL.
+    let connId = ''
+    world.hooks = [
+      { kind: 'open', stream: first.stream },
+      {
+        kind: 'open',
+        stream: reopen.stream,
+        body: (bytes) => {
+          const metadata: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(4, framesStart(bytes))))
+          if (typeof metadata !== 'object' || metadata === null || !('connId' in metadata)) throw new Error('no connId')
+          connId = String(metadata.connId)
+          return [bytes]
+        },
+        url: (at) => {
+          reopened.resolve({ at, connId })
+          return at
+        },
+      },
+    ]
+    try {
+      const live = pair(key, [transport])
+      await live.page.opened
+      const serverEnds = endsOf(live.channel)
+      if (transport === 'ws') scripted.sockets[0]?.close()
+      else first.cut()
+      if (transport === 'sse') {
+        const { at, connId: reopenedOn } = await reopened.promise
+        await fetch(at, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream', [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE },
+          body: new Blob([encodeSseRequest({ connId: reopenedOn }, [unattached])]),
+        })
+      }
+      await until(() => serverEnds.length > 0)
+      if (transport === 'sse') reopen.cut()
+      await until(() => live.ended.length > 0, 3_000).catch(() => {})
+      await delay(300)
+      const pageEnds = live.ended.map(({ name, message }) => [name, message])
+      const wires = transport === 'ws' ? world.sockets : opens()
+      expect([pageEnds, serverEnds, wires]).toEqual([sessionEnd, sessionEnd, 3])
+    } finally {
+      scripted.restore()
+    }
   },
 )

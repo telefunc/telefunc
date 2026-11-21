@@ -147,6 +147,9 @@ type WireState = {
    *  detach with. */
   closed: { reason: WireClose } | null
   retiredByBarrier: boolean
+  /** The session its page named in its last RECONCILE or BARRIER, which the page names again at its next reopen until
+   *  it reads the RECONCILED that gives the wire's own: that reply can go missing with the wire. */
+  namedSessionId: string | undefined
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
   /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
@@ -266,6 +269,7 @@ class ChannelMux implements UpgradeStagesOwner {
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
+        namedSessionId: undefined,
         recvBacklog,
         awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
         attaching,
@@ -534,8 +538,11 @@ class ChannelMux implements UpgradeStagesOwner {
     // and its page, should it miss the wire's last word, at its reopen.
     const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
     entry.state.awaited.refuseAll(cause)
-    const sessionId = entry.transport.getSessionId(wire)
-    if (sessionId !== undefined) this.endedSessions.keep(sessionId, cause, this.options.reconnectTimeout)
+    // Kept under the session the page may name at its reopen: the wire's, and the one it named, should the RECONCILED
+    // that gave it the wire's never reach it.
+    for (const sessionId of [entry.transport.getSessionId(wire), entry.state.namedSessionId]) {
+      if (sessionId !== undefined) this.endedSessions.keep(sessionId, cause, this.options.reconnectTimeout)
+    }
     entry.transport.close(wire, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
@@ -599,6 +606,7 @@ class ChannelMux implements UpgradeStagesOwner {
       const ended =
         frame.payload.sessionId === undefined ? undefined : this.endedSessions.causeOf(frame.payload.sessionId)
       if (ended !== undefined) {
+        entry.state.namedSessionId = frame.payload.sessionId
         this.endFault(entry.wire, { scope: 'session', cause: ended })
         return null
       }
@@ -734,6 +742,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** `isBarrier`: this commit retires the old wire's session, so the outcome names that wire, which gets a FIN once
    *  the new wire's RECONCILED has gone out. */
   private reconcile(entry: WireEntry, ctrl: ReconcilePayload, isBarrier = false): ReconcileOutcome {
+    entry.state.namedSessionId = ctrl.sessionId
     entry.sender.owesReconciled()
     try {
       return this.settleReconcile(entry, ctrl, isBarrier)
