@@ -78,8 +78,9 @@ for (const transport of ['sse', 'ws'] as const) {
 }
 
 for (const transport of ['sse', 'ws'] as const) {
-  for (const decider of ['server', 'page'] as const) {
-    describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after a close the ${decider} decided, with no frame from the page since`, () => {
+  for (const decider of ['server', 'page', 'crossed'] as const) {
+    const close = decider === 'crossed' ? 'a crossed close, a message before it,' : `a close the ${decider} decided`
+    describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after ${close} with no frame from the page since`, () => {
       for (const [text, sent, expected] of [
         [FITS, 'maxMemory to the byte', 'answered'],
         [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
@@ -89,7 +90,11 @@ for (const transport of ['sse', 'ws'] as const) {
           const [other, otherPage] = pair(transport)
           await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])
           otherPage.listen(() => 'answered')
-          if (decider === 'server') {
+          if (decider === 'crossed') {
+            // Each end's CLOSE leaves before the other's arrives; the message before it is one the page never confirms.
+            void first.send('before', { ack: false })
+            expect(await Promise.all([first.close(), firstPage.close()])).toEqual([null, null])
+          } else if (decider === 'server') {
             await first.close()
             await firstPage.closed
           } else {

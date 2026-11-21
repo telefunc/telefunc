@@ -87,6 +87,13 @@ class ServerReplay {
     return out
   }
 
+  /** Whether all it holds is frames `test` passes, no publish among them. */
+  holdsOnly(test: (frame: Uint8Array<ArrayBuffer>) => boolean): boolean {
+    if (this.publishes.length > 0) return false
+    for (let i = 0; i < this.frames.length; i++) if (!test(this.frames.at(i))) return false
+    return true
+  }
+
   /** What its newest `count` publishes hold. */
   heldByNewestPublishes(count: number): number {
     let held = 0
