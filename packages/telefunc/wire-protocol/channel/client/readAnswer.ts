@@ -1,7 +1,8 @@
-export { readAnswer, asksLater }
-export type { HttpAnswer }
+export { readAnswer, asksLater, endOfWire, telefuncAnswer, telefuncEndOf }
+export type { HttpAnswer, TelefuncAnswer }
 
 import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
+import type { TransportEnd } from './WireLifecycle.js'
 
 /** What the answer to a request of the page's SSE transport means. */
 type HttpAnswer =
@@ -40,6 +41,37 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
     answer: describeAnswer(response),
     retryAfterMs: retryAfterMsOf(response),
   }
+}
+
+type TelefuncAnswer = Extract<HttpAnswer, { tag: 'otherWireVersion' | 'retry' | 'frames' | 'route' }>
+
+/** One of Telefunc's own refusals (`refusal.ts`). */
+function telefuncAnswer(answer: HttpAnswer | null | 'left'): answer is TelefuncAnswer {
+  return (
+    answer !== null &&
+    answer !== 'left' &&
+    (answer.tag === 'otherWireVersion' || answer.tag === 'retry' || answer.tag === 'frames' || answer.tag === 'route')
+  )
+}
+
+/** Why a wire ends whose request Telefunc refused with `answer`, which alone says what ended: a `frames` refusal ends
+ *  the channel it names, or the page's session where it names none, with its cause. */
+function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
+  if (answer.tag === 'otherWireVersion') return { otherWireVersion: true }
+  if (answer.tag === 'retry') return { lost: answer.reason }
+  if (answer.tag === 'route') return { route: answer.reason }
+  if (answer.channel === null) return { sessionEnded: answer.cause }
+  return { framesRefused: { channel: answer.channel, cause: answer.cause } }
+}
+
+/** The end the server decided for a wire, as the wire's own end carries it (a WebSocket's close reason, the event
+ *  stream's last event: `refusal.ts`'s `wireEnd`), read as an answer's refusal is; undefined where it carries none this
+ *  page reads, and the wire ends as a loss. A told end is a `frames` refusal, which an answer carries with 400. */
+function endOfWire(value: string): TransportEnd | undefined {
+  const type = parseMimeType(value)
+  if (type?.essence !== REFUSAL_MEDIA_TYPE) return undefined
+  const answer = readRefusal(400, type.parameters)
+  return telefuncAnswer(answer) ? telefuncEndOf(answer) : undefined
 }
 
 /** Whether a refusal asks the page to come back later rather than refusing what it sent (RFC 9110 sections 15.5.9 and

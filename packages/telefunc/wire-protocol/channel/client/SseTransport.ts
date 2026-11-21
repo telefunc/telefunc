@@ -44,7 +44,7 @@ import type { TransportEnd, TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { asksLater, readAnswer, type HttpAnswer } from './readAnswer.js'
+import { asksLater, endOfWire, readAnswer, telefuncAnswer, telefuncEndOf, type HttpAnswer } from './readAnswer.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -463,6 +463,8 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
     const pair = pairPublishes()
+    /** What the stream's last event says ended the wire, where the server decided its end; a loss where none says. */
+    let end: TransportEnd | undefined
     try {
       while (true) {
         const raw = await reader.readNextEntry()
@@ -472,6 +474,10 @@ class SseTransport implements UpgradeSource {
           continue
         }
         const frame = decode(raw)
+        if (frame.tag === TAG.END) {
+          end = endOfWire(frame.refusal)
+          break
+        }
         if (frame.tag === TAG.PONG) {
           // A PONG still on its way on a wire the page left says nothing of the wire in use.
           if (this.transportAbort !== abortController) continue
@@ -499,7 +505,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, end)
     }
   }
 
@@ -1044,27 +1050,6 @@ function endOf(answer: HttpAnswer | null): TransportEnd {
   if (answer === null || answer.tag === 'expected') return {}
   if (telefuncAnswer(answer)) return telefuncEndOf(answer)
   return { refused: { answer: answer.answer, retryAfterMs: answer.retryAfterMs } }
-}
-
-type TelefuncAnswer = Extract<HttpAnswer, { tag: 'otherWireVersion' | 'retry' | 'frames' | 'route' }>
-
-/** One of Telefunc's own refusals (`refusal.ts`). */
-function telefuncAnswer(answer: HttpAnswer | null | 'left'): answer is TelefuncAnswer {
-  return (
-    answer !== null &&
-    answer !== 'left' &&
-    (answer.tag === 'otherWireVersion' || answer.tag === 'retry' || answer.tag === 'frames' || answer.tag === 'route')
-  )
-}
-
-/** Why a wire ends whose request Telefunc refused with `answer`, which alone says what ended: a `frames` refusal ends
- *  the channel it names, or the page's session where it names none, with its cause. */
-function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
-  if (answer.tag === 'otherWireVersion') return { otherWireVersion: true }
-  if (answer.tag === 'retry') return { lost: answer.reason }
-  if (answer.tag === 'route') return { route: answer.reason }
-  if (answer.channel === null) return { sessionEnded: answer.cause }
-  return { framesRefused: { channel: answer.channel, cause: answer.cause } }
 }
 
 /** What a refusal counted against the data it carried names (`onTransportRefused`); null where it isn't one: a

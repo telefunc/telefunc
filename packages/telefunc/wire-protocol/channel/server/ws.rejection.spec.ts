@@ -8,7 +8,7 @@ import { decode, encode, isOneFrame, messageFrames, type DecodedFrame } from '..
 import { TAG } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 
-test("a frame of no channel the server cannot read ends its channels with the connection's sentence, each told on the socket before it closes", async () => {
+test("a frame of no channel the server cannot read ends its channels with the connection's sentence, told by the socket's close: its code and the refusal as its reason", async () => {
   const telefunc = new Telefunc()
   const server = createServer((req, res) => void telefunc.serve({ req, res }))
   telefunc.installWebSocket(server)
@@ -31,12 +31,13 @@ test("a frame of no channel the server cannot read ends its channels with the co
   page.send(encode.reconcile({ open: [{ id: 'rejected-A', ix: 0, lastSeq: 0, initial: true }] }))
   // A wire-level frame of a tag no version has: it names no channel.
   page.send(new Uint8Array([0x0f, 0, 0]))
-  const { code } = await closed
+  const { code, reason } = await closed
   server.close()
 
-  expect([frames.filter(({ tag }) => tag === TAG.ERROR), code]).toEqual([
-    [{ tag: TAG.ERROR, index: 0, seq: 1, reason: END_CAUSE.unreadable.code }],
-    1000,
+  expect([frames.filter(({ tag }) => tag === TAG.ERROR), code, reason]).toEqual([
+    [],
+    4002,
+    `text/vnd.telefunc.refusal; kind=frames; cause=${END_CAUSE.unreadable.code}`,
   ])
   await expect(channel.closed).resolves.toHaveProperty('message', END_CAUSE.unreadable.error().message)
 })

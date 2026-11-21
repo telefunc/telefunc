@@ -17,7 +17,7 @@ const post = (body: BodyInit) =>
 /** A wire-level frame of a tag no version has: it names no channel. */
 const unreadable = new Uint8Array([0x0f, 0, 0])
 
-test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, and ends its channels with the connection's sentence, each told on the event stream before it ends", async () => {
+test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, and ends its channels with the connection's sentence, told by the event stream's last event: the same refusal", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
   getChannelMux().registerChannel(channel)
   const connId = crypto.randomUUID()
@@ -43,7 +43,10 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
   for (let read = await reader.read(); !read.done; read = await reader.read()) {
     decoder.push(read.value, (event) => events.push(event))
   }
-  const last = events.at(-1)
-  expect(last && decode(last)).toEqual({ tag: TAG.ERROR, index: 0, seq: 1, reason: END_CAUSE.unreadable.code })
+  const decoded = events.map((event) => decode(event))
+  expect([decoded.filter(({ tag }) => tag === TAG.ERROR), decoded.at(-1)]).toEqual([
+    [],
+    { tag: TAG.END, refusal: `text/vnd.telefunc.refusal; kind=frames; cause=${END_CAUSE.unreadable.code}` },
+  ])
   await expect(channel.closed).resolves.toHaveProperty('message', END_CAUSE.unreadable.error().message)
 })

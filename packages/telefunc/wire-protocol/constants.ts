@@ -124,6 +124,10 @@ export const WIRE_VERSION = 3
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
 
+/** The close code of a WebSocket the server ended with a refusal, which its reason carries (`refusal.ts`'s `wireEnd`):
+ *  the channel it names ends with its cause, or every channel of the page's session where it names none. */
+export const WS_CLOSE_REFUSED = 4002
+
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'

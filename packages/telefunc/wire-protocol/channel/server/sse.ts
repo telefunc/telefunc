@@ -36,7 +36,13 @@ import {
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
-import { WIRE_VERSION_REFUSAL, refusalContentType, type Refusal, type RefusalContentType } from '../../refusal.js'
+import {
+  WIRE_VERSION_REFUSAL,
+  refusalContentType,
+  wireEnd,
+  type Refusal,
+  type RefusalContentType,
+} from '../../refusal.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400 | 409
@@ -162,12 +168,13 @@ class EventStream implements WireQueue {
     this.waiting.remove(goes)
   }
 
-  /** What waits goes only to a page that still reads: past a wire only lost, the page's reconnect gets it from its
-   *  channels' replay, and it could wait here for as long as the socket stays open taking nothing. */
-  close({ flush }: { flush: boolean }): void {
-    while (flush && (this.current !== null || this.waiting.length > 0)) {
-      if (this.current !== null) this.pushChunks()
-      else this.startEvent(this.waiting.shift()!)
+  /** What waits goes no more: past a wire only lost, the page's reconnect gets it from its channels' replay, and it could
+   *  wait here for as long as the socket stays open taking nothing. An end the server decided goes as the `last` event,
+   *  after the event under way, which nothing passes once it started: what waits ended with the wire. */
+  close(last: Uint8Array<ArrayBuffer> | null): void {
+    if (last !== null) {
+      while (this.current !== null) this.pushChunks()
+      this.stream.push(encodeChunk(last, 0, last.byteLength))
     }
     this.current = null
     this.passing = new Fifo()
@@ -571,7 +578,7 @@ class SseServerTransport {
     wire.resolveReady()
     wire.resolveEnded()
     this.mux.onWireClosed(wire, how)
-    wire.events.close({ flush: refused !== null })
+    wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))
   }
 }
 

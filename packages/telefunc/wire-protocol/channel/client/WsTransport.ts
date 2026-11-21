@@ -7,6 +7,7 @@ import {
   LOSSY_CONFIRM_SLACK_MS,
   WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
+  WS_CLOSE_REFUSED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
@@ -25,6 +26,7 @@ import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
+import { endOfWire } from './readAnswer.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -224,12 +226,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       headroom.received()
       if (!receiveMessage(receiver, raw, now, take)) ws.close()
     }
-    ws.onclose = ({ code }: CloseEvent) => {
+    ws.onclose = ({ code, reason }: CloseEvent) => {
       headroom.close()
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner.onTransportClosed(this, { otherWireVersion: code === WS_CLOSE_WIRE_VERSION })
+      // An end the server decided rides the close: its reason is the refusal, read as an answer's is.
+      const end = code === WS_CLOSE_REFUSED ? endOfWire(reason) : { otherWireVersion: code === WS_CLOSE_WIRE_VERSION }
+      this.owner.onTransportClosed(this, end)
     }
     ws.onerror = () => {}
   }

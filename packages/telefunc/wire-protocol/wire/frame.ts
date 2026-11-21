@@ -151,6 +151,7 @@ type WireCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[] }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
+  | { tag: typeof TAG.END; refusal: string }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
@@ -271,6 +272,7 @@ const encode = {
     return frame
   },
   fin: () => encodeBareFrame(TAG.FIN),
+  end: (refusal: string) => encodeTextFrame(TAG.END, 0, refusal, 0),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
@@ -540,6 +542,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     }
     case TAG.FIN:
       return { tag: TAG.FIN }
+    case TAG.END:
+      return { tag: TAG.END, refusal: textDecoder.decode(payload) }
     // Client→server payloads are validated here, at the trust boundary; server→client ones are
     // trusted like every other payload our own server sends.
     case TAG.RECONCILE:

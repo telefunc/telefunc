@@ -875,8 +875,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal The page's wire ended for good, and the channel with it: with `ChannelPageLeftError` where the page left,
-   *  a session cause's error where it attached as the server ended the page's session (a wire closed mid-reconcile),
-   *  with no wire left to tell it on. */
+   *  a session cause's error where the server ended the page's session, which the wire's own end tells the page. */
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null

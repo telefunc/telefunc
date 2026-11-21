@@ -5,7 +5,8 @@ import { enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { assert } from '../../../utils/assert.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
-import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_REFUSED, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
+import { wireEnd } from '../../refusal.js'
 import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
@@ -51,11 +52,11 @@ function getTelefuncChannelOptions({
     copiesOnSend,
     bufferedAmount,
     // A loss closes at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
-    // An end the server told its channels closes after what was sent, which `terminate()` would drop: a plain close,
-    // which the page reads as a loss, reconnecting only for a channel the server didn't end.
+    // An end the server decided closes with its refusal as the reason, after what the socket already holds and ahead of
+    // what the wire's sender holds back, which goes with the wire.
     close: (peer, { how, refusal }) => {
       if (refusal === null) terminate(peer)
-      else peer.close(1000)
+      else peer.close(WS_CLOSE_REFUSED, wireEnd(refusal))
       mux.onWireClosed(peer, how)
     },
   }

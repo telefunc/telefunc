@@ -160,25 +160,26 @@ test('a body the server cannot frame is refused `frames`, naming no channel', as
   await cancel(opened)
 })
 
-test('a channel the server ends for a frame over the limit is told at the end of an event stream its page reads none of: what waited for the page goes first', async () => {
+test("a channel the server ends for a frame over the limit is told by the event stream's last event, where its page reads none of the stream: ahead of what waits for the page, which goes with the wire", async () => {
   const { connId, opened, channel } = await openWire()
   await channel.opened
-  // Past what goes at once, and the page reads none of its event stream: the text waits for the stream to ask, and the
-  // channel's ERROR waits behind it.
-  const waits = 'x'.repeat(WIRE_GATHER_BYTES)
-  void channel.send(waits).catch(() => {})
+  // Past what goes at once, and the page reads none of its event stream: the text waits for the stream to ask.
+  void channel.send('x'.repeat(WIRE_GATHER_BYTES)).catch(() => {})
   const answer = await post(
     bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), encode.close(0, 0, 1)),
   )
   expect(answer.contentType).toMatch(refusal('frames', '0', END_CAUSE.frameOverLimit.code))
   const frames = await framesOfStream(opened)
-  expect(frames.slice(-2)).toEqual([
-    expect.objectContaining({ tag: TAG.TEXT, index: 0, text: JSON.stringify(waits) }),
-    expect.objectContaining({ tag: TAG.ERROR, index: 0, reason: END_CAUSE.frameOverLimit.code }),
+  expect([frames.map(({ tag }) => tag), frames.at(-1)]).toEqual([
+    [TAG.RECONCILED, TAG.END],
+    {
+      tag: TAG.END,
+      refusal: `text/vnd.telefunc.refusal; kind=frames; channel=0; cause=${END_CAUSE.frameOverLimit.code}`,
+    },
   ])
 })
 
-test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told on the event stream, and the POST is refused `frames` naming no channel", async () => {
+test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told by the event stream's last event, and the POST is refused `frames` naming no channel", async () => {
   const attached = new ServerChannel()
   getChannelMux().registerChannel(attached)
   const ends: [string, string][] = []
@@ -207,8 +208,11 @@ test("a receive backlog past what the server holds for the page's connection end
     ],
   ])
   expect(answer.contentType).toMatch(refusal('frames', '', 0x09))
-  const told = (await framesOfStream(opened)).filter(({ tag }) => tag === TAG.ERROR)
-  expect(told).toEqual([expect.objectContaining({ index: 0, reason: END_CAUSE.receiveBudget.code })])
+  const frames = await framesOfStream(opened)
+  expect([frames.filter(({ tag }) => tag === TAG.ERROR), frames.at(-1)]).toEqual([
+    [],
+    { tag: TAG.END, refusal: `text/vnd.telefunc.refusal; kind=frames; cause=${END_CAUSE.receiveBudget.code}` },
+  ])
 })
 
 test("a channel's frame the server refuses is refused `frames`, naming the channel", async () => {

@@ -53,6 +53,9 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
+  /** Server → page, the event stream's last event: the end the server decided for the wire (`refusal.ts`'s `wireEnd`),
+   *  as a WebSocket's close reason carries it. Payload: that value, in UTF-8. */
+  END: 0x0e as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,

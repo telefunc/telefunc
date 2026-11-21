@@ -1,4 +1,4 @@
-export { REFUSAL_MEDIA_TYPE, REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, frameRefusal, refusalContentType }
+export { REFUSAL_MEDIA_TYPE, REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, frameRefusal, refusalContentType, wireEnd }
 export type { Refusal, RefusalKind, RefusalContentType }
 
 import { STATUS_BODY_MALFORMED_REQUEST } from '../shared/constants.js'
@@ -41,10 +41,18 @@ function frameRefusal(cause: RefusalCause, channel: number | undefined): Refusal
   return { kind: 'frames', channel, cause: code, reason }
 }
 
-/** `text/vnd.telefunc.refusal; kind=frames; channel=3; cause=6; reason="…"`: the reason as a quoted string (RFC 9110
- *  section 5.6.4). */
-function refusalContentType({ kind, channel, cause, reason }: Refusal): RefusalContentType {
+/** `text/vnd.telefunc.refusal; kind=frames; channel=3; cause=6; reason="…"`: the end the wire carries, then the
+ *  reason as a quoted string (RFC 9110 section 5.6.4). */
+function refusalContentType(refusal: Refusal): RefusalContentType {
+  return `${wireEnd(refusal)}; reason="${refusal.reason.replace(/["\\]/g, '\\$&')}"`
+}
+
+/** `text/vnd.telefunc.refusal; kind=frames; channel=3; cause=6`: the refusal without its reason, as the end the server
+ *  decided rides its wire's own end, a WebSocket's close reason and the event stream's last event, which the page reads
+ *  as it reads an answer's `Content-Type`. Within the 123 bytes a close reason holds: a channel is a u16 index and a
+ *  cause a small code. */
+function wireEnd({ kind, channel, cause }: Refusal): RefusalContentType {
   const named = channel === undefined ? '' : `; channel=${channel}`
   const caused = cause === undefined ? '' : `; cause=${cause}`
-  return `${REFUSAL_MEDIA_TYPE}; kind=${kind}${named}${caused}; reason="${reason.replace(/["\\]/g, '\\$&')}"`
+  return `${REFUSAL_MEDIA_TYPE}; kind=${kind}${named}${caused}`
 }

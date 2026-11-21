@@ -341,3 +341,62 @@ test("a frame of one channel the server refuses on a WebSocket ends that channel
     ['b1', 'b2'],
   ])
 })
+
+/** The page's WebSocket sends no acknowledgement and no PING, so what the server sends it waits in the server's piece
+ *  sender; and puts `bad` after the frame of `text`. */
+const unacknowledged =
+  (text: string, bad: (found: { ix: number; seq: number }) => Uint8Array<ArrayBuffer>) =>
+  (message: Uint8Array<ArrayBuffer>) =>
+    (isOneFrame(message) ? [message] : [...messageFrames(message)]).flatMap((frame) => {
+      if (frame[0] === TAG.PIECES_ACK || frame[0] === TAG.PING) return []
+      const found = textOf(frame, text)
+      return found ? [frame, bad(found)] : [frame]
+    })
+
+test("a session the server ends on a WebSocket while a channel's data waits unacknowledged tells the page its end, on the first socket", async () => {
+  const live = pair(crypto.randomUUID(), ['ws'])
+  await live.page.opened
+  const pageEnds = endsOf(live.page)
+  live.channel.listen(() => void live.channel.send('x'.repeat(256 * 1024)).catch(() => {}))
+  world.wsSends = unacknowledged('a1', () => encode.attachResult(999, null))
+  sends(live.page, 'a1')
+  await until(() => pageEnds.length > 0)
+  await delay(300)
+  expect([pageEnds, world.sockets]).toEqual([sessionEndOnPage, 1])
+})
+
+test("a channel the server ends on a WebSocket while its data waits unacknowledged reads its cause; the other's text arrives once, on the next socket", async () => {
+  const [refused, other] = opening(crypto.randomUUID(), ['ws'])
+  await Promise.all([refused.page.opened, other.page.opened])
+  const [refusedEnds, otherEnds] = [endsOf(refused.page), endsOf(other.page)]
+  refused.channel.listen(() => void refused.channel.send('x'.repeat(256 * 1024)).catch(() => {}))
+  world.wsSends = unacknowledged('a1', (found) => encode.error(found.ix, ERROR_REASON.UNCONFIRMED, found.seq + 1))
+  sends(refused.page, 'a1')
+  await until(() => refusedEnds.length > 0)
+  world.wsSends = null
+  sends(other.page, 'b1')
+  await until(() => other.got.length > 0)
+  await delay(300)
+  expect([refusedEnds, otherEnds, other.got]).toEqual([[['ChannelClosedError', told.refused]], [], ['b1']])
+})
+
+test('a session the server ends on a WebSocket ends a channel of it still awaiting registration, on both ends: it never attaches', async () => {
+  const key = crypto.randomUUID()
+  const live = pair(key, ['ws'])
+  const awaited = new ServerChannel<string, string>()
+  const page = new ClientChannel<string, string>({
+    channelId: awaited.id,
+    connection: { telefuncUrl: world.telefuncUrl, transports: ['ws'], idleTimeout: 0, connectionKey: key },
+  })
+  void page.opened.catch(() => {})
+  const [pageEnds, serverEnds] = [endsOf(page), endsOf(awaited)]
+  await live.page.opened
+  world.wsSends = (message) => (textIn(message, 'a1') ? [message, encode.attachResult(999, null)] : [message])
+  sends(live.page, 'a1')
+  await until(() => live.ended.length > 0)
+  await delay(300)
+  getChannelMux().registerChannel(awaited)
+  await until(() => serverEnds.length > 0)
+  await delay(300)
+  expect([pageEnds, serverEnds, world.sockets]).toEqual([sessionEndOnPage, sessionEndOnPage, 1])
+})

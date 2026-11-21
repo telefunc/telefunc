@@ -84,9 +84,9 @@ type ServerTransport<TWire> = {
   close(wire: TWire, end: ServerEnd): void
 }
 
-/** How the server ends a wire: lost, or for good for a session cause. `refusal`: what the server told the channels it
- *  ends, each on its own down stream, which the transport sends before the wire ends, and what an HTTP transport answers
- *  the page's requests that meet the end with; null for a plain loss, which tells nothing. */
+/** How the server ends a wire: lost, or for good for a session cause. `refusal`: the end the server decided, which the
+ *  wire's own end carries (a WebSocket's close, the event stream's last event) and an HTTP transport answers the page's
+ *  requests that meet the end with; null for a plain loss, which tells nothing. */
 type ServerEnd = { how: Exclude<WireClose, 'pageLeft'>; refusal: Refusal | null }
 
 /** What the server can't go on with on a wire, which `endFault` ends. */
@@ -507,27 +507,27 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Every end the server decides on `wire` is decided here: what `fault` ends, how the wire goes, and what the page's
    *  requests that meet the end are answered. `wire` may be a wire other than the one that sent the offending frame: a
-   *  barrier's violation is the staged probe's. A channel's end is told to its page on its own down stream, now or at
-   *  its next attach; what the others sent that the server didn't confirm goes again on the next wire. */
+   *  barrier's violation is the staged probe's. An end that keeps the wire is its channel's, told on its own down stream;
+   *  one that closes the wire rides the wire's own end, its refusal (see `ServerTransport.close`). What the others sent
+   *  that the server didn't confirm goes again on the next wire. */
   endFault(wire: Wire, fault: Fault): void {
     const entry = this.wires.get(wire)
     if (!entry) return
     const channelEnded = fault.scope === 'channel' && this.endChannelAt(entry, fault.ix, fault.cause)
     if (channelEnded && fault.wire === 'kept') return
-    if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
     if (fault.scope === 'loss') return entry.transport.close(wire, { how: 'transient', refusal: null })
-    if (fault.scope === 'channel' && channelEnded) {
-      return this.closeTold(entry, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
+    if (this.stages.get(wire)?.phase === 'staged') {
+      // A staged probe holds no channel and is no session's wire yet: its page reads its end as its stage's failure.
+      this.stages.clear(wire)
+      return entry.transport.close(wire, { how: 'unreadable', refusal: null })
     }
+    if (fault.scope === 'channel' && channelEnded) {
+      return entry.transport.close(wire, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
+    }
+    // The session's channels end as its wire closes with the cause (`detachHandle`); those it awaits, as they register.
     const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
-    for (const handle of [...(this.sessionOf(entry)?.values() ?? [])]) handle.channel._onServerEnd(cause)
-    this.closeTold(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
-  }
-
-  /** Closes the wire after what its channels were told: the frames its sender gathered go to the transport first. */
-  private closeTold(entry: WireEntry, end: ServerEnd): void {
-    entry.sender.flush()
-    entry.transport.close(entry.wire, end)
+    entry.state.awaited.refuseAll(cause)
+    entry.transport.close(wire, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
   /** The channels of the session `entry`'s wire carries, by index; undefined before its RECONCILE. */

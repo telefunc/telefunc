@@ -174,7 +174,7 @@ function testChannel() {
 }
 
 function testSessionEnd() {
-  test('Channel: a session the server ends tells the channel its cause before the WebSocket closes, and the page opens no other WebSocket', async () => {
+  test("Channel: a session the server ends tells the channel its cause by the WebSocket's close, its code and reason as the browser hands them to the page, and the page opens no other WebSocket", async () => {
     const browser = page.context().browser()
     if (browser === null) throw new Error('no browser')
     // A page of its own: its WebSocket stays wrapped for as long as it lives.
@@ -206,6 +206,10 @@ function testSessionEnd() {
       expect(await own.evaluate(() => window.sendUnreadable?.() ?? false)).toBe(true)
       await autoRetry(async () => {
         expect(await own.textContent('#log')).toContain(`Closed: ${sessionEndedByUnreadable}`)
+      })
+      expect(await own.evaluate(() => window.socketCloses?.at(-1))).deep.equal({
+        code: 4002,
+        reason: 'text/vnd.telefunc.refusal; kind=frames; cause=8',
       })
       // A channel told its end needs no other wire.
       await new Promise((resolve) => setTimeout(resolve, 1_000))

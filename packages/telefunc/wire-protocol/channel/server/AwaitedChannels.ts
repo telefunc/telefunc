@@ -3,7 +3,7 @@ export type { AwaitedChannel, RecvBacklog }
 
 import { encode, type ChannelFrame } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
-import type { FrameRefusalCause } from '../endCause.js'
+import type { RefusalCause } from '../endCause.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { RegistrationWaits } from './RegistrationWaits.js'
 
@@ -24,8 +24,9 @@ type AwaitedChannel = {
   phase: 'waiting' | 'attached' | 'expired'
   /** The deadline of its wait for its channel's registration (see `RegistrationWaits`); null once it waits no more. */
   ttl: ReturnType<typeof setTimeout> | null
-  /** Why the server refused a frame its page sent it while it was awaited: its channel ends with it as it registers. */
-  refused: FrameRefusalCause | null
+  /** Why the server ended it while it was awaited, a frame its page sent it or the end of its session: its channel ends
+   *  with it as it registers. */
+  refused: RefusalCause | null
 }
 
 /** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
@@ -88,12 +89,17 @@ class AwaitedChannels {
     this.backlog.frames++
   }
 
-  /** Its page sent it a frame the server can't take, for `cause`: the wire awaits it no more and drops what it held,
-   *  and its registration wait goes on past the wire's end, for its channel to end with `cause` as it registers. */
-  refuse(awaited: AwaitedChannel, cause: FrameRefusalCause): void {
+  /** The server ended it for `cause`: the wire awaits it no more and drops what it held, and its registration wait goes
+   *  on past the wire's end, for its channel to end with `cause` as it registers. */
+  refuse(awaited: AwaitedChannel, cause: RefusalCause): void {
     awaited.refused = cause
     this.drop(awaited)
     this.delete(awaited)
+  }
+
+  /** The page's session ended for `cause`: each channel it awaits ends with it as it registers. */
+  refuseAll(cause: RefusalCause): void {
+    for (const awaited of this.byIx.values()) this.refuse(awaited, cause)
   }
 
   /** Awaits it no more, and hands back what it held, to dispatch. */
