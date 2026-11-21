@@ -67,7 +67,7 @@ type ConnectionState =
   | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> | null }
   | { tag: 'closed' }
 
-type Recovery = { attempt: number; deadline: number; lost: Error | null; timer: ReturnType<typeof setTimeout> }
+type Recovery = { attempt: number; deadline: number; refusal: string | null; timer: ReturnType<typeof setTimeout> }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
 interface WireLifecycleOwner {
@@ -90,8 +90,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private state: ConnectionState = { tag: 'fresh' }
   /** From a first connect's start, or the first wire lost since the last RECONCILED: the attempts made (a wire that
-   *  opens and never reconciles counts), why the last wire went, and the deadline whose timer ends the channels if no
-   *  wire reconciled by then. */
+   *  opens and never reconciles counts), the last refusal an attempt was answered with, and the deadline whose timer
+   *  ends the channels if no wire reconciled by then. */
   private recovery: Recovery | null = null
   /** When the wire being opened started, until its RECONCILED. */
   private attemptStartedAt: number | null = null
@@ -280,7 +280,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         this.applyCompletionFrame(frame)
         return
       case 'fallback':
-        this.fallbackToSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+        this.fallbackToSse()
         return
     }
   }
@@ -377,6 +377,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
+    // A wire the connection left says nothing of the one it is on.
+    if (transport !== this.transport) {
+      if (this.upgrade.isLeftWire(transport)) this.fallbackToSse()
+      return
+    }
     // No reconnect reaches a server that speaks this page's wire.
     if (otherWireVersion) {
       this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
@@ -386,23 +391,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.closeAll(rejectedFrameError())
       return
     }
-    if (transport !== this.transport) {
-      if (this.upgrade.isLeftWire(transport)) {
-        this.fallbackToSse(new NetworkError('Connection dropped', true))
-      }
-      return
-    }
     this.upgrade.abortAttempt()
-    const err = refusal === undefined ? this.unansweredLoss() : new NetworkError(refusal, true)
-    this.handleTransportLoss(err, refusal !== undefined)
-  }
-
-  /** A wire lost with no answer that says why: before the page's first RECONCILED, none was ever established. */
-  private unansweredLoss(): NetworkError {
-    return new NetworkError(
-      this.exchange.sessionId === null ? 'Connection not established' : 'Connection dropped',
-      true,
-    )
+    this.handleTransportLoss(refusal ?? null)
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
@@ -476,7 +466,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         void this.upgradeOnceDrained(from)
         break
       case 'stranded':
-        this.fallbackToSse(new NetworkError('Upgrade barrier attempt timed out', true))
+        this.fallbackToSse()
         break
       case 'flipped':
         // The barrier is the WebSocket's RECONCILE: it beats from here, as any wire does from its RECONCILE, and the
@@ -513,18 +503,18 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
-  onHandoffFailed(err: Error): void {
-    this.fallbackToSse(err)
+  onHandoffFailed(): void {
+    this.fallbackToSse()
   }
 
-  private fallbackToSse(err: Error): void {
+  private fallbackToSse(): void {
     if (this.closed) return
     const abandoned = this.upgrade.abandon()
     this.transport.detachHeartbeat()
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    this.handleTransportLoss(err, false)
+    this.handleTransportLoss(null)
     if (abandoned === null) return
     // The old wire's held frames reach their channels once the connection left the wire it gave up, which may have
     // closed: what handling them sends, a flow-control frame or an answer, waits for the reconnect.
@@ -537,10 +527,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
-  private handleTransportLoss(err: Error, rejected: boolean): void {
+  /** A wire lost, or an attempt failed; `refusal`: the words of the answer that refused it, where one came. */
+  private handleTransportLoss(refusal: string | null): void {
     if (this.closed) return
     if (this.upgrade.flipped) {
-      this.fallbackToSse(err)
+      this.fallbackToSse()
       return
     }
     this.wire++
@@ -552,8 +543,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.ttl = null
     }
 
-    const attempt = this.recovery?.attempt ?? 0
-    if (rejected && attempt === 0) return this.loseConnection(err)
+    const recovery = this.recoveryFrom()
+    const attempt = recovery.attempt
+    if (refusal !== null) recovery.refusal = refusal
+    if (refusal !== null && attempt === 0) return this.giveUp()
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
       if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
@@ -562,8 +555,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.dispose()
       return
     }
-    const recovery = this.recoveryFrom()
-    recovery.lost = err
     recovery.attempt = attempt + 1
     // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
     // deadline ends the channels.
@@ -577,15 +568,25 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.recovery) return this.recovery
     const windowMs = this.reconnectWindow()
     const timer = setTimeout(() => this.onRecoveryDeadline(), windowMs)
-    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, lost: null, timer }
+    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, refusal: null, timer }
     return this.recovery
   }
 
-  /** No wire reconciled in time: the channels end with the last loss, and the attempt under way closes with them. */
+  /** No wire reconciled in time: the channels end, and the attempt under way closes with them. */
   private onRecoveryDeadline(): void {
-    const recovery = this.recovery
-    if (this.closed || !recovery) return
-    this.loseConnection(recovery.lost ?? this.unansweredLoss())
+    if (this.closed || !this.recovery) return
+    this.giveUp()
+  }
+
+  /** The connection gives up: each channel ends with the refusal this recovery heard last, else with whether the
+   *  server ever attached it. */
+  private giveUp(): void {
+    const refusal = this.recovery?.refusal ?? null
+    for (const record of this.channels.values()) {
+      const words = refusal ?? (this.channels.isInitial(record) ? 'Connection not established' : 'Connection dropped')
+      record.channel._onConnectionLost(new NetworkError(words, true))
+    }
+    this.dispose()
   }
 
   private endRecovery(): void {

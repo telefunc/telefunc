@@ -27,7 +27,6 @@ import {
 import { encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
-import { NetworkError } from '../../../shared/NetworkError.js'
 import { assert } from '../../../utils/assert.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { Heartbeat } from './Heartbeat.js'
@@ -152,7 +151,7 @@ type JoinRelease = { old: DecodedFrame[]; deferredOmitted: number[]; new: Decode
 /** The connection an upgrade moves from its SSE wire to a WebSocket. */
 interface UpgradeOwner {
   /** The join didn't complete in time: the connection goes back to SSE. */
-  onHandoffFailed(err: Error): void
+  onHandoffFailed(): void
 }
 
 type UpgradeOptions = {
@@ -526,8 +525,7 @@ class Upgrade implements ProbeOwner {
       u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
       return
     }
-    const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
-    this.owner.onHandoffFailed(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
+    this.owner.onHandoffFailed()
   }
 }
 

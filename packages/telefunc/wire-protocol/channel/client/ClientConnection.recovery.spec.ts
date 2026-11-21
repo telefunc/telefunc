@@ -148,7 +148,8 @@ async function lostWire({ handshakeMs = 0, openMs, then }: { handshakeMs?: numbe
   wire.drop()
   const lostAt = performance.now()
   /** Registers another channel on the same connection. */
-  const register = () => ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), options)
+  const register = (channel = fakeMuxChannel()) =>
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel, options)
   return { lostAt, ended, register }
 }
 
@@ -416,6 +417,15 @@ describe("a page's recovery", () => {
     await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1_000)
     expect(ended).toHaveLength(1)
     expect([ScriptedWebSocket.made[1]?.closedByPage, ScriptedWebSocket.made[1]?.sent]).toEqual([true, 0])
+  })
+
+  test('ends a channel registered during the recovery, which the server never attached, with "Connection not established", and the attached one with "Connection dropped"', async () => {
+    const { ended, register } = await lostWire({ then: [] })
+    const joined: unknown[] = []
+    register(fakeMuxChannel({ _onConnectionLost: (e) => joined.push(e) }))
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1)
+    expect(ended).toMatchObject([{ name: 'NetworkError', message: 'Connection dropped' }])
+    expect(joined).toMatchObject([{ name: 'NetworkError', message: 'Connection not established' }])
   })
 
   test("starts no attempt that couldn't reconcile before the deadline, as long as the last handshake took", async () => {
