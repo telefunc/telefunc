@@ -10,7 +10,7 @@ Use <Link href="/stream">Telefunc Stream</Link> on [Cloudflare Workers](https://
 
 ## Setup
 
-Add these two files' contents to a Worker project: Cloudflare's [Get started](https://developers.cloudflare.com/workers/get-started/guide/) creates one, and `wrangler types` generates the `Env` type the worker uses ([TypeScript](https://developers.cloudflare.com/workers/languages/typescript/)).
+Put this handler into your Worker's entry and these settings into its Wrangler configuration, and build the Worker with <Link href="/vite-plugin">Telefunc's Vite plugin</Link> and Cloudflare's [Vite plugin](https://developers.cloudflare.com/workers/vite-plugin/). `wrangler types` generates the `Env` type the handler uses ([TypeScript](https://developers.cloudflare.com/workers/languages/typescript/)).
 
 ```ts
 // worker.ts
