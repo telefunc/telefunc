@@ -18,6 +18,7 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   CHANNEL_TRANSPORT,
   type ChannelTransport,
+  type ChannelTransports,
 } from '../../constants.js'
 import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, tookOf, withTook } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
@@ -98,6 +99,9 @@ type MuxServerOptions = {
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
+  /** What `config.channel.transports` allows, and the same less `'ws'` for a wire whose server takes no upgrades. */
+  transports: ChannelTransports
+  transportsWithoutWs: ChannelTransports
 }
 
 /** How a wire closed: lost (its page may reconnect), its page left for good, or refused by the server. */
@@ -281,8 +285,6 @@ class ChannelMux implements UpgradeStagesOwner {
   sendReconciled(outcome: ReconcileOutcome): void {
     const entry = this.wires.get(outcome.deliverTo)
     entry?.sender.dropProbes()
-    // What the app's config allows, read at each RECONCILED, less `'ws'` where the wire's server takes no upgrades.
-    const { transports } = getChannelConfig()
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -296,7 +298,7 @@ class ChannelMux implements UpgradeStagesOwner {
         creditWindow: this.options.creditWindow,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-        transports: entry?.takesUpgrades() ? transports : transports.filter((t) => t !== CHANNEL_TRANSPORT.WS),
+        transports: entry?.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
       }),
     )
     for (const { channel } of outcome.attached) channel._confirmWant()
@@ -963,6 +965,8 @@ function resolveMuxServerOptions(): MuxServerOptions {
     connectTtl: c.connectTtl,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
+    transports: c.transports,
+    transportsWithoutWs: c.transports.filter((t) => t !== CHANNEL_TRANSPORT.WS),
   }
 }
 
