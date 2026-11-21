@@ -1,12 +1,13 @@
 // A Cluster whose nodes refuse the backend's login. A refused login stands until an operator changes the password or
-// the ACL, so a subscription ends with it once every node refused; a node that refuses beside one that lets the backend
-// in, or beside one that is only unreachable for a while, doesn't end it. A Redis Cluster's ACL is each node's own.
+// the ACL, so a subscription ends with it once every node refused, also when the backend's own client met the refusals
+// before anything waited on it; a node that refuses beside one that lets the backend in, or beside one that is only
+// unreachable for a while, doesn't end it. A Redis Cluster's ACL is each node's own.
 //
 // The backend is installed once per process, for one deployment, so the app's Cluster starts from the same two
 // addresses in every row: a forwarder to each node, which the app's client also reaches the node's own address through.
 import { inspect } from 'node:util'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { Cluster, type Redis } from 'ioredis'
+import { Cluster, type ClusterOptions, type Redis } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Broadcast } from 'telefunc'
 import { docker, forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
@@ -64,10 +65,9 @@ async function login(admin: Redis, accepted: boolean): Promise<void> {
   await admin.call('ACL', 'SETUSER', 'telefunc', 'on', 'resetpass', password, '~*', '&*', '+@all')
 }
 
-/** A new app Cluster of both forwarders, logging in as `telefunc`, installed as the backend's; the last row's ended
- *  first, so the backend's own client is new too. The nodes' own addresses, which CLUSTER SLOTS names, map to their
- *  forwarders. */
-function installCluster(via: [Forwarder, Forwarder], { primary, replica }: Nodes): Cluster {
+/** A new app Cluster of both forwarders, logging in as `telefunc`, which connects once used unless `options` say
+ *  otherwise. The nodes' own addresses, which CLUSTER SLOTS names, map to their forwarders. */
+function appCluster(via: [Forwarder, Forwarder], { primary, replica }: Nodes, options: ClusterOptions = {}): Cluster {
   const app = new Cluster(
     via.map(({ port }) => ({ host: '127.0.0.1', port })),
     {
@@ -78,12 +78,23 @@ function installCluster(via: [Forwarder, Forwarder], { primary, replica }: Nodes
         [`${replica.host}:6379`]: { host: '127.0.0.1', port: via[1].port },
       },
       redisOptions: { username: 'telefunc', password: 'pw' },
+      ...options,
     },
   )
   app.on('error', () => {})
   app.on('node error', () => {})
-  installRedis(app)
   return app
+}
+
+/** Each node's ACL log lists a refused login, for 10 s at most. */
+async function refusedOnEachNode({ primary, replica }: Nodes): Promise<void> {
+  const until = Date.now() + 10_000
+  for (const { admin } of [primary, replica]) {
+    while (!JSON.stringify(await admin.call('ACL', 'LOG')).includes('"auth"')) {
+      if (Date.now() > until) throw new Error("a node's ACL log lists no refused login")
+      await sleep(25)
+    }
+  }
 }
 
 /** How `promise` ends within `deadline`: `'resolved'`, its error, or still waiting. */
@@ -111,15 +122,21 @@ async function delivered(key: string, message: string, received: unknown[]): Pro
 describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
   let via: [Forwarder, Forwarder] | undefined
   let app: Cluster | undefined
-  /** The row's Cluster, and the app's client of it, which connects once used. */
-  async function cluster(store: Store, primaryLogin: boolean, replicaLogin: boolean): Promise<Nodes> {
-    via ??= [await forwarder(), await forwarder()]
+  /** A new Cluster for the row, and the forwarders to its nodes; the last row's app client ended first, so the
+   *  backend's own client is new too. */
+  async function newCluster(store: Store): Promise<{ nodes: Nodes; proxies: [Forwarder, Forwarder] }> {
+    const proxies = (via ??= [await forwarder(), await forwarder()])
     app?.disconnect()
     removeStores()
-    const nodes = await startCluster(store, via)
+    return { nodes: await startCluster(store, proxies), proxies }
+  }
+  /** The row's Cluster, and the app's client of it, installed as the backend's, which connects once used. */
+  async function cluster(store: Store, primaryLogin: boolean, replicaLogin: boolean): Promise<Nodes> {
+    const { nodes, proxies } = await newCluster(store)
     await login(nodes.primary.admin, primaryLogin)
     await login(nodes.replica.admin, replicaLogin)
-    app = installCluster(via, nodes)
+    app = appCluster(proxies, nodes)
+    installRedis(app)
     return nodes
   }
   afterAll(() => {
@@ -151,6 +168,45 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       expect({ ready, published }).toMatchObject({ ready: refused, published: refused })
       // Telefunc's own error: nothing of ioredis's, such as its wording of each node's reply.
       expect(inspect(ready, { depth: 8 })).not.toMatch(/invalid username-password pair|lastNodeError|ClusterAllFailed/)
+    }, 60_000)
+
+    it(`${store.name}: where every node refuses it after the app's client logged in, and the backend's own client gave up before anything waited, the subscription ends with 'denied', and so does a publish`, async () => {
+      const { nodes, proxies } = await newCluster(store)
+      await login(nodes.primary.admin, true)
+      await login(nodes.replica.admin, true)
+      // The app's client connects at once and stays logged in on its connections. The password then changes on each
+      // node, and the backend's copy of the client, which connects at installRedis(), gives up at its first failed
+      // connect, as the app's retry strategy says.
+      const eager = appCluster(proxies, nodes, { lazyConnect: false, clusterRetryStrategy: () => null })
+      app = eager
+      expect(await settled(new Promise((resolve) => eager.once('ready', resolve)), 10_000)).toBe('resolved')
+      await login(nodes.primary.admin, false)
+      await login(nodes.replica.admin, false)
+      installRedis(eager)
+      await refusedOnEachNode(nodes)
+      await sleep(500)
+
+      const subscription = Broadcast.subscribe(`eager-${i}`, () => {})
+      let ready: unknown
+      let published: unknown
+      try {
+        ready = await settled(subscription.ready, 10_000)
+        published = await settled(Promise.resolve(Broadcast.publish(`eager-${i}`, 'x')), 10_000)
+      } finally {
+        subscription()
+      }
+
+      const refused = {
+        name: 'BackendError',
+        code: 'denied',
+        outcome: 'not-run',
+        message: expect.stringContaining(LOGIN_REFUSED),
+      }
+      expect({ ready, published, app: eager.status }).toMatchObject({
+        ready: refused,
+        published: refused,
+        app: 'ready',
+      })
     }, 60_000)
 
     it(`${store.name}: where one node refuses it beside one that lets it in, the subscription lives on that one`, async () => {

@@ -184,9 +184,28 @@ function createCommandClient(redis: RedisClient): RedisClient {
         redisOptions: { ...redis.options.redisOptions, maxRetriesPerRequest: 0, reconnectOnError: null },
       })
     : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null, enableOfflineQueue: false })
-  // A connection error reaches the backend as its command's rejection.
-  commands.on('error', () => {})
+  recordAttempts(commands)
   return commands
+}
+
+/** Keeps what the client's connection attempt ended with, from the client's start, for `nextReady()`: a wait that
+ *  starts after the attempt failed, or after the client ended, still rejects with it. Its last error, and for a
+ *  Cluster each node's since the Cluster last read its slots, which it does from the first node that answers; a `ready`
+ *  clears them. A connection error reaches the backend as its command's rejection, not as an event. */
+function recordAttempts(client: RedisClient): void {
+  const attempt: Attempt = { lastError: new Error('Connection is closed.'), nodeErrors: new Map() }
+  attempts.set(client, attempt)
+  client.on('error', (error: unknown) => {
+    attempt.lastError = error
+  })
+  if (isCluster(client)) {
+    client.on('node error', (error: unknown, node: string) => void attempt.nodeErrors.set(node, error))
+    client.on('refresh', () => attempt.nodeErrors.clear())
+  }
+  client.on('ready', () => {
+    attempt.lastError = new Error('Connection is closed.')
+    attempt.nodeErrors.clear()
+  })
 }
 
 /** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live node. */
@@ -227,14 +246,23 @@ function subscriberNodeCount(redis: RedisClient): number {
   return isCluster(redis) ? Math.max(subscriberNodesOf(redis).length, 1) : 1
 }
 
-const { subscriberNodes, readyWaits } = getGlobalObject('ioredis.ts', () => ({
+/** What a client's connection attempt ended with, until its next `ready` (`recordAttempts()`). */
+type Attempt = {
+  lastError: unknown
+  /** By node: what each answered since the Cluster last read its slots. */
+  nodeErrors: Map<string, unknown>
+}
+
+const { subscriberNodes, readyWaits, attempts } = getGlobalObject('ioredis.ts', () => ({
   /** The node each Cluster's subscriber was last duplicated from. */
   subscriberNodes: new WeakMap<Cluster, Redis>(),
   /** Each client's wait for its next `ready` (`nextReady()`). */
   readyWaits: new WeakMap<RedisClient, Promise<void>>(),
+  /** What each backend client's connection attempt ended with (`recordAttempts()`). */
+  attempts: new WeakMap<RedisClient, Attempt>(),
 }))
 
-/** A Cluster's connect that closed after its nodes failed, with each node's last error (`nextReady()`): what the nodes
+/** A Cluster's connect that closed after its nodes failed, with each node's last error (`endedWith()`): what the nodes
  *  replied tells a refused login from a node that is only unreachable (`redisFailure()`). Only the backend reads it. */
 class ClusterNodesFailed extends Error {
   readonly nodeErrors: readonly unknown[]
@@ -246,28 +274,15 @@ class ClusterNodesFailed extends Error {
 
 /** The client's next `ready`, one wait for everything that waits meanwhile: the commands made while it reconnects, and
  *  the subscriber sockets a Cluster opens before it is ready. It rejects once the connection closes first, which is when
- *  ioredis would fail a command it held: with the client's last error, or for a Cluster whose nodes failed, with each
- *  node's (`ClusterNodesFailed`), as ioredis's own error keeps only the last node's. Every failed connect of a Cluster
- *  closes, whether it retries or ends. A client made with `lazyConnect` connects here. */
+ *  ioredis would fail a command it held, or at once if the client ended: with what its attempt ended with
+ *  (`endedWith()`). Every failed connect of a Cluster closes, whether it retries or ends. A client made with
+ *  `lazyConnect` connects here. */
 function nextReady(client: RedisClient): Promise<void> {
   const waiting = readyWaits.get(client)
   if (waiting !== undefined) return waiting
-  if (client.status === 'end') return Promise.reject(new Error('Connection is closed.'))
+  if (client.status === 'end') return Promise.reject(endedWith(client))
   const promise = new Promise<void>((resolve, reject) => {
-    let lastError: unknown = new Error('Connection is closed.')
-    // By node: what each answered since the Cluster last read its slots, which it does from the first node that answers.
-    const nodeErrors = new Map<string, unknown>()
-    const onError = (error: unknown) => {
-      lastError = error
-    }
-    const onNodeError = (error: unknown, node: string) => {
-      nodeErrors.set(node, error)
-    }
-    const onRefresh = () => nodeErrors.clear()
     const settle = () => {
-      client.off('error', onError)
-      client.off('node error', onNodeError)
-      client.off('refresh', onRefresh)
       client.off('ready', onReady)
       client.off('close', onClose)
       client.off('end', onClose)
@@ -279,12 +294,7 @@ function nextReady(client: RedisClient): Promise<void> {
     }
     const onClose = () => {
       settle()
-      reject(nodeErrors.size === 0 ? lastError : new ClusterNodesFailed([...nodeErrors.values()]))
-    }
-    client.on('error', onError)
-    if (isCluster(client)) {
-      client.on('node error', onNodeError)
-      client.on('refresh', onRefresh)
+      reject(endedWith(client))
     }
     client.once('ready', onReady)
     client.once('close', onClose)
@@ -293,4 +303,12 @@ function nextReady(client: RedisClient): Promise<void> {
   readyWaits.set(client, promise)
   if (client.status === 'wait') void client.connect().catch(() => {})
   return promise
+}
+
+/** What the client's last connection attempt ended with (`recordAttempts()`): for a Cluster whose nodes failed, each
+ *  node's error (`ClusterNodesFailed`), as ioredis's own error keeps only the last node's; else its last error. */
+function endedWith(client: RedisClient): unknown {
+  const attempt = attempts.get(client)
+  if (attempt === undefined) return new Error('Connection is closed.')
+  return attempt.nodeErrors.size === 0 ? attempt.lastError : new ClusterNodesFailed([...attempt.nodeErrors.values()])
 }

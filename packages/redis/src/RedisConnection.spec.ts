@@ -113,6 +113,44 @@ describe('a client of a replica', () => {
   })
 })
 
+/** A port whose server refuses every login, as Redis does a wrong password, and closes the connection. */
+async function refusingNode(): Promise<{ port: number; server: Server }> {
+  const server = createServer((socket) => {
+    socket.on('error', () => {})
+    socket.once('data', () => socket.end('-WRONGPASS invalid username-password pair or user is disabled.\r\n'))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the refusing node has no port')
+  return { port: address.port, server }
+}
+
+describe('a backend client that ended before anything waited on it', () => {
+  it('a refused login: a command made after the end rejects with the refusal, not as unreachable', async () => {
+    const { port, server } = await refusingNode()
+    // The app's client connects at once, so the backend's copy of it does too, and gives up at its first failed
+    // connect, as the app's retry strategy says.
+    const app = new Redis({ host: '127.0.0.1', port, password: 'pw', retryStrategy: () => null })
+    app.on('error', () => {})
+    clients.push(app)
+    const connection = installed(app)
+    while (connection.client.status !== 'end') await sleep(10)
+    const failure = await connection
+      .send('hkeys', (commands) => commands.hkeys('tf:0:k'))
+      .then(
+        () => 'answered',
+        (error: unknown) => error,
+      )
+    server.close()
+
+    expect(failure).toMatchObject({
+      code: 'denied',
+      outcome: 'not-run',
+      message: expect.stringContaining("refused the login of Telefunc's Redis backend (WRONGPASS)"),
+    })
+  })
+})
+
 describe('a failure of Redis, as the backend reports it', () => {
   it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", () => {
     const refused = answered('WRONGPASS invalid username-password pair or user is disabled.', {
