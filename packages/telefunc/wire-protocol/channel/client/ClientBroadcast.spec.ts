@@ -204,7 +204,7 @@ describe("a page's subscriber a close callback removes before the server confirm
       page._dispatchFrame(received(encode.close(0, 50, 1)))
       // The server's verdict once the page said it is done.
       await new Promise((resolve) => setTimeout(resolve, 10))
-      page._dispatchFrame(received(encode.closeDone(0, 2)))
+      page._dispatchFrame(received(encode.closeDone(0, 0, 2)))
       await expect(closed).resolves.toBeNull()
     })
   }
@@ -243,7 +243,7 @@ describe("a page subscriber's `opened` around its broadcast's close", () => {
       page._dispatchFrame(received(encode.wanted(0, 2)))
       const subscribedOutcome = await outcome(subscribed.opened)
       cleanup.resolve()
-      page._dispatchFrame(received(encode.closeDone(0, 2)))
+      page._dispatchFrame(received(encode.closeDone(0, 0, 2)))
       await page.closed
       expect({ removed: await removedOutcome, subscribed: subscribedOutcome }).toEqual({
         removed: 'Channel is closed',

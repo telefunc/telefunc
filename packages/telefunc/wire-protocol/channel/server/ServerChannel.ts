@@ -75,7 +75,14 @@ import { getChannelConfig, reconnectWindow } from '../../../node/server/serverCo
 import { closeTimedOutError, type EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ACK_STATUS, ERROR_REASON, encode, isCloseFrame, isSequencedFrame } from '../../wire/frame.js'
+import {
+  ACK_STATUS,
+  ERROR_REASON,
+  encode,
+  isCloseOutcomeFrame,
+  isSequencedFrame,
+  tellsLastRead,
+} from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -175,9 +182,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private mux: ChannelMux | null = null
   /** The frames that end it, made while no page was attached, in order: the next attach sends them. */
   private pendingEnd: Array<(peer: IndexedPeer) => void> = []
-  private closeRequestSeq = 0
-  /** Its CLOSE_DONE, the last it sends: the page decides only once it has it. */
-  private closeDoneSeq = 0
   /** The highest seq the page is known to have received from this channel. */
   private pageLastSeq = 0
   /** The page closed its end, so it takes nothing more from this channel. */
@@ -517,17 +521,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _sendEnding(frame: EndingFrame): void {
     switch (frame.kind) {
       case 'close':
-        return this.sendEnd((peer) => {
-          const seq = peer.sendCloseRequest(frame.timeoutMs)
-          // Its first CLOSE is the stop boundary the page's CLOSE_ACK confirms.
-          if (this.closeRequestSeq === 0) this.closeRequestSeq = seq
-        })
+        return this.sendEnd((peer) => peer.sendCloseRequest(frame.timeoutMs))
       case 'closeAck':
-        return this.sendEnd((peer) => peer.sendCloseAck())
+        return this.sendEnd((peer) => peer.sendCloseAck(this._lastClientSeq))
       case 'closeDone':
-        return this.sendEnd((peer) => {
-          this.closeDoneSeq = peer.sendCloseDone()
-        })
+        return this.sendEnd((peer) => peer.sendCloseDone(this._lastClientSeq))
       case 'timedOut':
         return this.sendEnd((peer) => peer.sendSequenced(encode.error, ERROR_REASON.CLOSE_TIMED_OUT))
     }
@@ -600,7 +598,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // An ended channel tracks the page's last seq and lets go of what its page confirms; it acts on nothing else.
     if (this._phase === 'ended') {
-      if (frame.tag === TAG.WINDOW) this.onPageHasThrough(frame.lastSeq)
+      if (tellsLastRead(frame)) this.onPageHasThrough(frame.lastSeq)
       return
     }
     if (isChannelCtrlTag(frame.tag)) {
@@ -648,14 +646,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this.lifecycle.peerClose(frame.timeoutMs)
         return
       case TAG.CLOSE_ACK:
-        // The page sends CLOSE_ACK when the CLOSE arrives, so it has everything sent before it.
-        this.onPageHas(this.closeRequestSeq)
+        this.onPageHasThrough(frame.lastSeq)
         this.lifecycle.peerCloseAck()
         return
       case TAG.CLOSE_DONE:
-        // The page sends it once it has the server's last frame of the close: as decider, the server's CLOSE_DONE; as
-        // follower, the server's CLOSE, which its cleanup waits for.
-        this.onPageHas(this.closeDoneSeq || this.closeRequestSeq)
+        this.onPageHasThrough(frame.lastSeq)
         this.lifecycle.peerCloseDone()
         return
       case TAG.ABORT:
@@ -1130,17 +1125,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.answering.clear()
   }
 
-  /** @internal `MemoryHolder`: ended with its page in the close, which read the server's CLOSE or sent its own, it keeps
-   *  only its close's own frames, no message, answer or abort, so letting go costs its page at most the close's outcome,
-   *  where the network lost them. A page that never read the CLOSE learns from them alone that the channel ended. */
+  /** @internal `MemoryHolder`: ended with its page in the close, which confirmed reading what the server sent of it up to
+   *  its CLOSE, it keeps only its close's own frames, no message, answer or abort, so letting go costs its page at most
+   *  the close's outcome, where the network lost them. A page that never read the CLOSE learns from them alone that the
+   *  channel ended. */
   letGoKept(): void {
-    if (this._phase === 'ended' && this.pageLastSeq >= this.closeRequestSeq && this.keepsOnlyTheClose())
-      this.mux?.letGoEnded(this.id)
+    if (this._phase === 'ended' && this.keepsOnlyTheClose()) this.mux?.letGoEnded(this.id)
   }
 
-  /** Its page lacks nothing of it but frames of its close. */
+  /** Its page lacks nothing of it but the outcome of a close it is in: a CLOSE still kept is one its page never
+   *  confirmed. So a page that sent a CLOSE of its own, crossing the server's, keeps its channel kept until it confirms
+   *  the server's too: stricter than its own CLOSE alone, and it loses nothing. */
   private keepsOnlyTheClose(): boolean {
-    return this._replayBuffer !== null && this.nothingPending() && this._replayBuffer.holdsOnly(isCloseFrame)
+    return this._replayBuffer !== null && this.nothingPending() && this._replayBuffer.holdsOnly(isCloseOutcomeFrame)
   }
 
   /** @internal Drops what the channel holds for its page: the replay buffer and all it buffered while detached. */

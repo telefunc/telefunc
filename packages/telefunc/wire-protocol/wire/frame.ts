@@ -13,7 +13,8 @@ export {
   decodeClientFrame,
   isSequencedFrame,
   peekTag,
-  isCloseFrame,
+  isCloseOutcomeFrame,
+  tellsLastRead,
 }
 export type {
   AckResultStatus,
@@ -119,8 +120,8 @@ type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
 
 type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
-  | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
-  | { tag: typeof TAG.CLOSE_DONE; index: number; seq: number }
+  | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number; lastSeq: number }
+  | { tag: typeof TAG.CLOSE_DONE; index: number; seq: number; lastSeq: number }
   | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number }
@@ -189,6 +190,14 @@ function encodeBinaryFrame(tag: number, index: number, data: Uint8Array, seq: nu
 function encodeBareFrame(tag: number, index = 0, seq = 0): Uint8Array<ArrayBuffer> {
   const frame = new Uint8Array(HEADER)
   writeHeader(frame, tag, index, seq)
+  return frame
+}
+
+/** A close's frame that says what its sender read: a seq's low 32 bits, as WINDOW carries it. */
+function encodeReadThrough(tag: number, index: number, lastSeq: number, seq: number): Uint8Array<ArrayBuffer> {
+  const frame = new Uint8Array(HEADER + 4)
+  writeHeader(frame, tag, index, seq)
+  writeU32(frame, HEADER, lastSeq)
   return frame
 }
 
@@ -324,8 +333,10 @@ const encode = {
     writeU32(frame, HEADER, timeoutMs)
     return frame
   },
-  closeAck: (index: number, seq: number) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
-  closeDone: (index: number, seq: number) => encodeBareFrame(TAG.CLOSE_DONE, index, seq),
+  /** Wire: [header][u32 lastSeq], the last seq its sender read on the channel. */
+  closeAck: (index: number, lastSeq: number, seq: number) => encodeReadThrough(TAG.CLOSE_ACK, index, lastSeq, seq),
+  /** Wire: [header][u32 lastSeq], as CLOSE_ACK. */
+  closeDone: (index: number, lastSeq: number, seq: number) => encodeReadThrough(TAG.CLOSE_DONE, index, lastSeq, seq),
   abort: (index: number, abortValue: string, seq: number) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
   error(index: number, reason: ErrorReason, seq: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
@@ -418,8 +429,8 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
   [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
-  [TAG.CLOSE_ACK]: encode.closeAck(0, 0).byteLength,
-  [TAG.CLOSE_DONE]: encode.closeDone(0, 0).byteLength,
+  [TAG.CLOSE_ACK]: encode.closeAck(0, 0, 0).byteLength,
+  [TAG.CLOSE_DONE]: encode.closeDone(0, 0, 0).byteLength,
   [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST, 0).byteLength,
   [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
   [TAG.WANT]: encode.want(0, { version: 0, text: false, binary: false }).byteLength,
@@ -467,11 +478,19 @@ function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
 }
 
-/** One of a close's own frames: CLOSE, CLOSE_ACK, CLOSE_DONE, or the ERROR of a close that timed out. */
-function isCloseFrame(frame: Uint8Array): boolean {
+/** A frame that answers a close or ends it: CLOSE_ACK, CLOSE_DONE, or the ERROR of a close that timed out. The CLOSE that
+ *  begins it is not one. */
+function isCloseOutcomeFrame(frame: Uint8Array): boolean {
   const tag = frame[0]
   if (tag === TAG.ERROR) return frame[HEADER] === ERROR_REASON.CLOSE_TIMED_OUT
-  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE
+  return tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE
+}
+
+/** A frame that tells the last seq its sender read on its channel. */
+function tellsLastRead<F extends DecodedFrame>(
+  frame: F,
+): frame is Extract<F, { tag: typeof TAG.WINDOW | typeof TAG.CLOSE_ACK | typeof TAG.CLOSE_DONE }> {
+  return frame.tag === TAG.WINDOW || frame.tag === TAG.CLOSE_ACK || frame.tag === TAG.CLOSE_DONE
 }
 
 function decode(frame: Uint8Array): DecodedFrame {
@@ -578,9 +597,11 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
       return { tag: TAG.CLOSE, index, seq, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
-      return { tag: TAG.CLOSE_ACK, index, seq }
+      assertProtocol(payload.length >= 4, 'CLOSE_ACK payload too short')
+      return { tag: TAG.CLOSE_ACK, index, seq, lastSeq: readU32(payload, 0) }
     case TAG.CLOSE_DONE:
-      return { tag: TAG.CLOSE_DONE, index, seq }
+      assertProtocol(payload.length >= 4, 'CLOSE_DONE payload too short')
+      return { tag: TAG.CLOSE_DONE, index, seq, lastSeq: readU32(payload, 0) }
     case TAG.ABORT:
       return { tag: TAG.ABORT, index, seq, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:

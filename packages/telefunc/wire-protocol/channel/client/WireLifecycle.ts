@@ -20,7 +20,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
-import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
+import { ERROR_REASON, isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
@@ -295,7 +295,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       if (seq === null) return
       frame.seq = seq
     }
-    if (frame.tag === TAG.WINDOW) {
+    if (tellsLastRead(frame)) {
       this.channels.serverHasThrough(frame.index, this.channels.sentThrough(frame.index, frame.lastSeq))
     }
     if (frame.tag === TAG.ACK_RES) this.channels.serverHasThrough(frame.index, frame.ackedSeq)

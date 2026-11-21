@@ -260,6 +260,11 @@ function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void 
   channel._dispatchFrame(decode(frame) as ChannelFrame)
 }
 
+/** The seq of the last frame `channel` sent its page: what a page that read all of it tells in its close's frames. */
+function sentThrough(channel: ServerChannel): number {
+  return channel._replayBuffer?.seq ?? 0
+}
+
 /** Each way channel 0 ends, other than its own `abort()` and a close, while its wire has started p1 and not the rest.
  *  The too-many-answers ERROR waits behind p1, and after the page's own abort or lost replay the server sends no frame
  *  that ends it. */
@@ -306,7 +311,7 @@ test("on a WebSocket, the page's close keeps the publishes the wire had not star
     '0:CLOSE_DONE',
   ])
   expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
-  fromPage(ended, encode.closeDone(0, 2))
+  fromPage(ended, encode.closeDone(0, sentThrough(ended), 2))
   await expect(ended.closed).resolves.toBeNull()
   other.abort()
 })
@@ -416,8 +421,8 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
       try {
         await publish(key, 'p4' + 'x'.repeat(after))
         expect(await page.readAll()).toEqual(pageReads)
-        fromPage(channel, encode.closeAck(0, 1))
-        fromPage(channel, encode.closeDone(0, 2))
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
         expect(await closing).toBeNull()
       } finally {
         release()
@@ -439,8 +444,8 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
       const pageReads = await page.readAll()
       expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
       expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
-      fromPage(channel, encode.closeAck(0, 1))
-      fromPage(channel, encode.closeDone(0, 2))
+      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
       expect(await closing).toBeNull()
     } finally {
       release()
@@ -1179,17 +1184,60 @@ test("on a WebSocket, a lossy send that waits when the page closes goes ahead of
   const pageReads = await page.readAll()
   expect(pageReads.slice(-2)).toEqual(['0:l1', '0:CLOSE_ACK'])
   onCloseDone()
-  fromPage(channel, encode.closeDone(0, 2))
+  fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
   await channel.closed
 })
 
-/** The server's frames of a close each end begins, and what the page sends back of it. */
+test("on a WebSocket, what the page says it read in a close's frames that arrive after the server's close timed out goes", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const page = overWebSocket([channel])
+    void channel.send('p1' + 'x'.repeat(100_000))
+    const closing = channel.close({ timeout: 1_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await closing).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+    vi.useRealTimers()
+    expect(await page.readAll()).toEqual(['0:p1', '0:CLOSE', '0:ERROR'])
+    expect(channel.heldBytes).toBeGreaterThan(100_000)
+    // The page read it all, and its answers to the CLOSE come only now.
+    fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+    fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+    expect(channel.heldBytes).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test("on a WebSocket, what the page says in its CLOSE_ACK it read goes while its close's cleanup still runs", async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  void channel.send('p1' + 'x'.repeat(100_000))
+  const closing = channel.close()
+  expect(await page.readAll()).toEqual(['0:p1', '0:CLOSE'])
+  expect(channel.heldBytes).toBeGreaterThan(100_000)
+  fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+  expect(channel.heldBytes).toBe(0)
+  fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+  expect(await closing).toBeNull()
+})
+
+/** The server's frames of a close each end begins: those it sends before the page's answer, and after it; and that
+ *  answer, from a page that read all the server sent it, through `lastSeq`. */
 const LOSSY_CLOSES = {
-  server: { serverSends: ['0:CLOSE', '0:CLOSE_DONE'], pageAnswers: [encode.closeAck(0, 1), encode.closeDone(0, 2)] },
-  page: { serverSends: ['0:CLOSE_ACK', '0:CLOSE_DONE'], pageAnswers: [encode.closeDone(0, 2)] },
+  server: {
+    before: ['0:CLOSE'],
+    after: ['0:CLOSE_DONE'],
+    pageAnswers: (lastSeq: number) => [encode.closeAck(0, lastSeq, 1), encode.closeDone(0, lastSeq, 2)],
+  },
+  page: {
+    before: ['0:CLOSE_ACK', '0:CLOSE_DONE'],
+    after: [],
+    pageAnswers: (lastSeq: number) => [encode.closeDone(0, lastSeq, 2)],
+  },
 }
 
-for (const [closer, { serverSends, pageAnswers }] of Object.entries(LOSSY_CLOSES)) {
+for (const [closer, { before, after, pageAnswers }] of Object.entries(LOSSY_CLOSES)) {
   test(`on a WebSocket, a lossy subscriber's newest publish that waits for its page goes ahead of the close the ${closer} begins, and none after it`, async () => {
     vi.useFakeTimers({ toFake: ['performance'] })
     try {
@@ -1203,10 +1251,11 @@ for (const [closer, { serverSends, pageAnswers }] of Object.entries(LOSSY_CLOSES
       }
       if (closer === 'server') void channel.close()
       else fromPage(channel, encode.close(0, 1_000, 1))
+      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...before])
       // The page confirms all it read, which would hand on whatever still waited.
-      for (const frame of pageAnswers) fromPage(channel, frame)
+      for (const frame of pageAnswers(sentThrough(channel))) fromPage(channel, frame)
       expect(await channel.closed).toBeNull()
-      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...serverSends])
+      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...before, ...after])
     } finally {
       vi.useRealTimers()
     }

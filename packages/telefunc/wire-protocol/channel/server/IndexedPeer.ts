@@ -75,23 +75,21 @@ class IndexedPeer {
     this.commit(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
-  /** Returns its seq. */
-  sendCloseRequest(timeoutMs: number): number {
+  sendCloseRequest(timeoutMs: number): void {
     const seq = this.replay.nextSeq()
     this.commit(seq, encode.close(this.index, timeoutMs, seq))
-    return seq
   }
 
-  sendCloseAck(): void {
+  /** `lastSeq`: the last seq the server read from the page on this channel. */
+  sendCloseAck(lastSeq: number): void {
     const seq = this.replay.nextSeq()
-    this.commit(seq, encode.closeAck(this.index, seq))
+    this.commit(seq, encode.closeAck(this.index, lastSeq, seq))
   }
 
-  /** Returns its seq. */
-  sendCloseDone(): number {
+  /** `lastSeq`: as `sendCloseAck`'s. */
+  sendCloseDone(lastSeq: number): void {
     const seq = this.replay.nextSeq()
-    this.commit(seq, encode.closeDone(this.index, seq))
-    return seq
+    this.commit(seq, encode.closeDone(this.index, lastSeq, seq))
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */

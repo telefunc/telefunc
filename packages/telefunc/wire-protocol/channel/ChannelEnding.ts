@@ -113,9 +113,9 @@ class ChannelEnding {
     this.progress()
   }
 
-  /** The other end's CLOSE arrived. */
+  /** The other end's CLOSE arrived. This and the two after it come only before it ends: an ended channel hands its end
+   *  no frame of the other end's. */
   peerClose(timeoutMs: number): void {
-    if (this.didEnd) return
     const at = this.port.now() + timeoutMs
     switch (this.role) {
       case null:
@@ -147,7 +147,6 @@ class ChannelEnding {
   }
 
   peerCloseAck(): void {
-    if (this.didEnd) return
     assertProtocol(this.role === 'initiator', 'CLOSE_ACK without a CLOSE')
     this.role = 'decider'
     this.peerStopped = true
@@ -155,7 +154,6 @@ class ChannelEnding {
   }
 
   peerCloseDone(): void {
-    if (this.didEnd) return
     assertProtocol(this.role === 'decider' || this.role === 'follower', 'CLOSE_DONE before its boundary')
     if (this.role === 'follower') return this.finish(undefined)
     this.peerDone = true

@@ -2,12 +2,14 @@
 // next channel does, and in a close the page decides, its verdict. Over a real server and page, with no PING due for a
 // minute.
 
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { WireLifecycle } from './client/WireLifecycle.js'
+import { fakeMuxChannel } from './client/fakeMuxChannel.fixture.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { decode, encode } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
@@ -78,8 +80,13 @@ for (const transport of ['sse', 'ws'] as const) {
 }
 
 for (const transport of ['sse', 'ws'] as const) {
-  for (const decider of ['server', 'page', 'crossed'] as const) {
-    const close = decider === 'crossed' ? 'a crossed close, a message before it,' : `a close the ${decider} decided`
+  for (const decider of ['server', 'page', 'crossed', 'answering'] as const) {
+    const close = {
+      server: 'a close the server decided',
+      page: 'a close the page decided',
+      crossed: 'a crossed close, a message before it,',
+      answering: "a close the server decided while it answered the page's acknowledged send",
+    }[decider]
     describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after ${close} with no frame from the page since`, () => {
       for (const [text, sent, expected] of [
         [FITS, 'maxMemory to the byte', 'answered'],
@@ -96,6 +103,22 @@ for (const transport of ['sse', 'ws'] as const) {
             expect(await Promise.all([first.close(), firstPage.close()])).toEqual([null, null])
           } else if (decider === 'server') {
             await first.close()
+            await firstPage.closed
+          } else if (decider === 'answering') {
+            // Its answer leaves after the server's CLOSE: the page reads it before it confirms the close.
+            let answer = (_: string) => {}
+            const asked = new Promise<void>((resolve) =>
+              first.listen(() => {
+                resolve()
+                return new Promise<string>((answered) => (answer = answered))
+              }),
+            )
+            const answered = firstPage.send('ask', { ack: true })
+            await asked
+            const closing = first.close()
+            answer('answer')
+            expect(await answered).toBe('answer')
+            expect(await closing).toBe(null)
             await firstPage.closed
           } else {
             await firstPage.close()
@@ -118,7 +141,7 @@ for (const transport of ['sse', 'ws'] as const) {
           await firstPage.close()
           await first.closed
 
-          const verdict = decode(encode.closeDone(0, first._lastClientSeq))
+          const verdict = decode(encode.closeDone(0, first._replayBuffer?.seq ?? 0, first._lastClientSeq))
           if (verdict.tag !== TAG.CLOSE_DONE) throw new Error('Expected CLOSE_DONE frame')
           first._dispatchFrame(verdict)
           expect(await first.closed).toBe(null)
@@ -128,4 +151,41 @@ for (const transport of ['sse', 'ws'] as const) {
         })
     })
   }
+}
+
+// The page lets go of what it sent once the server says it read it: in a close, its CLOSE_ACK says so.
+for (const transport of ['sse', 'ws'] as const) {
+  test(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, what the page sent before its close leaves its replay when the server's CLOSE_ACK arrives, while the server's cleanup still runs`, async () => {
+    const channel = new ServerChannel()
+    getChannelMux().registerChannel(channel)
+    channel.listenBinary(() => {})
+    let cleanedUp = () => {}
+    channel.onClose(() => new Promise<void>((resolve) => (cleanedUp = resolve)))
+    // The page's end of the channel, as the page's connection drives it: what the server sends it is read, by tag.
+    const read: number[] = []
+    const page = fakeMuxChannel({ id: channel.id, _dispatchFrame: (frame) => void read.push(frame.tag) })
+    const lifecycle = new WireLifecycle({
+      owner: { onDisposed() {} },
+      telefuncUrl,
+      options: { transports: [transport], fetchImpl: fetch, idleTimeout: 0 },
+    })
+    lifecycle.register(page)
+    const record = lifecycle.channels.of(page)
+    if (record === undefined) throw new Error('not registered')
+    const send = (frame: (seq: number) => Uint8Array<ArrayBuffer>) => {
+      const seq = record.replay.nextSeq()
+      lifecycle.gate.send(record, seq, frame(seq), 'control')
+    }
+    await channel.opened
+    // Less than a quarter of its credit window, which the server would grant again in a WINDOW that says it read it.
+    send((seq) => encode.binary(record.ix, new Uint8Array(100_000), seq))
+    send((seq) => encode.close(record.ix, 5_000, seq))
+    await vi.waitFor(() => expect(read).toContain(TAG.CLOSE_ACK))
+    expect(record.replay.length).toBe(0)
+    cleanedUp()
+    await vi.waitFor(() => expect(read).toContain(TAG.CLOSE_DONE))
+    send((seq) => encode.closeDone(record.ix, record.lastSeq, seq))
+    expect(await channel.closed).toBe(null)
+    lifecycle.unregister(page)
+  })
 }

@@ -332,14 +332,14 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
+    this.gate.send(record, seq, encode.closeAck(record.ix, record.lastSeq, seq), 'control')
   }
 
   sendCloseDone(channel: MuxChannel): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, encode.closeDone(record.ix, seq), 'control')
+    this.gate.send(record, seq, encode.closeDone(record.ix, record.lastSeq, seq), 'control')
   }
 
   sendCloseTimedOut(channel: MuxChannel): void {

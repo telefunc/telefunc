@@ -54,9 +54,11 @@ function createPeer(frames: Uint8Array[]) {
   })
 }
 
-/** What the page sends `channel`, through the entry its mux hands frames to; each frame takes the page's next seq. */
-function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8Array[]) {
+/** What the page sends `channel`, through the entry its mux hands frames to; each frame takes the page's next seq. The page
+ *  has read all that `channel` sent it. */
+function fromPage(channel: Pick<ServerChannel, '_dispatchFrame' | '_replayBuffer'>, frames: Uint8Array[]) {
   let seq = 0
+  const lastRead = () => channel._replayBuffer?.seq ?? 0
   const dispatch = (frame: Uint8Array<ArrayBuffer>) => channel._dispatchFrame(decode(frame) as ChannelFrame)
   const askAck = (text: string) => {
     const ackedSeq = ++seq
@@ -74,11 +76,11 @@ function fromPage(channel: Pick<ServerChannel, '_dispatchFrame'>, frames: Uint8A
       dispatch(encode.close(7, timeoutMs, ++seq))
     },
     closeAck() {
-      dispatch(encode.closeAck(7, ++seq))
+      dispatch(encode.closeAck(7, lastRead(), ++seq))
     },
     /** The page's side of the close is done; from the page that decides, the channel closed. */
     closeDone() {
-      dispatch(encode.closeDone(7, ++seq))
+      dispatch(encode.closeDone(7, lastRead(), ++seq))
     },
     closeTimedOut() {
       dispatch(encode.error(7, ERROR_REASON.CLOSE_TIMED_OUT, ++seq))
