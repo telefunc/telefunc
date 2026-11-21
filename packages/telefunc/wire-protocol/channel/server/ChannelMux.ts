@@ -211,12 +211,6 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** An ended channel its page may still need (`keep`) stays attachable; the mux forgets any other. */
-  /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
-  letGoEnded(id: string): void {
-    const channel = this.channels.get(id)
-    if (channel) this.ended.release(channel)
-  }
-
   onChannelEnded(
     channel: ServerChannel<any, any>,
     { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
@@ -224,6 +218,12 @@ class ChannelMux implements UpgradeStagesOwner {
     // Kept until its page needs nothing more from it, leaves, or stays away for `reconnectTimeout`.
     if (keep) this.ended.keep(channel, pageAttached ? null : this.options.reconnectTimeout)
     else this.unregisterChannel(channel.id)
+  }
+
+  /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
+  letGoEnded(id: string): void {
+    const channel = this.channels.get(id)
+    if (channel) this.ended.release(channel)
   }
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
