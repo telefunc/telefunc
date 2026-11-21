@@ -565,7 +565,9 @@ describe('a large lossy send near the memory budget', () => {
     // The page falls behind only at `untilBehind()`: a loaded runner may leave two sends further apart than its wire's wait.
     const behindAfter = vi.spyOn(WireSender.prototype, 'behindAfter').mockReturnValue(Number.POSITIVE_INFINITY)
     onTestFinished(() => behindAfter.mockRestore())
-    const response = await post([encode.reconcile({ attempt: 1, open })], { streamResponse: true })
+    const response = await post([encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open })], {
+      streamResponse: true,
+    })
     await channel.opened
     const [peer] = attached.mock.calls[attached.mock.contexts.indexOf(channel)] ?? []
     assert(peer)

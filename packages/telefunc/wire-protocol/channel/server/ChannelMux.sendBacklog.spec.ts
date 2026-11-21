@@ -36,7 +36,7 @@ test.each([
     vi.spyOn(page.mux, 'sendReconciled').mockImplementation(() => {})
     // Its PONG is measured before the hold begins.
     await page.mux.onWireMessage(page.wire, encode.ping([]))
-    await page.mux.onWireMessage(page.wire, encode.reconcile({ attempt: 1, open: [] }))
+    await page.mux.onWireMessage(page.wire, encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }))
     let pings = 0
     for (; pings < PINGS_PAST_THE_LIMIT && !page.state.terminated; pings++)
       await page.mux.onWireMessage(page.wire, widePing())
@@ -55,7 +55,9 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
   const opened = await handleSseChannelRequest(
     new Request(url, {
       method: 'POST',
-      body: encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ attempt: 1, open: [] })]),
+      body: encodeSseRequest({ connId, streamResponse: true }, [
+        encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+      ]),
     }),
     undefined,
     () => false,
@@ -81,7 +83,11 @@ test("over SSE, a reconnect whose replay passes the backlog base is not ended by
   mux.registerChannel(channel)
   const first = await openStream(
     'web',
-    encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+    encode.reconcile({
+      sessionId: crypto.randomUUID(),
+      attempt: 1,
+      open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
+    }),
   )
   const [reconciled] = await first.readUntil((frame) => frame[0] === TAG.RECONCILED)
   const answer = reconciled === undefined ? undefined : decode(reconciled)

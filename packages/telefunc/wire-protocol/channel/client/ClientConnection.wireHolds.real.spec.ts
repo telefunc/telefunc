@@ -1,10 +1,12 @@
 // Which wire holds a page's session, on the real Node server with the real page: a reopen keeps the session's id, a wire
-// that holds nothing ends only as a loss, and an older attempt's open read late takes nothing.
+// that holds nothing ends only as a loss, an older attempt's open read late takes nothing, and a page whose first
+// RECONCILED and last word were both lost, on SSE or on a WebSocket, reads the server's cause at its reopen.
 
 import { expect, test } from 'vitest'
-import { encodeU32 } from '../../wire/envelope.js'
+import { decodeU32, encodeU32 } from '../../wire/envelope.js'
 import { decode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
+import { getChannelMux } from '../server/ChannelMux.js'
 import { getWireUrl } from './getSessionUrl.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { delay, framesStart, opens, pair, rewriting, sends, until, useRealServer, world } from './realServer.fixture.js'
@@ -53,6 +55,42 @@ function namedOnSockets(named: (string | undefined)[]) {
     }
     return [message]
   }
+}
+
+/** The page's first WebSocket as if its RECONCILED and the server's last word never reached the page: the messages
+ *  that carry them are dropped, and its close reads as a dropped connection's. */
+function withholdingFirstSocket() {
+  const Counted = globalThis.WebSocket
+  const seen = { reconciled: false }
+  let made = 0
+  globalThis.WebSocket = class Withholding extends Counted {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols)
+      if (made++ > 0) return
+      // Added before the page sets its handlers, so these run first and can keep an event from them.
+      this.addEventListener('message', (event) => {
+        if (!(event.data instanceof ArrayBuffer)) return
+        const message = new Uint8Array(event.data)
+        const frames = isOneFrame(message) ? [message] : [...messageFrames(message)]
+        if (frames.some((frame) => frame[0] === TAG.RECONCILED)) seen.reconciled = true
+        if (frames.some((frame) => frame[0] === TAG.RECONCILED || frame[0] === TAG.END))
+          event.stopImmediatePropagation()
+      })
+      let dropped = false
+      this.addEventListener('close', (event) => {
+        if (dropped) return
+        dropped = true
+        event.stopImmediatePropagation()
+        this.dispatchEvent(Object.assign(new Event('close'), { code: 1006, reason: '' }))
+      })
+    }
+  }
+  return { seen, restore: () => void (globalThis.WebSocket = Counted) }
+}
+/** The connId an SSE open's body names, read off its metadata. */
+function connIdOf(bytes: Uint8Array<ArrayBuffer>): string {
+  const metadata: { connId: string } = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + decodeU32(bytes))))
+  return metadata.connId
 }
 
 test('a reopen over SSE is answered with the session id the page had', async () => {
@@ -180,3 +218,67 @@ test(
     }
   },
 )
+
+test("a first SSE wire whose RECONCILED and last word both never reach the page: the reopen reads the server's cause", async () => {
+  let connId = ''
+  const first = rewriting((frame) => (frame[0] === TAG.RECONCILED || frame[0] === TAG.END ? null : frame))
+  world.hooks = [
+    {
+      kind: 'open',
+      stream: first.stream,
+      body: (bytes) => {
+        connId = connIdOf(bytes)
+        return [bytes]
+      },
+    },
+  ]
+  const live = pair(crypto.randomUUID(), ['sse'])
+  const serverEnds: string[] = []
+  live.channel.onClose((err) => void serverEnds.push(err ? err.message : 'clean'))
+  try {
+    await until(() => connId !== '' && getChannelMux().getWireByConnId(connId) !== undefined)
+    await delay(200)
+    const wire = getChannelMux().getWireByConnId(connId)
+    if (wire !== undefined) getChannelMux().endFault(wire, { scope: 'session', cause: 'receiveBudget' })
+    first.cut()
+    // Within the test's own limit, so a page that reads nothing is seen as such.
+    await until(() => live.ended.length > 0, 12_000).catch(() => {})
+    const budget = 'The page sent more on its connection than the server holds while it works on what came before.'
+    expect([
+      live.ended.map((err) => err.message.includes(budget)),
+      serverEnds.map((end) => end.includes(budget)),
+    ]).toEqual([[true], [true]])
+  } finally {
+    live.page.abort()
+  }
+}, 20_000)
+
+test("a first WebSocket wire whose RECONCILED and last word both never reach the page: the reopen reads the server's cause", async () => {
+  // An unreadable message behind the page's first RECONCILE ends the session that RECONCILE took.
+  let garbled = false
+  world.wsSends = (message) => {
+    const frames = isOneFrame(message) ? [message] : [...messageFrames(message)]
+    if (garbled || !frames.some((frame) => frame[0] === TAG.RECONCILE)) return [message]
+    garbled = true
+    return [message, Uint8Array.from([0xff, 0xff, 0xff])]
+  }
+  const withheld = withholdingFirstSocket()
+  const socketsBefore = world.sockets
+  const live = pair(crypto.randomUUID(), ['ws'])
+  const serverEnds: string[] = []
+  live.channel.onClose((err) => void serverEnds.push(err ? err.message : 'clean'))
+  try {
+    // Within the test's own limit, so a page that reads nothing is seen as such.
+    await until(() => live.ended.length > 0, 12_000).catch(() => {})
+    // The page reopened: the cause it reads is the kept end its second wire was answered with.
+    expect([
+      withheld.seen.reconciled,
+      world.sockets - socketsBefore > 1,
+      serverEnds.length,
+      live.ended.map((err) => err.message),
+    ]).toEqual([true, true, 1, serverEnds])
+  } finally {
+    withheld.restore()
+    live.page.abort()
+  }
+}, 20_000)

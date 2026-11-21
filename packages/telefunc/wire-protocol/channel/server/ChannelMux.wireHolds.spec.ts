@@ -1,12 +1,12 @@
-// Which wire holds a page's session, on the real mux: a session keeps one id for its life and names the one wire that
-// holds it; a wire that holds nothing goes only as a loss; a reopen or an upgrade's commit hands the session over. Each
+// Which wire holds a page's session, on the real mux: a session keeps the id the page made for its life and names the
+// one wire that holds it; a wire that holds nothing goes only as a loss; a reopen or an upgrade's commit hands the session over. Each
 // wire reads the session id from the RECONCILED it was sent.
 
 import { expect, test } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
-import type { ReconcileOpenEntry } from '../../wire/payloads.js'
+import type { ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -66,9 +66,9 @@ function channel() {
 }
 
 const entry = (id: string, ix: number): ReconcileOpenEntry => ({ id, ix, lastSeq: 0, initial: true })
-/** A RECONCILE carrying the page's attempt number. */
-const reconcile = (payload: Parameters<typeof encode.reconcile>[0], attempt: number) =>
-  encode.reconcile({ ...payload, attempt })
+/** A RECONCILE carrying the page's attempt number; one that names no session names a new one, as a page's first does. */
+const reconcile = (payload: Omit<ReconcilePayload, 'sessionId'> & { sessionId?: string }, attempt: number) =>
+  encode.reconcile({ sessionId: crypto.randomUUID(), ...payload, attempt })
 /** A PREPARE carrying its probe's attempt number, which the stage keeps: the BARRIER carries none. */
 const prepare = (payload: { sessionId: string; upgradeId: string }, attempt: number) =>
   encode.prepare({ ...payload, attempt })
@@ -187,7 +187,10 @@ test('a RECONCILE whose wire was lost before its turn attaches nothing and leave
   const next = wire()
   try {
     // The tail is unframeable: it ends the wire before the RECONCILE's turn, and the wire holds nothing yet.
-    const message = new Uint8Array([...encode.reconcile({ attempt: 1, open: [entry(pending.id, 0)] }), 0xff])
+    const message = new Uint8Array([
+      ...encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [entry(pending.id, 0)] }),
+      0xff,
+    ])
     await first.send(message)
     await next.send(reconcile({ open: [entry(pending.id, 0)] }, 2))
     getChannelMux().registerChannel(pending)
@@ -353,9 +356,48 @@ test('a reopen whose RECONCILED never reached the page is taken over by the next
 test('a RECONCILE without its attempt on a wire that holds no session goes as a loss', async () => {
   const unnumbered = wire()
   try {
-    await unnumbered.send(encode.reconcile({ open: [] }))
+    await unnumbered.send(encode.reconcile({ sessionId: crypto.randomUUID(), open: [] }))
     expect([unnumbered.hows(), unnumbered.tags().includes(TAG.RECONCILED)]).toEqual([['transient'], false])
   } finally {
     unnumbered.leave()
+  }
+})
+
+test("a page's first RECONCILE names the id it made, and the session's end is kept under it for its next wire", async () => {
+  const a = channel()
+  const pageId = crypto.randomUUID()
+  const first = wire()
+  const second = wire()
+  try {
+    await first.send(reconcile({ sessionId: pageId, open: [entry(a.c.id, 0)] }, 1))
+    const named = first.sessionId()
+    // The page reads neither the RECONCILED nor the last word.
+    getChannelMux().endFault(first.w, { scope: 'session', cause: 'receiveBudget' })
+    await second.send(reconcile({ sessionId: pageId, open: [entry(a.c.id, 0)] }, 2))
+    expect({
+      named: named === pageId,
+      secondEnds: second.hows(),
+      reconciled: second.tags().includes(TAG.RECONCILED),
+    }).toEqual({
+      named: true,
+      secondEnds: ['receiveBudget'],
+      reconciled: false,
+    })
+  } finally {
+    first.leave()
+    second.leave()
+  }
+})
+
+test('a named id the server has no record of, with channels it never had, is answered as a missing session', async () => {
+  const unknown = wire()
+  try {
+    await unknown.send(
+      reconcile({ sessionId: crypto.randomUUID(), open: [{ id: crypto.randomUUID(), ix: 0, lastSeq: 4 }] }, 2),
+    )
+    const reconciled = unknown.frames.filter((frame) => frame[0] === TAG.RECONCILED).map(decode)[0]
+    expect([[...unknown.ends], reconciled?.tag === TAG.RECONCILED ? reconciled.payload.open : null]).toEqual([[], []])
+  } finally {
+    unknown.leave()
   }
 })

@@ -64,6 +64,7 @@ describe('upgrade wire vocabulary', () => {
 
 describe('decodeClientFrame — hostile schemas', () => {
   const badReconcile: [string, Record<string, unknown>][] = [
+    ['no sessionId', { open: goodOpen }],
     ['a non-string sessionId', { sessionId: 7, open: goodOpen }],
     ['open that is not an array', { sessionId: 's', open: 'nope' }],
     ['an entry with a non-string id', { sessionId: 's', open: [{ id: 7, ix: 0, lastSeq: 0 }] }],
@@ -87,9 +88,9 @@ describe('decodeClientFrame — hostile schemas', () => {
   test('control: every legal RECONCILE shape passes', () => {
     const legal: ReconcilePayload[] = [
       { sessionId: 's', open: goodOpen },
-      { open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
-      { open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
-      { open: [] },
+      { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
+      { sessionId: 's', open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
+      { sessionId: 's', open: [] },
     ]
     for (const payload of legal) expect(clientFrame(encode.reconcile(payload)).tag).toBe(TAG.RECONCILE)
   })
@@ -164,7 +165,7 @@ describe('decodeClientFrame — direction', () => {
 
   const clientLegal: [string, Uint8Array<ArrayBuffer>][] = [
     ['PING', encode.ping()],
-    ['RECONCILE', encode.reconcile({ attempt: 1, open: goodOpen })],
+    ['RECONCILE', encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: goodOpen })],
     ['PREPARE', encode.prepare({ attempt: 2, upgradeId: 'u', sessionId: 's' })],
     ['BARRIER', encode.barrier({ upgradeId: 'u', sessionId: 's', open: goodOpen })],
     ['TEXT', encode.text(0, '"hi"', 1)],

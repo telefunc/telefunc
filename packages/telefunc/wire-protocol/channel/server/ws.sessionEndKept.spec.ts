@@ -30,7 +30,7 @@ afterAll(() => {
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
-/** A page's wire whose RECONCILE names `sessionId`, or none: the session the RECONCILED gives it, or the close that ends
+/** A page's wire whose RECONCILE names `sessionId`, or a new one: the session the RECONCILED gives it, or the close that ends
  *  it first; `socket` to go on with it. */
 /** The page's number for each wire it opens. */
 let attempts = 0
@@ -49,7 +49,7 @@ async function reopen(sessionId?: string) {
     socket.addEventListener('close', ({ code, reason }) => resolve({ code, reason }))
   })
   await new Promise((resolve) => socket.addEventListener('open', resolve))
-  socket.send(encode.reconcile({ open: [], attempt: ++attempts, ...(sessionId === undefined ? {} : { sessionId }) }))
+  socket.send(encode.reconcile({ sessionId: sessionId ?? crypto.randomUUID(), open: [], attempt: ++attempts }))
   return { socket, answer: await answer }
 }
 
@@ -75,10 +75,10 @@ test("a reopen the server answers with a session's end keeps that end again: a s
   expect([first.answer, second.answer]).toEqual([sessionEnd, sessionEnd])
 })
 
-test("a reopen after the session's end was kept for its time, with no reopen between, finds no end: a new session, where the page reads its channels lost", async () => {
+test("a reopen after the session's end was kept for its time, with no reopen between, finds no end: a session under the id it named, where the page reads its channels lost", async () => {
   const sessionId = await endedSession()
   await delay(KEEP_MS * 1.2)
   const { socket, answer } = await reopen(sessionId)
   socket.close()
-  expect(answer).toEqual({ reconciled: expect.not.stringMatching(`^${sessionId}$`) })
+  expect(answer).toEqual({ reconciled: sessionId })
 })

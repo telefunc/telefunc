@@ -33,7 +33,9 @@ async function openPage(id: string) {
   })
   const closed = new Promise<CloseEvent>((resolve) => page.addEventListener('close', resolve))
   await new Promise((resolve) => page.addEventListener('open', resolve))
-  page.send(encode.reconcile({ attempt: 1, open: [{ id, ix: 0, lastSeq: 0, initial: true }] }))
+  page.send(
+    encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [{ id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
   await read
   const close = async () => {
     const event = await closed

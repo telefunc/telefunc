@@ -15,6 +15,7 @@ import { END_CAUSE } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import { assert } from '../../../utils/assert.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
 
 type ReconcileOutcome = {
   frames: OutboundFrame[]
@@ -80,6 +81,9 @@ class AttachExchange {
   private isReconcileOwed = false
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
   private session: string | null = null
+  /** The id the page names its session by until a RECONCILED gives it the server's: the page makes it, so that the
+   *  server keeps the session's end under it even when its first RECONCILED never reaches the page. */
+  private readonly ownId = randomUuid()
   /** The wires the connection opened, probes included: each one's first RECONCILE or PREPARE carries its number, which
    *  orders the page's attempts at the server. */
   private attempts = 0
@@ -361,8 +365,7 @@ class AttachExchange {
       uplink,
     })
     const released = this.channels.takeReleased()
-    const reconcile: ReconcilePayload = { open }
-    if (this.session) reconcile.sessionId = this.session
+    const reconcile: ReconcilePayload = { sessionId: this.session ?? this.ownId, open }
     // What changed goes on the wire that holds the session; a wire's first RECONCILE numbers it.
     if (changes) reconcile.released = released
     else reconcile.attempt = this.nextAttempt()

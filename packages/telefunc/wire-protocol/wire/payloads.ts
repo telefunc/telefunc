@@ -90,7 +90,8 @@ const WIRE_MAX_CTRL_FRAME_BYTES = HEADER + MAX_CHANNELS_PER_CONNECTION * WIDEST_
 /** On a new wire it names every channel the page holds; on the wire of the session it names, with `released`, it names
  *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */
 type ReconcilePayload = {
-  sessionId?: string
+  /** The page's session: the id the server gave it, or before that the one the page made. */
+  sessionId: string
   /** The page's number for the wire it comes on, one more for each wire the page opens: what orders its attempts, on a
    *  wire that doesn't hold the session yet, where it is required. */
   attempt?: number
@@ -218,10 +219,10 @@ function assertReconcilePayload(value: unknown): asserts value is ReconcilePaylo
   assertOpenList(payload.open)
   // A barrier's ids are checked as it is admitted, so that one over the cap ends its probe alone.
   for (const { id } of payload.open) assertProtocol(isChannelId(id), 'open entry id over the cap')
-  assertProtocol(payload.sessionId === undefined || isIssuedId(payload.sessionId), 'RECONCILE sessionId')
+  assertProtocol(isIssuedId(payload.sessionId), 'RECONCILE sessionId')
   assertProtocol(payload.attempt === undefined || isUint(payload.attempt, MAX_U32), 'RECONCILE attempt')
   if (payload.released === undefined) return
-  assertProtocol(isIssuedId(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
+  assertProtocol(Array.isArray(payload.released), 'RECONCILE released')
   assertProtocol(payload.released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
   for (const ix of payload.released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
 }

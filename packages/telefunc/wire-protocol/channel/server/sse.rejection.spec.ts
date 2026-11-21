@@ -23,7 +23,11 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
   const connId = crypto.randomUUID()
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [
-      encode.reconcile({ attempt: 1, open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+      encode.reconcile({
+        sessionId: crypto.randomUUID(),
+        attempt: 1,
+        open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
+      }),
     ]),
   )
   await channel.opened

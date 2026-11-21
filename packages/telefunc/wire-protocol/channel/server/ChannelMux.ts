@@ -595,9 +595,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
       // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or awaited.
-      const ended =
-        frame.payload.sessionId === undefined ? undefined : this.endedSessions.causeOf(frame.payload.sessionId)
-      if (ended !== undefined && frame.payload.sessionId !== undefined) {
+      const ended = this.endedSessions.causeOf(frame.payload.sessionId)
+      if (ended !== undefined) {
         this.endSessionOn(entry, frame.payload.sessionId, ended)
         return null
       }
@@ -626,7 +625,7 @@ class ChannelMux implements UpgradeStagesOwner {
   private isStale(entry: WireEntry, ctrl: ReconcilePayload): boolean {
     if (entry.holds !== null) return false
     assertProtocol(ctrl.attempt !== undefined, 'RECONCILE without its attempt on a wire that holds no session')
-    const named = ctrl.sessionId === undefined ? undefined : this.sessions.get(ctrl.sessionId)
+    const named = this.sessions.get(ctrl.sessionId)
     return named !== undefined && ctrl.attempt <= named.high
   }
 
@@ -670,8 +669,9 @@ class ChannelMux implements UpgradeStagesOwner {
    *  names and its wire's. A claim on a stage that is committing is refused. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
     const own = entry.holds?.id
-    if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
-    for (const claimed of [ctrl.sessionId, own]) if (claimed !== undefined) this.stages.claim(claimed)
+    if (ctrl.sessionId === own) return
+    this.stages.claim(ctrl.sessionId)
+    if (own !== undefined) this.stages.claim(own)
   }
 
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
@@ -768,9 +768,9 @@ class ChannelMux implements UpgradeStagesOwner {
     const held = entry.holds
     // A page has one session, and names it on every wire: a wire that holds one speaks for that one alone.
     assertProtocol(held === null || ctrl.sessionId === held.id, "RECONCILE names another session than its wire's")
-    // The session keeps its id for its life; one the server has no record of starts under a new id.
-    const named = ctrl.sessionId === undefined ? undefined : this.sessions.get(ctrl.sessionId)
-    const session = held ?? named ?? this.sessions.create(crypto.randomUUID())
+    // The session keeps its id for its life. One the server has no record of starts under the id the page named, which
+    // the page made: its end is then kept under that id from its first wire on.
+    const session = held ?? this.sessions.get(ctrl.sessionId) ?? this.sessions.create(ctrl.sessionId)
     // Missed frames are replayed where the RECONCILE comes on a wire that doesn't hold the session yet: the wire that
     // holds it, and a barrier's old wire read up to its FIN, still deliver them.
     const replay = !isBarrier && session.holder !== entry
