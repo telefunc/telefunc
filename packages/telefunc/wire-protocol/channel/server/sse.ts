@@ -316,18 +316,10 @@ class SseServerTransport {
           return await this.handleBatchPost(connId, reader)
       }
     } catch (err) {
-      // A body that ends mid-frame or a frame over the limit is the client's: refused, quietly. Anything else is our bug
-      // — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
+      // A body that ends mid-frame is the client's: refused, quietly. Anything else is our bug — rethrow so the request
+      // pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
-      const fault = faultOf(err)
-      if (fault === null) throw err
-      const wire = this.mux.getWireByConnId<SseWire>(connId)
-      if (!wire) return refuse(this.answerFor(connId))
-      // The mux decides what the fault ends; the request is answered as any request that meets that end is, once the
-      // page ended its body, read off from the frame the fault stopped at.
-      this.mux.endFault(wire, fault)
-      await reader.discardRest()
-      return closedUnder(wire)
+      throw err
     }
   }
 
@@ -342,11 +334,8 @@ class SseServerTransport {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
     if (existing) this.closeWire(existing, 'transient')
 
-    const onCancel = () => {
-      const wire = this.mux.getWireByConnId<SseWire>(connId)
-      if (wire) this.closeWire(wire, 'transient')
-    }
-    const events = new EventStream({ useNodeStream, onCancel })
+    // The stream is this wire's alone: its cancel closes this wire, not the one its connId names by then.
+    const events = new EventStream({ useNodeStream, onCancel: () => this.closeWire(wire, 'transient') })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
     const wire: SseWire = {
@@ -387,7 +376,7 @@ class SseServerTransport {
     this.sendNow(wire, encode.streamRequestOpenAck())
     // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
     await wire.ready
-    return this.answerAfterBody(wire, this.readUpload(wire, reader))
+    return this.answerAfterBody(wire, reader, this.readUpload(wire, reader))
   }
 
   /** Dispatches the upload's frames as they come, to the body's end; after its wire's end, what the page writes is read
@@ -431,7 +420,7 @@ class SseServerTransport {
     })
     wire.pendingDispatches.add(drain)
     try {
-      return await this.answerAfterBody(wire, drain)
+      return await this.answerAfterBody(wire, reader, drain)
     } finally {
       wire.pendingDispatches.delete(drain)
     }
@@ -440,12 +429,21 @@ class SseServerTransport {
   /** What a request whose frames `read` reads on `wire` is answered once the page ended its body. Its wire closed
    *  meanwhile: refused as a request for a wire closed before it is, so the page reconnects, also where the body was cut
    *  in the middle of a frame the server was reading as the wire ended. A cut on a wire still open is the truncation's
-   *  (`handleRequest`). */
-  private async answerAfterBody(wire: SseWire, read: Promise<void>): Promise<SseChannelHttpResponse> {
+   *  (`handleRequest`). A frame over the limit is `wire`'s fault, whatever wire its connId names by then: the mux
+   *  decides what it ends, and the request is answered as one that meets that end, once the page ended its body. */
+  private async answerAfterBody(
+    wire: SseWire,
+    reader: BodyReader,
+    read: Promise<void>,
+  ): Promise<SseChannelHttpResponse> {
     try {
       await read
     } catch (err) {
-      if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
+      const fault = faultOf(err)
+      if (fault !== null) {
+        this.mux.endFault(wire, fault)
+        await reader.discardRest()
+      } else if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
     }
     return wire.closed ? closedUnder(wire) : okResponse()
   }
