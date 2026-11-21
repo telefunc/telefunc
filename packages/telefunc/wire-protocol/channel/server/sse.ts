@@ -326,8 +326,8 @@ class SseServerTransport {
       if (err instanceof OversizeFrameError) {
         const channel = channelOf(err.head)
         const wire = this.mux.getWireByConnId<SseWire>(connId)
-        if (wire) this.mux.refuseFrame(wire, 'overLimit', channel)
-        return refuse(frameRefusal('overLimit', channel))
+        if (wire) this.mux.refuseFrame(wire, 'frameOverLimit', channel)
+        return refuse(frameRefusal('frameOverLimit', channel))
       }
       if (isProtocolViolationError(err)) return refuse(REFUSED.unframed)
       throw err
@@ -454,7 +454,7 @@ class SseServerTransport {
       // A truncation is the client hanging up (channels keep their grace); an over-limit frame is refused as on any
       // other request, its channel told on this stream or at its next attach.
       reportDispatchBug(err)
-      if (err instanceof OversizeFrameError) this.mux.refuseFrame(wire, 'overLimit', channelOf(err.head))
+      if (err instanceof OversizeFrameError) this.mux.refuseFrame(wire, 'frameOverLimit', channelOf(err.head))
       else this.closeWire(wire, 'transient')
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.

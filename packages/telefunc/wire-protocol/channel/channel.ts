@@ -110,9 +110,10 @@ type AbortReasonLimit = { max: number; bytesOf: (serialized: string) => number; 
  *  ends without it, and its refusal is a `ChannelOverflowError`. */
 function serializeBoundedAbortReason(value: unknown, limit: AbortReasonLimit): AbortReason {
   const reason = serializeAbortReason(value)
-  if (reason.refusal || limit.bytesOf(reason.serialized) <= limit.max) return reason
+  const bytes = limit.bytesOf(reason.serialized)
+  if (reason.refusal || bytes <= limit.max) return reason
   const error = new ChannelOverflowError(
-    `abort(): the value is more than ${limit.what} (${limit.max} bytes), so the channel ended without it`,
+    `abort(): the value is ${bytes} bytes, more than ${limit.what} (${limit.max} bytes), so the channel ended without it`,
   )
   return { value: undefined, serialized: serializeAbortReason(undefined).serialized, refusal: { error } }
 }

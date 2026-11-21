@@ -12,6 +12,7 @@ import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wir
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './ChannelMux.js'
+import { END_CAUSE } from '../endCause.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
 
@@ -51,9 +52,12 @@ async function cancel(answer: SseChannelHttpResponse): Promise<void> {
   if (answer.body instanceof ReadableStream) await answer.body.cancel()
 }
 
-/** The refusal's `Content-Type`, read as the page reads it: kind, then the channel where named, then the reason. */
-const refusal = (kind: string, channel = '') =>
-  new RegExp(`^text/vnd\\.telefunc\\.refusal; kind=${kind}${channel && `; channel=${channel}`}; reason="[^"]+"$`)
+/** The refusal's `Content-Type`, read as the page reads it: kind, then the channel where named, then the code of the
+ *  channel's end where it ends one, then the reason. */
+const refusal = (kind: string, channel = '', cause?: number) =>
+  new RegExp(
+    `^text/vnd\\.telefunc\\.refusal; kind=${kind}${channel && `; channel=${channel}`}${cause === undefined ? '' : `; cause=${cause}`}; reason="[^"]+"$`,
+  )
 
 afterEach(() => {
   config.channel = {}
@@ -112,7 +116,7 @@ test.each([
       bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), frame),
     )
     expect(answer.statusCode).toBe(400)
-    expect(answer.contentType).toMatch(refusal('frames', channel))
+    expect(answer.contentType).toMatch(refusal('frames', channel, END_CAUSE.frameOverLimit.code))
     await cancel(opened)
   },
 )
@@ -122,7 +126,7 @@ test('a body the server cannot frame is refused `frames`, naming no channel', as
   // A frame of no bytes: no tag, no header.
   const answer = await post(bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(0)))
   expect(answer.statusCode).toBe(400)
-  expect(answer.contentType).toMatch(refusal('frames'))
+  expect(answer.contentType).toMatch(refusal('frames', '', END_CAUSE.frameRefused.code))
   await cancel(opened)
 })
 
@@ -131,7 +135,7 @@ test("a channel's frame the server refuses is refused `frames`, naming the chann
   // A page sends no ERROR but a lost one.
   const answer = await post(encodeSseRequest({ connId }, [encode.error(0, ERROR_REASON.UNCONFIRMED, 1)]))
   expect(answer.statusCode).toBe(400)
-  expect(answer.contentType).toMatch(refusal('frames', '0'))
+  expect(answer.contentType).toMatch(refusal('frames', '0', END_CAUSE.frameRefused.code))
   await cancel(opened)
 })
 

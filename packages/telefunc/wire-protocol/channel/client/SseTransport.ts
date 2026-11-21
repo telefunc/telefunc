@@ -45,7 +45,7 @@ import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { asksLater, readAnswer, type HttpAnswer } from './readAnswer.js'
-import { FRAME_REFUSAL } from '../../refusal.js'
+import { END_CAUSE } from '../endCause.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -484,7 +484,7 @@ class SseTransport implements UpgradeSource {
         const raw = await reader.readNextEntry()
         if (!raw) break
         if (raw[0] === TAG.REJECTED) {
-          final = FRAME_REFUSAL.refused.reason
+          final = END_CAUSE.frameRefused.reason
           break
         }
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {

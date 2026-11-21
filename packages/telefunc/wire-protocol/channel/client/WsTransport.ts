@@ -26,7 +26,7 @@ import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { FRAME_REFUSAL } from '../../refusal.js'
+import { END_CAUSE } from '../endCause.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -233,7 +233,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       this.settleDrained()
       this.owner.onTransportClosed(this, {
         otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
-        final: code === WS_CLOSE_REJECTED ? FRAME_REFUSAL.refused.reason : undefined,
+        final: code === WS_CLOSE_REJECTED ? END_CAUSE.frameRefused.reason : undefined,
       })
     }
     ws.onerror = () => {}

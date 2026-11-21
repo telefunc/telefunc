@@ -49,14 +49,8 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import {
-  ChannelClosedError,
-  ChannelOverflowError,
-  framesRefusedError,
-  replayLossError,
-  unconfirmedError,
-} from '../channelErrors.js'
-import { FRAME_REFUSAL, type FrameRefusalCause } from '../../refusal.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { END_CAUSE, type FrameRefusalCause } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
@@ -79,7 +73,7 @@ import {
 import { ServerReplay } from './ServerReplay.js'
 import { LossyDelivery, type LossyHost } from './LossyDelivery.js'
 import { getChannelConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
-import { closeTimedOutError, type EndingFrame } from '../ChannelEnding.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
@@ -666,7 +660,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           frame.reason === ERROR_REASON.LOST || frame.reason === ERROR_REASON.CLOSE_TIMED_OUT,
           `ERROR reason ${frame.reason} from a page`,
         )
-        this.shutdown(frame.reason === ERROR_REASON.LOST ? replayLossError() : closeTimedOutError(), { pageGone: true })
+        const cause = frame.reason === ERROR_REASON.LOST ? END_CAUSE.lost : END_CAUSE.closeTimedOut
+        this.shutdown(cause.error(), { pageGone: true })
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
@@ -862,7 +857,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const stall = replay?.stall
     if (!replay || !stall || !replay.unconfirmed || performance.now() - stall.since <= reconnectTimeout) return false
     replay.dispose()
-    this.endWithError(ERROR_REASON.UNCONFIRMED, unconfirmedError(reconnectTimeout))
+    this.endWithError(ERROR_REASON.UNCONFIRMED, END_CAUSE.unconfirmed.error(reconnectTimeout))
     return true
   }
 
@@ -875,12 +870,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal The server can't take a frame of the channel's that its page sent: the channel ends, told to its page
    *  now or at its next attach, as the page's refusal tells it. */
   _onFrameRefused(cause: FrameRefusalCause): void {
-    const { error, reason } = FRAME_REFUSAL[cause]
-    this.endWithError(error, framesRefusedError(reason))
+    const { code, error } = END_CAUSE[cause]
+    this.endWithError(code, error())
   }
 
   /** @internal The page's wire ended for good, and the channel with it: with `ChannelPageLeftError` where the page left,
-   *  `framesRefusedError` where the server refused its wire. */
+   *  the `frameRefused` cause's error where the server refused its wire. */
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null

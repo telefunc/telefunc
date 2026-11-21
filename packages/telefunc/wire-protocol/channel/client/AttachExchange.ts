@@ -11,7 +11,7 @@ import { RECONCILE_TIMEOUT_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import { readU16 } from '../../wire/header.js'
 import { isSequencedTag } from '../../wire/tags.js'
-import { replayLossError } from '../channelErrors.js'
+import { END_CAUSE } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 
@@ -437,7 +437,7 @@ class AttachExchange {
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
     this.gate.dropQueue(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
-    channel._onEnded(replayLossError())
+    channel._onEnded(END_CAUSE.lost.error())
     return { kind: 'control', frame }
   }
 }

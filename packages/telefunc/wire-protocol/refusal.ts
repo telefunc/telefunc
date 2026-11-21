@@ -1,20 +1,13 @@
-export {
-  FRAME_REFUSAL,
-  REFUSAL_MEDIA_TYPE,
-  REQUEST_KIND_REFUSAL,
-  WIRE_VERSION_REFUSAL,
-  frameRefusal,
-  refusalContentType,
-}
-export type { FrameRefusalCause, Refusal, RefusalKind, RefusalContentType }
+export { REFUSAL_MEDIA_TYPE, REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, frameRefusal, refusalContentType }
+export type { Refusal, RefusalKind, RefusalContentType }
 
 import { STATUS_BODY_MALFORMED_REQUEST } from '../shared/constants.js'
-import { ERROR_REASON } from './wire/frame.js'
+import { END_CAUSE, type FrameRefusalCause } from './channel/endCause.js'
 
 /** The media type of Telefunc's own refusals of the page's SSE requests, so that the page tells them from an answer of
  *  anything in front of the server, at the headers, from any origin (`Content-Type` is a CORS-safelisted response
  *  header). Used unregistered until its owner registers it (RFC 6838 section 3.2, the vendor tree); a registration
- *  states UTF-8 text, the parameter `kind` and its four values, `channel` and `reason`. */
+ *  states UTF-8 text, the parameter `kind` and its four values, `channel`, `cause` and `reason`. */
 const REFUSAL_MEDIA_TYPE = 'text/vnd.telefunc.refusal'
 
 /** What the page does about a refusal:
@@ -24,8 +17,9 @@ const REFUSAL_MEDIA_TYPE = 'text/vnd.telefunc.refusal'
  *  - `reload`: the server runs another wire version. */
 type RefusalKind = 'retry' | 'frames' | 'route' | 'reload'
 
-/** `reason`: a sentence for the page's error, in printable ASCII. */
-type Refusal = { kind: RefusalKind; channel?: number; reason: string }
+/** `cause`: the code of the channel's end (`END_CAUSE`), where the refusal ends one. `reason`: a sentence for the
+ *  page's error, in printable ASCII. */
+type Refusal = { kind: RefusalKind; channel?: number; cause?: number; reason: string }
 
 type RefusalContentType = `${typeof REFUSAL_MEDIA_TYPE}; kind=${RefusalKind}${string}`
 
@@ -40,23 +34,17 @@ const WIRE_VERSION_REFUSAL = {
  *  with the body a telefunction call reads. */
 const REQUEST_KIND_REFUSAL = { kind: 'route', reason: STATUS_BODY_MALFORMED_REQUEST } as const satisfies Refusal
 
-/** Why the server can't take a frame of the page's: the sentence the page's error gives, and the ERROR that tells it on
- *  the wire where no refusal does. A channel learns its end with the same error however it reaches the page. */
-const FRAME_REFUSAL = {
-  overLimit: { error: ERROR_REASON.FRAME_OVER_LIMIT, reason: "A frame is over the server's frame limit." },
-  refused: { error: ERROR_REASON.FRAME_REFUSED, reason: "The server can't take a frame of the page's." },
-} as const
-
-type FrameRefusalCause = keyof typeof FRAME_REFUSAL
-
-/** The `frames` refusal of a frame refused for `cause`, naming `channel` where its header says one. */
+/** The `frames` refusal of a frame refused for `cause`, naming `channel` where its header says one. Its reason is the
+ *  cause's, and so is the error an `ERROR` of its code gives where no refusal tells the channel's end. */
 function frameRefusal(cause: FrameRefusalCause, channel: number | undefined): Refusal {
-  return { kind: 'frames', channel, reason: FRAME_REFUSAL[cause].reason }
+  const { code, reason } = END_CAUSE[cause]
+  return { kind: 'frames', channel, cause: code, reason }
 }
 
-/** `text/vnd.telefunc.refusal; kind=frames; channel=3; reason="…"`: the reason as a quoted string (RFC 9110 section
- *  5.6.4). */
-function refusalContentType({ kind, channel, reason }: Refusal): RefusalContentType {
+/** `text/vnd.telefunc.refusal; kind=frames; channel=3; cause=6; reason="…"`: the reason as a quoted string (RFC 9110
+ *  section 5.6.4). */
+function refusalContentType({ kind, channel, cause, reason }: Refusal): RefusalContentType {
   const named = channel === undefined ? '' : `; channel=${channel}`
-  return `${REFUSAL_MEDIA_TYPE}; kind=${kind}${named}; reason="${reason.replace(/["\\]/g, '\\$&')}"`
+  const caused = cause === undefined ? '' : `; cause=${cause}`
+  return `${REFUSAL_MEDIA_TYPE}; kind=${kind}${named}${caused}; reason="${reason.replace(/["\\]/g, '\\$&')}"`
 }

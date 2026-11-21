@@ -8,7 +8,7 @@ import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 import { ChannelClosedError } from '../channelErrors.js'
-import { closeTimedOutError } from '../ChannelEnding.js'
+import { END_CAUSE } from '../endCause.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 
@@ -114,7 +114,7 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
         })
         page._dispatchFrame(received(encode.close(0, 10, 1)))
         // The server decides: its deadline passes, and its ERROR ends the page's end.
-        setTimeout(() => page._onEnded(closeTimedOutError()), 10)
+        setTimeout(() => page._onEnded(END_CAUSE.closeTimedOut.error()), 10)
         const ended = await page.closed
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
         const opened = await stop.opened.then(

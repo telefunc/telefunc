@@ -20,9 +20,8 @@ import {
   ChannelCloseUnknownError,
   ChannelOverflowError,
   ChannelPageLeftError,
-  framesRefusedError,
 } from '../../wire-protocol/channel/channelErrors.js'
-import { FRAME_REFUSAL } from '../../wire-protocol/refusal.js'
+import { END_CAUSE } from '../../wire-protocol/channel/endCause.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
 import {
@@ -1049,7 +1048,7 @@ const ENDINGS: Ending[] = [
   },
   {
     ending: 'a frame the server refused',
-    end: ({ channel }) => channel._onPeerGone(framesRefusedError(FRAME_REFUSAL.refused.reason)),
+    end: ({ channel }) => channel._onPeerGone(END_CAUSE.frameRefused.error()),
     outcome: (outcome) => outcome instanceof ChannelClosedError,
     waiting: 'rejects',
   },

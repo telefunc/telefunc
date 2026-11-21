@@ -1,12 +1,4 @@
-export {
-  ChannelClosedError,
-  ChannelOverflowError,
-  ChannelCloseUnknownError,
-  ChannelPageLeftError,
-  framesRefusedError,
-  replayLossError,
-  unconfirmedError,
-}
+export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, ChannelPageLeftError, framesRefusedError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
 
@@ -51,25 +43,8 @@ class ChannelPageLeftError extends NetworkError {
   }
 }
 
-/** How a channel ends, on both ends, when the server can't take a frame the page sent: `reason` is the cause's sentence
- *  (`FRAME_REFUSAL`). Sending the same frame again fails again, so it is no `NetworkError`. */
+/** How a channel ends, on both ends, when the server can't take a frame the page sent: `reason` is the refusal's
+ *  sentence (`END_CAUSE`'s frame causes). Sending the same frame again fails again, so it is no `NetworkError`. */
 function framesRefusedError(reason: string): ChannelClosedError {
   return new ChannelClosedError(`Channel closed: the server refused what the page sent on it: ${reason}`)
-}
-
-/** How a channel ends, on both ends, when its page hasn't confirmed what the server sent on it for over
- *  `reconnectTimeoutMs` of reconnects. */
-function unconfirmedError(reconnectTimeoutMs: number): NetworkError {
-  return new NetworkError(
-    `Channel closed: the page hasn't confirmed what the server sent on it for over ${reconnectTimeoutMs / 1_000} s of reconnects`,
-    true,
-  )
-}
-
-/** How a channel ends when a reconnect needs what the page's replay buffer dropped. */
-function replayLossError(): NetworkError {
-  return new NetworkError(
-    "Channel closed: a reconnect needed messages the client's replay buffer had dropped to stay within its size. Await your sends.",
-    true,
-  )
 }

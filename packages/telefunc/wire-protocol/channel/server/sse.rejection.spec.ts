@@ -3,7 +3,8 @@ import { handleSseChannelRequest } from './sse.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
 import { WIRE_VERSION } from '../../constants.js'
-import { FRAME_REFUSAL, frameRefusal, refusalContentType } from '../../refusal.js'
+import { frameRefusal, refusalContentType } from '../../refusal.js'
+import { END_CAUSE } from '../endCause.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import { encode } from '../../wire/frame.js'
 import { SseEvents } from '../../wire/SseEvents.js'
@@ -28,7 +29,7 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
 
   const refused = await post(encodeSseRequest({ connId }, [unreadable]))
 
-  const refusal = frameRefusal('refused', undefined)
+  const refusal = frameRefusal('frameRefused', undefined)
   expect({ statusCode: refused.statusCode, contentType: refused.contentType, body: refused.body }).toEqual({
     statusCode: 400,
     contentType: refusalContentType(refusal),
@@ -44,6 +45,6 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
   expect(events.at(-1)).toEqual(encode.rejected())
   await expect(channel.closed).resolves.toHaveProperty(
     'message',
-    `Channel closed: the server refused what the page sent on it: ${FRAME_REFUSAL.refused.reason}`,
+    `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
   )
 })

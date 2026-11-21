@@ -5,7 +5,7 @@ import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
 import { WIRE_VERSION, WS_CLOSE_REJECTED, WIRE_REJECTED_REASON } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
-import { FRAME_REFUSAL } from '../../refusal.js'
+import { END_CAUSE } from '../endCause.js'
 
 test('a frame of no channel the server cannot read reaches the page as 4002 with its reason, and ends its channels with the reason', async () => {
   const telefunc = new Telefunc()
@@ -30,6 +30,6 @@ test('a frame of no channel the server cannot read reaches the page as 4002 with
   expect({ code, reason }).toEqual({ code: WS_CLOSE_REJECTED, reason: WIRE_REJECTED_REASON })
   await expect(channel.closed).resolves.toHaveProperty(
     'message',
-    `Channel closed: the server refused what the page sent on it: ${FRAME_REFUSAL.refused.reason}`,
+    `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
   )
 })

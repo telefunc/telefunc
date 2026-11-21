@@ -11,7 +11,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { encode } from '../../wire/frame.js'
-import { FRAME_REFUSAL } from '../../refusal.js'
+import { END_CAUSE } from '../endCause.js'
 import { ClientConnection } from './ClientConnection.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
@@ -200,7 +200,7 @@ describe('a wire the server refused for a frame it could not read', () => {
     expect(ended[0]).toBeInstanceOf(ChannelClosedError)
     expect(ended[0]).toHaveProperty(
       'message',
-      `Channel closed: the server refused what the page sent on it: ${FRAME_REFUSAL.refused.reason}`,
+      `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
     )
     expect(downstreams).toHaveLength(1)
   })

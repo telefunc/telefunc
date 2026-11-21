@@ -33,8 +33,9 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
-import { FRAME_REFUSAL, frameRefusal, type FrameRefusalCause, type Refusal } from '../../refusal.js'
-import { ChannelPageLeftError, framesRefusedError } from '../channelErrors.js'
+import { frameRefusal, type Refusal } from '../../refusal.js'
+import { ChannelPageLeftError } from '../channelErrors.js'
+import { END_CAUSE, type FrameRefusalCause } from '../endCause.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   BarrierPayload,
@@ -475,7 +476,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
-      if (isProtocolViolationError(err)) this.refuseFrame(err.target ?? entry.wire, 'refused', channelOf(rawFrame))
+      if (isProtocolViolationError(err)) this.refuseFrame(err.target ?? entry.wire, 'frameRefused', channelOf(rawFrame))
       else handleTelefunctionBug(err)
       return null
     } finally {
@@ -911,7 +912,7 @@ class ChannelMux implements UpgradeStagesOwner {
         h.channel._onPeerGone(new ChannelPageLeftError())
         return
       case 'rejected':
-        h.channel._onPeerGone(framesRefusedError(FRAME_REFUSAL.refused.reason))
+        h.channel._onPeerGone(END_CAUSE.frameRefused.error())
         return
       case 'transient':
         h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)

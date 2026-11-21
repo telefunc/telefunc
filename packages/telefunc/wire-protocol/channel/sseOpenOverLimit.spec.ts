@@ -88,7 +88,7 @@ test("an abort before the first open, its reason over the server's frame limit, 
   expect(ended(refusal)).toEqual({
     name: 'ChannelOverflowError',
     message:
-      'abort(): the value is more than the server accepts in one frame (1048576 bytes), so the channel ended without it',
+      'abort(): the value is 2097161 bytes, more than the server accepts in one frame (1048576 bytes), so the channel ended without it',
     abortValue: 'none',
   })
   void otherPage.send('alongside').catch(() => {})

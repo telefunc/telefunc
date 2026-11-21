@@ -4,13 +4,11 @@ export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError, framesRefusedError, unconfirmedError } from '../channelErrors.js'
-import { closeTimedOutError } from '../ChannelEnding.js'
-import { FRAME_REFUSAL } from '../../refusal.js'
+import { framesRefusedError } from '../channelErrors.js'
+import { endCauseOf } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -21,7 +19,7 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
-import { ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
+import { isSequencedFrame } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
@@ -877,20 +875,5 @@ const TRANSPORT_REGISTRY: Record<
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
 function channelErrorFor(reason: number, reconnectTimeoutMs: number): Error {
-  if (reason === ERROR_REASON.OVERFLOW) {
-    return new ChannelOverflowError(
-      `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
-    )
-  }
-  if (reason === ERROR_REASON.CLOSE_TIMED_OUT) return closeTimedOutError()
-  if (reason === ERROR_REASON.NOT_IN_EFFECT) {
-    return new ChannelClosedError(
-      'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',
-    )
-  }
-  if (reason === ERROR_REASON.UNCONFIRMED) return unconfirmedError(reconnectTimeoutMs)
-  for (const { error, reason: sentence } of Object.values(FRAME_REFUSAL)) {
-    if (reason === error) return framesRefusedError(sentence)
-  }
-  return makeBugError()
+  return endCauseOf(reason)?.error(reconnectTimeoutMs) ?? makeBugError()
 }

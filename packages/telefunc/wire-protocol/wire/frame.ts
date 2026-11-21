@@ -53,6 +53,7 @@ import {
 } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
+import { END_CAUSE } from '../channel/endCause.js'
 
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
@@ -84,24 +85,15 @@ const ACK_STATUS = {
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
-/** Why the server closed a channel with `ERROR`. */
+/** Why a channel ended, as `ERROR` carries it: each cause's code (`END_CAUSE`, which says what each means). */
 const ERROR_REASON = {
-  /** Its page fell behind what the server holds for it, sent more than the server holds while its listeners work on it,
-   *  or the server can't hold even a refusal of its ack requests. */
-  OVERFLOW: 0x01 as const,
-  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
-  LOST: 0x02 as const,
-  /** A graceful close's deadline passed before both ends were done: from the end that decides the close. */
-  CLOSE_TIMED_OUT: 0x04 as const,
-  /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
-   *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
-  NOT_IN_EFFECT: 0x03 as const,
-  /** Its page sent a frame of it over the server's frame limit (`FRAME_REFUSAL.overLimit`). */
-  FRAME_OVER_LIMIT: 0x05 as const,
-  /** Its page sent a frame of it the protocol doesn't allow (`FRAME_REFUSAL.refused`). */
-  FRAME_REFUSED: 0x06 as const,
-  /** Its page hasn't confirmed what the server sent on it for over `reconnectTimeout` of reconnects. */
-  UNCONFIRMED: 0x07 as const,
+  OVERFLOW: END_CAUSE.overflow.code,
+  LOST: END_CAUSE.lost.code,
+  NOT_IN_EFFECT: END_CAUSE.notInEffect.code,
+  CLOSE_TIMED_OUT: END_CAUSE.closeTimedOut.code,
+  FRAME_OVER_LIMIT: END_CAUSE.frameOverLimit.code,
+  FRAME_REFUSED: END_CAUSE.frameRefused.code,
+  UNCONFIRMED: END_CAUSE.unconfirmed.code,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
