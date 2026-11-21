@@ -153,8 +153,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.connecting = socket
     this.pieces = socket.pieces
     ws.onopen = () => this.adopt(socket)
-    ws.onclose = () => this.connectFailed(socket)
-    ws.onerror = () => {}
+    // Its first `error` or `close`: Node 22's undici 6 fires no `close` before the upgrade (nodejs/undici#3506).
+    ws.onclose = ws.onerror = () => this.connectFailed(socket)
     this.raceTimer = setTimeout(() => this.connect(Math.min(TIMER_DELAY_MAX_MS, raceAfterMs * 2)), raceAfterMs)
   }
 
@@ -168,8 +168,9 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.owner.onTransportOpen(this, socket.startedAt)
   }
 
-  /** A socket that closed before it opened; the attempt fails with the last. */
+  /** A socket that failed before it opened, once; the attempt fails with the last. */
   private connectFailed(socket: Connecting): void {
+    socket.ws.onclose = socket.ws.onerror = null
     socket.pieces.headroom.close()
     if (socket === this.racing) this.racing = null
     else {

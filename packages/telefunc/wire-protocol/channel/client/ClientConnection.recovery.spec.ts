@@ -13,13 +13,17 @@ const RECONNECT_TIMEOUT_MS = 20_000
 const RECOVERY_WINDOW_MS = 2 * PING_INTERVAL_MS + RECONNECT_TIMEOUT_MS
 
 /** What a socket the page makes does: reconciles `afterMs` after it opens; opens `afterMs` after it was made, then
- *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); closes at once as a refused
- *  connect; never opens nor closes, as Node 22's after a reset at accept; or can't be made: its constructor throws. */
+ *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); fails at once as a refused
+ *  connect, `error` then `close` in one task; fails with `error` alone, as Node 22's after a reset at accept; never opens
+ *  nor fails, as one whose upgrade gets no answer (`hangs22`: and fires `error` twice, never `close`, once the page
+ *  closes it, as Node 22's); or can't be made: its constructor throws. */
 type Script =
   | { reconcile: { afterMs: number } }
   | { opens: { afterMs: number; despiteClose?: boolean } }
   | 'refused'
+  | 'errors'
   | 'hangs'
+  | 'hangs22'
   | 'throws'
 
 /** A WebSocket that plays the next script: the page's sockets, when it made each, and whether it closed them. */
@@ -41,6 +45,7 @@ class ScriptedWebSocket {
   /** The most of the page's sockets connecting at once, none open yet. */
   static mostConnecting = 0
   private readonly despiteClose: boolean
+  private readonly errorsOnClose: boolean
 
   constructor() {
     if (ScriptedWebSocket.scripts[0] === 'throws') {
@@ -52,9 +57,18 @@ class ScriptedWebSocket {
     ScriptedWebSocket.mostConnecting = Math.max(ScriptedWebSocket.mostConnecting, connecting)
     const script = ScriptedWebSocket.scripts.shift() ?? 'refused'
     this.despiteClose = typeof script === 'object' && 'opens' in script && script.opens.despiteClose === true
-    if (script === 'hangs' || script === 'throws') return
+    this.errorsOnClose = script === 'hangs22'
+    if (script === 'hangs' || script === 'hangs22' || script === 'throws') return
     if (script === 'refused') {
-      queueMicrotask(() => this.drop())
+      queueMicrotask(() => {
+        this.readyState = 3
+        this.onerror?.()
+        this.onclose?.({ code: 1006 })
+      })
+      return
+    }
+    if (script === 'errors') {
+      queueMicrotask(() => this.onerror?.())
       return
     }
     if ('opens' in script) {
@@ -77,6 +91,14 @@ class ScriptedWebSocket {
   }
   close(): void {
     this.closedByPage = true
+    if (this.readyState === 0 && this.errorsOnClose) {
+      this.readyState = 2
+      queueMicrotask(() => {
+        this.onerror?.()
+        this.onerror?.()
+      })
+      return
+    }
     if (this.readyState === 0 && this.despiteClose) return
     this.readyState = 3
   }
@@ -364,6 +386,36 @@ describe("a page's recovery", () => {
     expect(madeSince(lostAt)).toEqual([450, 1450, 2400])
     expect(ScriptedWebSocket.made[3]?.sent).toBeGreaterThan(0)
     expect(closed).toHaveBeenCalledTimes(2)
+  })
+
+  test("takes a socket's `error` with no `close` as its failure, as Node 22's after a reset, and backs off from it", async () => {
+    const { lostAt, ended } = await lostWire({ then: ['errors', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(5_000)
+    // 0.9 of 500, then 0.9 of the second delay, 1,000, from that socket's failure.
+    expect(madeSince(lostAt)).toEqual([450, 1350])
+    expect(ScriptedWebSocket.made.at(-1)?.sent).toBeGreaterThan(0)
+    expect(ended).toEqual([])
+  })
+
+  test("counts a socket's `error` and `close` in one task as one failure", async () => {
+    const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    const { lostAt } = await lostWire({ then: ['refused', 'refused', { reconcile: { afterMs: 0 } }] })
+    await vi.advanceTimersByTimeAsync(5_000)
+    // 0.9 of 500, of 1,000 and of 2,000, each from the last failure.
+    expect(madeSince(lostAt)).toEqual([450, 1350, 3150])
+    // The wire's drop, then each refused socket once.
+    expect(closed).toHaveBeenCalledTimes(3)
+  })
+
+  test('takes nothing from the `error`s of a socket it let go, as Node 22 fires once the page closed it', async () => {
+    const closed = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    const { lostAt, ended } = await lostWire({ then: Array<Script>(8).fill('hangs22') })
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS - 1)
+    // The schedule of an attempt whose sockets never answer: the ones let go at 3,450 and on say nothing of it.
+    expect(madeSince(lostAt)).toEqual([450, 1450, 3450, 7450, 15450])
+    expect(ScriptedWebSocket.mostConnecting).toBe(2)
+    expect(closed).toHaveBeenCalledTimes(1)
+    expect(ended).toEqual([])
   })
 
   test('ends the attempt with a socket it could not make, the one still connecting too, and backs off from it', async () => {

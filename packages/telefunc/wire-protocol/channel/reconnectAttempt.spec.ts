@@ -9,6 +9,7 @@ import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { WireLifecycle } from './client/WireLifecycle.js'
 import { ChannelMux, getChannelMux } from './server/ChannelMux.js'
 import { encode } from '../wire/frame.js'
 
@@ -97,8 +98,9 @@ async function pair(transport: 'sse' | 'ws') {
 
 for (const transport of ['sse', 'ws'] as const)
   for (const attempt of ['destroy', 'hold'] as const) {
-    // An SSE open that is held is dropped by its RECONCILE's deadline, 10 s on: not this spec's.
-    if (transport === 'sse' && attempt === 'hold') continue
+    // An SSE open that is held is dropped by its RECONCILE's deadline, 10 s on: not this spec's. A WebSocket reset at
+    // accept: the row after this loop.
+    if (transport === 'sse' ? attempt === 'hold' : attempt === 'destroy') continue
     test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page whose next connection after a drop the network ${attempt === 'destroy' ? 'resets as it accepts it' : 'takes and never answers'} sends on another`, async () => {
       const { network, page, received } = await pair(transport)
       try {
@@ -111,6 +113,26 @@ for (const transport of ['sse', 'ws'] as const)
       }
     })
   }
+
+// Node 22's WebSocket fires only `error` for a connection reset at accept, Node 26's `error` then `close`.
+test('over a WebSocket, a page whose next socket after a drop the network resets as it accepts it takes that as a loss, and sends on another', async () => {
+  const opened = vi.spyOn(WireLifecycle.prototype, 'onTransportOpen')
+  const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+  const { network, page, received } = await pair('ws')
+  // The page's own connection: an earlier row's, closed, may still report its sockets' ends.
+  const connection = opened.mock.contexts.at(-1)
+  try {
+    network.drop('destroy')
+    void page.send('after')
+    expect(await received).toBe('after')
+    // The wire's drop, then the socket the network reset: each once.
+    expect(lost.mock.contexts.filter((context) => context === connection)).toHaveLength(2)
+    page.abort()
+  } finally {
+    for (const spy of [opened, lost]) spy.mockRestore()
+    network.close()
+  }
+})
 
 test('over a WebSocket, a page whose next socket after a drop the server answers late sends on the one it raced; the late one sends nothing, and the server lets it go and logs nothing', async () => {
   const { network, page, received } = await pair('ws')
