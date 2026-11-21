@@ -410,13 +410,17 @@ describe("a page's recovery", () => {
   })
 
   test('takes nothing from an attempt it gave up on at the deadline: its socket opening and reconciling late ends nothing twice', async () => {
-    // The socket at 450 ms opens past the deadline, after the page closed it, as a runtime may.
-    const { ended } = await lostWire({
-      then: [{ opens: { afterMs: RECOVERY_WINDOW_MS, despiteClose: true } }],
+    // Eight refused attempts, then one at 29.25 s, the only socket connecting when the deadline comes at 30 s: it opens
+    // 2 s after it was made, after the page closed it, as a runtime may.
+    const { lostAt, ended } = await lostWire({
+      then: [...Array<Script>(8).fill('refused'), { opens: { afterMs: 2_000, despiteClose: true } }],
     })
-    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 1_000)
+    await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + 3_000)
+    const late = ScriptedWebSocket.made.at(-1)
+    expect(madeSince(lostAt)).toHaveLength(9)
+    expect(madeSince(lostAt).at(-1)).toBe(29_250)
     expect(ended).toHaveLength(1)
-    expect([ScriptedWebSocket.made[1]?.closedByPage, ScriptedWebSocket.made[1]?.sent]).toEqual([true, 0])
+    expect([late?.readyState, late?.closedByPage, late?.sent]).toEqual([3, true, 0])
   })
 
   test('ends a channel registered during the recovery, which the server never attached, with "Connection not established", and the attached one with "Connection dropped"', async () => {
