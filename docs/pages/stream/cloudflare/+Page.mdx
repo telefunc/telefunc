@@ -150,7 +150,7 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 `publish()` works anywhere in your Worker, including cron triggers and queue consumers. A server-side `subscribe()` runs on the Durable Object of the client whose request installed it, so subscribe inside a telefunction or a channel handler. The subscription lives in that Durable Object's memory and ends when Cloudflare evicts the object, so it serves a client that stays connected.
 
-> While a subscription exists, its Durable Object can stay in memory, and be billed, after the client has left. Remove the subscription when the client leaves.
+> Remove a server-side subscription when the client leaves: while it exists, its callback runs for each message published to its key.
 
 ### How it works
 
@@ -233,7 +233,7 @@ See also: <Link href="/Telefunc" />.
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-The Durable Object can hibernate once all channels are closed, no clients remain connected and no server-side subscription is left. A client that disconnected keeps its channels open for `reconnectTimeout`, so lower it to hibernate sooner.
+The Durable Object can hibernate once all channels are closed and no clients remain connected. A client that disconnected keeps its channels open for `reconnectTimeout`, so lower it to hibernate sooner.
 
 ```ts
 import { config } from 'telefunc'
