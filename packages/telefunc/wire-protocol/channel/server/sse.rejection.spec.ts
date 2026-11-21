@@ -3,7 +3,6 @@ import { handleSseChannelRequest } from './sse.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel } from './ServerChannel.js'
 import { WIRE_VERSION } from '../../constants.js'
-import { frameRefusal, refusalContentType } from '../../refusal.js'
 import { END_CAUSE } from '../endCause.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import { decode, encode } from '../../wire/frame.js'
@@ -17,7 +16,7 @@ const post = (body: BodyInit) =>
 /** A wire-level frame of a tag no version has: it names no channel. */
 const unreadable = new Uint8Array([0x0f, 0, 0])
 
-test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, and ends its channels with the connection's sentence, told by the event stream's last event: the same refusal", async () => {
+test("a frame of no channel the server cannot read is answered `retry`, and ends its channels with the connection's sentence, told by the event stream's last event", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
   getChannelMux().registerChannel(channel)
   const connId = crypto.randomUUID()
@@ -34,11 +33,9 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
 
   const refused = await post(encodeSseRequest({ connId }, [unreadable]))
 
-  const refusal = frameRefusal('unreadable', undefined)
-  expect({ statusCode: refused.statusCode, contentType: refused.contentType, body: refused.body }).toEqual({
+  expect({ statusCode: refused.statusCode, contentType: refused.contentType }).toEqual({
     statusCode: 400,
-    contentType: refusalContentType(refusal),
-    body: refusal.reason,
+    contentType: expect.stringMatching(/^text\/vnd\.telefunc\.refusal; kind=retry; reason="[^"]+"$/),
   })
   const events: Uint8Array<ArrayBuffer>[] = []
   const decoder = new SseEvents()

@@ -130,14 +130,14 @@ async function answerAgain(): Promise<[number, string | null]> {
   return [answer.status, answer.headers.get('content-type')]
 }
 
-const framesNamingNoChannel = (cause: number) =>
-  expect.stringMatching(new RegExp(`^text/vnd\\.telefunc\\.refusal; kind=frames; cause=${cause}; reason="[^"]+"$`))
+/** A request that meets a wire the server ended is answered `retry`: the end rides the wire's own end. */
+const retryAnswer = expect.stringMatching(/^text\/vnd\.telefunc\.refusal; kind=retry; reason="[^"]+"$/)
 
 test.each([
   ['an over-limit frame', overLimit(999)],
   ['a frame only a server sends', serverOnly(999)],
 ])(
-  'a batch POST carrying %s of an index the session holds in no form ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is refused `frames` naming no channel',
+  'a batch POST carrying %s of an index the session holds in no form ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is answered `retry`',
   async (_bad, bad) => {
     world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', bad) }]
     const [first, second] = opening(crypto.randomUUID())
@@ -146,7 +146,7 @@ test.each([
     sends(first.page, 'a1')
     await until(() => ends.every((each) => each.length > 0))
     expect(ends).toEqual([[['ChannelClosedError', told.unreadable]], [['ChannelClosedError', told.unreadable]]])
-    expect(await answerAgain()).toEqual([400, framesNamingNoChannel(8)])
+    expect(await answerAgain()).toEqual([400, retryAnswer])
   },
 )
 
@@ -205,7 +205,7 @@ test('a held frame the server refuses as its channel registers ends that channel
   await until(() => other.got.includes('a1'))
 })
 
-test("a body whose frames the server can't read ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is refused `frames` naming no channel", async () => {
+test("a body whose frames the server can't read ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is answered `retry`", async () => {
   world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', severalFrames) }]
   const [first, second] = opening(crypto.randomUUID())
   await Promise.all([first.page.opened, second.page.opened])
@@ -213,27 +213,24 @@ test("a body whose frames the server can't read ends the session: every channel 
   sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
   expect(ends).toEqual([[['ChannelClosedError', told.unreadable]], [['ChannelClosedError', told.unreadable]]])
-  expect(await answerAgain()).toEqual([400, framesNamingNoChannel(8)])
+  expect(await answerAgain()).toEqual([400, retryAnswer])
 })
 
-test("a request that meets the wire a channel's over-limit frame closed is refused as that frame was: `frames` naming its channel", async () => {
+test("a request that meets the wire a channel's over-limit frame closed is answered `retry`", async () => {
   world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', overLimit('own')) }]
   const refusedPair = pair(crypto.randomUUID())
   await refusedPair.page.opened
   sends(refusedPair.page, 'a1')
   await until(() => refusedPair.ended.length > 0)
-  expect(await answerAgain()).toEqual([
-    400,
-    expect.stringMatching(/^text\/vnd\.telefunc\.refusal; kind=frames; channel=\d+; cause=5; reason="[^"]+"$/),
-  ])
+  expect(await answerAgain()).toEqual([400, retryAnswer])
 })
 
 /** How a channel that sent nothing wrong ends on the page as the server ends its session. */
 const sessionEndOnPage = [['ChannelClosedError', told.unreadable]]
 
 /** The event stream without the channels' ERROR frames and its END, held open past the server's end of it: the page
- *  learns of the session's end from the answer to its request alone. `withheld`: the tags of the frames it kept from the
- *  page. */
+ *  learns of the session's end only at its reopen, which meets the end the server kept. `withheld`: the tags of the
+ *  frames it kept from the page. */
 function answerDecides() {
   const withheld: number[] = []
   const stream = (body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
@@ -271,7 +268,7 @@ const endingAfter = (text: string, bad: Bad) => (body: ReadableStream<Uint8Array
     }),
   )
 
-test("a batch POST of two channels' data the server refuses `frames` naming no channel ends both on the page with the server's sentence of the connection", async () => {
+test("a batch POST of two channels' data the server can't read, the event stream's last event withheld, ends both on the page with the server's sentence of the connection: the POST answered `retry`, one reopen reads the cause", async () => {
   const carried: string[] = []
   const decides = answerDecides()
   world.hooks = [
@@ -291,16 +288,16 @@ test("a batch POST of two channels' data the server refuses `frames` naming no c
   sends(first.page, 'a1')
   sends(second.page, 'b1')
   await until(() => ends.every((each) => each.length > 0))
-  // From that answer alone: the stream's END was kept from the page, and no other wire opened to read the kept end.
+  // The stream's END was kept from the page: one reopen read the end the server kept.
   expect([carried, ends, decides.withheld.includes(TAG.END), opens()]).toEqual([
     ['a1', 'b1'],
     [sessionEndOnPage, sessionEndOnPage],
     true,
-    1,
+    2,
   ])
 })
 
-test("the streaming upload the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
+test("the streaming upload the server can't read, the event stream's last event withheld, ends every channel on the page with the server's sentence of the connection: one reopen reads the cause", async () => {
   world.uploads = true
   const decides = answerDecides()
   world.hooks = [
@@ -313,8 +310,8 @@ test("the streaming upload the server refuses `frames` naming no channel ends ev
   const ends = [first, second].map(({ page }) => endsOf(page))
   sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
-  // From that answer alone: the stream's END was kept from the page, and no other wire opened to read the kept end.
-  expect([ends, decides.withheld.includes(TAG.END), opens()]).toEqual([[sessionEndOnPage, sessionEndOnPage], true, 1])
+  // The stream's END was kept from the page: one reopen read the end the server kept.
+  expect([ends, decides.withheld.includes(TAG.END), opens()]).toEqual([[sessionEndOnPage, sessionEndOnPage], true, 2])
 })
 
 /** The page's first WebSocket, whose close the page reads `ms` after it came. */
@@ -340,13 +337,13 @@ function closingFirstSocketLate(ms: number) {
 }
 
 // The staged WebSocket holds no session, so the server's end closes it as a loss, which races the barrier POST's answer
-// to the page. Each order is made here, and each takes only the requests its carrier needs, beside the page's PINGs,
-// its heartbeat, which go in either.
+// to the page. Each order is made here, and in each the page reopens once and reads the end the server kept, beside
+// the page's PINGs, its heartbeat, which go in either.
 test.each([
-  ["the POST's answer reaches the page first", 'answer', ['post']],
+  ["the POST's answer, `retry`, reaches the page first", 'answer', ['post', 'open']],
   ["the WebSocket's loss reaches the page first, and the POST's answer never", 'loss', ['post', 'open']],
 ])(
-  "the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection: %s",
+  "the barrier POST of a move to a WebSocket whose bytes the server can't read ends every channel on the page with the server's sentence of the connection: %s",
   async (_order, first, requests) => {
     let requestsBefore = -1
     // Each batch POST after the barrier's that carries PINGs and nothing else, by where it went among the requests: a

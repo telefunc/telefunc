@@ -211,6 +211,11 @@ class ChannelMux implements UpgradeStagesOwner {
     return this.options.connectTtl
   }
 
+  /** Exposed for SSE's read-off of a closed wire's bodies, bounded by the wire's ping deadline. */
+  get pingInterval(): number {
+    return this.options.pingInterval
+  }
+
   // ── ServerChannel registry ──────────────────────────────────────────
 
   /** Callers must not invoke `channel._registerChannel()` directly. */

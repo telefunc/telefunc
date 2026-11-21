@@ -12,7 +12,8 @@ const REFUSAL_MEDIA_TYPE = 'text/vnd.telefunc.refusal'
 
 /** What the page does about a refusal:
  *  - `retry`: the server no longer has the request's wire, a loss; the frames go again on the next wire.
- *  - `frames`: the server can't take a frame; the channel whose frame it is ends, `channel` where the server knows it.
+ *  - `frames`: the server ended a channel, named by `channel`, or the page's session, named by none. Only a wire's own
+ *    end carries it (`wireEnd`), never a request's answer.
  *  - `route`: the server doesn't serve the page's SSE requests so; the page leaves SSE for this connection.
  *  - `reload`: the server runs another wire version. */
 type RefusalKind = 'retry' | 'frames' | 'route' | 'reload'
@@ -41,8 +42,8 @@ function frameRefusal(cause: RefusalCause, channel: number | undefined): Refusal
   return { kind: 'frames', channel, cause: code, reason }
 }
 
-/** `text/vnd.telefunc.refusal; kind=frames; channel=3; cause=6; reason="…"`: the end the wire carries, then the
- *  reason as a quoted string (RFC 9110 section 5.6.4). */
+/** `text/vnd.telefunc.refusal; kind=retry; reason="…"`: a request's answer, its kind, then the reason as a quoted
+ *  string (RFC 9110 section 5.6.4). */
 function refusalContentType(refusal: Refusal): RefusalContentType {
   return `${wireEnd(refusal)}; reason="${refusal.reason.replace(/["\\]/g, '\\$&')}"`
 }
@@ -51,7 +52,7 @@ function refusalContentType(refusal: Refusal): RefusalContentType {
  *  decided rides its wire's own end, a WebSocket's close reason and the event stream's last event, which the page reads
  *  as it reads an answer's `Content-Type`. Within the 123 bytes a close reason holds: a channel is a u16 index and a
  *  cause a small code. */
-function wireEnd({ kind, channel, cause }: Refusal): RefusalContentType {
+function wireEnd({ kind, channel, cause }: Pick<Refusal, 'kind' | 'channel' | 'cause'>): RefusalContentType {
   const named = channel === undefined ? '' : `; channel=${channel}`
   const caused = cause === undefined ? '' : `; cause=${cause}`
   return `${REFUSAL_MEDIA_TYPE}; kind=${kind}${named}${caused}`

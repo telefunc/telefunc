@@ -1,10 +1,10 @@
-// What the page does with Telefunc's own refusals of its SSE requests, which say so in their media type with a kind
-// (decisions/516-sse-carrier.md, step 6 at 13:08Z and 13:14Z): a REAL ClientChannel and its connection against a
-// scripted server (scriptedServer.fixture.ts). The verdict is taken at the headers; no refusal's body is read.
+// What the page does with Telefunc's own refusals of its SSE requests, which say so in their media type with a kind:
+// a REAL ClientChannel and its connection against a scripted server (scriptedServer.fixture.ts). The verdict is taken
+// at the headers; no refusal's body is read. No answer carries an end the server decided: a `frames` answer is a kind
+// the page doesn't read.
 
 import { expect, test } from 'vitest'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
-import { END_CAUSE } from '../endCause.js'
 import { FakeWebSocket, advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
 
 useScriptedServer()
@@ -76,49 +76,24 @@ test('a marked refusal followed by an unmarked value is read as unmarked: refuse
   expect(page.ended[0]?.err?.message).toMatch(/refused with 400 .*, text\/html, again after a reconnect/)
 })
 
-test("a `frames` refusal naming a channel ends that channel at the first answer with its cause's error; the other goes on", async () => {
-  const opened = await open(2)
-  const [refused, other] = [opened(0), opened(1)]
-  world.postAnswers = [typed(400, marked('kind=frames; channel=0; cause=6; reason="A frame the server cannot take."'))]
-  void refused.channel.send('unreadable').catch(() => {})
-  await advance(3_000)
-  expect(refused.ended).toHaveLength(1)
-  expect(refused.ended.map(({ err }) => err?.message)).toEqual([END_CAUSE.frameRefused.error().message])
-  void other.channel.send('goes on')
-  await advance(3_000)
-  expect(other.ended).toEqual([])
-  expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(1)
-  expect(world.server.got.filter(({ ix }) => ix === 0)).toEqual([])
-})
-
-test("a `frames` refusal naming one of a POST's channels, as of a frame over the limit, ends that one and no other: the other's data arrives", async () => {
-  const opened = await open(2)
-  const [other, refused] = [opened(0), opened(1)]
-  world.postAnswers = [
-    typed(400, marked('kind=frames; channel=1; cause=5; reason="A frame is over the server\'s frame limit."')),
-  ]
-  void other.channel.send('goes on').catch(() => {})
-  void refused.channel.send('x'.repeat(100_000)).catch(() => {})
-  await advance(5_000)
-  expect(refused.ended).toHaveLength(1)
-  expect(refused.ended[0]?.err?.message).toMatch(/over the server's frame limit/)
-  expect(other.ended).toEqual([])
-  expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(1)
-  expect(world.server.got.filter(({ ix }) => ix === 1)).toEqual([])
-})
-
-test("a `frames` refusal naming no channel ends every channel of the page's session at the first answer with its cause's error", async () => {
-  const opened = await open(2)
-  const pages = [opened(0), opened(1)]
-  world.postAnswers = [
-    typed(400, marked('kind=frames; cause=8; reason="The server can\'t read the request\'s frames."')),
-  ]
-  for (const page of pages) void page.channel.send('unframed').catch(() => {})
-  await advance(3_000)
-  for (const page of pages) {
-    expect(page.ended.map(({ err }) => err?.message)).toEqual([END_CAUSE.unreadable.error().message])
-  }
-})
+test.each([
+  ['naming a channel', marked('kind=frames; channel=0; cause=6; reason="A frame the server cannot take."')],
+  ['naming no channel', marked('kind=frames; cause=8; reason="The server can\'t read the request\'s frames."')],
+])(
+  "an answer of the kind `frames` %s, which only a wire's own end carries, ends no channel with its cause: the page reads a kind it does not know, and leaves SSE",
+  async (_how, contentType) => {
+    const opened = await open(2)
+    const pages = [opened(0), opened(1)]
+    world.postAnswers = [typed(400, contentType)]
+    void pages[0]?.channel.send('refused').catch(() => {})
+    await advance(3_000)
+    for (const page of pages) {
+      expect(page.ended.map(({ err }) => err?.message)).toEqual([
+        expect.stringMatching(/in words this page can't read/),
+      ])
+    }
+  },
+)
 
 test('a `route` refusal of the open, with WebSocket next in the order, opens a WebSocket at once', async () => {
   serveSse()
@@ -146,28 +121,6 @@ test.each([
     expect(world.opens).toBe(1)
   },
 )
-
-test("a `frames` refusal of a frame over the server's limit ends its channel once, and leaves the size of later POSTs where it was", async () => {
-  const opened = await open(2)
-  const [refused, other] = [opened(0), opened(1)]
-  world.postAnswers = [
-    typed(400, marked('kind=frames; channel=0; cause=5; reason="A frame is over the server\'s frame limit."')),
-  ]
-  void refused.channel.send('x'.repeat(100_000)).catch(() => {})
-  await advance(3_000)
-  expect(refused.ended).toHaveLength(1)
-  const refusedPost = defined(
-    world.posts.find(({ status }) => status === 400),
-    'the refused POST',
-  )
-  // Many texts at once: their POSTs are as large as the page's own sizing makes them, not halved below the refused one.
-  for (let i = 0; i < 400; i++) void other.channel.send('y'.repeat(900)).catch(() => {})
-  await advance(5_000)
-  const after = world.posts.slice(world.posts.indexOf(refusedPost) + 1).filter(({ data }) => data)
-  expect(Math.max(...after.map(({ bytes }) => bytes))).toBeGreaterThan(refusedPost.bytes / 2)
-  expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(400)
-  expect(refused.ended[0]?.err?.message).toMatch(/over the server's frame limit/)
-})
 
 /** Opens `count` channels over SSE with the streaming upload taken, and waits till their wire carries them. */
 async function openWithUpload(count: number) {
@@ -199,12 +152,12 @@ test.each([
   [
     '`frames`, naming the channel',
     marked('kind=frames; channel=0; cause=6; reason="Unreadable."'),
-    /The server can't take a frame of the page's\./,
+    /in words this page can't read/,
   ],
   [
     '`frames`, naming no channel',
     marked('kind=frames; cause=8; reason="Unreadable."'),
-    /The server can't read what the page sent on its connection\./,
+    /in words this page can't read/,
   ],
 ])('a %s answer to the streaming upload ends as on the batch path', async (_kind, contentType, told) => {
   const page = (await openWithUpload(1))(0)

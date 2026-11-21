@@ -1,5 +1,5 @@
-// The end a wire carries, where the server decided it: the refusal a request's answer carries, as a WebSocket's close
-// reason and the event stream's last event carry it, and as the page reads it there.
+// The end a wire carries, where the server decided it, as a WebSocket's close reason and the event stream's last event
+// carry it, and as the page reads it there; a request's answer carries none.
 
 import { expect, test } from 'vitest'
 import { END_CAUSE, type RefusalCause } from './channel/endCause.js'
@@ -67,29 +67,12 @@ test.each(unwritten)("a last word the server's writer never writes (`%s`) is no 
 const answerOf = (contentType: string) =>
   readAnswer(new Response('refused', { status: 400, headers: { 'Content-Type': contentType } }), 'ok')
 
-test.each(unwritten.map((suffix) => `${media}; kind=frames; ${suffix}; reason="${END_CAUSE.frameRefused.reason}"`))(
-  "an answer's `frames` refusal the server's writer never writes (`%s`) ends no channel: the page reads it as a refusal it doesn't know",
+test.each([
+  ...rows.map(([cause, channel]) => refusalContentType(frameRefusal(cause, channel))),
+  ...unwritten.map((suffix) => `${media}; kind=frames; ${suffix}; reason="${END_CAUSE.frameRefused.reason}"`),
+])(
+  "an answer of the kind `frames` (`%s`) ends no channel: only a wire's own end carries an end, and the page reads the answer as a refusal it doesn't know",
   (contentType) => {
     expect(answerOf(contentType).tag).toBe('route')
-  },
-)
-
-test("an answer's `frames` refusal whose reason is another sentence than its cause's still ends the channel it names: the reason is prose, as another deploy may word it", () => {
-  expect(answerOf(`${media}; kind=frames; channel=3; cause=6; reason="Unreadable."`)).toEqual({
-    tag: 'frames',
-    channel: 3,
-    cause: 6,
-  })
-})
-
-test.each(rows)(
-  "the server's own `frames` refusal of %s, naming channel %s, is read from an answer as from a wire's end",
-  (cause, channel) => {
-    const { code } = END_CAUSE[cause]
-    expect(answerOf(refusalContentType(frameRefusal(cause, channel)))).toEqual({
-      tag: 'frames',
-      channel: channel ?? null,
-      cause: code,
-    })
   },
 )

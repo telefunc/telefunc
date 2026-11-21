@@ -1,7 +1,7 @@
 // Telefunc's own refusals of the page's SSE requests say so in their media type, with what the page does about each:
-// `retry` (the server no longer has the wire: a loss), `frames` (it can't take a frame: the channel ends, named where
-// the server knows it), `route` (it doesn't serve SSE this way: the page leaves SSE) and `reload` (another wire
-// version), each with a reason for the page's error (decisions/516-sse-carrier.md, step 6 at 13:08Z and 13:14Z).
+// `retry` (the server no longer has the wire: a loss), `route` (it doesn't serve SSE this way: the page leaves SSE) and
+// `reload` (another wire version), each with a reason for the page's error. No answer carries an end the server decided:
+// that rides the wire's own end, the event stream's last event, and the page's reopen meets the end the server kept.
 
 import { afterEach, expect, test, vi } from 'vitest'
 
@@ -147,16 +147,21 @@ test.each([
   ['a frame of an index the session holds in no form', encode.close(3, 0, 1), '', UNREADABLE],
   ["a frame of the connection's own", encode.ping([]), '', UNREADABLE],
 ])(
-  '%s over the frame limit is refused `frames`, naming its channel where the session holds it: the server reads its header',
+  "%s over the frame limit is answered `retry`, and the event stream's last event names its channel where the session holds it: the server reads its header",
   async (_frame, frame, channel, cause) => {
     const { connId, opened } = await openWire()
     // The length says more than the limit; only the header follows it.
     const answer = await post(
       bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), frame),
     )
-    expect(answer.statusCode).toBe(400)
-    expect(answer.contentType).toMatch(refusal('frames', channel, cause))
-    await cancel(opened)
+    expect([answer.statusCode, answer.contentType, (await framesOfStream(opened)).at(-1)]).toEqual([
+      400,
+      expect.stringMatching(refusal('retry')),
+      {
+        tag: TAG.END,
+        refusal: `text/vnd.telefunc.refusal; kind=frames${channel && `; channel=${channel}`}; cause=${cause}`,
+      },
+    ])
   },
 )
 
@@ -164,7 +169,7 @@ test.each([
   ['a batch POST', false],
   ['a streaming upload', true],
 ])(
-  "%s whose read of a frame is under way when another request ends the session, its body then cut mid-frame, is answered with the session's end",
+  '%s whose read of a frame is under way when another request ends the session, its body then cut mid-frame, is answered `retry`, as the request that ended it',
   async (_request, streamRequest) => {
     const { connId, opened } = await openWire()
     const reading = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
@@ -187,35 +192,39 @@ test.each([
     const ending = await post(encodeSseRequest({ connId }, [encode.attachResult(999, null)]))
     controller.close()
     expect([ending.contentType, (await answer).contentType]).toEqual([
-      expect.stringMatching(refusal('frames', '', UNREADABLE)),
-      expect.stringMatching(refusal('frames', '', UNREADABLE)),
+      expect.stringMatching(refusal('retry')),
+      expect.stringMatching(refusal('retry')),
     ])
     await cancel(opened)
   },
 )
 
-test("a POST for a wire the server ended, past `connectTtl` with no close since, is refused `retry`: the end isn't kept past its time", async () => {
-  const { connId, opened } = await openWire()
-  const ended = await post(encodeSseRequest({ connId }, [encode.attachResult(999, null)]))
-  expect(ended.contentType).toMatch(refusal('frames', '', UNREADABLE))
-  const now = performance.now()
-  const clock = vi.spyOn(performance, 'now').mockReturnValue(now + getChannelMux().connectTtl + 1)
+test("a close POST for a wire the page lost, past `connectTtl` with no close since, ends nothing: the server keeps a closed wire's session for `connectTtl` alone", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
   try {
-    const late = await post(encodeSseRequest({ connId }, [encode.ping([])]))
-    expect(late.contentType).toMatch(refusal('retry'))
-  } finally {
-    clock.mockRestore()
+    const { connId, opened, channel } = await openWire()
+    const ends: string[] = []
+    channel.onClose((err) => void ends.push(err === null ? 'clean' : err.name))
+    await channel.opened
     await cancel(opened)
+    await vi.advanceTimersByTimeAsync(getChannelMux().connectTtl + 1)
+    const left = await post(encodeSseRequest({ connId, close: true }))
+    expect([left.statusCode, ends]).toEqual([200, []])
+    channel.abort()
+  } finally {
+    vi.useRealTimers()
   }
 })
 
-test('a body the server cannot frame is refused `frames`, naming no channel', async () => {
+test("a body the server cannot frame is answered `retry`, and the event stream's last event ends the session", async () => {
   const { connId, opened } = await openWire()
   // A frame of no bytes: no tag, no header.
   const answer = await post(bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(0)))
-  expect(answer.statusCode).toBe(400)
-  expect(answer.contentType).toMatch(refusal('frames', '', UNREADABLE))
-  await cancel(opened)
+  expect([answer.statusCode, answer.contentType, (await framesOfStream(opened)).at(-1)]).toEqual([
+    400,
+    expect.stringMatching(refusal('retry')),
+    { tag: TAG.END, refusal: `text/vnd.telefunc.refusal; kind=frames; cause=${UNREADABLE}` },
+  ])
 })
 
 test("a channel the server ends for a frame over the limit is told by the event stream's last event, where its page reads none of the stream: ahead of what waits for the page, which goes with the wire", async () => {
@@ -226,7 +235,7 @@ test("a channel the server ends for a frame over the limit is told by the event 
   const answer = await post(
     bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), encode.close(0, 0, 1)),
   )
-  expect(answer.contentType).toMatch(refusal('frames', '0', END_CAUSE.frameOverLimit.code))
+  expect(answer.contentType).toMatch(refusal('retry'))
   const frames = await framesOfStream(opened)
   expect([frames.map(({ tag }) => tag), frames.at(-1)]).toEqual([
     [TAG.RECONCILED, TAG.END],
@@ -237,7 +246,7 @@ test("a channel the server ends for a frame over the limit is told by the event 
   ])
 })
 
-test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told by the event stream's last event, and the POST is refused `frames` naming no channel", async () => {
+test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told by the event stream's last event, and the POST is answered `retry`", async () => {
   const attached = new ServerChannel()
   getChannelMux().registerChannel(attached)
   const ends: [string, string][] = []
@@ -267,7 +276,7 @@ test("a receive backlog past what the server holds for the page's connection end
       "Channel closed: the page's connection ended: The page sent more on its connection than the server holds while it works on what came before.",
     ],
   ])
-  expect(answer.contentType).toMatch(refusal('frames', '', 0x09))
+  expect(answer.contentType).toMatch(refusal('retry'))
   const frames = await framesOfStream(opened)
   expect([frames.filter(({ tag }) => tag === TAG.ERROR), frames.at(-1)]).toEqual([
     [],
@@ -275,13 +284,18 @@ test("a receive backlog past what the server holds for the page's connection end
   ])
 })
 
-test("a channel's frame the server refuses is refused `frames`, naming the channel", async () => {
+test("a channel's frame the server refuses is answered `retry`, and the event stream's last event names the channel", async () => {
   const { connId, opened } = await openWire()
   // A page sends no ERROR but a lost one.
   const answer = await post(encodeSseRequest({ connId }, [encode.error(0, ERROR_REASON.UNCONFIRMED, 1)]))
-  expect(answer.statusCode).toBe(400)
-  expect(answer.contentType).toMatch(refusal('frames', '0', END_CAUSE.frameRefused.code))
-  await cancel(opened)
+  expect([answer.statusCode, answer.contentType, (await framesOfStream(opened)).at(-1)]).toEqual([
+    400,
+    expect.stringMatching(refusal('retry')),
+    {
+      tag: TAG.END,
+      refusal: `text/vnd.telefunc.refusal; kind=frames; channel=0; cause=${END_CAUSE.frameRefused.code}`,
+    },
+  ])
 })
 
 test('a streaming upload whose wire closes under it is answered `retry` once the page ends its body, and the frame it reads after the close is not dispatched', async () => {
@@ -343,7 +357,7 @@ test.each([
   ['the streaming upload', (connId: string) => encodeSseRequestMetadata({ connId, streamRequest: true })],
   ['a batch POST whose body streams', (connId: string) => encodeSseRequestMetadata({ connId })],
 ])(
-  "a session the server ends under %s that stays open and idle is answered once the page ends its body, after the event stream's last event, `frames` naming no channel; what the page writes meanwhile is read and not run",
+  "a session the server ends under %s that stays open and idle is answered `retry` once the page ends its body, after the event stream's last event; what the page writes meanwhile is read and not run",
   async (_request, metadata) => {
     const { connId, opened, channel } = await openWire()
     const idle = createDeferred<ReadableStreamDefaultController<Uint8Array>>()
@@ -374,7 +388,7 @@ test.each([
     expect([last, answeredOpen, (await answer).contentType]).toEqual([
       TAG.END,
       false,
-      expect.stringMatching(refusal('frames', '', 8)),
+      expect.stringMatching(refusal('retry')),
     ])
   },
 )
@@ -405,10 +419,7 @@ test("a channel's frame the server refuses, on a stream its page has read: the c
   // A page sends no ERROR but a lost one.
   const answer = await post(encodeSseRequest({ connId }, [encode.error(0, ERROR_REASON.UNCONFIRMED, 1)]))
   const tags = (await stream.frames()).map(({ tag }) => tag)
-  expect([answer.contentType, tags]).toEqual([
-    expect.stringMatching(refusal('frames', '0', END_CAUSE.frameRefused.code)),
-    [TAG.RECONCILED, TAG.END],
-  ])
+  expect([answer.contentType, tags]).toEqual([expect.stringMatching(refusal('retry')), [TAG.RECONCILED, TAG.END]])
 })
 
 test('a session end finishes the event its stream started, and what waits behind that event, control or data, goes with the wire', async () => {

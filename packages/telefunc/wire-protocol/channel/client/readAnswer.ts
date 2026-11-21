@@ -1,7 +1,7 @@
 export { readAnswer, asksLater, endOfWire, telefuncAnswer, telefuncEndOf }
 export type { HttpAnswer, TelefuncAnswer }
 
-import { REFUSAL_MEDIA_TYPE, type Refusal, refusalContentType, wireEnd } from '../../refusal.js'
+import { REFUSAL_MEDIA_TYPE, wireEnd } from '../../refusal.js'
 import { refusalCauseOf } from '../endCause.js'
 import type { TransportEnd } from './WireLifecycle.js'
 
@@ -10,11 +10,10 @@ type HttpAnswer =
   | { tag: 'expected' }
   /** The server runs another `WIRE_VERSION`, as Telefunc's own refusal of kind `reload` says. */
   | { tag: 'otherWireVersion' }
-  /** Telefunc's own refusals (`refusal.ts`), read at the headers: the server no longer has the request's wire, a loss;
-   *  it ended `channel` for the cause `cause` (`END_CAUSE`'s code), or the page's session where it names none; it
-   *  doesn't serve the page's SSE requests so. */
+  /** Telefunc's own refusals (`refusal.ts`), read at the headers: the server no longer has the request's wire, a loss
+   *  (an end it decided rides the wire's own end, and the page's reopen meets the end it kept); it doesn't serve the
+   *  page's SSE requests so. */
   | { tag: 'retry'; reason: string }
-  | { tag: 'frames'; channel: number | null; cause: number }
   | { tag: 'route'; reason: string }
   /** A 413: something in front refused the request for its size (a proxy's limit on a request's body), so a smaller one
    *  may pass. `answer` and `retryAfterMs` as for `refused` (RFC 9110, section 15.5.14: a 413 may ask to wait). */
@@ -44,55 +43,45 @@ function readAnswer(response: Response, expects: 'event-stream' | 'ok'): HttpAns
   }
 }
 
-type TelefuncAnswer = Extract<HttpAnswer, { tag: 'otherWireVersion' | 'retry' | 'frames' | 'route' }>
+type TelefuncAnswer = Extract<HttpAnswer, { tag: 'otherWireVersion' | 'retry' | 'route' }>
 
 /** One of Telefunc's own refusals (`refusal.ts`). */
 function telefuncAnswer(answer: HttpAnswer | null | 'left'): answer is TelefuncAnswer {
   return (
     answer !== null &&
     answer !== 'left' &&
-    (answer.tag === 'otherWireVersion' || answer.tag === 'retry' || answer.tag === 'frames' || answer.tag === 'route')
+    (answer.tag === 'otherWireVersion' || answer.tag === 'retry' || answer.tag === 'route')
   )
 }
 
-/** Why a wire ends whose request Telefunc refused with `answer`, which alone says what ended: a `frames` refusal ends
- *  the channel it names, or the page's session where it names none, with its cause. */
+/** Why a wire ends whose request Telefunc refused with `answer`. */
 function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
   if (answer.tag === 'otherWireVersion') return { otherWireVersion: true }
   if (answer.tag === 'retry') return { lost: answer.reason }
-  if (answer.tag === 'route') return { route: answer.reason }
-  if (answer.channel === null) return { sessionEnded: answer.cause }
-  return { framesRefused: { channel: answer.channel, cause: answer.cause } }
+  return { route: answer.reason }
 }
 
 /** The end the server decided for a wire, as the wire's own end carries it (a WebSocket's close reason, the event
  *  stream's last event: `refusal.ts`'s `wireEnd`). Undefined for anything the server doesn't write so, such as a reason
  *  cut short, and the wire ends as a loss, which the server's kept end answers at the page's reopen. */
 function endOfWire(value: string): TransportEnd | undefined {
-  const end = writtenEnd(parseMimeType(value), wireEnd)
+  const end = writtenEnd(parseMimeType(value))
   if (end === null) return undefined
   if (end.channel === undefined) return { sessionEnded: end.cause }
   return { framesRefused: { channel: end.channel, cause: end.cause } }
 }
 
-/** The channel and the cause of a `frames` refusal, read only from what the server writes: `written`, the carrier's
- *  writer, writes the end read back the same as it came, and its cause names a channel exactly where it ends one
- *  (`refusalCauseOf`'s scope). Null for anything else: a channel empty, named twice or of a cause of the session's, a
- *  quote left open. */
-function writtenEnd(
-  type: MimeType | null,
-  written: (refusal: Refusal) => string,
-): { channel: number | undefined; cause: number } | null {
+/** The channel and the cause of a wire's end, read only from what the server writes: `wireEnd` writes the end read
+ *  back the same as it came, and its cause names a channel exactly where it ends one (`refusalCauseOf`'s scope). Null
+ *  for anything else: a channel empty, named twice or of a cause of the session's, a parameter more. */
+function writtenEnd(type: MimeType | null): { channel: number | undefined; cause: number } | null {
   const code = decimalOf(type?.parameters.get('cause'))
   const cause = code === null ? undefined : refusalCauseOf(code)
   if (type === null || cause === undefined) return null
   const named = type.parameters.get('channel')
   const channel = named === undefined ? undefined : indexOf(named)
   if (channel === null || (channel === undefined) !== (cause.scope === 'session')) return null
-  const reason = type.parameters.get('reason') ?? ''
-  return written({ kind: 'frames', channel, cause: cause.code, reason }) === type.value
-    ? { channel, cause: cause.code }
-    : null
+  return wireEnd({ kind: 'frames', channel, cause: cause.code }) === type.value ? { channel, cause: cause.code } : null
 }
 
 /** Whether a refusal asks the page to come back later rather than refusing what it sent (RFC 9110 sections 15.5.9 and
@@ -103,15 +92,12 @@ function asksLater(status: number): boolean {
 }
 
 /** What Telefunc's own refusal says, by its `kind` (`refusal.ts`). A kind the page doesn't know, or none, ends SSE for
- *  this connection rather than loops, naming the status; so does a `frames` refusal the server doesn't write so
- *  (`writtenEnd`). */
+ *  this connection rather than loops, naming the status; so does `frames`, which only a wire's own end carries. */
 function readRefusal(status: number, type: MimeType): HttpAnswer {
   const kind = type.parameters.get('kind')
   const reason = type.parameters.get('reason') ?? `The server refused the request with ${status}.`
-  const end = kind === 'frames' ? writtenEnd(type, refusalContentType) : null
   if (kind === 'reload') return { tag: 'otherWireVersion' }
   if (kind === 'retry') return { tag: 'retry', reason }
-  if (end !== null) return { tag: 'frames', channel: end.channel ?? null, cause: end.cause }
   if (kind === 'route') return { tag: 'route', reason }
   return { tag: 'route', reason: `${reason} (refused with ${status}, in words this page can't read)` }
 }
