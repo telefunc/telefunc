@@ -4,7 +4,6 @@ export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { framesRefusedError } from '../channelErrors.js'
 import { endCauseOf } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
@@ -51,10 +50,11 @@ type TransportEnd = {
   lost?: string
   /** Telefunc doesn't serve the page's SSE requests so (`route`): the page leaves SSE for this connection. */
   route?: string
-  /** Telefunc couldn't take a frame of `channel` (`frames`): that channel ends with `reason`, the connection goes on. */
-  framesRefused?: { channel: number; reason: string }
-  /** Telefunc couldn't take the connection's own frames: the connection ends with it. */
-  final?: string
+  /** Telefunc ended `channel` for the cause `cause` (`frames` naming it): that channel ends with the cause's error, and
+   *  the wire goes as a loss. */
+  framesRefused?: { channel: number; cause: number }
+  /** Telefunc ended the page's session for the cause with this code: every channel ends with the cause's error. */
+  sessionEnded?: number
 }
 
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
@@ -417,7 +417,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { refusal, otherWireVersion = false, refused, lost, route, framesRefused, final }: TransportEnd = {},
+    { refusal, otherWireVersion = false, refused, lost, route, framesRefused, sessionEnded }: TransportEnd = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -426,8 +426,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
       return
     }
-    if (final !== undefined) {
-      this.closeAll(framesRefusedError(final))
+    if (sessionEnded !== undefined) {
+      this.closeAll(channelErrorFor(sessionEnded, this.reconnectTimeoutMs))
       return
     }
     if (route !== undefined && transport === this.transport) {
@@ -451,14 +451,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.handleTransportLoss(err, refusal !== undefined)
   }
 
-  /** The server couldn't take a frame of the channel, which ends at once with the server's reason: nothing of it goes
-   *  again. A RECONCILE tells the server, ending it there. */
-  private endRefusedChannel({ channel, reason }: { channel: number; reason: string }): void {
+  /** The server ended the channel for `cause`, which it ends with at once: nothing of it goes again. A RECONCILE tells
+   *  the server, ending it there. */
+  private endRefusedChannel({ channel, cause }: { channel: number; cause: number }): void {
     const record = this.channels.get(channel)
     if (record === undefined) return
     this.gate.release(record)
     this.exchange.scheduleRegisterReconcile()
-    record.channel._onEnded(framesRefusedError(reason))
+    record.channel._onEnded(channelErrorFor(cause, this.reconnectTimeoutMs))
   }
 
   /** The server doesn't serve the page's SSE requests: with WebSocket next in the page's order, the connection goes on

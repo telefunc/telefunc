@@ -233,7 +233,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       this.settleDrained()
       this.owner.onTransportClosed(this, {
         otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
-        final: code === WS_CLOSE_REJECTED ? END_CAUSE.frameRefused.reason : undefined,
+        sessionEnded: code === WS_CLOSE_REJECTED ? END_CAUSE.unreadable.code : undefined,
       })
     }
     ws.onerror = () => {}

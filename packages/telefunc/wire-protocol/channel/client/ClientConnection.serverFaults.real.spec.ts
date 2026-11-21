@@ -1,13 +1,14 @@
-// The ends the server decides, on the real Node server and the real page over SSE: which channels a fault ends and with
-// what cause, and what a request that meets the end is answered. A fetch wrapper stands for a page that breaks the
-// protocol: it puts a frame the server can't take into the page's request, after a channel's text. The page drops the
-// answer of a request in flight once its event stream says the session ended, so the request a hook changed is sent
-// once more, as it went, and that answer is read: the server's for any request that meets the end.
+// The ends the server decides, on the real Node server and the real page: which channels a fault ends and with what
+// cause on both ends, and what a request that meets the end is answered. A fetch wrapper stands for a page that breaks
+// the protocol: it puts a frame the server can't take into the page's request, after a channel's text. The page drops
+// the answer of a request in flight once its event stream says the session ended, so the request a hook changed is sent
+// once more, as it went, and that answer is read: the server's for any request that meets the end. Where a row asks
+// what the page makes of one carrier of the end, the wrapper keeps the others from it.
 
 import { expect, test } from 'vitest'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { WIRE_MAX_RAW_FRAME_BYTES, WS_CLOSE_REJECTED } from '../../constants.js'
 import { encodeU32 } from '../../wire/envelope.js'
-import { ERROR_REASON, encode } from '../../wire/frame.js'
+import { ERROR_REASON, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
 import { ServerChannel } from '../server/ServerChannel.js'
@@ -15,6 +16,7 @@ import { ClientChannel } from './ClientChannel.js'
 import {
   delay,
   findText,
+  framesStart,
   opens,
   pair,
   sends,
@@ -22,10 +24,11 @@ import {
   until,
   uploads,
   useRealServer,
+  withholding,
   world,
 } from './realServer.fixture.js'
 
-useRealServer(['sse'])
+useRealServer(['sse', 'ws'])
 
 const told = {
   unreadable:
@@ -52,7 +55,8 @@ const serverOnly =
 /** A frame of the text's own channel the protocol doesn't allow: a page sends no ERROR but a lost one. */
 const refusedOwn: Bad = (text) => framed(encode.error(text.ix, ERROR_REASON.UNCONFIRMED, text.seq + 1))
 /** A message of several frames, which SSE doesn't carry: the server can't read the request's frames. */
-const severalFrames: Bad = () => framed(new Uint8Array([TAG.LENGTH, 0, 0, 0]))
+const unframeable = () => framed(new Uint8Array([TAG.LENGTH, 0, 0, 0]))
+const severalFrames: Bad = unframeable
 
 /** A batch POST's body with `bad` after the frame that carries `text`. */
 const after = (text: string, bad: Bad) => (bytes: Uint8Array<ArrayBuffer>) => {
@@ -77,6 +81,14 @@ function endsOf(channel: ServerChannel<string, string> | ClientChannel<string, s
   const ends: [string, string][] = []
   channel.onClose((err) => void ends.push(err === null ? ['clean', ''] : [err.name, err.message]))
   return ends
+}
+
+/** Two channels on the page's connection `connectionKey`, over `transports`. */
+function opening(
+  connectionKey: string,
+  transports: ('sse' | 'ws')[] = ['sse'],
+): [ReturnType<typeof pair>, ReturnType<typeof pair>] {
+  return [pair(connectionKey, transports), pair(connectionKey, transports)]
 }
 
 /** A channel the page opens whose server end isn't registered yet: the server awaits it. */
@@ -108,11 +120,10 @@ test.each([
   'a batch POST carrying %s of an index the session holds in no form ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is refused `frames` naming no channel',
   async (_bad, bad) => {
     world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', bad) }]
-    const key = crypto.randomUUID()
-    const pairs = [pair(key), pair(key)]
-    await Promise.all(pairs.map(({ page }) => page.opened))
-    const ends = pairs.map(({ channel }) => endsOf(channel))
-    sends(pairs[0]!.page, 'a1')
+    const [first, second] = opening(crypto.randomUUID())
+    await Promise.all([first.page.opened, second.page.opened])
+    const ends = [first, second].map(({ channel }) => endsOf(channel))
+    sends(first.page, 'a1')
     await until(() => ends.every((each) => each.length > 0))
     expect(ends).toEqual([[['ChannelClosedError', told.unreadable]], [['ChannelClosedError', told.unreadable]]])
     expect(await answerAgain()).toEqual([400, framesNamingNoChannel(8)])
@@ -122,12 +133,11 @@ test.each([
 test('the streaming upload carrying an over-limit frame of an index the session holds in no form ends the session: every channel ends on the server with one sentence of the connection', async () => {
   world.uploads = true
   world.hooks = [{ kind: 'upload', upload: uploadAfter('a1', overLimit(999)) }]
-  const key = crypto.randomUUID()
-  const pairs = [pair(key), pair(key)]
-  await Promise.all(pairs.map(({ page }) => page.opened))
+  const [first, second] = opening(crypto.randomUUID())
+  await Promise.all([first.page.opened, second.page.opened])
   await until(() => uploads() === 1)
-  const ends = pairs.map(({ channel }) => endsOf(channel))
-  sends(pairs[0]!.page, 'a1')
+  const ends = [first, second].map(({ channel }) => endsOf(channel))
+  sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
   expect(ends).toEqual([[['ChannelClosedError', told.unreadable]], [['ChannelClosedError', told.unreadable]]])
 })
@@ -175,11 +185,10 @@ test('a held frame the server refuses as its channel registers ends that channel
 
 test("a body whose frames the server can't read ends the session: every channel ends on the server with one sentence of the connection, and a request that meets the end is refused `frames` naming no channel", async () => {
   world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', severalFrames) }]
-  const key = crypto.randomUUID()
-  const pairs = [pair(key), pair(key)]
-  await Promise.all(pairs.map(({ page }) => page.opened))
-  const ends = pairs.map(({ channel }) => endsOf(channel))
-  sends(pairs[0]!.page, 'a1')
+  const [first, second] = opening(crypto.randomUUID())
+  await Promise.all([first.page.opened, second.page.opened])
+  const ends = [first, second].map(({ channel }) => endsOf(channel))
+  sends(first.page, 'a1')
   await until(() => ends.every((each) => each.length > 0))
   expect(ends).toEqual([[['ChannelClosedError', told.unreadable]], [['ChannelClosedError', told.unreadable]]])
   expect(await answerAgain()).toEqual([400, framesNamingNoChannel(8)])
@@ -195,4 +204,109 @@ test("a request that meets the wire a channel's over-limit frame closed is refus
     400,
     expect.stringMatching(/^text\/vnd\.telefunc\.refusal; kind=frames; channel=\d+; cause=5; reason="[^"]+"$/),
   ])
+})
+
+/** How a channel that sent nothing wrong ends on the page as the server ends its session. */
+const sessionEndOnPage = [['ChannelClosedError', told.unreadable]]
+
+/** The event stream without the server's REJECTED, held open past the server's end of it: the page learns of the
+ *  session's end from the answer to its request alone. */
+function answerDecides(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = withholding((frame) => frame[0] === TAG.REJECTED)
+    .stream(body)
+    .getReader()
+  return new ReadableStream<Uint8Array>({
+    pull: async (controller) => {
+      const { done, value } = await reader.read()
+      if (done) return new Promise<void>(() => {})
+      controller.enqueue(value)
+    },
+    cancel: (reason) => reader.cancel(reason),
+  })
+}
+
+test("a batch POST of two channels' data the server refuses `frames` naming no channel ends both on the page with the server's sentence of the connection", async () => {
+  const carried: string[] = []
+  world.hooks = [
+    { kind: 'open', stream: answerDecides },
+    {
+      kind: 'post',
+      text: 'b1',
+      body: (bytes) => {
+        carried.push(...['a1', 'b1'].filter((text) => findText(bytes, text) !== null))
+        return after('b1', severalFrames)(bytes)
+      },
+    },
+  ]
+  const [first, second] = opening(crypto.randomUUID())
+  await Promise.all([first.page.opened, second.page.opened])
+  const ends = [first, second].map(({ page }) => endsOf(page))
+  sends(first.page, 'a1')
+  sends(second.page, 'b1')
+  await until(() => ends.every((each) => each.length > 0))
+  expect([carried, ends]).toEqual([
+    ['a1', 'b1'],
+    [sessionEndOnPage, sessionEndOnPage],
+  ])
+})
+
+test("the streaming upload the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
+  world.uploads = true
+  world.hooks = [
+    { kind: 'open', stream: answerDecides },
+    { kind: 'upload', upload: uploadAfter('a1', overLimit(999)) },
+  ]
+  const [first, second] = opening(crypto.randomUUID())
+  await Promise.all([first.page.opened, second.page.opened])
+  await until(() => uploads() === 1)
+  const ends = [first, second].map(({ page }) => endsOf(page))
+  sends(first.page, 'a1')
+  await until(() => ends.every((each) => each.length > 0))
+  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
+})
+
+test("the barrier POST of a move to a WebSocket the server refuses `frames` naming no channel ends every channel on the page with the server's sentence of the connection", async () => {
+  // The answer alone tells the page: the probe's close is kept from it as the event stream's REJECTED is.
+  world.wsHears = (code) => code !== WS_CLOSE_REJECTED
+  let requestsBefore = -1
+  world.hooks = [
+    { kind: 'open', stream: answerDecides },
+    {
+      kind: 'post',
+      carries: TAG.BARRIER,
+      body: (bytes) => {
+        requestsBefore = world.started.length
+        return [bytes.subarray(0, framesStart(bytes)), ...unframeable(), bytes.subarray(framesStart(bytes))]
+      },
+    },
+  ]
+  const [first, second] = opening(crypto.randomUUID(), ['sse', 'ws'])
+  const ends = [first, second].map(({ page }) => endsOf(page))
+  await until(() => ends.every((each) => each.length > 0))
+  // No request went after the barrier's, such as a PING meeting the end.
+  expect([world.started.slice(requestsBefore), ends]).toEqual([['post'], [sessionEndOnPage, sessionEndOnPage]])
+})
+
+test("the REJECTED event alone ends every channel on the page with the server's sentence of the connection", async () => {
+  world.hooks = [{ kind: 'post', text: 'a1', body: after('a1', severalFrames), held: true }]
+  const [first, second] = opening(crypto.randomUUID())
+  await Promise.all([first.page.opened, second.page.opened])
+  const ends = [first, second].map(({ page }) => endsOf(page))
+  sends(first.page, 'a1')
+  await until(() => ends.every((each) => each.length > 0))
+  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
+})
+
+/** Whether a WebSocket message carries the frame of `text`. */
+const carriesText = (message: Uint8Array<ArrayBuffer>, text: string) =>
+  (isOneFrame(message) ? [message] : Array.from(messageFrames(message))).some((frame) => textOf(frame, text) !== null)
+
+test("the 4002 close ends every channel of a page on WebSocket with the server's sentence of the connection", async () => {
+  world.wsSends = (message) => (carriesText(message, 'a1') ? [message, encode.attachResult(999, null)] : [message])
+  const [first, second] = opening(crypto.randomUUID(), ['ws'])
+  await Promise.all([first.page.opened, second.page.opened])
+  const ends = [first, second].map(({ page }) => endsOf(page))
+  sends(first.page, 'a1')
+  await until(() => ends.every((each) => each.length > 0))
+  expect(ends).toEqual([sessionEndOnPage, sessionEndOnPage])
 })

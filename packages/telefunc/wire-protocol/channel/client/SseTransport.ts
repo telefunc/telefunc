@@ -363,21 +363,8 @@ class SseTransport implements UpgradeSource {
       return null
     }
     const answer = readAnswer(response, 'event-stream')
-    if (
-      answer.tag === 'otherWireVersion' ||
-      answer.tag === 'retry' ||
-      answer.tag === 'route' ||
-      answer.tag === 'frames'
-    ) {
-      const carried = [...stage.initialFrames, ...stage.movedOutbox, ...stage.movedBufferedFrames]
-      this.failOpen(
-        stage,
-        abortController,
-        telefuncEndOf(
-          answer,
-          carried.map(({ frame }) => frame),
-        ),
-      )
+    if (telefuncAnswer(answer)) {
+      this.failOpen(stage, abortController, telefuncEndOf(answer))
       return null
     }
     // A login page or an app's HTML fallback, also behind a followed redirect, is no event stream.
@@ -445,7 +432,7 @@ class SseTransport implements UpgradeSource {
     // Telefunc's own: `retry` is a loss and keeps the streaming upload; the others end as on the batch path.
     if (answer?.tag === 'otherWireVersion' || answer?.tag === 'route' || answer?.tag === 'frames') {
       this.abandonActiveTransport()
-      this.owner.onTransportClosed(this, telefuncEndOf(answer, []))
+      this.owner.onTransportClosed(this, telefuncEndOf(answer))
       return
     }
     abortController.abort()
@@ -477,14 +464,14 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
     const pair = pairPublishes()
-    // The server refused a frame of no channel: its last event before it let the wire go.
-    let final: string | undefined
+    // The server ended the page's session: its last event before it let the wire go.
+    let sessionEnded: number | undefined
     try {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
         if (raw[0] === TAG.REJECTED) {
-          final = END_CAUSE.frameRefused.reason
+          sessionEnded = END_CAUSE.unreadable.code
           break
         }
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
@@ -519,7 +506,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, { final })
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, { sessionEnded })
     }
   }
 
@@ -633,18 +620,12 @@ class SseTransport implements UpgradeSource {
         this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
         return
       }
-      // Telefunc's own, but a `frames` refusal that names no channel of a POST of several: the server no longer has the
-      // wire, ends the channel it names, or isn't served so. Nothing of it is counted as a refusal of the data.
-      const end = telefuncAnswer(answer)
-        ? telefuncEndOf(
-            answer,
-            queued.map(({ frame }) => frame),
-          )
-        : null
-      if (end !== null && end.refused === undefined) {
+      // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
+      // Nothing of it is counted as a refusal of the data.
+      if (telefuncAnswer(answer)) {
         this.requeue(queued)
         this.abandonActiveTransport()
-        this.owner.onTransportClosed(this, end)
+        this.owner.onTransportClosed(this, telefuncEndOf(answer))
         return
       }
       if (answer?.tag === 'tooLarge') {
@@ -851,17 +832,23 @@ class SseTransport implements UpgradeSource {
     const counted = countedAnswer(answer)
     if (counted !== null && !this.owner.onTransportRefused([frame], counted)) return
     this.abandonActiveTransport()
-    this.owner.onTransportClosed(this, telefuncAnswer(answer) ? telefuncEndOf(answer, [frame]) : endOf(answer))
+    this.owner.onTransportClosed(this, endOf(answer))
   }
 
-  /** For the barrier, which cannot wait for the next flush and is delivered either way: failure is swallowed, a
-   *  refusal too, and neither is split nor sent again. */
+  /** For the barrier, which cannot wait for the next flush and is delivered either way: it is neither split nor sent
+   *  again. Telefunc's own answer ends the wire as a batch POST's does; any other, or none, is swallowed, since the
+   *  barrier may have arrived. */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
-    assert(this.transportAbort)
-    try {
-      await this.postAndRead(encodeSseRequest({ connId: this.connId }, frames), this.transportAbort.signal)
-    } catch {}
+    const wire = this.transportAbort
+    assert(wire)
+    const answer = await this.answerOn(
+      this.postAndRead(encodeSseRequest({ connId: this.connId }, frames), wire.signal),
+      wire,
+    )
+    if (!telefuncAnswer(answer)) return
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, telefuncEndOf(answer))
   }
 
   /** Not the control frames waiting for the next POST: a channel out of credit with only those waiting was starved. */
@@ -1062,7 +1049,7 @@ async function answerOf(request: Promise<Response>): Promise<HttpAnswer | null> 
 /** Why a wire ends whose batch POST got `answer`: null where none came, a dropped connection. */
 function endOf(answer: HttpAnswer | null): TransportEnd {
   if (answer === null || answer.tag === 'expected') return {}
-  if (telefuncAnswer(answer)) return telefuncEndOf(answer, [])
+  if (telefuncAnswer(answer)) return telefuncEndOf(answer)
   return { refused: { answer: answer.answer, retryAfterMs: answer.retryAfterMs } }
 }
 
@@ -1077,28 +1064,21 @@ function telefuncAnswer(answer: HttpAnswer | null | 'left'): answer is TelefuncA
   )
 }
 
-/** Why a wire ends whose request carrying `frames` Telefunc refused with `answer`. A `frames` refusal ends the channel it
- *  names, or else the one channel whose data the request carried; of the connection's own frames alone, the connection;
- *  of several channels' data, the server can't say whose frame it was, so it is counted as a refusal of each
- *  (`onTransportRefused`). */
-function telefuncEndOf(answer: TelefuncAnswer, frames: Uint8Array<ArrayBuffer>[]): TransportEnd {
+/** Why a wire ends whose request Telefunc refused with `answer`, which alone says what ended: a `frames` refusal ends
+ *  the channel it names, or the page's session where it names none, with its cause. */
+function telefuncEndOf(answer: TelefuncAnswer): TransportEnd {
   if (answer.tag === 'otherWireVersion') return { otherWireVersion: true }
   if (answer.tag === 'retry') return { lost: answer.reason }
   if (answer.tag === 'route') return { route: answer.reason }
-  if (answer.channel !== null) return { framesRefused: { channel: answer.channel, reason: answer.reason } }
-  const channels = new Set(frames.filter((frame) => isSequencedTag(frame[0] ?? -1)).map((frame) => readU16(frame, 1)))
-  const [only] = channels
-  if (channels.size === 0) return { final: answer.reason }
-  if (only !== undefined && channels.size === 1) return { framesRefused: { channel: only, reason: answer.reason } }
-  return { refused: { answer: answer.reason, retryAfterMs: 0 } }
+  if (answer.channel === null) return { sessionEnded: answer.cause }
+  return { framesRefused: { channel: answer.channel, cause: answer.cause } }
 }
 
 /** What a refusal counted against the data it carried names (`onTransportRefused`); null where it isn't one: a
- *  refusal that asks for later, Telefunc's own but for a `frames` refusal of several channels' data, or none. */
+ *  refusal that asks for later, Telefunc's own, or none. */
 function countedAnswer(answer: HttpAnswer | null | 'left'): string | null {
   if (answer === null || answer === 'left') return null
   if (answer.tag === 'tooLarge') return answer.answer
   if (answer.tag === 'refused') return asksLater(answer.status) ? null : answer.answer
-  if (answer.tag === 'frames' && answer.channel === null) return answer.reason
   return null
 }

@@ -5,6 +5,7 @@
 export {
   cutIn,
   findText,
+  framesStart,
   open,
   opens,
   pair,
@@ -33,16 +34,20 @@ import { ServerChannel } from '../server/ServerChannel.js'
 import { ClientChannel } from './ClientChannel.js'
 
 type Kind = 'open' | 'post' | 'upload'
-/** What the wrapper does to one request of `kind` that carries `text`, where given, and to its answer. */
+/** What the wrapper does to one request of `kind` that carries `text`, or a frame tagged `carries`, where given, and to
+ *  its answer. */
 type Hook = {
   kind: Kind
   text?: string
+  carries?: number
   url?: (url: string) => string
   body?: (bytes: Uint8Array<ArrayBuffer>) => BlobPart[]
   upload?: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>
   contentType?: (contentType: string) => string
   /** The event stream as the page reads it. */
   stream?: (body: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>
+  /** The request reaches the server, and its answer never reaches the page. */
+  held?: true
 }
 const world: {
   hooks: Hook[]
@@ -54,8 +59,23 @@ const world: {
   /** Each batch POST a hook changed, as it went: `again` sends it once more, past the hooks, whatever the page aborted. */
   hooked: { again: () => Promise<Response> }[]
   sockets: number
+  /** What the page's WebSockets send in place of each message, where set. */
+  wsSends: ((message: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>[]) | null
+  /** Whether the page hears its WebSocket's close with `code`, where set: one it doesn't hear leaves the socket open
+   *  for the page. */
+  wsHears: ((code: number) => boolean) | null
   telefuncUrl: string
-} = { hooks: [], uploads: false, requests: [], started: [], hooked: [], sockets: 0, telefuncUrl: '' }
+} = {
+  hooks: [],
+  uploads: false,
+  requests: [],
+  started: [],
+  hooked: [],
+  sockets: 0,
+  wsSends: null,
+  wsHears: null,
+  telefuncUrl: '',
+}
 
 /** `frame`'s channel and seq, where it carries `text`. */
 function textOf(frame: Uint8Array<ArrayBuffer>, text: string): { ix: number; seq: number } | null {
@@ -67,15 +87,29 @@ function textOf(frame: Uint8Array<ArrayBuffer>, text: string): { ix: number; seq
 
 /** Where a batch body's frame that carries `text` ends, and its channel and seq; null where none does. */
 function findText(body: Uint8Array<ArrayBuffer>, text: string): { end: number; ix: number; seq: number } | null {
-  let at = 4 + decodeU32(body.subarray(0, 4))
-  while (at + 4 <= body.length) {
-    const end = at + 4 + decodeU32(body.subarray(at, at + 4))
-    const found = textOf(body.subarray(at + 4, end), text)
+  for (const { frame, end } of framesOf(body)) {
+    const found = textOf(frame, text)
     if (found !== null) return { end, ...found }
-    at = end
   }
   return null
 }
+
+/** A batch body's frames, each with where it ends in the body. */
+function* framesOf(body: Uint8Array<ArrayBuffer>): Generator<{ frame: Uint8Array<ArrayBuffer>; end: number }> {
+  let at = 4 + decodeU32(body.subarray(0, 4))
+  while (at + 4 <= body.length) {
+    const end = at + 4 + decodeU32(body.subarray(at, at + 4))
+    yield { frame: body.subarray(at + 4, end), end }
+    at = end
+  }
+}
+
+/** Where a batch body's frames start, after its metadata. */
+const framesStart = (body: Uint8Array<ArrayBuffer>) => 4 + decodeU32(body.subarray(0, 4))
+
+/** Whether a batch body carries a frame tagged `tag`. */
+const carriesTag = (body: Uint8Array<ArrayBuffer>, tag: number) =>
+  Array.from(framesOf(body)).some(({ frame }) => frame[0] === tag)
 
 /** The hook for this request, taken from the queue: the first of its kind, of its text where it names one. */
 async function takeHook(
@@ -85,7 +119,9 @@ async function takeHook(
   const bytes = body instanceof Blob ? new Uint8Array(await body.arrayBuffer()) : null
   const at = world.hooks.findIndex(
     (hook) =>
-      hook.kind === kind && (hook.text === undefined || (bytes !== null && findText(bytes, hook.text) !== null)),
+      hook.kind === kind &&
+      (hook.text === undefined || (bytes !== null && findText(bytes, hook.text) !== null)) &&
+      (hook.carries === undefined || (bytes !== null && carriesTag(bytes, hook.carries))),
   )
   const hook = world.hooks[at]
   if (hook === undefined) return bytes === null ? null : { hook: { kind }, bytes, taken: false }
@@ -117,6 +153,7 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   const target = hook.url ? hook.url(url) : url
   if (taken?.taken && sent instanceof Blob)
     world.hooked.push({ again: () => realFetch(target, { ...init, body: sent, signal: null }) })
+  if (hook.held) return heldAnswer(realFetch(target, { ...init, body: sent, signal: null }), init?.signal)
   const response = await realFetch(target, { ...init, body: sent })
   const contentType = response.headers.get('content-type')
   world.requests.push({ kind, bytes: bytes?.byteLength ?? 0, status: response.status, contentType })
@@ -130,12 +167,36 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   })
 }
 
-/** Counts the WebSockets the page makes. */
+/** A request whose answer the page never gets: it settles only as the page aborts it. */
+function heldAnswer(sent: Promise<Response>, signal: AbortSignal | null | undefined): Promise<Response> {
+  void sent.catch(() => {})
+  return new Promise((_, reject) =>
+    signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true }),
+  )
+}
+
+/** Counts the WebSockets the page makes, sends what `world.wsSends` makes of each message, and tells the page of the
+ *  closes `world.wsHears` lets through. */
 const RealWebSocket = globalThis.WebSocket
 class CountedWebSocket extends RealWebSocket {
   constructor(url: string | URL, protocols?: string | string[]) {
     super(url, protocols)
     world.sockets++
+    let onclose: ((event: CloseEvent) => void) | null = null
+    Object.defineProperty(this, 'onclose', {
+      get: () => onclose,
+      set: (next: typeof onclose) => (onclose = next),
+    })
+    this.addEventListener('close', (event: CloseEvent) => {
+      if (world.wsHears?.(event.code) ?? true) onclose?.(event)
+    })
+  }
+  override send(data: string | Blob | ArrayBufferLike | ArrayBufferView): void {
+    if (typeof data === 'string' || data instanceof Blob) return super.send(data)
+    const message = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
+      : new Uint8Array(data).slice()
+    for (const part of world.wsSends?.(message) ?? [message]) super.send(part)
   }
 }
 
@@ -156,7 +217,16 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
     world.telefuncUrl = `http://127.0.0.1:${address.port}/_telefunc`
   })
   afterEach(() => {
-    Object.assign(world, { hooks: [], uploads: false, requests: [], started: [], hooked: [], sockets: 0 })
+    Object.assign(world, {
+      hooks: [],
+      uploads: false,
+      requests: [],
+      started: [],
+      hooked: [],
+      sockets: 0,
+      wsSends: null,
+      wsHears: null,
+    })
   })
   afterAll(() => {
     globalThis.fetch = realFetch

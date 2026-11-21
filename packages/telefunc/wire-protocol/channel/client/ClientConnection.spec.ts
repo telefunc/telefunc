@@ -177,7 +177,7 @@ describe('a wire the server refused for a frame it could not read', () => {
     vi.useRealTimers()
   })
 
-  test("its event stream's REJECTED event ends the channels with the refusal, and the page opens no other wire", async () => {
+  test("its event stream's REJECTED event ends the channels with the end of the page's connection, and the page opens no other wire", async () => {
     vi.useFakeTimers()
     const { fetchImpl, downstreams } = createStalledTransport()
     const ended: unknown[] = []
@@ -198,10 +198,7 @@ describe('a wire the server refused for a frame it could not read', () => {
 
     expect(ended).toHaveLength(1)
     expect(ended[0]).toBeInstanceOf(ChannelClosedError)
-    expect(ended[0]).toHaveProperty(
-      'message',
-      `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
-    )
+    expect(ended[0]).toHaveProperty('message', END_CAUSE.unreadable.error().message)
     expect(downstreams).toHaveLength(1)
   })
 })

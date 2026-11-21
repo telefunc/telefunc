@@ -53,8 +53,8 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
-  /** Server → client, an SSE stream's last event: the server refused a frame of no channel and closed the wire, as a
-   *  WebSocket's close with `WS_CLOSE_REJECTED` says. */
+  /** Server → client, an SSE stream's last event: the server ended the page's session and closed the wire, as a
+   *  WebSocket's close with `WS_CLOSE_REJECTED` says. It carries no cause: the page reads `END_CAUSE.unreadable`. */
   REJECTED: 0x0e as const,
 
   // ─── Data plane ───

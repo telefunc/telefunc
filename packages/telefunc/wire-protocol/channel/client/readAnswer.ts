@@ -9,9 +9,10 @@ type HttpAnswer =
   /** The server runs another `WIRE_VERSION`, as Telefunc's own refusal of kind `reload` says. */
   | { tag: 'otherWireVersion' }
   /** Telefunc's own refusals (`refusal.ts`), read at the headers: the server no longer has the request's wire, a loss;
-   *  it can't take a frame, of `channel` where it names one; it doesn't serve the page's SSE requests so. */
+   *  it ended `channel` for the cause `cause` (`END_CAUSE`'s code), or the page's session where it names none; it
+   *  doesn't serve the page's SSE requests so. */
   | { tag: 'retry'; reason: string }
-  | { tag: 'frames'; channel: number | null; reason: string }
+  | { tag: 'frames'; channel: number | null; cause: number }
   | { tag: 'route'; reason: string }
   /** A 413: something in front refused the request for its size (a proxy's limit on a request's body), so a smaller one
    *  may pass. `answer` and `retryAfterMs` as for `refused` (RFC 9110, section 15.5.14: a 413 may ask to wait). */
@@ -49,18 +50,22 @@ function asksLater(status: number): boolean {
 }
 
 /** What Telefunc's own refusal says, by its `kind` (`refusal.ts`). A kind the page doesn't know, or none, ends SSE for
- *  this connection rather than loops, naming the status. */
+ *  this connection rather than loops, naming the status; so does a `frames` refusal that names no cause. */
 function readRefusal(status: number, parameters: ReadonlyMap<string, string>): HttpAnswer {
   const kind = parameters.get('kind')
   const reason = parameters.get('reason') ?? `The server refused the request with ${status}.`
+  const cause = decimalOf(parameters.get('cause'))
   if (kind === 'reload') return { tag: 'otherWireVersion' }
   if (kind === 'retry') return { tag: 'retry', reason }
-  if (kind === 'frames') {
-    const named = parameters.get('channel')
-    return { tag: 'frames', channel: named !== undefined && /^\d+$/.test(named) ? Number(named) : null, reason }
-  }
+  if (kind === 'frames' && cause !== null)
+    return { tag: 'frames', channel: decimalOf(parameters.get('channel')), cause }
   if (kind === 'route') return { tag: 'route', reason }
   return { tag: 'route', reason: `${reason} (refused with ${status}, of a kind this page doesn't know)` }
+}
+
+/** A parameter's value read as a decimal number; null where it isn't one, or there is none. */
+function decimalOf(value: string | undefined): number | null {
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : null
 }
 
 /** The MIME type a response carries, as Fetch extracts it from its `Content-Type` values
