@@ -265,6 +265,52 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
   })
 
   for (const { name } of STORES) {
+    it(`${name}: each write script's call that Redis doesn't refuse, by the commands and the TYPE calls it makes`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      const connection = store && trials.get(store)
+      if (store === undefined || connection === undefined) throw new Error(`${name} didn't start`)
+      // These rows come first, a few seconds after the recording: a close's commit runs only under its lease, which
+      // lapses 15 s after it was taken.
+      const made: Record<string, string[]> = {}
+      for (const call of recorded) {
+        await restore(store.admin, call.before)
+        await store.admin.config('RESETSTAT')
+        await call.replay(connection)
+        const run = await commandsRun(store.admin)
+        const commands = [...run.values()].reduce((sum, calls) => sum + calls, 0)
+        ;(made[call.name] ??= []).push(`${commands} commands, ${run.get('type') ?? 0} TYPE`)
+      }
+      // A key a call's first command on it reads, or a write that comes first, needs no TYPE: Redis refuses there.
+      const commit = '7 commands, 1 TYPE'
+      expect(made).toEqual({
+        tfBroadcastStart: ['3 commands, 0 TYPE'],
+        tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
+        tfRoomCellsExchange: ['19 commands, 2 TYPE', '16 commands, 2 TYPE'],
+        tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
+        tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
+        tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
+        tfRoomDropIncarnation: ['2 commands, 0 TYPE', '2 commands, 0 TYPE'],
+        tfRoomHeadExchange: [
+          '20 commands, 3 TYPE',
+          '4 commands, 0 TYPE',
+          '3 commands, 0 TYPE',
+          '4 commands, 0 TYPE',
+          '20 commands, 3 TYPE',
+          '3 commands, 0 TYPE',
+          '4 commands, 0 TYPE',
+        ],
+        tfRoomOperation: [
+          '40 commands, 2 TYPE',
+          '37 commands, 2 TYPE',
+          '28 commands, 2 TYPE',
+          '45 commands, 5 TYPE',
+          '48 commands, 5 TYPE',
+        ],
+      })
+    }, 300_000)
+  }
+
+  for (const { name } of STORES) {
     it(`${name}: each key in turn holding another type`, async () => {
       const store = stores.find((candidate) => candidate.name === name)
       if (store === undefined) throw new Error(`${name} didn't start`)
@@ -312,48 +358,6 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
         ),
       }
       expect(verdicts).toEqual({ list: refused, hash: refused, set: refused, zset: refused })
-    }, 300_000)
-
-    it(`${name}: each write script's call that Redis doesn't refuse, by the commands it makes and its TYPEs`, async () => {
-      const store = stores.find((candidate) => candidate.name === name)
-      const connection = store && trials.get(store)
-      if (store === undefined || connection === undefined) throw new Error(`${name} didn't start`)
-      const made: Record<string, string[]> = {}
-      for (const call of recorded) {
-        await restore(store.admin, call.before)
-        await store.admin.config('RESETSTAT')
-        await call.replay(connection)
-        const run = await commandsRun(store.admin)
-        const commands = [...run.values()].reduce((sum, calls) => sum + calls, 0)
-        ;(made[call.name] ??= []).push(`${commands} commands, ${run.get('type') ?? 0} TYPE`)
-      }
-      // A key a call's first command on it reads, or a write that comes first, needs no TYPE: Redis refuses there.
-      const commit = '7 commands, 1 TYPE'
-      expect(made).toEqual({
-        tfBroadcastStart: ['3 commands, 0 TYPE'],
-        tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
-        tfRoomCellsExchange: ['19 commands, 2 TYPE', '16 commands, 2 TYPE'],
-        tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
-        tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
-        tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
-        tfRoomDropIncarnation: ['2 commands, 0 TYPE', '2 commands, 0 TYPE'],
-        tfRoomHeadExchange: [
-          '20 commands, 3 TYPE',
-          '4 commands, 0 TYPE',
-          '3 commands, 0 TYPE',
-          '4 commands, 0 TYPE',
-          '20 commands, 3 TYPE',
-          '3 commands, 0 TYPE',
-          '4 commands, 0 TYPE',
-        ],
-        tfRoomOperation: [
-          '40 commands, 2 TYPE',
-          '37 commands, 2 TYPE',
-          '28 commands, 2 TYPE',
-          '45 commands, 5 TYPE',
-          '48 commands, 5 TYPE',
-        ],
-      })
     }, 300_000)
 
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {
