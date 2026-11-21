@@ -83,8 +83,9 @@ type ChannelConfigUser = {
    * Transports enabled on this server for Telefunc channels.
    * Determines which transport(s) clients may connect with or upgrade to.
    *
-   * - `['sse']` (default): SSE only
-   * - `['sse', 'ws']`: SSE and WebSocket — clients may upgrade to WS
+   * - `['sse']`: SSE only
+   * - `['sse', 'ws']` (default): SSE and WebSocket — a page is offered WS only where its server takes upgrades
+   *   (`installWebSocket()`, `telefunc/bun`, `telefunc/deno`, a Durable Object)
    * - `['ws']`: WebSocket only
    *
    * Connections arriving on a transport not listed here are immediately rejected.
