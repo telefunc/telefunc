@@ -1436,11 +1436,13 @@ function testRoom() {
     (r) => {
       expect(r.inOrder).toBe(1_000)
       expect(r.defaultTrack).deep.equal([7])
-      expect(r.demand.filter(([track]) => track !== 'main')).deep.equal([
+      // The room tells each track's demand on its own, in no set order between tracks.
+      const named = r.demand.filter(([track]) => track !== 'main')
+      expect(named.slice(0, 2)).to.have.deep.members([
         ['t0', true],
         ['t999', true],
-        ['t0', false],
       ])
+      expect(named.slice(2)).deep.equal([['t0', false]])
       expect(r.demand.filter(([track]) => track === 'main')).deep.equal([['main', true]])
       expect(r.wanted).toBe(1_002)
       expect(r.pubOwn).deep.equal([['own', true]])
