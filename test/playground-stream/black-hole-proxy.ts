@@ -12,6 +12,8 @@ type BlackHoleProxy = {
   muteNextWebSocket(): void
   /** The page's next WebSocket gets no answer, and the server never sees it: a peer that took the connection and stays silent. */
   holdNextWebSocket(): void
+  /** How many of the page's WebSockets `holdNextWebSocket()` held. */
+  heldWebSockets(): number
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
   /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does, each byte `delayMs` late; a direction whose queue is full stops reading its senders. */
@@ -40,6 +42,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   const links = new Set<Link>()
   let muteNext = false
   let holdNext = false
+  let held = 0
   let webSockets = 0
   let openedBeforeMutedClosed: number | null = null
   let down: PacedDirection | null = null
@@ -57,6 +60,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
         webSockets++
         if (holdNext) {
           holdNext = false
+          held++
           link.dead = true
           return
         }
@@ -111,6 +115,7 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
     holdNextWebSocket() {
       holdNext = true
     },
+    heldWebSockets: () => held,
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
     pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5, delayMs = 0 }) {
       down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs, delayMs)

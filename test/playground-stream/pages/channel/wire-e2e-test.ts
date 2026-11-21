@@ -373,6 +373,8 @@ function testWire(isDev: boolean) {
             const { end } = await getResult<WireState>('#wire-state')
             expect(end?.received).deep.equal([...sentBefore, 'onClose:none'])
           })
+          // The reconnect it held was the page's: an upgrade the proxy didn't read in one piece would pass it by.
+          expect(proxy.heldWebSockets()).toBe(1)
         } finally {
           await proxy.close()
         }
