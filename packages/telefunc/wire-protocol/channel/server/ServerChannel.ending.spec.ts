@@ -500,6 +500,25 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     }
   })
 
+  test(`on a WebSocket, with room, a lossy subscriber closing while its page is away keeps all ${kind} publishes its page lacks`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key, lossy: true })
+    const request = new Request('http://one.test/')
+    const page = overWebSocket([channel], [request])
+    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000))
+    const [peer] = page.peers
+    if (peer === undefined) throw new Error('no peer')
+    channel._onPeerDisconnect(peer, 60_000)
+    const closing = channel.close()
+    const back = overWebSocket([])
+    // The page has p1.
+    back.attach(channel, 0, 1, request)
+    expect(await back.readAll()).toEqual(['0:p2', '0:p3', '0:CLOSE'])
+    fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+    fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+    expect(await closing).toBeNull()
+  })
+
   for (const [near, leave] of [
     ['the budget', leaveRoom],
     ['maxMemory', leaveRoomUnderMax],
@@ -532,6 +551,34 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
       }
     })
 }
+
+// The page's event stream subscribes it to text publishes.
+for (const [near, leave] of [
+  ['the budget', leaveRoom],
+  ['maxMemory', leaveRoomUnderMax],
+] as const)
+  test(`on SSE, a publish near ${near} for an open lossy subscriber leaves a closing one its newest, and its close ends gracefully`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key, lossy: true })
+    const open = new ServerBroadcast<string>({ key, lossy: true })
+    const page = await overSse([channel, open])
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+    const closing = channel.close()
+    const release = leave(450_000)
+    try {
+      await Broadcast.publish(key, 'p4' + 'x'.repeat(900_000))
+      // An event stream that reads nothing has handed its socket nothing: all of it waits, and the newest stays.
+      const pageReads = reads(await page.readUntil('1:p4'))
+      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p3', '0:CLOSE'])
+      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+      expect(await closing).toBeNull()
+    } finally {
+      release()
+      open.abort()
+      await page.close()
+    }
+  })
 
 for (const [kind, publish] of Object.entries(PUBLISHES)) {
   test(`on a WebSocket, a closing subscriber cut for another object's publish reads the error at the next ${kind} publish of its key`, async () => {

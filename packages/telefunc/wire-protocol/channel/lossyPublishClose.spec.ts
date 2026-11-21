@@ -79,7 +79,7 @@ for (const transport of ['sse', 'ws'] as const) {
 
         const closing = closer === 'server' ? channel.close() : page.close()
         // The server's end of the close is written behind v2.
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await vi.waitFor(() => expect(channel._phase).toBe('closing'))
         stallDownlink(false)
         expect(await closing).toBe(null)
         expect(await (closer === 'server' ? page.closed : channel.closed)).toBe(null)
@@ -130,6 +130,24 @@ for (const transport of ['sse', 'ws'] as const) {
       expect(await page.close()).toBe(null)
       expect(await readBeforeAnswer).toBe(true)
       expect(read).toEqual(['v1', 'v2', 'v3', 'p4', 'close began'])
+    })
+
+    test('a close both ends begin at once skips none of them', async () => {
+      const key = `room:${crypto.randomUUID()}`
+      const channel = new ServerBroadcast({ key, lossy: true })
+      getChannelMux().registerChannel(channel)
+      const page = new ClientBroadcast<string>({
+        channelId: channel.id,
+        lossy: true,
+        connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
+      })
+      const read: string[] = []
+      page.subscribe((value) => void read.push(value.slice(0, 2)))
+      page.onClose(() => void read.push('close began'))
+      await Promise.all([channel.opened, page.opened])
+      await Promise.all(['v1', 'v2', 'v3'].map((name) => Broadcast.publish(key, name + 'x'.repeat(600_000))))
+      expect(await Promise.all([channel.close(), page.close()])).toEqual([null, null])
+      expect(read).toEqual(['v1', 'v2', 'v3', 'close began'])
     })
   })
 }
