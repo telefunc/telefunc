@@ -271,7 +271,7 @@ async function listedRoom(plane: RoomPlane, roomId: string, incTag: string): Pro
   const head = await plane.driver.readHead(roomId)
   const call = new BackendCall()
   const [, info] = await Promise.all([
-    call.write(() => repairRoomIndex(plane, roomId, incTag, head)),
+    repairRoomIndex(plane, roomId, incTag, head, call),
     call.read(() => openRoomInfo(plane, roomId, head)),
   ])
   return info

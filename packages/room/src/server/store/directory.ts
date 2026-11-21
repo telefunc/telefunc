@@ -29,10 +29,16 @@ async function listRoom(
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
- *  tombstone lapsed), so it is dropped with its listing. */
-async function repairRoomIndex(plane: RoomPlane, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
+ *  tombstone lapsed), so it is dropped with its listing. Its writes are steps of `call`, which a listing that needs no
+ *  repair doesn't mark as having written. */
+async function repairRoomIndex(
+  plane: RoomPlane,
+  id: string,
+  listedInc: string,
+  head: RoomHead | null,
+  call = new BackendCall(),
+): Promise<void> {
   if (head?.currentInc === listedInc) return
-  const call = new BackendCall()
   await call.write(() => plane.driver.dropIncarnation(id, listedInc))
   const live = openConfig(head)
   if (live) await call.write(() => listRoom(plane, { id, inc: live.inc, hold: live.hold }, head!.expiresAt))
