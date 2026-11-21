@@ -8,6 +8,7 @@ import type { Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ChannelCloseUnknownError } from './channelErrors.js'
+import { isAbort } from '../../shared/Abort.js'
 import { ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -107,21 +108,33 @@ for (const transport of ['sse', 'ws'] as const) {
 // learns how the channel ended, so it stays kept however short memory runs.
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, the network lost the server's last frames with the connection, and memory runs short before the page is back`, () => {
-    test('a close that timed out with nothing before its CLOSE stays kept, and the page back reads the timed-out verdict', async () => {
-      const [channel, page] = await pair(transport)
-      network.losing = true
-      await channel.close({ timeout: 100 })
-      const connections = dropConnections()
+    for (const [ending, title] of [
+      [
+        'close',
+        'a close that timed out with nothing before its CLOSE stays kept, and the page back reads the timed-out verdict',
+      ],
+      ['abort', 'an abort stays kept, and the page back reads it with its value'],
+    ] as const) {
+      test(title, async () => {
+        const [channel, page] = await pair(transport)
+        network.losing = true
+        if (ending === 'close') await channel.close({ timeout: 100 })
+        else channel.abort('bye')
+        const connections = dropConnections()
 
-      // Holding all of `maxMemory` lets go of whatever may go; the queue then holds nothing for the rows after.
-      const queue = queueMemory()
-      const held = queue.tryHold(MAX_MEMORY)
-      queue.release()
-      connections.reconnect()
-      expect(held).toBe(false)
+        // Holding all of `maxMemory` lets go of whatever may go; the queue then holds nothing for the rows after.
+        const queue = queueMemory()
+        const held = queue.tryHold(MAX_MEMORY)
+        queue.release()
+        connections.reconnect()
+        expect(held).toBe(false)
 
-      expect(await page.closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
-    })
+        const closed = await page.closed
+        if (ending === 'close')
+          expect(closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+        else expect(isAbort(closed) && closed.abortValue).toBe('bye')
+      })
+    }
   })
 }
 
