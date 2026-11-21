@@ -77,6 +77,18 @@ describe("a participant's demand", () => {
     }).toEqual({ list: false, a: true, again: true })
   })
 
+  it('keeps the tracks it showed when another track came and went between two reads', async () => {
+    const me = await joinedAmong({ sam: 1 })
+    me.onChange(() => {})
+    me._applyDemand('a', { add: ['sam'] })
+    const before = me.demand.map((entry) => entry.track)
+    me._applyDemand('0', { add: ['sam'] })
+    await Promise.resolve()
+    me._applyDemand('0', { remove: ['sam'] })
+    await Promise.resolve()
+    expect({ before, after: me.demand.map((entry) => entry.track) }).toEqual({ before: ['a'], after: ['a'] })
+  })
+
   it('shows a watcher once the room shows them', async () => {
     const { me, deliver } = await joinedIn({ sam: 1 })
     me.onChange(() => {})

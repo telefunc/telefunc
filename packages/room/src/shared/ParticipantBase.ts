@@ -372,20 +372,25 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     this.staleTracks.clear()
   }
 
-  /** `shownDemand` with `listChanges` in it, in track order: each change put in its place, or, where there are more
-   *  changes than a sort's log n, the entries sorted again. */
+  /** `shownDemand` with `listChanges` in it, in track order: the changes, sorted, merged into it in one pass. */
   private demandList(): TrackDemand[] {
-    if (this.listChanges.size > Math.log2(this.demandEntries.size + 1))
-      return [...this.demandEntries.values()].sort(byTrack)
-    const list = [...this.shownDemand]
-    for (const [key, entry] of this.listChanges) {
-      const track = publicTrack(key)
-      const at = placeOf(list, track)
-      const there = list[at]?.track === track
-      if (entry === null) {
-        if (there) list.splice(at, 1)
-      } else list.splice(at, there ? 1 : 0, entry)
+    const changes = Array.from(this.listChanges, ([key, entry]) => ({ track: publicTrack(key), entry })).sort(byTrack)
+    const list: TrackDemand[] = []
+    let next = 0
+    const addChange = ({ entry }: (typeof changes)[number]) => {
+      if (entry !== null) list.push(entry)
+      next++
     }
+    for (const shown of this.shownDemand) {
+      let change = changes[next]
+      while (change !== undefined && change.track < shown.track) {
+        addChange(change)
+        change = changes[next]
+      }
+      if (change !== undefined && change.track === shown.track) addChange(change)
+      else list.push(shown)
+    }
+    for (const change of changes.slice(next)) addChange(change)
     return list
   }
 
@@ -534,19 +539,6 @@ function watchersOf(me: LocalParticipant, tracks: readonly string[]): TracksWatc
 }
 
 /** In code-unit order, as `sort()` orders strings; no two entries share a track. */
-function byTrack(a: TrackDemand, b: TrackDemand): number {
+function byTrack(a: { track: string }, b: { track: string }): number {
   return a.track < b.track ? -1 : 1
-}
-
-/** Where `track`'s entry is in `list`, in `byTrack` order, or would go. */
-function placeOf(list: readonly TrackDemand[], track: string): number {
-  let low = 0
-  let high = list.length
-  while (low < high) {
-    const mid = (low + high) >>> 1
-    const entry = list[mid]
-    if (entry !== undefined && entry.track < track) low = mid + 1
-    else high = mid
-  }
-  return low
 }
