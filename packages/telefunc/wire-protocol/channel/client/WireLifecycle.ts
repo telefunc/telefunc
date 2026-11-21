@@ -638,7 +638,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** The server ended `channel`, as its verdict does, which the page then sends nothing more on. */
   serverEnded(channel: MuxChannel): void {
     const record = this.channels.of(channel)
-    if (record !== undefined) this.endedByServer(record)
+    // Its verdict reaches it on this connection, which it is still registered on.
+    assert(record !== undefined)
+    this.endedByServer(record)
   }
 
   /** The page owes nothing more on a channel the server ended: nothing of it is replayed or sent. */
