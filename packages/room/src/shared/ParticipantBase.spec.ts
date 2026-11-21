@@ -114,6 +114,55 @@ describe("a participant's demand", () => {
     })
   })
 
+  it('after a whole-state reset, lists only the tracks the reset names', async () => {
+    const me = await joinedAmong({ sam: 1 })
+    me.onChange(() => {})
+    me._applyDemand('a', { add: ['sam'] })
+    const before = me.demand.map((entry) => entry.track)
+    me._applyDemandState([{ track: 'b', watchers: ['sam'], pages: [] }])
+    expect({ before, after: me.demand.map((entry) => entry.track) }).toEqual({ before: ['a'], after: ['b'] })
+  })
+
+  for (const listener of ['reading', 'silent', 'none'] as const) {
+    it(`keeps no more of its tracks than it has or last listed, and nothing once it left (listener: ${listener})`, async () => {
+      const { me, deliver, endWire } = await joinedIn({ sam: 1 })
+      if (listener === 'reading') me.onChange(() => void me.demand)
+      if (listener === 'silent') me.onChange(() => {})
+      const kept = () => {
+        const sizes = ['demandEntries', 'staleTracks', 'listChanges'].map((field) => {
+          const value: unknown = Reflect.get(me, field)
+          if (!(value instanceof Map || value instanceof Set)) throw new Error(`Expected the ${field} it keeps`)
+          return value.size
+        })
+        return sizes.reduce((sum, size) => sum + size, 0)
+      }
+      const settle = async () => {
+        for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+      }
+      // 512 tracks, each wanted and then not, one at a time: it has one at most, and lists none, so it keeps that
+      // one's entry and one change of it waiting for a read at most.
+      let most = 0
+      for (let i = 0; i < 512; i++) {
+        deliver({ __r: 'demand', member: me.id, track: `t${i}`, add: ['sam'] })
+        await settle()
+        most = Math.max(most, kept())
+        deliver({ __r: 'demand', member: me.id, track: `t${i}`, remove: ['sam'] })
+        await settle()
+        most = Math.max(most, kept())
+      }
+      for (const track of ['a', 'b', 'c']) deliver({ __r: 'demand', member: me.id, track, add: ['sam'] })
+      await settle()
+      const listed = me.demand.length
+      endWire()
+      expect({ atMostTwo: most <= 2, listed, left: kept(), demand: me.demand }).toEqual({
+        atMostTwo: true,
+        listed: 3,
+        left: 0,
+        demand: [],
+      })
+    })
+  }
+
   it('is empty once it left', async () => {
     const { me, endWire } = await joinedIn({ sam: 1 })
     me.onChange(() => {})

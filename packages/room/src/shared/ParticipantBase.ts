@@ -104,8 +104,9 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private allTracksStale = false
   /** The version of its room's roster the entries were read at. */
   private demandRosterVersion = -1
-  /** The entries that changed since `shownDemand` was made, `null` for one that went. */
-  private readonly listChanges = new Map<TrackKey, TrackDemand | null>()
+  /** The entries that changed since `shownDemand` was made: each its new entry, `null` for one that went, and whether
+   *  `shownDemand` lists its track. */
+  private readonly listChanges = new Map<TrackKey, { entry: TrackDemand | null; listed: boolean }>()
   private demandChanges = 0
   private disconnectListeners: Listeners<() => unknown> | null = null
   private reconnectListeners: Listeners<() => unknown> | null = null
@@ -348,10 +349,16 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     return this.shownDemand
   }
 
-  /** @internal Who receives `track`, or any of its tracks where none is named, may have changed. */
+  /** @internal Who receives `track`, or any of its tracks where none is named, may have changed. Past as many tracks
+   *  as it has entries and watches, it reads them all again instead. */
   protected _demandStale(track?: TrackKey): void {
-    if (track === undefined) this.allTracksStale = true
-    else this.staleTracks.add(track)
+    if (this.allTracksStale) return
+    if (track !== undefined && this.staleTracks.size < this.demandEntries.size + this.watchesNow.size) {
+      this.staleTracks.add(track)
+    } else {
+      this.allTracksStale = true
+      this.staleTracks.clear()
+    }
   }
 
   /** Reads again the entries of the tracks that may have changed, and only those: every one where its room's roster
@@ -369,16 +376,32 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
       if (entry === was) continue
       if (entry === undefined) this.demandEntries.delete(key)
       else this.demandEntries.set(key, entry)
-      this.listChanges.set(key, entry ?? null)
+      // A track the list doesn't show that went again changes nothing in it.
+      const listed = this.listChanges.get(key)?.listed ?? was !== undefined
+      if (entry === undefined && !listed) this.listChanges.delete(key)
+      else this.listChanges.set(key, { entry: entry ?? null, listed })
       this.demandChanges++
     }
     this.allTracksStale = false
     this.staleTracks.clear()
   }
 
+  /** Lets go of what `demand` kept: once it left, it receives nothing. */
+  private releaseDemand(): void {
+    this.demandEntries.clear()
+    this.staleTracks.clear()
+    this.listChanges.clear()
+    this.allTracksStale = false
+    if (this.shownDemand.length === 0) return
+    this.shownDemand = NO_DEMAND
+    this.demandChanges++
+  }
+
   /** `shownDemand` with `listChanges` in it, in track order: the changes, sorted, merged into it in one pass. */
   private demandList(): TrackDemand[] {
-    const changes = Array.from(this.listChanges, ([key, entry]) => ({ track: publicTrack(key), entry })).sort(byTrack)
+    const changes = Array.from(this.listChanges, ([key, { entry }]) => ({ track: publicTrack(key), entry })).sort(
+      byTrack,
+    )
     const list: TrackDemand[] = []
     let next = 0
     const addChange = ({ entry }: (typeof changes)[number]) => {
@@ -503,7 +526,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     if (this.leftCause) return
     const ownedCause = ownLeaveCause(cause)
     this.leftCause = ownedCause
-    this._demandStale()
+    this.releaseDemand()
     // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
     const held = this.pendingInbox
     this.pendingInbox = null
