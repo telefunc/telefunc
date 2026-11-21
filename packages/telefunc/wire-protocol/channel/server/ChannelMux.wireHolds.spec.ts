@@ -551,3 +551,31 @@ test("two reopens answered with their session's kept end, both unread, naming on
     pending.abort()
   }
 })
+
+test("an app whose channel's open registers a channel the wire awaits at two indexes closes the wire mid-RECONCILE: the channel the RECONCILE attaches after that close gets a reported end", async () => {
+  const pending = new ServerChannel<string, string>()
+  const trigger = channel()
+  const after = channel()
+  const holder = wire()
+  const pendingEnds: string[] = []
+  pending.onClose((err) => void pendingEnds.push(err ? err.message : 'clean'))
+  try {
+    await holder.send(reconcile({ open: [entry(pending.id, 1)] }, 1))
+    const sessionId = holder.sessionId()
+    trigger.c.onOpen(() => getChannelMux().registerChannel(pending))
+    // `pending` again at index 2: its registration, as `trigger` opens, attaches it at 1 and then finds it held at 2,
+    // a broken page, which ends the session before `after` attaches.
+    await holder.send(
+      reconcile({ sessionId, open: [entry(pending.id, 2), entry(trigger.c.id, 0), entry(after.c.id, 3)] }, 1),
+    )
+    expect({
+      how: holder.hows(),
+      after: after.ends.map((end) => end.includes("can't read")),
+      pending: pendingEnds.map((end) => end.includes("can't read")),
+      reconciled: holder.tags().filter((tag) => tag === TAG.RECONCILED).length,
+    }).toEqual({ how: ['unreadable'], after: [true], pending: [true], reconciled: 1 })
+  } finally {
+    holder.leave()
+    pending.abort()
+  }
+})
