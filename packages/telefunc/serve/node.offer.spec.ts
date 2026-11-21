@@ -121,7 +121,11 @@ async function openPage(app: App, host = app.host): Promise<{ offer: string[] | 
       connectionKey: crypto.randomUUID(),
     },
   })
-  closers.push(async () => page.abort())
+  // The page leaves before its server, as a closed tab's page does: one whose wire drops before the server has its
+  // close reconnects to deliver it, to whatever listens on that address by then.
+  closers.push(async () => {
+    await page.close()
+  })
   expect(await page.send('page', { ack: true })).toBe('ack:page')
   const offer = app.offers[offersBefore]
   let webSocketOpened = false
