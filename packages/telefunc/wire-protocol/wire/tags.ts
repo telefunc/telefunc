@@ -1,11 +1,21 @@
-export { TAG, isWireCtrlTag, isChannelCtrlTag, isSequencedTag, passesData, replayKindOf, countsCredit }
+export {
+  TAG,
+  isWireCtrlTag,
+  isChannelCtrlTag,
+  isClosingTag,
+  isSequencedTag,
+  isPublishBody,
+  passesData,
+  replayKindOf,
+  countsCredit,
+}
 export type { ReplayKind }
 
 import { assert } from '../../utils/assert.js'
 
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  wire-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
-//   0x10–0x29  data plane (carries seq, payload varies)
+//   0x10–0x2f  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 
 const DATA_TAG_MIN = 0x10
@@ -43,6 +53,9 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
+  /** Server → client, an SSE stream's last event: the server refused a frame of the wire and closed it, as a
+   *  WebSocket's close with `WS_CLOSE_REJECTED` says. */
+  REJECTED: 0x0e as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -59,20 +72,26 @@ const TAG = {
   PUBLISH_BINARY: 0x17 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
+  /** Goes right before a PUBLISH or PUBLISH_BINARY on a subscriber's wire and names that subscriber's channel and seq
+   *  for it: the body is the same bytes for every subscriber, so its own index and seq are 0. */
+  PUBLISH_TO: 0x19 as const,
 
   // ─── Per-channel control (carries ix) ───
   /** A close request. Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
-  /** Sequenced, as CLOSE is. */
+  /** The end that follows a close sends nothing more. Sent the moment the CLOSE arrives, so a CLOSE after it from the
+   *  same end asks for a shorter deadline. Sequenced, as CLOSE is. */
   CLOSE_ACK: 0x31 as const,
   /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Client → server for `LOST` only; sequenced as CLOSE. */
+  /** Channel closed with an error, either way; a page's is `LOST`. Payload: u8 `ERROR_REASON`. Sequenced, as CLOSE. */
   ERROR: 0x33 as const,
   /** Receiver → sender: bytes consumed plus window (mod 2^32), and the last seq it has, which the replay lets go. */
   WINDOW: 0x34 as const,
-  BROADCAST_SUB: 0x35 as const,
-  BROADCAST_UNSUB: 0x36 as const,
+  /** Page → server: a broadcast's want. Payload: u32 its version, u8 bit 0 text, bit 1 binary. */
+  WANT: 0x35 as const,
+  /** Server → page: the broadcast's want at this version is in effect. Payload: u32 the version. */
+  WANTED: 0x36 as const,
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
    *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
@@ -81,7 +100,12 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
-  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within `connectTtl`. */
+  /** "My side of the close is done": its acknowledged sends are answered and its `onClose()` cleanup settled. The end
+   *  that decides the close sends its own only once it has the other's, so from it, it means the channel closed.
+   *  Sequenced, as CLOSE is. */
+  CLOSE_DONE: 0x3a as const,
+  /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
+   *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
 }
 
@@ -97,13 +121,18 @@ function isSequencedTag(tag: number): boolean {
   return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
 }
 
+/** A publish's body, which follows its head and names no channel. */
+function isPublishBody(tag: number): boolean {
+  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
+}
+
 /** Whether a frame of `tag` passes the data waiting ahead of it: not sequenced, nor FIN, which ends its wire's data. */
 function passesData(tag: number): boolean {
   return !isSequencedTag(tag) && tag !== TAG.FIN
 }
 
 function isClosingTag(tag: number): boolean {
-  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE || tag === TAG.ABORT || tag === TAG.ERROR
 }
 
 /** The replay queue of a sequenced frame; `closing` holds the frame that ends a channel, which no byte budget drops. */

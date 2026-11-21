@@ -73,7 +73,7 @@ class Liveness {
     transport.detachHeartbeat()
     const heartbeat = new Heartbeat({
       intervalMs,
-      pongTimeoutMs: pingDeadline(intervalMs),
+      pongTimeoutMs: pingDeadline(intervalMs, transport.type),
       send: () => this.beat(transport),
       onDead: () => this.owner.onWireLate(transport),
     })

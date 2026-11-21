@@ -1,4 +1,4 @@
-export { encodePublishText, decodePublishText, encodePublishBinary, decodePublishBinary }
+export { encodePublishText, decodePublishText, writePublishBinaryInfo, decodePublishBinary, PUBLISH_BINARY_HEADER }
 export type { WirePublishInfo }
 
 import { assertProtocol } from './protocolViolation.js'
@@ -29,13 +29,10 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
 
 const PUBLISH_BINARY_HEADER = 16
 
-function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
-  const view = new DataView(result.buffer)
+function writePublishBinaryInfo(frame: Uint8Array<ArrayBuffer>, at: number, info: WirePublishInfo): void {
+  const view = new DataView(frame.buffer, frame.byteOffset + at)
   view.setFloat64(0, info.seq, true)
   view.setFloat64(8, info.timestamp, true)
-  result.set(data, PUBLISH_BINARY_HEADER)
-  return result
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {

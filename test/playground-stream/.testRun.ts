@@ -23,8 +23,6 @@ import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
-    // A stream-flow pause takes 60 s to lapse, past the 60 s a test gets outside CI.
-    additionalTimeout: 30_000,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times
@@ -59,9 +57,16 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         // A test dropped an SSE stream's connection (wire-sockets.ts).
         log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+        // upgrade-e2e-test.ts's upgrade from another site's page.
+        log.logText.includes('A WebSocket upgrade from https://another-site.example was refused') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
-        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
+        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed')) ||
+        // function/e2e-test.ts's `GET //` with Upgrade, on Node: Vike 0.4.259 logs a bug of its own for it (vikejs/vike#3357, fixed in Vike 0.4.260).
+        ((cmd === 'pnpm dev' || cmd === 'pnpm preview') &&
+          log.logSource === 'stderr' &&
+          log.logText.includes('[Bug] You stumbled upon a Vike bug') &&
+          log.logText.includes('at logHttpResponse'))
       )
     },
   })
@@ -100,7 +105,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
-  testUpgrade()
+  testUpgrade(isDev)
 
   testFunction(isDev)
 

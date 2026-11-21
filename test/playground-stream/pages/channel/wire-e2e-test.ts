@@ -1,6 +1,6 @@
-export { testWire, testWireSmallReplay, testWireSlowPing, testWireShortReconnect }
+export { testWire, testWireSlowPing, testWireShortReconnect }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
@@ -10,6 +10,7 @@ import {
   runServerAction,
   cutWire,
   canCutWire,
+  countConnections,
   dropNextWebSocket,
   forceServerGc,
   holdNextSsePost,
@@ -19,12 +20,12 @@ import {
   refuseNextSsePost,
   releaseHeldSsePosts,
 } from '../../e2e-utils'
-import { withNetworkConditions } from '../../../utils'
+import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
-  overrun: { channelId: string; received: Tally; onClose: string | null } | null
   burst: { channelId: string; received: number[]; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
@@ -91,7 +92,7 @@ function testWire(isDev: boolean) {
       return channelId
     }
 
-    test(`channel: all that maxPendingBytes lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
+    test(`channel: all that maxMemory lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
       const channelId = await burstWhileOffline(5)
       await autoRetry(
         async () => {
@@ -104,17 +105,18 @@ function testWire(isDev: boolean) {
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
     })
 
-    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxPendingBytes and closes the channel with ChannelOverflowError, not a lost replay's NetworkError`, async () => {
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxMemory: it is refused, and the channel stays open`, async () => {
       const channelId = await burstWhileOffline(6)
       await autoRetry(
         async () => {
           const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.onClose).toBe('ChannelOverflowError')
+          expect(burst!.onClose).toBe(null)
           expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
         },
         { timeout: 60_000 },
       )
-      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxPendingBytes')
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
+      expectLog(sendRefusedWarning)
     })
   }
 
@@ -143,7 +145,7 @@ function testWire(isDev: boolean) {
         expect(state.end!.received).deep.equal(received('onClose:none'))
         const ss = await getCleanupState()
         expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
-        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('0')
+        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('clean')
       })
     })
 
@@ -167,7 +169,7 @@ function testWire(isDev: boolean) {
       await page.click('#wire-end-close-timeout')
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
-        expect(end!.close).toBe('1')
+        expect(end!.close).toBe('ChannelClosedError')
       })
       await cutWire()
       await page.context().setOffline(false)
@@ -186,12 +188,12 @@ function testWire(isDev: boolean) {
     })
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') {
     // MAX_CHANNELS_PER_CONNECTION
     const maxChannels = 4_096
     const connect = async () => {
       // The wire's version, as the page's `getWireUrl` names it.
-      const url = new URL('/_telefunc?wire=1', getServerUrl())
+      const url = new URL('/_telefunc?wire=3', getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
@@ -351,7 +353,7 @@ function testWire(isDev: boolean) {
     })
   }
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {
     test('channel: a 1 MB message the server sends at 1 Mbit/s as the page upgrades from SSE to WebSocket arrives, and the page moves to the WebSocket without opening another SSE stream', async () => {
       await navigate(`${getServerUrl()}/channel`)
       let sseStreams = 0
@@ -395,7 +397,7 @@ function testWire(isDev: boolean) {
       let channelId = ''
       await autoRetry(async () => {
         const { release } = await getResult<WireState>('#wire-state')
-        expect(release!.close).toBe('0')
+        expect(release!.close).toBe('clean')
         channelId = release!.channelId
       })
       // Well within reconnectTimeout (60 s), which the server waits for a page that is away.
@@ -410,13 +412,19 @@ function testWire(isDev: boolean) {
     })
   }
 
-  test('channel: a page that opened and closed 4,200 channels on one connection opens the next', async () => {
+  test('channel: a page that opened and closed 4,200 channels on one connection, each close acknowledged, opens the next', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    const connections = countConnections()
     await page.click('#wire-many')
     await autoRetry(async () => {
       const { many } = await getResult<WireState>('#wire-state')
       expect(many).deep.equal({ closed: 4_200, next: 'open' })
     })
+    // At most the one it opened for them: a page that upgrades opens its WebSocket beside its first SSE stream.
+    const opened = connections.stop()
+    if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).length === 1) {
+      expect(opened).lessThanOrEqual(1)
+    }
   })
 
   test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, every close is acknowledged on both ends, and what the page sends on a kept one as each opens arrives', async () => {
@@ -434,7 +442,7 @@ function testWire(isDev: boolean) {
     )
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
     test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
       await navigate(`${getServerUrl()}/channel`)
       await holdNextSseWire()
@@ -546,40 +554,6 @@ async function openEnd(): Promise<string> {
   return channelId
 }
 
-// Run by the lanes whose server keeps 64 KiB of each end's text for a reconnect.
-function testWireSmallReplay() {
-  for (const from of ['server', 'page'] as const) {
-    test(`channel: 256 KiB the ${from} sends without awaiting while the page is offline is more than the replay keeps: the channel closes with NetworkError on both ends, and no message after the gap arrives`, async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      await page.click('#wire-overrun-open')
-      let channelId = ''
-      await autoRetry(async () => {
-        const { overrun } = await getResult<WireState>('#wire-state')
-        expect(overrun).not.toBe(null)
-        channelId = overrun!.channelId
-        expect((await getCleanupState())[`wireOverrun_${channelId}_onOpen`]).toBe('true')
-      })
-      await page.context().setOffline(true)
-      if (from === 'server') {
-        await runServerAction(`wireOverrun_${channelId}`)
-      } else {
-        await page.click('#wire-overrun-send')
-        await cutWire()
-      }
-      await page.context().setOffline(false)
-      await autoRetry(async () => {
-        const { overrun } = await getResult<WireState>('#wire-state')
-        expect(overrun!.onClose).toBe('NetworkError')
-        const ss = await getCleanupState()
-        expect(ss[`wireOverrun_${channelId}_onClose`]).toBe('NetworkError')
-        const received: Tally = from === 'server' ? overrun!.received : JSON.parse(ss[`wireOverrun_${channelId}`]!)
-        expect(received.inOrder).toBe(true)
-        expect(received.text).lessThan(16)
-      })
-    })
-  }
-}
-
 // A server pinging every 7 s outlives, by its 14 s ping deadline, a WebSocket the page gives up at its 10 s RECONCILE deadline.
 function testWireSlowPing() {
   test("channel: a channel keeps delivering after two drops in a row, the first reconnect's answer lost, once the server closes that dead WebSocket", async () => {
@@ -603,7 +577,7 @@ function testWireSlowPing() {
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
         expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
-        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('0')
+        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('clean')
       })
     } finally {
       await proxy.close()

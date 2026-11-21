@@ -1,9 +1,9 @@
 export { testRun }
 export { testCloudflareBindings }
 
-import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
+import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { WebSocket } from 'playwright-chromium'
-import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
+import { sendRefusedWarning, testCounter, testRunClassic, upgradeStatus, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
@@ -34,6 +34,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRefusedPresence()
   testColdPublish()
   testPublishOrder()
+  testServerFirst()
 }
 
 function testCloudflareBindings() {
@@ -116,9 +117,23 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    // The channel moves to WebSocket, though +server.ts assigns config.channel after the adapter. The page opens it
+    // over SSE and upgrades once its RECONCILED arrives, so the welcome may come before the WebSocket opens.
+    await autoRetry(
+      async () => {
+        expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
+      },
+      { timeout: 10000 },
+    )
     page.off('websocket', onWebSocket)
-    // The channel goes over WebSocket, though +server.ts assigns config.channel after the adapter.
-    expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
+    // The page's own origin opened it; a page of another site may not. The Worker answers it 403, and the dev and
+    // preview server of @cloudflare/vite-plugin, which hands upgrades to the Worker, ends the connection without
+    // passing on an answer that isn't a WebSocket (its dist/index.mjs, `if (!workerWebSocket) socket.destroy()`).
+    expect(await upgradeStatus('https://another-site.example')).toBe('no answer')
+    // The server's warning comes through its own output, apart from the connection.
+    await autoRetry(() => expectLog('A WebSocket upgrade from https://another-site.example was refused'), {
+      timeout: 5000,
+    })
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {
@@ -159,10 +174,12 @@ function testChannelOversized() {
     await autoRetry(async () => {
       expect(await page.textContent('#log')).toContain('{"type":"welcome"}')
     })
+    // `sendBinary()` throws at the call: the page logs the refusal, and not the send.
     await page.click('#send-oversized-btn')
     await autoRetry(async () => {
-      expect(await page.textContent('#log')).toContain('Channel message too large')
+      expect(await page.textContent('#log')).toContain('Refused: ')
     })
+    expect(await page.textContent('#log')).not.toContain('binary: 32 MiB')
     const echoText = `echo-${Math.random()}`
     await page.fill('#echo-input', echoText)
     await page.click('#send-echo-btn')
@@ -207,7 +224,17 @@ function testChat() {
 }
 
 function testBacklog() {
-  test('Backlog: 96 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+  test('Backlog: 24 MiB the server sends nobody awaiting to a page that stops reading all go out, and arrive whole and in order once it reads, the channel open', async () => {
+    expect(await sendToStalledPage(1500)).toBe(0)
+  })
+
+  test("Backlog: of 96 MiB the same way, those past Cloudflare's default maxMemory of 64 MiB are refused, and the rest arrive in order, the channel open", async () => {
+    expect(await sendToStalledPage(6000)).greaterThan(0)
+    expectLog(sendRefusedWarning)
+  })
+
+  /** Returns how many were refused. */
+  async function sendToStalledPage(count: 1500 | 6000) {
     await page.goto(getServerUrl() + '/backlog')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -219,31 +246,32 @@ function testBacklog() {
       expect(channelId).not.toBe(null)
     })
     const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
-    await page.click('#backlog-run')
+    await page.click(`#backlog-run-${count}`)
     await autoRetry(async () => {
       expect(await (await fetch(runUrl)).json()).deep.equal({ started: true })
     })
     // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
       await fetch(runUrl, { method: 'POST' })
-      let run: { sent: number; refused: string | null } | undefined
+      let run: { sent: number; refused: number } | undefined
       await autoRetry(async () => {
         run = await (await fetch(runUrl)).json()
         expect(run!.sent).not.toBe(undefined)
       })
       return run!
     })
-    expect({ sent, refused }).deep.equal({ sent: 6000, refused: null })
+    expect(sent).toBe(count)
     await autoRetry(
       async () => {
         const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.received).toBe(6000)
+        expect(state.received).toBe(count - refused)
         expect(state.outOfOrder).toBe(0)
         expect(state.closeErr).toBe(null)
       },
       { timeout: 30_000 },
     )
-  })
+    return refused
+  }
 }
 
 function testChatMembers() {
@@ -338,8 +366,10 @@ function testRefusedPresence() {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
     await page.click('#subscribe')
+    // KV refused the presence: the subscription's `opened` rejected, and the publish made meanwhile settled.
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+      const { openedRejected, published } = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      expect({ openedRejected, published }).deep.equal({ openedRejected: true, published: true })
     })
     // Each try publishes again: the presence is written at its next refresh, within 30 s.
     await autoRetry(
@@ -363,7 +393,7 @@ async function fullPageReload() {
 }
 
 function testColdPublish() {
-  test("Broadcast: publishes past the buffer's budget while the key's first presence is written all arrive", async () => {
+  test("Broadcast: a publish a listener makes in answer to a key's first publish, as its first presence is written, arrives", async () => {
     await page.goto(getServerUrl() + '/cold-publish')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -399,4 +429,33 @@ function testPublishOrder() {
       { timeout: 30_000 },
     )
   })
+}
+
+function testServerFirst() {
+  test("Broadcast: a channel the server subscribed to after an `await` delivers every publish to its page's object", async () => {
+    // Pages on two objects, so that a subscription recorded under any one object but the page's misses on one of them.
+    for (const shard of [1, 2]) {
+      await page.goto(`${getServerUrl()}/server-first?session=${sessionTokenOfShard(shard)}`)
+      await autoRetry(async () => {
+        expect(await page.locator('#hydrated').count()).toBe(1)
+      })
+      await page.click('#server-first')
+      await autoRetry(
+        async () => {
+          expect(JSON.parse((await page.textContent('#server-first-result')) ?? 'null')).deep.equal(['p1', 'p2', 'p3'])
+        },
+        { timeout: 15_000 },
+      )
+    }
+  })
+}
+
+/** A session token the server routes to shard `shard` of the five `new Telefunc({ scale: 5 })` has. */
+function sessionTokenOfShard(shard: number): string {
+  for (;;) {
+    const token = crypto.randomUUID()
+    let hash = 0
+    for (let i = 0; i < token.length; i++) hash = (hash * 31 + token.charCodeAt(i)) >>> 0
+    if (hash % 5 === shard) return token
+  }
 }

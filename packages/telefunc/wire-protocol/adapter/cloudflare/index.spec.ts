@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
     readonly attachRequest = vi.fn()
+    readonly runInObject = vi.fn(<T>(_doName: string, run: () => T): T => run())
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
 
@@ -36,6 +37,7 @@ const mocks = vi.hoisted(() => {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     setAdapterMaxFrameBytes: vi.fn(),
+    setAdapterMaxMemory: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
     telefuncMock: vi.fn(async () => ({
       statusCode: 200,
@@ -69,12 +71,13 @@ vi.mock('crossws/adapters/cloudflare', () => ({
 }))
 
 vi.mock('../../channel/server/ws.js', () => ({
-  getTelefuncChannelHooks: vi.fn(() => ({})),
+  getTelefuncChannelOptions: vi.fn(() => ({ hooks: {} })),
 }))
 
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
+  setAdapterMaxMemory: mocks.setAdapterMaxMemory,
 }))
 
 vi.mock('../../../node/server/telefunc.js', () => ({
@@ -263,7 +266,7 @@ describe('cloudflare adapter entrypoint', () => {
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
-    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('telefunc-shard-weur-1', 'weur')
+    expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')
 
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')

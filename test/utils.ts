@@ -2,7 +2,9 @@ export { testCounter }
 export { testRunClassic }
 export { withNetworkConditions }
 export { newCDPSession }
-export { sendsOutrunWarning }
+export { sendRefusedWarning }
+export { upgradeStatus }
+export { rawRequestStatus }
 
 import {
   page,
@@ -16,9 +18,68 @@ import {
   editFile,
   editFileRevert,
 } from '@brillout/test-e2e'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { randomBytes } from 'node:crypto'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 
-/** What a server channel prints once the sends nobody awaits keep outrunning its page. */
-const sendsOutrunWarning = "A channel's `send()` calls outrun its client"
+const sendRefusedWarning = 'A channel refused a `send()`'
+
+/**
+ * The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`, or `'no answer'`
+ * where it ends the connection without one.
+ */
+function upgradeStatus(origin: string): Promise<number | undefined | 'no answer'> {
+  const url = new URL('/_telefunc', getServerUrl())
+  return new Promise((resolve, reject) => {
+    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': randomBytes(16).toString('base64'),
+        Origin: origin,
+      },
+    })
+    req.on('upgrade', (res, socket) => {
+      socket.destroy()
+      resolve(res.statusCode)
+    })
+    req.on('response', (res) => {
+      res.resume()
+      resolve(res.statusCode)
+    })
+    req.on('error', (err) => {
+      // Node's client names a connection that ended before any answer this way.
+      if (err.message === 'socket hang up') resolve('no answer')
+      else reject(err)
+    })
+    req.end()
+  })
+}
+
+/**
+ * The status the server answers a request written byte for byte with, for a request line or a `Host` no HTTP client
+ * sends (`GET //_telefunc`, `Host: a b`); `head` holds the request line and the headers, without the blank line.
+ * `'no answer'` where the server closes the connection without an answer, or sends nothing within 10 seconds.
+ */
+async function rawRequestStatus(head: string[]): Promise<number | 'no answer'> {
+  const { hostname, port } = new URL(getServerUrl())
+  const socket = connect(Number(port), hostname)
+  try {
+    await once(socket, 'connect')
+    socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
+    const first = await new Promise<Buffer | null>((resolve) => {
+      socket.once('data', resolve)
+      socket.once('close', () => resolve(null))
+      socket.setTimeout(10_000, () => resolve(null))
+    })
+    return first ? Number(first.toString('latin1').split(' ')[1]) : 'no answer'
+  } finally {
+    socket.destroy()
+  }
+}
 
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
@@ -38,8 +99,12 @@ async function withNetworkConditions<T>(conditions: NetworkConditions, run: () =
     await emulate(conditions)
     return await run()
   } finally {
-    await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
-    await cdp.detach()
+    // Detached even where lifting the throttle fails, as on a page that closed meanwhile.
+    try {
+      await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
+    } finally {
+      await cdp.detach()
+    }
   }
 }
 

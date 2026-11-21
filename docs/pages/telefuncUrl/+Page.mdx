@@ -61,3 +61,5 @@ import { config } from 'telefunc'
 // The server-side value always needs to be a URL pathname (such as '/_telefunc')
 config.telefuncUrl = '/api/_telefunc'
 ```
+
+For channels over WebSocket, also list the frontend's origin in the server's `config.channel.allowedOrigins`: see <Link href="/transport#websocket">which pages open a WebSocket</Link>.

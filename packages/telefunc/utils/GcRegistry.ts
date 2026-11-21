@@ -1,5 +1,6 @@
-export { GcRegistry }
+export { GcRegistry, getGcRegistry }
 
+import { getGlobalObject } from './getGlobalObject.js'
 import { unrefTimer } from './unrefTimer.js'
 
 type CloseFn = () => void | Promise<void>
@@ -33,7 +34,10 @@ class GcRegistry {
   private scanTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly periodicScanMs = 5000) {
-    this.finalReg = new FinalizationRegistry<Entry>((entry) => this.fireCleanup(entry))
+    this.finalReg = new FinalizationRegistry<Entry>((entry) => {
+      // Chrome 158 runs it once an iframe navigated, if its parent kept the old realm: it cleared the new page's timer.
+      if (typeof document === 'undefined' || document.defaultView !== null) this.fireCleanup(entry)
+    })
   }
 
   /** Returns what forgets `target` without closing it, once nothing is left for `close` to do. */
@@ -79,4 +83,10 @@ class GcRegistry {
       this.scanTimer = null
     }
   }
+}
+
+/** The process's one registry, which every copy of Telefunc of this version shares. It is kept under this file's key, as
+ *  this file says what `register()` returns: an older version's registry, under its own file's key, returns nothing. */
+function getGcRegistry(): GcRegistry {
+  return getGlobalObject('utils/GcRegistry.ts', () => ({ gcRegistry: new GcRegistry() })).gcRegistry
 }

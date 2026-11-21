@@ -1,6 +1,6 @@
 export { WireSender }
 
-import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
+import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import type { ServerChannel } from './ServerChannel.js'
@@ -8,6 +8,7 @@ import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { SessionRegistry } from './SessionRegistry.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
+import type { WireQueue } from '../../flowControl/server/waitingPublishes.js'
 import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
@@ -19,6 +20,8 @@ type WireSenderOptions = {
   transport: ServerTransport<unknown>
   /** The wire's ping interval, which sizes the frames its headroom sends whole. */
   pingInterval: number
+  /** The POST turn of the page's confirmations on SSE. */
+  sseFlushThrottle: number
   /** What the wire delivered. */
   deliveries: Deliveries
   /** The mux's sessions, whose channels on the wire its headroom counts. */
@@ -37,6 +40,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   private readonly transport: ServerTransport<unknown>
   /** Null on a wire that doesn't take pieces (SSE). */
   readonly pieces: WirePieces | null
+  readonly queue: WireQueue
+  private readonly sseFlushThrottle: number
   /** How long the frames that go at once wait behind what the socket holds. */
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
@@ -53,7 +58,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ wire, transport, pingInterval, deliveries, sessions, attaching }: WireSenderOptions) {
+  constructor({ wire, transport, pingInterval, sseFlushThrottle, deliveries, sessions, attaching }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
     this.pieces = transport.wholeMessages
@@ -62,9 +67,18 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
           receiver: new ServerPieceReceiver({ owner: this }),
         }
       : null
+    this.queue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
+    this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.sessions = sessions
     this.attaching = attaching
+  }
+
+  /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
+   *  throttle, or the POST ahead of it, which takes a round trip. */
+  behindAfter(roundTrip: number): number {
+    const wait = this.pieces ? WIRE_QUEUE_DELAY_MS : Math.max(this.sseFlushThrottle, roundTrip)
+    return LOSSY_CONFIRM_SLACK_MS + wait + roundTrip
   }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
@@ -145,12 +159,13 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     for (const { ix, probe } of probed) this.send(encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
-  /** What its channels' flow control lets the wire hold, less what it holds; `Infinity` if the runtime can't tell. */
+  /** What the wire may hold, less what it holds; `Infinity` if the runtime can't tell. Its data is what its channels hold,
+   *  so what passes this is what nothing else bounds: a page flooding it with what it answers at once. */
   private measureHeadroom(): number {
     const backlog = this.bufferedAmount()
     if (backlog === undefined) return Infinity
-    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const channel of this.channels()) allowed += channel._sendAllowance() + this.largestSent
+    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
+    for (const channel of this.channels()) allowed += channel.heldBytes
     return allowed - backlog
   }
 

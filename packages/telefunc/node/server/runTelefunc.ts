@@ -32,7 +32,9 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
-import { createRequestContext } from './context/requestContext.js'
+import { createRequestContext, type RequestContext } from './context/requestContext.js'
+import type { ClientLeft } from './runTelefunc/clientLeft.js'
+import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -261,27 +263,39 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
+  const requestContext = createRequestContext(httpRequestResolved.request)
+  let httpResponse: HttpResponse | undefined
   try {
-    return await runTelefunc_(httpRequestResolved)
+    httpResponse = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    return createHttpResponse({
+    httpResponse = createHttpResponse({
       ...serverError,
       err,
     })
+  } finally {
+    // A call that answers without a value ends the live values it was passed as arguments.
+    if (httpResponse?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
+    // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
+    requestContext.markComplete()
   }
+  return httpResponse
 }
 
-async function runTelefunc_({
-  request,
-  readable,
-  context,
-}: {
-  request: Request
-  readable?: StreamReadableNode
-  context?: Telefunc.Context
-}): Promise<HttpResponse> {
-  const requestContext = createRequestContext(request)
+async function runTelefunc_(
+  {
+    request,
+    readable,
+    context,
+    clientLeft,
+  }: {
+    request: Request
+    readable?: StreamReadableNode
+    context?: Telefunc.Context
+    clientLeft: ClientLeft
+  },
+  requestContext: RequestContext,
+): Promise<HttpResponse> {
   const runContext = { requestContext }
 
   {
@@ -290,6 +304,7 @@ async function runTelefunc_({
     objectAssign(runContext, {
       request,
       readable,
+      clientLeft,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
@@ -312,8 +327,8 @@ async function runTelefunc_({
     if (parsed.isMalformedRequest) {
       return createHttpResponse({ ...malformedRequest })
     }
-    if (parsed.wireResponse) {
-      return createHttpResponse(parsed.wireResponse)
+    if (parsed.isSseRequest) {
+      return createHttpResponse(parsed.sseResponse)
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -321,6 +336,7 @@ async function runTelefunc_({
       telefuncFilePath,
       telefunctionName,
       resolveRequest: parsed.resolveRequest,
+      wants: parsed.wants,
     })
   }
 
@@ -361,6 +377,9 @@ async function runTelefunc_({
     }
   }
 
+  // Each subscription the page made before this call is in effect, or its broadcast ended, before the telefunction runs.
+  if (runContext.wants) await getChannelMux().applyCallWants(request, runContext.wants)
+
   {
     assert(runContext.isValidRequest)
     const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError } =
@@ -380,10 +399,6 @@ async function runTelefunc_({
     })
   }
 
-  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
-    runContext.requestContext.markTopLevelError()
-  }
-
   if (runContext.telefunctionHasErrored) {
     if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
       return createHttpResponse({ ...shieldValidationError })
@@ -392,10 +407,7 @@ async function runTelefunc_({
   }
 
   {
-    objectAssign(runContext, {
-      abortSignal: runContext.requestContext.abortSignal,
-      useNodeStream: readable !== undefined,
-    })
+    objectAssign(runContext, { useNodeStream: readable !== undefined })
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {

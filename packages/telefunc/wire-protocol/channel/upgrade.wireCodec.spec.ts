@@ -21,10 +21,7 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   idleTimeout: 2,
   pingInterval: 3,
   maxFrameBytes: 10,
-  serverReplayBuffer: 8,
-  serverReplayBufferBinary: 9,
-  clientReplayBuffer: 4,
-  clientReplayBufferBinary: 5,
+  creditWindow: 8,
   sseFlushThrottle: 6,
   ssePostIdleFlushDelay: 7,
   transports: [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS],
@@ -38,7 +35,7 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
   })
 
-  test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
+  test('a BARRIER round-trips at one entry, and with every channel a connection may hold under the longest id', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
     expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
@@ -152,9 +149,11 @@ describe('decodeClientFrame — direction', () => {
     ['FIN', encode.fin()],
     ['READY', encode.ready({ upgradeId: 'u' })],
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
-    ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
-    ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
+    ['PUBLISH', encode.publish(JSON.stringify(1), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_BINARY', encode.publishBinary(new Uint8Array(14), { seq: 9, timestamp: 1700000000000 })],
+    ['PUBLISH_TO', encode.publishTo(0, 1)],
     ['RECONCILED', encode.reconciled(reconciled())],
+    ['WANTED', encode.wanted(0, 1)],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
@@ -180,8 +179,7 @@ describe('decodeClientFrame — direction', () => {
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
     ['BDP_PING_ACK', encode.bdpPingAck(0, 1, 0, 50)],
-    ['BROADCAST_SUB', encode.broadcastSub(0, false)],
-    ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
+    ['WANT', encode.want(0, { version: 1, text: true, binary: false })],
   ]
   test.each(clientLegal)('control: a client-sent %s passes', (_name, frame) => {
     expect(clientFrame(frame).tag).toBe(frame[0])

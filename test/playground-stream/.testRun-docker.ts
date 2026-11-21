@@ -2,7 +2,7 @@ export { testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
-import { navigate } from './e2e-utils'
+import { navigate, sleep } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -22,6 +22,21 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
+/**
+ * Waits, at most `NETWORK_SETTLE_MAX_MS`, until no IPv6 address on the host is tentative. A new interface's address stays
+ * tentative for a second or two after its container is up, and Chromium then treats it settling as a network change and
+ * fails what is in flight with `ERR_NETWORK_CHANGED`. Without `ip`, as on macOS, whose browser doesn't see Docker's
+ * interfaces, there is nothing to wait for.
+ */
+async function networkSettled() {
+  const deadline = Date.now() + NETWORK_SETTLE_MAX_MS
+  while (Date.now() < deadline && execSync('ip -6 addr show tentative 2>/dev/null || true').length > 0) {
+    await sleep(NETWORK_SETTLE_POLL_MS)
+  }
+}
+const NETWORK_SETTLE_MAX_MS = 10_000
+const NETWORK_SETTLE_POLL_MS = 50
+
 function testRunDocker() {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
@@ -31,7 +46,8 @@ function testRunDocker() {
   }
 
   run('pnpm test:docker', {
-    serverUrl: 'https://localhost:8443',
+    // Where the browser reaches Caddy: elsewhere than 8443 where the host port is Docker's to assign (compose.yaml).
+    serverUrl: process.env.TELEFUNC_DOCKER_SERVER_URL ?? 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
     tolerateExitCode: [130],
     tolerateError(log) {
@@ -56,7 +72,6 @@ function testRunDocker() {
         t.includes('The user aborted a request') ||
         t.includes('Telefunc call cancelled') ||
         t.includes('ERR_INTERNET_DISCONNECTED') ||
-        t.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         // Expected during the docker reconnect test — `restartProxy()` deliberately kills
         // Caddy at the TCP layer; the browser sees these while it retries reconnecting.
         t.includes('ERR_CONNECTION_CLOSED') ||
@@ -73,6 +88,9 @@ function testRunDocker() {
       )
     },
   })
+
+  // First, so no test has a request in flight when the stack's network settles.
+  test("the stack's network settles", networkSettled)
 
   test('home page', async () => {
     await navigate(`${getServerUrl()}/`, { waitUntil: 'load' })

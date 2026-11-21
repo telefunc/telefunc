@@ -4,7 +4,10 @@ import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_TRANSPORT,
+  LOSSY_CONFIRM_SLACK_MS,
+  WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
+  WS_CLOSE_REJECTED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
@@ -15,6 +18,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
+import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame } from './ClientConnection.js'
 import type { TransportOwner } from './WireLifecycle.js'
@@ -29,6 +33,7 @@ type WirePieces = {
   headroom: ClientHeadroom
   sender: PieceSender
   receiver: ClientPieceReceiver
+  pair: ReturnType<typeof pairPublishes>
 }
 
 type WsTransportOptions = {
@@ -69,6 +74,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const base = typeof window === 'undefined' ? undefined : window.location.href
     const url = new URL(getWireUrl(this.telefuncUrl), base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    // A WebSocket URL may have no fragment.
+    url.hash = ''
     return url.href
   }
 
@@ -188,11 +195,12 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       headroom,
       sender: headroom.sender,
       receiver: new ClientPieceReceiver({ owner: headroom }),
+      pair: pairPublishes(),
     }
   }
 
   private setupHandlers(ws: WebSocket, pieces: WirePieces): void {
-    const { downlink, headroom, sender, receiver } = pieces
+    const { downlink, headroom, sender, receiver, pair } = pieces
     this.pieces = pieces
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
@@ -200,15 +208,18 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         this.headroomChanged(sender)
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        this.heartbeat?.resetPong()
+        this.heartbeatOf(ws)?.resetPong()
         this.owner.onTransportPong(frame.ended)
-      } else this.owner.onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
+      } else {
+        const paired = pair(frame)
+        if (paired) this.owner.onTransportFrame(paired, this, byteLength, ws === this.abandoned?.ws)
+      }
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
       const raw = new Uint8Array(data as ArrayBuffer)
-      this.heartbeat?.noteReceived(raw.byteLength, now)
+      this.heartbeatOf(ws)?.noteReceived(raw.byteLength, now)
       downlink.delivered(raw.byteLength, now)
       headroom.received()
       if (!receiveMessage(receiver, raw, now, take)) ws.close()
@@ -218,9 +229,17 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner.onTransportClosed(this, { otherWireVersion: code === WS_CLOSE_WIRE_VERSION })
+      this.owner.onTransportClosed(this, {
+        otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
+        rejectedFrame: code === WS_CLOSE_REJECTED,
+      })
     }
     ws.onerror = () => {}
+  }
+
+  /** The heartbeat of `ws`'s wire; none once the page left that socket, which then says nothing of the wire in use. */
+  private heartbeatOf(ws: WebSocket): Heartbeat | null {
+    return this.ws === ws ? this.heartbeat : null
   }
 
   /** `ClientHeadroomOwner`: the live wire's sender sends what waited. */
@@ -246,8 +265,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.pieces)
-    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => frame.frame)
-    else this.pieces.headroom.send(frame.frame)
+    const { receiver } = this.pieces
+    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
+    else this.pieces.headroom.send(receiver.report(frame.frame))
+  }
+
+  /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
+  get behindAfter(): number {
+    return LOSSY_CONFIRM_SLACK_MS + WIRE_QUEUE_DELAY_MS + this.uplink.roundTrips.pathRtt
   }
 
   headroom(): number {
@@ -306,7 +331,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.pieces)
-    this.pieces.sender.send(withTook(frame, this.pieces.receiver.took), 0)
+    this.pieces.sender.send(this.pieces.receiver.report(frame), 0)
   }
 
   dispose(): void {
@@ -429,7 +454,10 @@ class PendingProbe implements ProbeWire {
       sender.heartbeat(frame.took, at)
       if (this.phase === 'reporting') this.owner.onProbePong()
       else this.settleProof(true)
-    } else if (this.phase === 'reporting') this.owner.onProbeFrame(frame, byteLength)
+    } else if (this.phase === 'reporting') {
+      const paired = this.pieces.pair(frame)
+      if (paired) this.owner.onProbeFrame(paired, byteLength)
+    }
     return true
   }
 

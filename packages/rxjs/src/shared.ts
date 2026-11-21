@@ -10,6 +10,7 @@ export {
   markSwallowed,
 }
 export type {
+  WireChannel,
   ObservableMetadata,
   SubjectMetadata,
   ObservableContract,
@@ -18,7 +19,7 @@ export type {
   ObservableMessage,
 }
 
-import type { TypeContract, ChannelBase, ShieldValidators } from 'telefunc'
+import type { TypeContract, ShieldValidators } from 'telefunc'
 import { Abort } from 'telefunc/client'
 import type { Subject, Subscriber } from 'rxjs'
 import { Observable, type Subscription } from 'rxjs'
@@ -47,6 +48,16 @@ type SubjectMetadata = {
 
 type ObservableContract = TypeContract<Observable<unknown>, Observable<unknown>, ObservableMetadata>
 type SubjectContract = TypeContract<Subject<unknown>, Subject<unknown>, SubjectMetadata>
+
+/** What the wiring uses of a channel: a `ChannelBase` that sends and receives `T` is one. */
+type WireChannel<T> = {
+  readonly isClosed: boolean
+  send(data: T): Promise<void>
+  listen(callback: (data: T) => void): unknown
+  onClose(callback: (err: Error | null) => void): unknown
+  close(): Promise<unknown>
+  abort(abortValue?: unknown, message?: string): void
+}
 
 // === Subject protocol ===
 
@@ -98,15 +109,13 @@ type ObservableMessage =
  *   the caller's responsibility (reviver/replacer) because only they know
  *   whether the Subject is safe to terminate (per-request vs potentially shared).
  */
-function wireSubject(
-  subject: Subject<unknown>,
-  channel: ChannelBase<SubjectMessage, SubjectMessage>,
-  validators?: ShieldValidators,
-) {
+function wireSubject(subject: Subject<unknown>, channel: WireChannel<SubjectMessage>, validators?: ShieldValidators) {
   // Only populated on the server side — see subjectReplacer/subjectReviver in server.ts.
   // Client side passes `undefined` since the server's emissions are trusted.
   const validateNext = validators?.get('next')
   let isProcessingRemote = false
+  /** From the call of `close()` on, nothing more comes in: neither a value nor a new subscription to forward to. */
+  let closing = false
   let remoteSub: Subscription | null = null
   let localSubscriberCount = 0
 
@@ -164,6 +173,7 @@ function wireSubject(
   }
 
   channel.listen((msg) => {
+    if (closing && (msg.t === MSG.NEXT || msg.t === MSG.SUBSCRIBE)) return
     isProcessingRemote = true
     try {
       switch (msg.t) {
@@ -203,6 +213,7 @@ function wireSubject(
 
   return {
     async close() {
+      closing = true
       remoteUnsubscribe()
       await channel.close()
     },
@@ -220,11 +231,10 @@ function wireSubject(
  * Listens for multiplexed subscription requests. Each OBS_MSG.SUBSCRIBE
  * creates a fresh observable.subscribe() — matching rxjs per-subscription semantics.
  */
-function wireSourceObservable(
-  observable: Observable<unknown>,
-  channel: ChannelBase<ObservableMessage, ObservableMessage>,
-) {
+function wireSourceObservable(observable: Observable<unknown>, channel: WireChannel<ObservableMessage>) {
   const subscriptions = new Map<number, Subscription>()
+  /** From the call of `close()` on, no value goes and no subscription starts; an end still goes. */
+  let closing = false
 
   const unsubAll = () => {
     for (const sub of subscriptions.values()) sub.unsubscribe()
@@ -234,10 +244,11 @@ function wireSourceObservable(
   channel.listen((msg) => {
     switch (msg.t) {
       case OBS_MSG.SUBSCRIBE: {
+        if (closing) break
         const id = msg.id
         const sub = observable.subscribe({
           next(v) {
-            if (channel.isClosed) return
+            if (closing || channel.isClosed) return
             channel.send({ t: OBS_MSG.NEXT, id, v })
           },
           error(v) {
@@ -272,6 +283,7 @@ function wireSourceObservable(
 
   return {
     async close() {
+      closing = true
       await channel.close()
     },
     abort(abortValue?: unknown) {
@@ -286,19 +298,20 @@ function wireSourceObservable(
  * Each subscribe() sends OBS_MSG.SUBSCRIBE with a unique id, triggering a fresh
  * server-side subscription. Messages are routed by id.
  */
-function wireProxyObservable(
-  channel: ChannelBase<ObservableMessage, ObservableMessage>,
-  validators?: ShieldValidators,
-) {
+function wireProxyObservable(channel: WireChannel<ObservableMessage>, validators?: ShieldValidators) {
   // Only populated on the server side when an Observable arrives as a telefunc arg.
   // Client side leaves `undefined` — server-emitted values are trusted.
   const validateNext = validators?.get('next')
   const subscribers = new Map<number, Subscriber<unknown>>()
   let nextId = 0
+  /** From the call of `close()` on, a value that comes is dropped; an end, and the close's own, still reach each
+   *  subscriber. */
+  let closing = false
 
   channel.listen((msg) => {
     const sub = subscribers.get(msg.id)
     if (!sub) return
+    if (closing && msg.t === OBS_MSG.NEXT) return
     switch (msg.t) {
       case OBS_MSG.NEXT:
         // Shield fail = silent drop (validator auto-logs). Same rationale as wireSubject:
@@ -346,6 +359,7 @@ function wireProxyObservable(
   return {
     observable,
     async close() {
+      closing = true
       await channel.close()
     },
     abort(abortValue?: unknown) {

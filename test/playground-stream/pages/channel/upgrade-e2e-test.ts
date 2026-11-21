@@ -8,16 +8,48 @@
 // commit from abort. The paired sse-only run is the control: no `/_telefunc` WebSocket may ever open.
 export { testUpgrade }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e2e-utils'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { Page, WebSocket, WebSocketRoute } from 'playwright-chromium'
+import { navigate, getResult, getCleanupState, resetCleanupState, serverRuntime } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
+import { rawRequestStatus, upgradeStatus } from '../../../utils'
 
 type FrameCounts = { received: number }
 
-function testUpgrade() {
+function testUpgrade(isDev: boolean) {
   const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const expectsUpgrade = transports.length > 1 && transports[transports.length - 1] === 'ws'
   const isSseOnly = transports.length === 1 && transports[0] === 'sse'
+
+  if (transports.includes('ws'))
+    test("a WebSocket upgrade from a page of another site is refused, and one from the server's own origin opens", async () => {
+      expect(await upgradeStatus('https://another-site.example')).toBe(403)
+      expect(await upgradeStatus(new URL(getServerUrl()).origin)).toBe(101)
+    })
+  if (transports.includes('ws'))
+    test("on Node a WebSocket handshake whose Host can't be read is answered 400, and on every runtime a request for another path is the app's", async () => {
+      const handshake = [
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      ]
+      // On Node only: on Bun and Deno this app's static files middleware (srvx's) parses the request's URL before
+      // Telefunc's `fetch()` sees it, and answers 500 itself.
+      if (serverRuntime() === 'node')
+        expect(await rawRequestStatus(['GET /_telefunc HTTP/1.1', 'Host: a b', ...handshake])).toBe(400)
+      const { host } = new URL(getServerUrl())
+      // On every runtime: a WebSocket handshake to a path that only begins like Telefunc's is the app's own request,
+      // answered as the app answers a path that isn't Telefunc's.
+      const appsAnswer = await rawRequestStatus(['GET /no-such-page HTTP/1.1', `Host: ${host}`])
+      expect(appsAnswer).not.toBe('no answer')
+      expect(await rawRequestStatus(['GET /_telefunc/other HTTP/1.1', `Host: ${host}`, ...handshake])).toBe(appsAnswer)
+      // In development Vike answers both with 500, as the playground has no error page, and logs that on stderr.
+      if (isDev)
+        await autoRetry(async () => {
+          expectLog(/No error page found|HTTP response ← \/(no-such-page|_telefunc\/other) 500/)
+        })
+    })
   // ws-only (['ws']): no SSE to start from, so data-on-WS is normal and asserting it would be vacuous
   // — the existing channel suite already covers pure-WS delivery. Run only the upgrade path + control.
   if (!expectsUpgrade && !isSseOnly) return
@@ -106,12 +138,90 @@ function testUpgrade() {
       page.off('websocket', onWebSocket)
     }
   })
+
+  if (!expectsUpgrade) return
+
+  // The server moves a page's publishes to the WebSocket at the barrier, and the page takes that wire over once the
+  // barrier's POST answers. Holding that answer lands a publish between the two, whole or with its body's end after.
+  for (const { bytes, what, bodyHeld } of [
+    { bytes: 1024, what: 'arrives whole', bodyHeld: false },
+    { bytes: 4 * 1024 * 1024, what: 'starts arriving', bodyHeld: true },
+  ]) {
+    test(`${label}: a publish that ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
+      const context = await page.context().browser()!.newContext()
+      const routed = await context.newPage()
+      const acrossFlip = async () => {
+        const state = JSON.parse((await routed.textContent('#channel-state'))!) as UpgradeChannelState
+        return state.acrossFlip
+      }
+      try {
+        const gate = await holdFlip(routed, bytes / 2)
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.click('#channel-test-across-flip')
+        await autoRetry(async () => expect(await acrossFlip()).not.toBe(null))
+        await gate.committed
+        gate.countFromHere()
+        await routed.evaluate((n) => (window as unknown as AcrossFlipPage).publishAcrossFlip(n), bytes)
+        void routed.evaluate(() => (window as unknown as AcrossFlipPage).sendAcrossFlip())
+        await autoRetry(() => expect(gate.passedBytes()).greaterThan(bytes / 2))
+        expect((await gate.flip()) > 0).toBe(bodyHeld)
+        await autoRetry(async () => expect((await acrossFlip())?.received).deep.equal([bytes]))
+      } finally {
+        await context.close()
+      }
+    })
+  }
 }
 
-function parseChannelTransports(raw: string | undefined): string[] {
-  if (!raw) return ['sse']
-  return JSON.parse(raw) as string[]
+/** Routes `target`'s wires through the test: the barrier's POST is answered only by `flip()`, which then passes what it
+ *  held of the page's WebSocket past `heldPast` bytes, once the page's first send after the flip shows it took the wire. */
+async function holdFlip(target: Page, heldPast: number) {
+  const held: Buffer[] = []
+  let counted = false
+  let passed = 0
+  let toPage: WebSocketRoute | undefined
+  let allowFlip: () => void
+  const flipAllowed = new Promise<void>((resolve) => (allowFlip = resolve))
+  let tookWire: () => void
+  const tookWireP = new Promise<void>((resolve) => (tookWire = resolve))
+  let serverCommitted: () => void
+  const committed = new Promise<void>((resolve) => (serverCommitted = resolve))
+  await target.route(/\/_telefunc/, async (route) => {
+    if (!route.request().postDataBuffer()?.includes('upgradeId')) return route.fallback()
+    const answer = await route.fetch()
+    serverCommitted()
+    await flipAllowed
+    await route.fulfill({ response: answer })
+  })
+  await target.routeWebSocket(/\/_telefunc/, (ws) => {
+    const server = ws.connectToServer()
+    toPage = ws
+    ws.onMessage((message) => {
+      if (Buffer.from(message as Buffer).includes('after-flip')) tookWire()
+      server.send(message)
+    })
+    server.onMessage((message) => {
+      const bytes = Buffer.from(message as Buffer)
+      if (counted && passed > heldPast) return void held.push(bytes)
+      if (counted) passed += bytes.length
+      ws.send(message)
+    })
+  })
+  return {
+    committed,
+    countFromHere: () => void (counted = true),
+    passedBytes: () => passed,
+    flip: async () => {
+      allowFlip()
+      await tookWireP
+      counted = false
+      for (const message of held) toPage!.send(message)
+      return held.length
+    },
+  }
 }
+
+type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
 
 type UpgradeChannelState = {
   connected: boolean
@@ -124,4 +234,5 @@ type UpgradeChannelState = {
   multiCh1IsMonotonic: boolean | null
   multiCh2IsMonotonic: boolean | null
   upstreamReconnectChannelId: string | null
+  acrossFlip: { received: number[] } | null
 }

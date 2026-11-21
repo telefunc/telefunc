@@ -8,19 +8,15 @@ import { createRequestReplacer } from '../../wire-protocol/values/client/request
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/channel/client/ClientChannel.js'
+import { ClientConnection } from '../../wire-protocol/channel/client/ClientConnection.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/values/types.js'
 import { CloseHandler } from '../close.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { GcRegistry } from '../../utils/GcRegistry.js'
+import { getGcRegistry } from '../../utils/GcRegistry.js'
 import { randomUuid } from '../../utils/randomUuid.js'
-
-const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 type CallContext = {
   telefuncFilePath: string
@@ -58,6 +54,9 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
+  const wants = ClientConnection.unconfirmedWants(callContext.telefuncUrl)
+  if (wants) dataMain.wants = wants
+
   const connection = getConnectionOptions(callContext)
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
@@ -84,7 +83,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         //  holds the original, so it serves as its own GC anchor.)
         const { value, close } = replaced
         assert(isObjectOrFunction(value))
-        globalObject.gcRegistry.register(value, close)
+        getGcRegistry().register(value, close)
       }
 
       {

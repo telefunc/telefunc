@@ -169,25 +169,7 @@ export default {
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
-Add to your `wrangler.jsonc`:
-
-```jsonc
-{
-  "compatibility_date": "2025-08-15", // or later
-  "compatibility_flags": ["enable_request_signal"], // a Worker's request.signal aborts when its client disconnects
-  "durable_objects": {
-    "bindings": [
-      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
-    ]
-  },
-  "kv_namespaces": [
-    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
-  ],
-  "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
-  ]
-}
-```
+The `wrangler.jsonc` it needs, with its Durable Object binding and migration, its KV namespace and its compatibility flags, is in <Link href="/stream/cloudflare#setup" />.
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 

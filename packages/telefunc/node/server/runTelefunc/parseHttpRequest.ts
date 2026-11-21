@@ -4,37 +4,29 @@ import type { Readable } from 'node:stream'
 import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
-import { getUrlPathname } from '../../../utils/getUrlPathname.js'
+import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
-import { getChannelMux } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import { carryChannel } from './carryChannel.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
-import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { queueMemory } from '../../../wire-protocol/channel/server/channelMemory.js'
+import { getGcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleStreamFlowRequest } from '../../../wire-protocol/values/server/response/StreamFlow.js'
+import { isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
-
-// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
-// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
-// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
-// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
-// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 type RunContext = {
   request: Request
@@ -42,6 +34,8 @@ type RunContext = {
    *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
    *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
   readable?: Readable
+  /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
+  clientLeft: ClientLeft
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -65,18 +59,20 @@ type ParseResult =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      /** The wants of the page's broadcasts the server hasn't confirmed to it, where there are any. */
+      wants: CallWant[] | undefined
       resolveRequest: (telefunction: Telefunction) => ResolvedRequest
-      wireResponse?: undefined
+      isSseRequest: false
       isMalformedRequest: false
     }
-  | { isMalformedRequest: false; wireResponse: SseChannelHttpResponse }
+  | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
   | { isMalformedRequest: true }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -87,29 +83,23 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable)
-    return { isMalformedRequest: false, wireResponse: sseResponse }
-  }
-  if (requestKind === REQUEST_KIND.FLOW) {
-    const { text } = await readBody(request, readable, REQUEST_KIND.TEXT)
-    return { isMalformedRequest: false, wireResponse: handleStreamFlowRequest(text) }
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft)
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
-  const mux = getChannelMux()
   const createChannel = <ClientToServer, ServerToClient>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
-    mux.registerChannel(channel)
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    channel.onClose(requestContext.trackPending())
+    carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
+  const { text, registerFile, consumeFile } = await readBody(request, readable, clientLeft, requestKind)
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
     createChannel,
-    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) =>
+      ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
   }
 
   // Routing must be known before the target telefunc module can load. Parse JSON structure only;
@@ -117,10 +107,18 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
+  const wants = wantsOf(envelope.raw)
+  if (wants === null) {
+    logParseError('Telefunc request body has unexpected `wants`', runContext)
+    return { isMalformedRequest: true }
+  }
+
   return {
     telefuncFilePath: envelope.telefuncFilePath,
     telefunctionName: envelope.telefunctionName,
     telefunctionKey: envelope.telefunctionKey,
+    wants,
+    isSseRequest: false,
     isMalformedRequest: false,
     resolveRequest(telefunction) {
       const { requestTypes } = getServerExtensionTypes()
@@ -147,9 +145,14 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
           // underlying channel/stream closes and the client releases the original.
           const wrapper = wrapProxy(value)
+          // Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
+          // instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
+          // tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
+          // It must NOT be created per-request: a per-request closure hung on the (rooted) request context
+          // pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
           // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
-          requestContext.onTopLevelError(close)
+          requestContext.onClose(getGcRegistry().register(wrapper, close))
+          requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
         },
@@ -169,6 +172,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
+  clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
@@ -178,7 +182,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new BodyReader(source)
+    const reader = new BodyReader(source, clientLeft)
     return {
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
@@ -186,7 +190,7 @@ async function readBody(
     }
   }
   return {
-    text: await request.text(),
+    text: await readText(request, clientLeft),
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
@@ -194,6 +198,17 @@ async function readBody(
           controller.error(new Error('No binary frame'))
         },
       }),
+  }
+}
+
+/** A text call's body, as the platform reads it. A read that fails as its client leaves is a truncated body, as a binary
+ *  call's is; any other failure, and one nothing explains (`noTransportEvidence`), is thrown as it is. */
+async function readText(request: Request, clientLeft: ClientLeft): Promise<string> {
+  try {
+    return await request.text()
+  } catch (err) {
+    if (clientLeft(err)) throw new StreamTruncatedError({ cause: err })
+    throw err
   }
 }
 
@@ -257,6 +272,13 @@ function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   }
 }
 
+/** The call's `wants`, of the page's broadcasts on all its connections: null where they're malformed. */
+function wantsOf(raw: object): CallWant[] | undefined | null {
+  if (!hasProp(raw, 'wants')) return undefined
+  const { wants } = raw
+  return Array.isArray(wants) && wants.every(isCallWant) ? wants : null
+}
+
 function logParseException(err: unknown, runContext: RunContext) {
   logParseError(
     ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
@@ -266,16 +288,10 @@ function logParseException(err: unknown, runContext: RunContext) {
   )
 }
 
-const VALID_STREAM_TRANSPORTS: StreamTransport[] = [
-  STREAM_TRANSPORT.BINARY_INLINE,
-  STREAM_TRANSPORT.SSE_INLINE,
-  STREAM_TRANSPORT.CHANNEL,
-]
-
 function resolveStreamTransport(parsed: object, fallback: StreamTransport): StreamTransport {
-  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport', 'string')) return fallback
-  const transport = parsed.stream.transport as StreamTransport
-  return VALID_STREAM_TRANSPORTS.includes(transport) ? transport : fallback
+  if (!hasProp(parsed, 'stream', 'object') || !hasProp(parsed.stream, 'transport')) return fallback
+  const { transport } = parsed.stream
+  return isStreamTransport(transport) ? transport : fallback
 }
 
 function isWrongMethod(runContext: { request: Request; logMalformedRequests: boolean }) {
@@ -287,7 +303,7 @@ function isWrongMethod(runContext: { request: Request; logMalformedRequests: boo
 }
 
 function assertUrl(runContext: { request: Request; serverConfig: { telefuncUrl: string } }) {
-  const urlPathname = getUrlPathname(runContext.request.url)
+  const urlPathname = getRequestPathname(runContext.request.url)
   assertUsage(
     urlPathname === runContext.serverConfig.telefuncUrl,
     `serve({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,

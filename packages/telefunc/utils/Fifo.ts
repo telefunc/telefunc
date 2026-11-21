@@ -21,6 +21,14 @@ class Fifo<T> {
     for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
   }
 
+  /** Removes the items `drops` says go, called on each in order. */
+  remove(drops: (item: T) => boolean): void {
+    const kept: T[] = []
+    for (const item of this) if (!drops(item)) kept.push(item)
+    this.items = kept
+    this.head = 0
+  }
+
   shift(): T | undefined {
     if (this.head === this.items.length) return undefined
     const item = this.items[this.head] as T

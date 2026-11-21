@@ -419,7 +419,8 @@ function bestPlateauWindow(samples: number[], k: number): number {
   return bestMean
 }
 
-/** What the servers received per second from the end of the warmup to the end of the flood, each on its own clock. */
+/** What the servers received per second, summed over the channels: each channel's server counts on its own clock, from
+ *  `WARMUP_MS` after its first receipt to as long after that receipt as the client's flood lasted (`floodMs`). */
 function serverReceiveRate(channels: { at: number; total: number }[][], floodMs: number): number {
   let rate = 0
   for (const samples of channels) {
@@ -454,9 +455,6 @@ async function measureThroughputCell(
     ),
   )
   const instanceList = opens.map((o) => o.instance)
-  // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
-  // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
-  await Promise.all(opens.map((o) => o.channel.opened))
   const binaryPayload = scenario.binary ? new Uint8Array(bytes).fill(0xab) : null
   const textPayload = scenario.binary ? null : 'x'.repeat(bytes)
 
@@ -473,6 +471,10 @@ async function measureThroughputCell(
   }
 
   try {
+    // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
+    // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
+    // Inside the `try`: a channel that fails to open leaves the others to the `finally`, which closes them.
+    await Promise.all(opens.map((o) => o.channel.opened))
     // ── Phase TX: client floods, server counts (no echoes). Workers run
     // continuously while `measureRate` waits on the local `sent` counter for the
     // flood to plateau, which only decides when the flood stops: `sent` counts
@@ -1120,14 +1122,15 @@ function Bench() {
           <strong>Throughput:</strong> {INSTANCE_COUNTS.join('/')} channels. <code>round-robin</code> uses{' '}
           <code>?bench_instances=N</code> (Caddy distributes). <code>pinned</code> uses{' '}
           <code>?bench_instance=&lt;letter&gt;</code> (fixed backend per slot). Pure one-direction measurement:{' '}
-          <strong>TX</strong> = client floods, the server's received count from the end of the warmup to the end of the
-          flood (no echoes); <strong>RX</strong> = server pushes fire-and-forget, client counts. Two sequential phases
-          per cell. Each phase burns {WARMUP_MS / 1000}s of warmup (workers running, no samples collected) so the BDP
-          credit window ramps before measurement starts. Then samples the rate every {SAMPLE_MS}ms and terminates when
-          the rate has held within {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous{' '}
-          {PLATEAU_HOLD_MS}ms window — BDP ramp produces shifting samples that can't form a plateau, so the hold-window
-          naturally waits past it. Measurement capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s
-          + MB/s. Green = best per row. Scale = top / base.
+          <strong>TX</strong> = client floods, each channel's server counts what it received (no echoes), on its own
+          clock: from the end of the warmup after its first receipt to as long after that receipt as the flood lasted;{' '}
+          <strong>RX</strong> = server pushes fire-and-forget, client counts. Two sequential phases per cell. Each phase
+          burns {WARMUP_MS / 1000}s of warmup (workers running, no samples collected) so the BDP credit window ramps
+          before measurement starts. Then samples the rate every {SAMPLE_MS}ms and terminates when the rate has held
+          within {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous {PLATEAU_HOLD_MS}ms window — BDP
+          ramp produces shifting samples that can't form a plateau, so the hold-window naturally waits past it.
+          Measurement capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s + MB/s. Green = best per
+          row. Scale = top / base.
         </p>
         <p>
           <strong>Server Push:</strong> {INSTANCE_COUNTS.join('/')} channels. Each cell: {PUSH_COUNT}-msg burst across N

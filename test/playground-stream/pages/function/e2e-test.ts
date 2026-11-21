@@ -3,7 +3,8 @@ export { testFunction }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import * as http from 'node:http'
 import * as os from 'node:os'
-import { navigate, getResult, forceServerGc, serverRuntime } from '../../e2e-utils'
+import { navigate, getResult, forceServerGc, serverRuntime, resetCleanupState, getCleanupState } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 function testFunction(isDev: boolean, inDocker = false) {
   test('function: simple greeter returns correct string', async () => {
@@ -118,7 +119,7 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   })
 
-  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('ws')) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).includes('ws')) {
     test("function: a call's channel.idleTimeout of 0 closes its connection once the callback it passed is let go", async () => {
       await navigate(`${getServerUrl()}/function`)
       const webSocket = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })
@@ -136,7 +137,8 @@ function testFunction(isDev: boolean, inDocker = false) {
   }
 
   // Node only: Bun.serve and Deno.serve hand this upgrade to the app's fetch handler (Node emits an 'upgrade' event): Deno's Vike logs a [Bug] rendering `//`, Bun gets no Response.
-  if (serverRuntime() === 'node')
+  // Not in Docker: its HTTPS edge, not Node's upgrade handler, would get the plain-http request.
+  if (serverRuntime() === 'node' && !inDocker)
     test("function: the server keeps answering after a WebSocket upgrade whose path isn't a URL", async () => {
       await navigate(`${getServerUrl()}/function`)
       await requestPath('//', {
@@ -162,10 +164,14 @@ function testFunction(isDev: boolean, inDocker = false) {
 
   test('function: a callback the server calls without awaiting it, which fails, leaves the server clean', async () => {
     await navigate(`${getServerUrl()}/function`)
+    await resetCleanupState()
     await page.click('#unawaited-run')
     await autoRetry(async () => {
       expect(await getResult<string>('#unawaited-result')).toBe('answered')
     })
+    // The failed call's answer came before the awaited one's: nothing reported it as unhandled.
+    const state = await getCleanupState()
+    expect(Object.keys(state).filter((key) => key.startsWith('unhandledRejection:'))).deep.equal([])
   })
 
   // A browser gives crypto.randomUUID() only to secure origins: HTTPS or localhost.

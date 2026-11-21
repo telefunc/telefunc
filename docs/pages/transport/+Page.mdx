@@ -24,7 +24,7 @@ config.channel.transports = ['sse', 'ws'] // default
 ```
 
 > These are **client-side** configs — separate from the following **server-side** settings:
-> - <Link href="/channel-config">`config.channel`</Link>: reconnect/idle timeouts and per-peer buffer limits
+> - <Link href="/channel-config">`config.channel`</Link>: how long a client may be gone, and what a channel may hold for it
 > - <Link href="/stream/scale#broadcast">`config.broadcast.transport`</Link>: cross-instance broadcast for multi-server deployments
 
 <ConfigWhereClient />
@@ -57,8 +57,6 @@ Controls how streaming values are delivered over HTTP.
 - **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
 - **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as <Link href="/channel">Telefunc channels</Link> do).
 
-> With `'binary-inline'` and `'sse-inline'`, a stream the page isn't reading is paused by a request from the page, which has to reach the server holding the response (<Link href="/stream/scale#sticky-sessions">sticky sessions</Link>). Where it can't, and on Cloudflare Workers, the page instead buffers that stream's chunks until it reads them. A pause lasts only while the page keeps renewing it: if the page loses that server, the stream flows again within a minute and the page buffers it.
-
 
 ## Channel transport
 
@@ -88,6 +86,29 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 - **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
+
+### WebSocket
+
+The server opens a WebSocket only for a page of its own origin: it answers an upgrade from a page of another origin with 403. A page whose transports include SSE stays on SSE. A page with `['ws']` alone can't connect: it keeps trying, as it does for a server that is down, and past <Link href="/channel-config">`reconnectTimeout`</Link> its channels end with `NetworkError`. Behind a reverse proxy that changes `Host`, have it forward the public host in `X-Forwarded-Host`. For a page on another origin than your server, list that origin:
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+// The pages are served from app.example.com, the telefunctions from api.example.com
+config.channel.allowedOrigins = ['https://app.example.com']
+```
+
+> A leading `*.` stands for any one subdomain, whoever runs it, as in `'https://*.example.com'`: use it for a domain whose every subdomain is yours. A client that isn't a browser sends no `Origin` and isn't refused.
+
+> An app shell's pages are listed by the origin the shell gives them: `'capacitor://localhost'` (Capacitor on iOS), `'tauri://localhost'` (Tauri on macOS and Linux), `'ionic://localhost'` (Ionic's web view on iOS). A page opened from a file, or in a sandboxed frame, can't be listed: it sends `null`, which any site can make its page send.
+
+> A page of your server's own host served over `http://` that opens `wss://`, as with `telefuncUrl` set to an `https://` URL, is refused in Firefox and Safari, which tell the server it is another site's page. Chrome and the other Chromium-based browsers send no such header on a WebSocket handshake ([WebKit bug 237550](https://bugs.webkit.org/show_bug.cgi?id=237550)), so there it opens. To have every browser alike, answer `http://` only with a redirect to `https://` and send `Strict-Transport-Security`, or list `'http://<your host>'`.
+
+> The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin and for the first 20 origins it refuses in 10 minutes, and the browser's console shows the failed handshake.
+
+> On Node, `installWebSocket(server)` leaves every other request with `Upgrade` to your server, as on the same server without Telefunc. With no `upgrade` listener of your own, it reaches your request handler. With one, it goes to your `upgrade` listeners, and a request none of them answers stays open: answer or close it there. Node before 22.21 and 24.9 can't hand it to your request handler: there, with no `upgrade` listener of your own, such a request is answered 404.
 
 
 

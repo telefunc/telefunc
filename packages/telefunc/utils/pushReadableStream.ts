@@ -11,14 +11,15 @@ export type { PushReadableStream }
  * Producer calls `push(chunk)` / `close()` synchronously; each chunk lands
  * directly in the stream's internal queue via `controller.enqueue`.
  * Consumers (fetch upstream, `pipeTo`) drain the queue natively — no async
- * generator, no `await` per chunk, no `new ReadableStream({ pull })` adapter.
+ * generator, no `await` per chunk.
  *
- * Backpressure is opt-in via `onPull`:
- *   - omit it (SSE upstream, client→server stream-request): `push` always
- *     returns `true`; channel-level credit bounds the producer.
- *   - wire it (inline streaming response): `push` returns the consumer's
- *     `desiredSize > 0` (false = queue full); producer awaits a deferred
- *     between `push`-returns-false and the next `onPull`.
+ * Backpressure: `push` returns whether the queue has room once the chunk is in
+ * it (`desiredSize > 0`), which is only while a read was waiting and took the
+ * chunk, and `false` once closed. `onPull` runs when the consumer wants more:
+ * a producer pacing on `push` (the server's SSE stream, an inline streaming
+ * response) waits for it after a `false`. One bounded otherwise (the page's
+ * SSE upload, by channel credit) passes no `onPull`, ignores the answer and
+ * reads `bufferedAmount`.
  *
  * `onCancel` fires once when the consumer cancels the stream (fetch
  * aborted, `pipeTo` destination errored, etc.). Producer-side `close()`

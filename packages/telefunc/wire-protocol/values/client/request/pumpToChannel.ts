@@ -1,30 +1,21 @@
 export { pumpClientProducerToChannel }
 
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
+import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { concat, textEncoder } from '../../../wire/envelope.js'
 import { ChannelClosedError } from '../../../channel/channelErrors.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../../utils/randomUuid.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { sendChunks } from '../../sendChunks.js'
 
-const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
-const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
-// A larger chunk goes in parts, each a message under every channel's frame limit (32 MiB on Cloudflare).
-const CHUNK_PART_BYTES = 8 * 1024 * 1024
 
 /**
- * Pump a single producer's chunks to the server through a dedicated ClientChannel.
+ * Pumps a single producer's chunks to the server through a channel of its own, and returns the channel's id as the
+ * metadata the request carries, with `close()` and `abort()` for the request's lifetime.
  *
- * Creates the channel, starts the pump, and returns the channel so the caller
- * can register it for abort handling.
- *
- * The pump races `cancelledPromise` against `producer.chunks.next()` so that
- * channel close / abort breaks the loop immediately.
- *
- * On abort: the abort error propagates through the race (reject, not resolve),
- * so the catch block sees it. On clean close: resolves with `{ done: true }`.
+ * The channel's end, a close or an abort, wakes the pump at once, and its error, if any, goes to `producer.cancel()`.
  */
 function pumpClientProducerToChannel(createProducer: () => StreamingProducer, connection: ConnectionOptions) {
   const channel = new ClientChannel({ channelId: randomUuid(), connection })
@@ -32,21 +23,20 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
   const producer = createProducer()
 
   let cancelled = false
-  const { promise: cancelledPromise, resolve: resolveCancelled } =
-    createDeferred<IteratorResult<Uint8Array<ArrayBuffer>>>()
-  const doCancel = (err?: Error) => {
+  const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<null>()
+  const doCancel = (err: Error | null) => {
     if (cancelled) return
     cancelled = true
-    resolveCancelled({ done: true, value: undefined as never })
-    producer.cancel(err)
+    resolveCancelled(null)
+    producer.cancel(err ?? undefined)
   }
 
   channel.onClose(doCancel)
 
-  void (async () => {
+  async function runUploadPump() {
     try {
       await channel.opened
-      await sendChunks(channel, producer, cancelledPromise, () => cancelled)
+      await sendChunks(channel, producer, cancelledPromise)
     } catch (err) {
       // A channel that ended has nothing to report: `opened` rejects with what ended it, before it opened, and
       // sendBinary with ChannelClosedError, mid-send (e.g. by abort(res)).
@@ -58,11 +48,13 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
         channel.sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
       }
     } finally {
-      doCancel()
+      doCancel(null)
       // A server that is away gets the upload's end once back, as an open channel waits for it.
       channel.close({ timeout: channel._connection.reconnectWindow() })
     }
-  })()
+  }
+
+  void runUploadPump()
 
   return {
     metadata: { channelId: channel.id },
@@ -72,26 +64,5 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
     abort() {
       channel.abort()
     },
-  }
-}
-
-/** Sends the producer's chunks, each in parts, then its end; stops at the first chunk read once cancelled. */
-async function sendChunks(
-  channel: ClientChannel,
-  producer: StreamingProducer,
-  cancelledPromise: Promise<IteratorResult<Uint8Array<ArrayBuffer>>>,
-  isCancelled: () => boolean,
-): Promise<void> {
-  while (true) {
-    const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
-    if (isCancelled()) return
-    if (done) {
-      channel.sendBinary(TAG_END)
-      return
-    }
-    for (let at = 0; at < value.byteLength; at += CHUNK_PART_BYTES) {
-      const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + CHUNK_PART_BYTES)))
-      if (pending) await pending
-    }
   }
 }

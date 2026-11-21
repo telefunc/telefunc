@@ -11,35 +11,52 @@ import type {
   ChannelCloseResult,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo } from '../channel.js'
+import { Outcome, makePublishInfo, neverOpened, stringifyValue, unsubscribeOf, type Unsubscribe } from '../channel.js'
 import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
-import type {
-  BroadcastPublishResult,
-  BroadcastAdapter,
-  BroadcastUnsubscribe,
-} from '../../broadcast/broadcastAdapter.js'
+import type { BroadcastPublishResult, BroadcastAdapter, Listening } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assertUsage } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import {
+  admitPublish,
+  fitsPublish,
+  hold,
+  letGo,
+  maxPendingBytesOf,
+  queueMemory,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { Listeners } from '../../../utils/Listeners.js'
+import { Listeners, type Registration } from '../../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
-import { ACK_STATUS, ERROR_REASON, encode } from '../../wire/frame.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { ACK_STATUS, ERROR_REASON, encode, type AckResultStatus } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { encodePublishText, encodePublishBinary } from '../../wire/publishInfo.js'
-import type { ChannelDataFrame } from '../../wire/frame.js'
+import type { ChannelDataFrame, ErrorReason } from '../../wire/frame.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'
-import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
+import { PublishBody } from './PublishBody.js'
+import { LossyDelivery } from './LossyDelivery.js'
+import type { IndexedPeer } from './IndexedPeer.js'
+import type { AttachState, Want } from '../../wire/payloads.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { isAbort } from '../../../node/server/Abort.js'
+import { Abort } from '../../../node/server/Abort.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
+const NOT_EVEN_NEWEST = 'the server could not hold even the newest message for its client'
+const FELL_BEHIND = 'its client fell behind what the server holds for it; `lossy: true` lets it skip to the newest'
+const NOT_IN_EFFECT =
+  'Broadcast closed: its client subscribed, then made a telefunction call that ended before the subscription took effect'
+const NOT_IN_EFFECT_IN_TIME =
+  'Broadcast closed: its subscription did not take effect within `connectTtl` of a telefunction call its client made after subscribing'
 
-class ServerBroadcast<T = unknown> extends ServerChannel {
+class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -53,21 +70,54 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   private adapter: BroadcastAdapter | null = null
-  private unsubBroadcast: BroadcastUnsubscribe | null = null
-  private unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
-  private peerSubscribedText = false
-  private peerSubscribedBinary = false
+  /** Its subscription to the key's publishes on its backend, while its page or a subscriber of it wants them. */
+  private textListening: Listening | null = null
+  private binaryListening: Listening | null = null
+  /** Its subscribers waiting for their kind's subscription to take effect. */
+  private readonly textWaiting = new Set<Outcome>()
+  private readonly binaryWaiting = new Set<Outcome>()
+  /** The page's want it applied last: which of the key's publishes go to the page. */
+  private pageWant: Readonly<Want> = { version: 0, text: false, binary: false }
 
-  constructor(opts: { key: string }) {
+  /** Past what its wire takes to confirm, a newer publish replaces those waiting, on the way to its page and on the page's
+   *  way up. */
+  readonly lossy: boolean
+  private readonly lossyPublishes: LossyDelivery<PublishBody> | null
+
+  constructor(opts: BroadcastChannelOptions) {
     super()
-    this.key = opts.key
+    const { key, lossy = false } = opts
+    assertUsage(typeof lossy === 'boolean', "`new BroadcastChannel()`'s `lossy` should be a boolean")
+    this.key = key
+    this.lossy = lossy
+    this.lossyPublishes = lossy
+      ? new LossyDelivery({
+          peer: () => this.peer,
+          replay: () => this._replayBuffer,
+          hand: (body) => this.lastPeer!.sendPublish(body),
+          hold: (body) => hold(this, body),
+          letGo: (body) => letGo(this, body),
+          dropReplaceable: () => this.dropUnhanded(),
+          // A broadcast's publishes count against no credit.
+          outOfCredit: () => false,
+        })
+      : null
   }
 
-  /** A publish can't be awaited per page, so a broadcast's page gets a quarter of the largest window past credit, not
-   *  what was published to it: a page that stops reading has its wire cut, and reconnects. */
-  protected override pastCreditAllowance(): number {
-    return this.sendCredit.peerByteWindowMax / 4
-  }
+  /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
+  private overflowed: string | null = null
+  /** Its abort, owed to its page: an overflow takes its place where its page would miss a message (`shed`). */
+  private owesAbort = false
+  /** While it owes its page that abort, the page's channel on the wire it reads, which the overflow then goes on. */
+  private endedOn: IndexedPeer | null = null
+  /** The page's channel on the wire it last attached on: a publish while the page is away joins the replay through it,
+   *  as one a silently dead wire lost does. */
+  private lastPeer: IndexedPeer | null = null
+  /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
+   *  those its page still wants, ahead of the close where the broadcast closed meanwhile, as a plain channel does. */
+  private beforeAttach: PublishBody[] = []
+  /** The calls waiting for its page's want to take effect, which go on once it does or the broadcast ends. */
+  private readonly callWaits = new Set<() => void>()
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
@@ -88,48 +138,61 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
-    const serialized = stringify(data)
+    const serialized = stringifyValue(data, 'publish')
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
   }
 
   override messages(options?: { signal?: AbortSignal }) {
-    return broadcastMessages<ChannelData<T>>(this, { text: this.bufferLimit, binary: this.bufferLimitBinary }, options)
+    return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
-  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
-    const remove = this.broadcastListeners.add(callback, {
-      ...options,
-      onRemove: () => this.unsubscribeUnusedBroadcasts(),
-    })
-    this.subscribeBroadcast()
-    this.unsubscribeUnusedBroadcasts()
-    return remove
+  /** In effect once its backend delivers what any server publishes to the key. */
+  subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    return this.addSubscriber(this.broadcastListeners, false, callback, options)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    this.ensureBroadcast()
-    if (!this.adapter) throw new ChannelClosedError()
     const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
   }
 
-  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): () => void {
-    if (options.signal?.aborted) return () => {}
-    this.ensureBroadcast()
-    const remove = this.broadcastBinaryListeners.add(callback, {
+  subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {
+    return this.addSubscriber(this.broadcastBinaryListeners, true, callback, options)
+  }
+
+  /** Its `opened` settles as a page's does: once the backend delivers to it what any server publishes to the key, or once
+   *  it is removed, with the end as known then where the close callbacks were called; one still registered rejects
+   *  where the broadcast ends first. One added to an ended broadcast never takes effect. */
+  private addSubscriber<L>(
+    listeners: Listeners<L>,
+    binary: boolean,
+    callback: L,
+    options: { signal?: AbortSignal },
+  ): Unsubscribe {
+    if (options.signal?.aborted) return unsubscribeOf(() => {})
+    if (this._phase === 'ended') return neverOpened(this.endError())
+    const waiting = binary ? this.binaryWaiting : this.textWaiting
+    const listening = binary ? this.binaryListening : this.textListening
+    const outcome = new Outcome()
+    // Both before the backend starts: it may deliver a message before its subscribe returns, to which a listener may end
+    // the broadcast, which settles what waits with that end.
+    if (listening && !listening.opened) outcome.settle(true)
+    else waiting.add(outcome)
+    const remove = listeners.add(callback, {
       ...options,
-      onRemove: () => this.unsubscribeUnusedBroadcasts(),
+      onRemove: () => {
+        // Removed, it can no longer take effect: once its close callbacks were called, that is the end as known now.
+        waiting.delete(outcome)
+        outcome.settle(this.lifecycle.closeFired ? this.endError() : true)
+        this.unsubscribeUnusedBroadcasts()
+      },
     })
-    this.subscribeBinaryBroadcast()
-    this.unsubscribeUnusedBroadcasts()
-    return remove
+    if (binary) this.subscribeBinaryBroadcast()
+    else this.subscribeBroadcast()
+    return unsubscribeOf(remove, outcome)
   }
 
   // --- Transport callbacks ---
@@ -146,170 +209,516 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super.dispatchDataFrame(frame)
   }
 
+  // What the publish carries is the broadcast's to hold, so its request holds only the room for its answer.
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishAckReq(text, seq))
+    return this.answerHeld(seq, 0, () => this.dispatchPublishAckReq(text, seq))
   }
 
   _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this.lifecycle.trackAck(this.dispatchPublishBinaryAckReq(data, seq))
+    return this.answerHeld(seq, 0, () => this.dispatchPublishBinaryAckReq(data, seq))
   }
 
-  private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
+  /** `listeners`: the ones a publish made now reaches, also one added while it's delivered, as a server subscriber is. */
+  private deliverBroadcastMessage(
+    serialized: string,
+    rawInfo: WirePublishInfo,
+    listeners: Iterable<Registration<BroadcastListener<T>>>,
+  ): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this.broadcastListeners.list()) {
-      try {
-        const result = cb(data, info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+    for (const { listener } of listeners) {
+      if (!listener) continue
+      if (this.callListener(listener, data, info)) return
     }
-    if (!this.peerSubscribedText) return
-    this.forwardPublish(encodePublishText(serialized, rawInfo))
+    if (!this.takesPublish(this.pageWant.text)) return this.endOverflowed()
+    const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
+    this.forwardPublish(body)
   }
 
-  private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastBinaryMessage(
+    data: Uint8Array,
+    rawInfo: WirePublishInfo,
+    listeners: Iterable<Registration<BroadcastBinaryListener>>,
+  ): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this.broadcastBinaryListeners.list()) {
-      try {
-        // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-        const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
-      } catch (err) {
-        if (this.lifecycle.handleCallbackError(err)) return
-      }
+    for (const { listener } of listeners) {
+      if (!listener) continue
+      // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
+      if (this.callListener(listener, new Uint8Array(data), info)) return
     }
-    if (!this.peerSubscribedBinary) return
-    this.forwardPublish(encodePublishBinary(data, rawInfo))
+    if (!this.takesPublish(this.pageWant.binary)) return this.endOverflowed()
+    const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
+    this.forwardPublish(body)
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away. */
-  private forwardPublish(wire: string | Uint8Array): void {
-    const binary = typeof wire !== 'string'
-    const peer = this.peer
-    if (!peer) {
-      if (binary) this.offlineBuffer.pushPublishBinary(wire)
-      else this.offlineBuffer.pushPublish(wire)
-      this.closeIfDroppedOffline(binary)
-      return
+  /** Calls `listener` with a publish; true where it threw `Abort`, which aborts the channel, so the rest get none. */
+  private callListener<D>(
+    listener: (data: D, info: ChannelPublishInfo) => unknown,
+    data: D,
+    info: ChannelPublishInfo,
+  ): boolean {
+    try {
+      const result = listener(data, info)
+      if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+    } catch (err) {
+      return this.lifecycle.handleCallbackError(err)
     }
-    if (binary) peer.sendSequenced(encode.publishBinary, wire)
-    else peer.sendSequenced(encode.publish, wire)
+    return false
   }
 
-  /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private closeIfDroppedOffline(binary: boolean): void {
-    if (!this.offlineBuffer.dropped) return
-    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-    this.endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        `Broadcast closed: more was published to its client while it was offline than config.channel.${limit} lets the server hold`,
-      ),
+  /** Whether a publish of the kind its page subscribed to (`subscribed`) is the page's. One made after its close began
+   *  is not, and costs it nothing: this is asked before the body is made, which admits it against the budget. */
+  private takesPublish(subscribed: boolean): boolean {
+    return subscribed && this._phase === 'open'
+  }
+
+  /** A publish to a page that takes it (`takesPublish`). Where admitting this body or one before it cut the channel, it
+   *  ends now and sends nothing, and the subscribers after it still get theirs. Where the server can't hold it for the
+   *  page, the page ends as one that missed it. */
+  private forwardPublish(body: PublishBody): void {
+    if (this.overflowed !== null) return this.endOverflowed()
+    if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+    if (this.lastPeer === null) return this.holdBeforeAttach(body)
+    if (this.lossyPublishes) return this.lossyPublishes.send(body)
+    this.lastPeer!.sendPublish(body)
+    const most = maxPendingBytesOf()
+    if (this.heldBytes > most) this.shed(most, this.owner)
+  }
+
+  /** Holds a publish for the page's first attach: a lossy one only the newest; past `maxPendingBytes`, none, and the
+   *  page ends as one that missed them. */
+  private holdBeforeAttach(body: PublishBody): void {
+    if (this.lossy) this.dropBeforeAttach()
+    this.beforeAttach.push(body)
+    hold(this, body)
+    if (this.heldBytes <= maxPendingBytesOf()) return
+    this.dropBeforeAttach()
+    this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
+  }
+
+  /** As its replay's `dropFromGap`, for what it holds for its first attach: all of it, where it holds more than
+   *  `toBytes` and more than one waits (any at 0). True where any went. */
+  private dropBeforeAttachFromGap(toBytes: number): boolean {
+    const mayGo = toBytes === 0 ? this.beforeAttach.length : this.beforeAttach.length - 1
+    if (mayGo <= 0 || this.heldBytes <= toBytes) return false
+    this.dropBeforeAttach()
+    return true
+  }
+
+  private dropBeforeAttach(): void {
+    for (const body of this.beforeAttach) letGo(this, body)
+    this.beforeAttach = []
+  }
+
+  /** A graceful close goes behind what waits for its page, so a lossy one first replaces that with the newest. An abort
+   *  drops what waits for a lossy one's page, and goes behind it for a reliable one (`onAbortOwed`). */
+  override close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
+    this.endOverflowed()
+    if (this._phase === 'open') this.sendNewestOnly()
+    return super.close(opts)
+  }
+
+  override abort(abortValue?: unknown, message?: string): void {
+    this.endOverflowed()
+    super.abort(abortValue, message)
+  }
+
+  /** Leaves a lossy page only the newest publish to wait for: what waits for its wire goes, and the newest is sent again. */
+  private sendNewestOnly(): void {
+    const publishes = this.lossyPublishes
+    if (publishes === null) return
+    if (this.peer !== null && publishes.held === null && this.unhanded() > 1) {
+      const newest = this._replayBuffer!.newestPublish()!
+      publishes.letWaitingGo()
+      this.peer.sendPublish(newest)
+    }
+    publishes.flush()
+  }
+
+  protected override onPageHas(lastSeq: number): void {
+    super.onPageHas(lastSeq)
+    this.lossyPublishes?.mayGo()
+  }
+
+  /** A reliable broadcast's publishes go ahead of its ABORT, as a channel's reliable sends do; a lossy one's go, with
+   *  what it held for its first attach. */
+  protected override onAbortOwed(): void {
+    this.owesAbort = true
+    this.endedOn = this.peer
+    if (!this.lossy) return
+    this.dropBeforeAttach()
+    super.onAbortOwed()
+  }
+
+  /** Its publishes that no wire has taken go, unless it ended: its replay is then what its page reads. */
+  protected override dropUnhanded(): void {
+    if (this._phase === 'ended') return
+    this.dropBeforeAttach()
+    if (this.peer) this.peer.dropUnhanded()
+    else this._replayBuffer?.dropNewestPublishes(this.unhanded())
+  }
+
+  /** Where `holder` is a lossy page this publish reaches (its key, on its object), it lets go of what the publish
+   *  replaces. */
+  private replaceIn(holder: MemoryHolder, binary: boolean): void {
+    if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
+    if (holder.owner !== this.owner) return
+    if (holder.takesPublish(binary ? holder.pageWant.binary : holder.pageWant.text)) {
+      holder.lossyPublishes.letWaitingGo()
+    }
+  }
+
+  /** How many of its newest publishes no wire has: all of them while it has no wire. Ended, those of the wire its page
+   *  reads its abort on. */
+  private unhanded(): number {
+    return (this.peer ?? this.endedOn)?.unhanded() ?? Number.POSITIVE_INFINITY
+  }
+
+  /** Its newest publish, where no wire has that yet: before its first attach, the newest it holds for that. */
+  get newestUnhanded(): PublishBody | undefined {
+    if (this._phase === 'ended' || !this._replayBuffer) return undefined
+    return (
+      this.lossyPublishes?.held ??
+      this.beforeAttach.at(-1) ??
+      (this.unhanded() === 0 ? undefined : this._replayBuffer.newestPublish())
     )
   }
 
-  protected override onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
-    if (binary) this.peerSubscribedBinary = subscribed
-    else this.peerSubscribedText = subscribed
-    if (subscribed) {
-      this.ensureBroadcast()
-      if (binary) this.subscribeBinaryBroadcast()
-      else this.subscribeBroadcast()
+  /** The request whose server its page is on: its wire's, else, till its page attaches, the call's that carried it. */
+  private get ownerRequest(): Request | undefined {
+    return this.wireRequest ?? this._callRequest
+  }
+
+  private get owner(): string | undefined {
+    return this.adapter?.ownerOf?.(this.ownerRequest)
+  }
+
+  /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
+   *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
+   *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once and the channel ends
+   *  after the call that cut it (`overflow`). Ended by its abort, it is cut the same way, and the overflow takes the
+   *  abort's place; the abort alone needs no memory, so without a gap it ends as it was going to. */
+  shed(toBytes: number, owner?: string): void {
+    const replay = this._replayBuffer
+    const ended = this._phase === 'ended'
+    if (!replay || (ended && !this.owesAbort) || (this.lossy && toBytes > 0)) return
+    if (toBytes === 0) this.lossyPublishes?.dispose()
+    const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
+    const peer = this.peer ?? this.endedOn
+    if (gap) {
+      peer?.sender.queue.dropWaitingFrom(peer.index, 'publish')
+      this.dropPendingFrames()
+    }
+    if (toBytes === 0 && !ended) this.overflow(NOT_EVEN_NEWEST, owner)
+    else if (gap) this.overflow(FELL_BEHIND, owner)
+  }
+
+  /** What it held for its first attach goes with the frames it held for that. */
+  protected override dropPendingFrames(): void {
+    this.dropBeforeAttach()
+    super.dropPendingFrames()
+  }
+
+  /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
+  protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
+    if (this.overflowed !== null) return this.endOverflowed()
+    super.sendAckRes(ackedSeq, result, status)
+  }
+
+  /** It ends after the call that cut it, so no close callback runs inside that call: at its next event (a delivery of its
+   *  key, its heartbeat, its attach, its answer, its close running out, the app's `close()` or `abort()`), a microtask
+   *  later at the latest. Only its own object can write to its page, so one cut for another `owner`'s publish waits for
+   *  that event. */
+  private overflow(why: string, owner: string | undefined): void {
+    this.overflowed ??= why
+    if (owner === this.owner) queueMicrotask(() => this.endOverflowed())
+  }
+
+  private endOverflowed(): void {
+    if (this.overflowed === null) return
+    if (this._phase !== 'ended') {
+      this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
       return
     }
+    if (!this.owesAbort) return
+    this.owesAbort = false
+    this.replaceEnd(ERROR_REASON.OVERFLOW, this.endedOn)
+    this.endedOn = null
+  }
+
+  /** Applies a want newer than the one it has: the wire and a call can each bring the page's. A closing one takes none,
+   *  as it delivers nothing more, and an ended one would listen to its backend with nothing left to stop it. */
+  protected override onPeerWant(want: Want): void {
+    if (this._phase === 'open' && want.version > this.pageWant.version) this.applyPageWant(want)
+  }
+
+  private applyPageWant(want: Want): void {
+    this.pageWant = want
+    if (want.text) this.subscribeBroadcast(true)
+    if (want.binary) this.subscribeBinaryBroadcast(true)
+    // A page that reads none of its publishes any more would only drop those still waiting for its wire.
+    if (!want.text && !want.binary) this.dropUnhanded()
     this.unsubscribeUnusedBroadcasts()
   }
 
+  /** Tells the page its want is in effect, and the calls waiting for it, where its backend delivers what any server
+   *  publishes to the key already; else that waits for the backend (`whenListening`). A page that never asked for one has
+   *  nothing to confirm. */
+  override _confirmWant(): void {
+    if (this.pageWant.version === 0 || !this.pageWantInEffect()) return
+    this.peer?.sendWanted(this.pageWant.version)
+    for (const goOn of this.callWaits) goOn()
+    this.callWaits.clear()
+  }
+
+  private pageWantInEffect(): boolean {
+    const { text, binary } = this.pageWant
+    return !(text && this.textListening?.opened) && !(binary && this.binaryListening?.opened)
+  }
+
+  /** The call waits until the want it carries is in effect, or the broadcast ended. Where the call's request goes first
+   *  (its page left, or aborted the call), or the call waited `waitAtMost` (`connectTtl`), the broadcast ends now with an
+   *  error its page reads: its telefunction runs without the subscription. */
+  override _applyCallWant(want: Want, callAborted: AbortSignal, waitAtMost: number): Promise<void> | undefined {
+    this.onPeerWant(want)
+    this._confirmWant()
+    // A want a closing broadcast didn't take never takes effect: the call runs once the broadcast ended.
+    if (want.version > this.pageWant.version) return this.closed.then(() => {})
+    return this.pageWantInEffect() ? undefined : this.inEffectOrEnded(callAborted, waitAtMost)
+  }
+
+  /** Every way the wait ends comes past its `await`, which drops its timer and abort listener. */
+  private async inEffectOrEnded(callAborted: AbortSignal, waitAtMost: number): Promise<void> {
+    const inEffect = createDeferred()
+    this.callWaits.add(inEffect.resolve)
+    const end = (message: string) => this.endWithError(ERROR_REASON.NOT_IN_EFFECT, new ChannelClosedError(message))
+    const endAborted = () => end(NOT_IN_EFFECT)
+    if (callAborted.aborted) endAborted()
+    else callAborted.addEventListener('abort', endAborted, { once: true })
+    const timer = unrefTimer(setTimeout(() => end(NOT_IN_EFFECT_IN_TIME), waitAtMost))
+    await inEffect.promise
+    clearTimeout(timer)
+    callAborted.removeEventListener('abort', endAborted)
+  }
+
   private unsubscribeUnusedBroadcasts(): void {
-    if (!this.peerSubscribedBinary && this.broadcastBinaryListeners.size === 0) {
-      this.unsubBinaryBroadcast?.()
-      this.unsubBinaryBroadcast = null
+    if (!this.pageWant.binary && this.broadcastBinaryListeners.size === 0) {
+      this.binaryListening?.unsubscribe()
+      this.binaryListening = null
     }
-    if (!this.peerSubscribedText && this.broadcastListeners.size === 0) {
-      this.unsubBroadcast?.()
-      this.unsubBroadcast = null
+    if (!this.pageWant.text && this.broadcastListeners.size === 0) {
+      this.textListening?.unsubscribe()
+      this.textListening = null
     }
   }
 
-  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
-    this.unsubBroadcast?.()
-    this.unsubBroadcast = null
-    this.unsubBinaryBroadcast?.()
-    this.unsubBinaryBroadcast = null
-    super.shutdown(err, options)
+  /** What it held for its first attach goes first, of the kinds the attach's want keeps. */
+  protected override sendHeldForAttach(peer: IndexedPeer): void {
+    if (this._phase !== 'ended') this.lastPeer = peer
+    const held = this.beforeAttach
+    this.dropBeforeAttach()
+    for (const body of held)
+      if (this.pageWant[body.frame[0] === TAG.PUBLISH ? 'text' : 'binary']) peer.sendPublish(body)
+  }
+
+  override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
+    if (this.owesAbort && this._phase === 'ended') this.endedOn = peer
+    // Attached again, what its want brings goes to its new wire at once; on a first attach, behind what was held.
+    if (this.lastPeer !== null && this._phase !== 'ended') this.lastPeer = peer
+    super._attachPeer(peer, state)
+    this.endOverflowed()
+  }
+
+  override _acknowledge(): void {
+    super._acknowledge()
+    this.endOverflowed()
+  }
+
+  /** @internal Its page needs nothing more of it: no overflow can take the abort's place, and it lets go of the wire. */
+  override _release(): void {
+    this.owesAbort = false
+    this.endedOn = null
+    super._release()
+  }
+
+  /** A wire that closed has none of its publishes: once ended, its page away is cut as an open one's (`unhanded`). */
+  override _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
+    if (this.endedOn?.sender === peer.sender) this.endedOn = null
+    super._onPeerDisconnect(peer, reconnectTimeout)
+  }
+
+  /** Where its close ran out, one that was cut ends with why, which its page reads; a close its page asked for or
+   *  answered ends gracefully. */
+  override _end(err?: Error): void {
+    if (err !== undefined && this.overflowed !== null) return this.endOverflowed()
+    super._end(err)
+  }
+
+  /** What it held for its first attach goes with the rest it buffered: an error ends it without them. */
+  protected override endWithError(reason: ErrorReason, err: Error): void {
+    if (this._phase !== 'ended') this.dropBeforeAttach()
+    super.endWithError(reason, err)
+  }
+
+  /** Its close running out is an event that ends one that was cut with why, in the timeout's place. */
+  override _sendEnding(frame: EndingFrame): void {
+    if (frame.kind === 'timedOut' && this.overflowed !== null) return this.endOverflowed()
+    super._sendEnding(frame)
+  }
+
+  override _finalize(err: Error | undefined): void {
+    if (this.endsPageGone) this.dropBeforeAttach()
+    this.lossyPublishes?.dispose()
+    this.lastPeer = null
+    this.textListening?.unsubscribe()
+    this.textListening = null
+    this.binaryListening?.unsubscribe()
+    this.binaryListening = null
+    super._finalize(err)
+    // What waits gets the end: one its close callbacks removed or added too.
+    const endError = this.endError()
+    settleAll(this.textWaiting, endError)
+    settleAll(this.binaryWaiting, endError)
+    for (const goOn of this.callWaits) goOn()
+    this.callWaits.clear()
     this.broadcastListeners.clear()
     this.broadcastBinaryListeners.clear()
   }
 
   // --- Internal broadcast helpers ---
 
-  private ensureBroadcast(): void {
-    if (this.adapter) return
-    this.adapter = getBroadcastAdapter()
+  /** The installed adapter, which the channel keeps from its first use. */
+  private broadcastAdapter(): BroadcastAdapter {
+    this.adapter ??= getBroadcastAdapter()
+    return this.adapter
   }
 
-  private subscribeBroadcast(): void {
-    if (this.unsubBroadcast) return
-    assert(this.adapter)
-    this.unsubBroadcast = this.adapter.subscribe(
-      this.key,
-      (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
-      this.wireRequest,
+  /** `forPage`: a subscription its backend refuses at once fails as one it gives up later does (`whenListening`),
+   *  where a server subscriber's `subscribe()` throws the refusal instead. */
+  private subscribeBroadcast(forPage = false): void {
+    if (this.textListening) return
+    this.textListening = starting()
+    this.startListening(this.textListening, this.broadcastListeners, this.textWaiting, forPage, () =>
+      this.broadcastAdapter().subscribe(
+        this.key,
+        Object.assign(
+          (serialized: string, rawInfo: WirePublishInfo) =>
+            this.deliverBroadcastMessage(serialized, rawInfo, this.broadcastListeners.live()),
+          // A publish that waits goes to the listeners there are when it's made.
+          {
+            taken: () => {
+              const listeners = this.broadcastListeners.list()
+              return (serialized: string, rawInfo: WirePublishInfo) =>
+                this.deliverBroadcastMessage(serialized, rawInfo, listeners)
+            },
+          },
+        ),
+        this.ownerRequest,
+      ),
     )
   }
 
-  private subscribeBinaryBroadcast(): void {
-    if (this.unsubBinaryBroadcast) return
-    assert(this.adapter)
-    this.unsubBinaryBroadcast = this.adapter.subscribeBinary(
-      this.key,
-      (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
-      this.wireRequest,
+  private subscribeBinaryBroadcast(forPage = false): void {
+    if (this.binaryListening) return
+    this.binaryListening = starting()
+    this.startListening(this.binaryListening, this.broadcastBinaryListeners, this.binaryWaiting, forPage, () =>
+      this.broadcastAdapter().subscribeBinary(
+        this.key,
+        Object.assign(
+          (data: Uint8Array, rawInfo: WirePublishInfo) =>
+            this.deliverBroadcastBinaryMessage(data, rawInfo, this.broadcastBinaryListeners.live()),
+          {
+            taken: () => {
+              const listeners = this.broadcastBinaryListeners.list()
+              return (data: Uint8Array, rawInfo: WirePublishInfo) =>
+                this.deliverBroadcastBinaryMessage(data, rawInfo, listeners)
+            },
+          },
+        ),
+        this.ownerRequest,
+      ),
     )
+  }
+
+  /** Starts `listening`, which holds its kind's place while its backend starts: a message the backend delivers meanwhile
+   *  may add a subscriber of the kind, which waits in `waiting` with the others, or end the broadcast, or remove the
+   *  kind's last subscriber, either of which stops it once started. Where a server subscriber's start throws, the place
+   *  is given back, and the kind's subscribers, which all came for a start of the key that failed, get the error and are
+   *  removed. */
+  private startListening<L>(
+    listening: Listening,
+    listeners: Listeners<L>,
+    waiting: Set<Outcome>,
+    forPage: boolean,
+    subscribe: () => Listening,
+  ): void {
+    let started: Listening
+    try {
+      started = listeningOrFailure(forPage, subscribe)
+    } catch (err) {
+      if (this.textListening === listening) this.textListening = null
+      if (this.binaryListening === listening) this.binaryListening = null
+      settleAll(waiting, err instanceof Error ? err : new Error(String(err)))
+      listeners.clear()
+      throw err
+    }
+    listening.unsubscribe = started.unsubscribe
+    if (!this.isListening(listening)) return listening.unsubscribe()
+    listening.opened = started.opened
+    if (started.opened) void this.whenListening(listening, started.opened, waiting)
+    else settleAll(waiting, true)
+  }
+
+  private isListening(listening: Listening): boolean {
+    return this.textListening === listening || this.binaryListening === listening
+  }
+
+  /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
+   *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
+   *  broadcast ends: with the backend's error on the server, reported as a server error, and on its page as a
+   *  subscription that didn't take effect; every `opened` waiting rejects with that end. One removed meanwhile left `waiting` at its removal. */
+  private async whenListening(listening: Listening, opened: Outcome, waiting: Set<Outcome>): Promise<void> {
+    try {
+      await opened.promise
+    } catch (err) {
+      if (!this.isListening(listening)) return
+      handleCallbackBug(err)
+      return this.endWithError(ERROR_REASON.NOT_IN_EFFECT, err instanceof Error ? err : new Error(String(err)))
+    }
+    if (!this.isListening(listening)) return
+    listening.opened = undefined
+    settleAll(waiting, true)
+    this._confirmWant()
   }
 
   private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publish(this.key, serialized))
+    return receiptOf(this.key, this.broadcastAdapter().publish(this.key, serialized))
   }
 
   private publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this.adapter)
-    return receiptOf(this.key, this.adapter.publishBinary(this.key, data))
+    return receiptOf(this.key, this.broadcastAdapter().publishBinary(this.key, data))
   }
 
   private async dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const validateData = this._validators.get('data')
-      if (validateData) {
-        const data = parse(serialized) as ChannelData<T>
-        const result = validateData(data)
-        // `shield-error` status lets the client reject its `publish()` promise with a branded
-        // ShieldValidationError — same identity every other shield-fail surface produces.
-        if (result !== true) {
-          this.sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
-          return
-        }
-      }
-      const result = await this.publishBroadcast(serialized)
-      this.sendAckRes(seq, stringify(result))
+      const verdict = validateData ? validateData(parse(serialized) as ChannelData<T>) : true
+      // `shield-error` status lets the client reject its `publish()` promise with a branded
+      // ShieldValidationError — same identity every other shield-fail surface produces.
+      if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
+      const receipt = await this.publishBroadcast(serialized)
+      this.sendAckRes(seq, stringify(receipt))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 
   private async dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
-      this.ensureBroadcast()
       const result = await this.publishBinaryBroadcast(data)
       this.sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this.lifecycle.handleCallbackError(err)) return
-      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.answerFailed(seq, err)
     }
   }
 }
@@ -321,7 +730,7 @@ type BroadcastChannel<T = unknown> = {
   readonly id: string
   readonly isClosed: boolean
   readonly opened: Promise<void>
-  readonly closed: Promise<void>
+  readonly closed: Promise<ChannelCloseResult>
   messages(options?: { signal?: AbortSignal }): AsyncIterableIterator<
     ({ type: 'text'; data: ChannelData<T> } | { type: 'binary'; data: Uint8Array }) & { info: ChannelPublishInfo }
   >
@@ -329,19 +738,64 @@ type BroadcastChannel<T = unknown> = {
     data: ChannelData<T>
     ack: unknown
   }
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): () => void
+  /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
+   *  publishes to the key (`opened`): while the broadcast backend is unreachable, that waits, and where the backend gives
+   *  it up, the broadcast ends: with its error on the server, and on its page with a `ChannelClosedError` that says its
+   *  subscription didn't take effect. A telefunction the page calls after `subscribe()` runs once the
+   *  subscription is in effect, or once the broadcast ended.
+   *
+   *  https://telefunc.com/channel#chat-example */
+  subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): () => void
-  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): void
-  onOpen(callback: () => void, options?: { signal?: AbortSignal }): void
+  /** As `subscribe()`, for binary publishes. */
+  subscribeBinary(callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe
+  onClose(callback: ChannelCloseCallback, options?: { signal?: AbortSignal }): () => void
+  onOpen(callback: () => void, options?: { signal?: AbortSignal }): () => void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void
 }
 
+type BroadcastChannelOptions = {
+  key: string
+  /**
+   * Where only the newest message matters: a client that keeps up gets every message, and one that falls behind skips
+   * to the newest, with `info.seq` jumping over what it skipped. This channel's client skips whoever publishes, while a
+   * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
+   * the server holds for it.
+   *
+   * https://telefunc.com/channel#skip-to-the-newest
+   *
+   * @default false
+   */
+  lossy?: boolean
+}
+
 const BroadcastChannel = ServerBroadcast as {
-  new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+  new <T = unknown>(opts: BroadcastChannelOptions): BroadcastChannel<T>
+}
+
+const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
+  /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
+  publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
+})
+
+function bodyOf<T>(
+  encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
+  data: T,
+  info: WirePublishInfo,
+  owner: string | undefined,
+  replace: (holder: MemoryHolder) => void,
+): PublishBody {
+  let body = globalObject.publishBodies.get(info)
+  if (!body) {
+    body = new PublishBody(encodeBody(data, info))
+    admitPublish(body, owner, replace)
+    globalObject.publishBodies.set(info, body)
+  }
+  return body
 }
 
 /** The adapter's receipt as the public one, carrying its key like a subscriber's `info`. */
@@ -362,44 +816,35 @@ function receiptOf(
 }
 
 const Broadcast = {
+  /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
-    const serialized = stringify(data)
+    const serialized = stringifyValue(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
-  subscribe<U = unknown>(
-    key: string,
-    callback: BroadcastListener<U>,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
+  /** Receive `(data, info)` for each publish to `key`, in effect once it gets what any server publishes to `key`. */
+  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribe(key, (serialized, info) => {
-          const data = parse(serialized) as ChannelData<U>
-          callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return unsubscribeOf(() => {})
+    const listening = adapter.subscribe(key, (serialized, info) => {
+      const data = parse(serialized) as ChannelData<U>
+      callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return removedOnAbort(listening, options?.signal)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     const adapter = getBroadcastAdapter()
     return receiptOf(key, adapter.publishBinary(key, data))
   },
-  subscribeBinary(
-    key: string,
-    callback: BroadcastBinaryListener,
-    options?: { signal?: AbortSignal },
-  ): BroadcastUnsubscribe {
+  /** As `subscribe()`, for binary publishes. */
+  subscribeBinary(key: string, callback: BroadcastBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
-    return subscribeWithSignal(
-      () =>
-        adapter.subscribeBinary(key, (data, info) => {
-          // A copy of its own, as a `BroadcastChannel` listener gets.
-          callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
-        }),
-      options,
-    )
+    if (options?.signal?.aborted) return unsubscribeOf(() => {})
+    const listening = adapter.subscribeBinary(key, (data, info) => {
+      // A copy of its own, as a `BroadcastChannel` listener gets.
+      callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
+    })
+    return removedOnAbort(listening, options?.signal)
   },
 }
 
@@ -418,19 +863,45 @@ function callStaticListener<D>(
 }
 
 function reportStaticListenerError(err: unknown): void {
-  if (!isAbort(err)) handleCallbackBug(err)
+  if (!(err instanceof Abort)) handleCallbackBug(err)
 }
 
-function subscribeWithSignal(subscribe: () => () => void, { signal }: { signal?: AbortSignal } = {}): () => void {
-  if (signal?.aborted) return () => {}
-  let unsubscribe: (() => void) | undefined = subscribe()
-  const remove = () => {
-    const current = unsubscribe
-    unsubscribe = undefined
-    signal?.removeEventListener('abort', remove)
-    current?.()
+/** The subscription `subscribe` starts; where it throws and `orFailure`, one whose `opened` rejects with that. */
+function listeningOrFailure(orFailure: boolean, subscribe: () => Listening): Listening {
+  try {
+    return subscribe()
+  } catch (err) {
+    if (!orFailure) throw err
+    // The broadcast it fails reports it (`whenListening`).
+    return { unsubscribe: () => {}, opened: Outcome.failed(err instanceof Error ? err : new Error(String(err))) }
   }
-  signal?.addEventListener('abort', remove, { once: true })
+}
+
+/** A subscription its backend is starting: not in effect yet, with nothing to stop. */
+function starting(): Listening {
+  return { unsubscribe: () => {}, opened: new Outcome() }
+}
+
+function settleAll(waiting: Set<Outcome>, outcome: true | Error): void {
+  for (const opened of waiting) opened.settle(outcome)
+  waiting.clear()
+}
+
+/** Unsubscribes once `signal` aborts, at once if it aborted while subscribing, or when the returned function runs; its
+ *  `opened` resolves once the subscription is in effect or removed, and rejects where its backend failed it first. */
+function removedOnAbort({ unsubscribe, opened, removed }: Listening, signal: AbortSignal | undefined): Unsubscribe {
+  const outcome = opened && new Outcome(opened)
+  let current: (() => void) | undefined = unsubscribe
+  const remove = () => {
+    const pending = current
+    current = undefined
+    signal?.removeEventListener('abort', remove)
+    // Ahead of the transport's remover, which may fail the wait it abandons.
+    outcome?.settle(opened?.failure ?? true)
+    pending?.()
+  }
+  // Off `signal` once the adapter removed the subscription itself, as when the app removes it.
+  signal?.addEventListener('abort', remove, { once: true, signal: removed })
   if (signal?.aborted) remove()
-  return remove
+  return unsubscribeOf(remove, outcome)
 }
