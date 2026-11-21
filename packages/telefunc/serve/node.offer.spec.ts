@@ -1,12 +1,13 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 import { once } from 'node:events'
-import { createServer, request as httpRequest, Server } from 'node:http'
+import { createServer, type IncomingMessage, request as httpRequest, Server } from 'node:http'
 import { connect, createServer as createTcpServer, type Socket } from 'node:net'
 import { serve as honoServe } from '@hono/node-server'
 import { Hono } from 'hono'
 import type { Duplex } from 'node:stream'
 import { Telefunc } from './node.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { hasProp } from '../utils/hasProp.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
@@ -174,9 +175,12 @@ async function closeServer(server: Server | ReturnType<typeof createTcpServer>, 
   await closed
 }
 
-/** A page opens a channel through `host` (the app's, or a proxy's in front of it): the transports its wire is offered, and
- *  whether its WebSocket opened. */
-async function openPage(app: App, host = app.host): Promise<{ offer: string[] | undefined; webSocketOpened: boolean }> {
+/** A page opens a channel through `host` (the app's, or a proxy's in front of it), and its first send is answered: the
+ *  transports its wire is offered. */
+async function connectPage(
+  app: App,
+  host = app.host,
+): Promise<{ page: ClientChannel<string, string>; offer: string[] | undefined }> {
   const offersBefore = app.offers.length
   const serverChannel = new ServerChannel<string, string>()
   serverChannel.listen((data) => `ack:${data}`)
@@ -196,7 +200,12 @@ async function openPage(app: App, host = app.host): Promise<{ offer: string[] | 
     await page.close()
   })
   expect(await page.send('page', { ack: true })).toBe('ack:page')
-  const offer = app.offers[offersBefore]
+  return { page, offer: app.offers[offersBefore] }
+}
+
+/** A page opens a channel through `host`: the transports its wire is offered, and whether its WebSocket opened. */
+async function openPage(app: App, host = app.host): Promise<{ offer: string[] | undefined; webSocketOpened: boolean }> {
+  const { offer } = await connectPage(app, host)
   let webSocketOpened = false
   if (offer?.includes('ws')) {
     await expect
@@ -231,6 +240,36 @@ test("a page opened after the app removed Telefunc's upgrade listener is offered
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
   expect(webSockets.get(app.host)?.length).toBe(opened)
 })
+
+// Node has it from 22.21 and 24.9; its typings here don't.
+const nodeHasTheCallback = hasProp(createServer(), 'shouldUpgradeCallback', 'function')
+/** The app's own `shouldUpgradeCallback`, which upgrades only its own WebSocket server's path. */
+const appsCallback = (req: IncomingMessage) => req.url === '/app-ws'
+
+test.runIf(nodeHasTheCallback)(
+  "a page opened while the app's own `shouldUpgradeCallback` is in place of Telefunc's is offered SSE alone",
+  async () => {
+    const app = await fetchApp()
+    app.telefunc.installWebSocket(app.server)
+    // What an app's `server.shouldUpgradeCallback = …` does, which the typings here don't know.
+    Reflect.set(app.server, 'shouldUpgradeCallback', appsCallback)
+    expect((await connectPage(app)).offer).toEqual(['sse'])
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "`installWebSocket()` after the app put its own `shouldUpgradeCallback` in place of Telefunc's moves the next page to WebSocket, and removing Telefunc's listener gives the app's callback back",
+  async () => {
+    const app = await fetchApp()
+    app.telefunc.installWebSocket(app.server)
+    Reflect.set(app.server, 'shouldUpgradeCallback', appsCallback)
+    app.telefunc.installWebSocket(app.server)
+    expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+    app.server.removeAllListeners('upgrade')
+    expect(hasProp(app.server, 'shouldUpgradeCallback') && app.server.shouldUpgradeCallback).toBe(appsCallback)
+  },
+  20_000,
+)
 
 test('of two apps in one process, only the one with an upgrade listener offers WebSocket', async () => {
   const a = await fetchApp()

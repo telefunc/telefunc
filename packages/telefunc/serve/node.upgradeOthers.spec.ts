@@ -165,6 +165,17 @@ test.runIf(nodeHasTheCallback)(
   },
 )
 
+test.runIf(nodeHasTheCallback)(
+  "removing Telefunc's upgrade listener leaves the `shouldUpgradeCallback` the app set after Telefunc's WebSocket",
+  async () => {
+    const { server: s } = await server({ telefunc: true })
+    const later = (req: IncomingMessage) => req.url === '/app-ws'
+    Reflect.set(s, 'shouldUpgradeCallback', later)
+    s.removeAllListeners('upgrade')
+    expect(hasProp(s, 'shouldUpgradeCallback') && s.shouldUpgradeCallback).toBe(later)
+  },
+)
+
 // Node before 22.21 and 24.9 has no `shouldUpgradeCallback`: it hands every request with `Upgrade` to the `upgrade`
 // listeners once there is one.
 test.skipIf(nodeHasTheCallback)(
