@@ -434,10 +434,11 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       expect(reply).toBe('{"kind":"conflict"}')
     })
 
-    it(`${name}: an exchange that writes a counter cell and counts it counts from what it wrote`, async () => {
+    it(`${name}: an exchange that writes a counter cell and counts it is a script error`, async () => {
       const store = stores.find((candidate) => candidate.name === name)
       if (store === undefined) throw new Error(`${name} didn't start`)
-      // The check before the first write reads the counter at 1; the exchange then writes it at 5 and counts it by 1.
+      // No call of Telefunc's counts a cell it also writes: a count takes the cell only as the check before the first
+      // write read it, and the write left none to take.
       const keys = ['head', 'rev', 'manifest', 'index', 'values', 'versions'].map((part) => `written-count:${part}`)
       const [head, , , , values] = keys
       if (head === undefined || values === undefined) throw new Error('no keys')
@@ -446,17 +447,13 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       const written = '{"value":5,"changedAt":2}'
       const argv = ['i', '1', '0', '1', 'counter', 'set', written, 'counter', '1', '']
 
-      const reply = await store.admin.eval(REDIS_COMMANDS.cellsExchange.lua, keys.length, ...keys, ...argv)
-      const stored = await store.admin.hget(values, 'counter')
+      const reply = await store.admin.eval(REDIS_COMMANDS.cellsExchange.lua, keys.length, ...keys, ...argv).then(
+        () => 'replied',
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      )
       await store.admin.del(...keys)
 
-      expect({
-        reply: Array.isArray(reply) ? reply.slice(0, 3) : reply,
-        stored: stored?.match(/"value":(\d+)/)?.[1],
-      }).toEqual({
-        reply: ['committed', 'counter', '6'],
-        stored: '6',
-      })
+      expect(reply).toContain('a count of counter had no check before the first write')
     })
 
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {

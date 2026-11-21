@@ -254,7 +254,8 @@ return {seq, ts}
 // changedAt to `reply` (see CellCount).
 //   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them
 // `tf_checked`: the counter cells the checks before the first write read, by key: `{ counter = <decoded> }`, or `{}`
-// where the cell was absent. A cell the script writes leaves it, so a later count reads what the write left.
+// where the cell was absent. A count takes its cell from there, and only from there: a cell the script writes leaves it,
+// so no script counts a cell it wrote, or counts one twice.
 const CELL_WRITES_LUA = `
 local tf_checked = {}
 local function tf_write(key, value, version)
@@ -277,17 +278,11 @@ local function tf_cell_writes_allowed()
   tf_allowed('HDEL', KEYS[5], '')
   tf_allowed('HDEL', KEYS[6], '')
   tf_allowed('ZREM', KEYS[4], '')
-  tf_allowed('HGET', KEYS[5], '')
 end
 local function tf_count(key, delta, create, version, now, reply)
   local checked = tf_checked[key]
-  local counter
-  if checked then
-    counter = checked.counter
-  else
-    local raw = redis.call('HGET', KEYS[5], key)
-    counter = raw and cjson.decode(raw)
-  end
+  if not checked then error('a count of ' .. key .. ' had no check before the first write') end
+  local counter = checked.counter
   local stored = counter ~= nil
   if not counter and create then counter = { value = 0 } end
   if not counter then return end
