@@ -1,5 +1,6 @@
 export { markRequestsOfServer, serverOfRequest }
 
+import type { EventEmitter } from 'node:events'
 import { IncomingMessage } from 'node:http'
 import { Http2ServerRequest } from 'node:http2'
 import type { HttpServer } from './nodeUpgrades.js'
@@ -23,13 +24,15 @@ function markRequestsOfServer(server: HttpServer): void {
   markingServers.add(server)
   const token = crypto.randomUUID()
   if (server.listening) serverOfToken.set(token, server)
-  const emit = server.emit
-  Reflect.set(server, 'emit', function (this: unknown, ...args: unknown[]): unknown {
-    if (args[0] === 'request') markRequest(args[1], token)
-    else if (args[0] === 'listening') serverOfToken.set(token, server)
-    else if (args[0] === 'close') serverOfToken.delete(token)
-    return Reflect.apply(emit, this, args)
-  })
+  // The two server classes overload `emit` apart; as the `EventEmitter` each one is, it has one signature.
+  const events: EventEmitter = server
+  const emit = events.emit
+  events.emit = function (this: EventEmitter, event: string | symbol, ...args: unknown[]): boolean {
+    if (event === 'request') markRequest(args[0], token)
+    else if (event === 'listening') serverOfToken.set(token, server)
+    else if (event === 'close') serverOfToken.delete(token)
+    return emit.call(this, event, ...args)
+  }
 }
 
 /** After whatever the client sent under that name, as frameworks build a `Request` off `rawHeaders` or `headers`. */
