@@ -415,6 +415,22 @@ test("a page that sends the token of the docs' Hono app to a Fetch-only app besi
   expect(honoUpgrades).toBe(1)
 })
 
+test("a page whose stream request carries its server's token after the server began to close is offered SSE alone", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  // Before the app's handler: the page's stream request, the one its offer comes back on.
+  app.server.prependListener('request', (req) => {
+    if (req.headers.accept === 'text/event-stream' && app.server.listening) app.server.close()
+  })
+  const offersBefore = app.offers.length
+  void connectPage(app).catch(() => {}) // The server takes no new connection for the page's other requests.
+  await expect.poll(() => app.offers.length, { timeout: 10_000 }).toBeGreaterThan(offersBefore)
+  expect(app.server.listening).toBe(false)
+  expect(app.markers).not.toEqual([])
+  expect(app.offers[offersBefore]).toEqual(['sse'])
+  expect(webSockets.get(app.host)).toBeUndefined()
+}, 20_000)
+
 test('an app whose server closed and listens again offers WebSocket, and the token it marked requests with before names no server', async () => {
   const app = await fetchApp()
   app.telefunc.installWebSocket(app.server)

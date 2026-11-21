@@ -12,7 +12,7 @@ import { getRequestPathname } from '../utils/getUrlPathname.js'
 const SERVER_HEADER = 'x-telefunc-server'
 
 const { serverOfToken, markingServers } = getGlobalObject('serve/requestServer.ts', {
-  /** Each marking server, by its token, while it listens. */
+  /** Each marking server, by its token, from its `listening` event until its `close` event. */
   serverOfToken: new Map<string, HttpServer>(),
   markingServers: new WeakSet<HttpServer>(),
 })
@@ -58,10 +58,13 @@ function isTelefuncUrl(url: string): boolean {
   return getRequestPathname(url) === telefuncUrl
 }
 
-/** The server the request came in on, where it marks its requests: a token no listening server has names none. The
- *  token names a server and proves nothing, as the app's handler for Telefunc's URL sees it: a request that carries
- *  another taken server's token gets that server's answer, so a page of a server that takes no upgrades is offered
- *  WebSocket there, its upgrade is refused, and its channel goes on over SSE. */
+/** The server the request came in on, where it marks its requests. A token names its server from the server's
+ *  `listening` event until its `close` event, so also while it closes; what the page is offered is that server's answer
+ *  at each offer, which has no WebSocket once the server stopped listening, lost Telefunc's listener or has another
+ *  callback in place of Telefunc's. The token names a server and proves nothing, as the app's handler for Telefunc's
+ *  URL sees it: a request that carries another taken server's token gets that server's answer, so where that server
+ *  offers WebSocket, a page of a server that takes no upgrades is offered it too, its upgrade is refused, and its
+ *  channel goes on over SSE. */
 function serverOfRequest(request: Request): HttpServer | undefined {
   const value = request.headers.get(SERVER_HEADER)
   if (value === null) return undefined
