@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
-import { createServer, type Server } from 'node:http'
-import type { Socket } from 'node:net'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { connect, type Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
+import { hasProp } from '../utils/hasProp.js'
 import { Telefunc } from './node.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
@@ -133,6 +135,32 @@ function nodeApp(telefunc: InstanceType<typeof Telefunc>, server: Server): void 
   })
 }
 
+/** The app's own WebSocket server, for `/app-ws`: it answers 418, so a row can tell its answer from anyone else's. */
+function appUpgrade(req: IncomingMessage, socket: Duplex): void {
+  if (req.url === '/app-ws') socket.end("HTTP/1.1 418 I'm a teapot\r\nContent-Length: 0\r\n\r\n")
+}
+
+/** The status a WebSocket handshake for `path` gets, or null where none comes within 2 s. */
+async function upgradeStatus(host: string, path: string): Promise<number | null> {
+  const [hostname, port] = host.split(':')
+  const socket = connect(Number(port), hostname)
+  socket.on('error', () => {})
+  const { promise: answered, resolve } = Promise.withResolvers<number | null>()
+  socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ')[1])))
+  socket.once('close', () => resolve(null))
+  const timer = setTimeout(() => resolve(null), 2_000)
+  socket.write(
+    `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+  )
+  const status = await answered
+  clearTimeout(timer)
+  socket.destroy()
+  return status
+}
+
+// Node has it from 22.21 and 24.9; its typings here don't.
+const nodeHasTheCallback = hasProp(createServer(), 'shouldUpgradeCallback', 'function')
+
 test('an app on `serve({ req, res })` that never calls `installWebSocket()` offers WebSocket to its first page, and the page moves to it', async () => {
   const server = createServer()
   nodeApp(new Telefunc(), server)
@@ -179,3 +207,35 @@ test("`installWebSocket()` on an app on `serve({ req, res })` after it removed T
   webSockets.clear()
   expect(await openPage(host)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
+
+test("an app on `serve({ req, res })` that called `installWebSocket()` and removed Telefunc's upgrade listener before its first page offers that page SSE alone, and its own upgrade route answers as before", async () => {
+  const telefunc = new Telefunc()
+  const server = createServer()
+  nodeApp(telefunc, server)
+  telefunc.installWebSocket(server)
+  server.removeAllListeners('upgrade')
+  server.on('upgrade', appUpgrade)
+  const host = await listen(server)
+  expect(await openPage(host)).toEqual({ offer: ['sse'], webSocketOpened: false })
+  expect(webSockets.get(host)).toBeUndefined()
+  expect(server.listeners('upgrade')).toEqual([appUpgrade])
+  expect(await upgradeStatus(host, '/app-ws')).toBe(418)
+})
+
+test.runIf(nodeHasTheCallback)(
+  'an app on `serve({ req, res })` that set its own `shouldUpgradeCallback` after `installWebSocket()` keeps it at its first page, which is offered SSE alone',
+  async () => {
+    const telefunc = new Telefunc()
+    const server = createServer()
+    nodeApp(telefunc, server)
+    server.on('upgrade', appUpgrade)
+    telefunc.installWebSocket(server)
+    const appsCallback = (req: IncomingMessage) => req.url === '/app-ws'
+    // What an app's `server.shouldUpgradeCallback = …` does, which the typings here don't know.
+    Reflect.set(server, 'shouldUpgradeCallback', appsCallback)
+    const host = await listen(server)
+    expect(await openPage(host)).toEqual({ offer: ['sse'], webSocketOpened: false })
+    expect(hasProp(server, 'shouldUpgradeCallback') && server.shouldUpgradeCallback).toBe(appsCallback)
+    expect(await upgradeStatus(host, '/app-ws')).toBe(418)
+  },
+)

@@ -1,6 +1,7 @@
-export { noUpgrades, upgradesTakenHere, upgradeServers, upgradesOfServer, upgradesOfSocketServer }
-export type { TakesUpgrades }
+export { noUpgrades, telefuncsUpgradesOn, upgradesTakenHere, upgradeServers, upgradesOfServer, upgradesOfSocketServer }
+export type { TakenServer, TakesUpgrades }
 
+import type { IncomingMessage } from 'node:http'
 import type { Readable } from 'node:stream'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { hasProp } from '../../../utils/hasProp.js'
@@ -18,30 +19,41 @@ const noUpgrades: TakesUpgrades = () => false
  *  `telefunc/deno`, a Cloudflare Durable Object. */
 const upgradesTakenHere: TakesUpgrades = () => true
 
-/** A Node server Telefunc took, with the `upgrade` listener it put on it and, where Node reads one, the
- *  `shouldUpgradeCallback` it put in front of the server's own. */
+/** Telefunc's take of a Node server, kept for the server's life: the `upgrade` listener Telefunc put on it and, where
+ *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`own`), as the server can't tell
+ *  which of its functions are Telefunc's. `holdsRegistry`: the server is in 0.3.1's registry for Telefunc's listener.
+ *  A removal of the listener that Telefunc's `removeListener` listener didn't see leaves it there, so 0.3.1's next
+ *  install skips the server, until this copy's next `installWebSocket()` takes it again. */
 type TakenServer = {
-  server: { listeners(event: 'upgrade'): unknown[]; shouldUpgradeCallback?: unknown }
-  listener: unknown
-  callback: unknown
+  server: {
+    listenerCount(event: 'upgrade', listener: (...args: never[]) => void): number
+    shouldUpgradeCallback?: unknown
+  }
+  listener: (...args: never[]) => void
+  callback: ((req: IncomingMessage) => boolean) | undefined
+  own: ((req: IncomingMessage) => unknown) | undefined
+  holdsRegistry: boolean
 }
 
 const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrades.ts', {
-  /** The Node servers Telefunc put its `upgrade` listener on (serve/nodeUpgrades.ts). */
+  /** Every Node server Telefunc took (serve/nodeUpgrades.ts), whether or not its listener is still there. */
   upgradeServers: new WeakMap<object, TakenServer>(),
 })
 
 /** A server that has begun to close takes no new connection, so no upgrade, though it still serves those it has. */
 function upgradesOfServer(server: object): TakesUpgrades {
-  return () => upgradesReachTelefunc(server) && 'listening' in server && server.listening === true
+  return () =>
+    telefuncsUpgradesOn(server) === 'listener and callback' && 'listening' in server && server.listening === true
 }
 
-/** Asked of the server itself, so that it holds however the app removed the listener or replaced the callback: an
- *  app's own callback in place of Telefunc's decides for Telefunc's handshake too. */
-function upgradesReachTelefunc(server: object): boolean {
+/** What of Telefunc's take is on the server now, asked of the server itself, which the app may have changed in any way
+ *  since: nothing (never taken, or Telefunc's listener is gone), Telefunc's listener with the app's own
+ *  `shouldUpgradeCallback` in place of Telefunc's (which then decides for Telefunc's handshake too), or both. */
+function telefuncsUpgradesOn(server: object): 'nothing' | 'listener' | 'listener and callback' {
   const taken = upgradeServers.get(server)
-  if (taken === undefined || !taken.server.listeners('upgrade').includes(taken.listener)) return false
-  return taken.callback === undefined || taken.server.shouldUpgradeCallback === taken.callback
+  if (taken === undefined || taken.server.listenerCount('upgrade', taken.listener) === 0) return 'nothing'
+  if (taken.callback !== undefined && taken.server.shouldUpgradeCallback !== taken.callback) return 'listener'
+  return 'listener and callback'
 }
 
 /** Node, through the request's socket: the server it arrived on. */

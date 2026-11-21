@@ -134,6 +134,29 @@ async function honoApp(): Promise<App> {
   return { telefunc, server, host: hostOf(server), offers, markers }
 }
 
+/** The app's own WebSocket server, for `/app-ws`: it answers 418, so a row can tell its answer from anyone else's. */
+function appUpgrade(req: IncomingMessage, socket: Duplex): void {
+  if (req.url === '/app-ws') socket.end("HTTP/1.1 418 I'm a teapot\r\nContent-Length: 0\r\n\r\n")
+}
+
+/** The status a WebSocket handshake for `path` gets, or null where none comes within 2 s. */
+async function upgradeStatus(host: string, path: string): Promise<number | null> {
+  const [hostname, port] = host.split(':')
+  const socket = connect(Number(port), hostname)
+  socket.on('error', () => {})
+  const { promise: answered, resolve } = Promise.withResolvers<number | null>()
+  socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ')[1])))
+  socket.once('close', () => resolve(null))
+  const timer = setTimeout(() => resolve(null), 2_000)
+  socket.write(
+    `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+  )
+  const status = await answered
+  clearTimeout(timer)
+  socket.destroy()
+  return status
+}
+
 /** Records the transports each RECONCILED of an SSE stream offers, fed the stream's chunks in order. */
 function offerRecorder(offers: string[][]): (chunk: Uint8Array) => void {
   const decoder = new TextDecoder()
@@ -250,6 +273,21 @@ test("a page opened after the app removed Telefunc's upgrade listener, with no `
   app.server.removeAllListeners('removeListener')
   app.server.removeAllListeners('upgrade')
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+})
+
+test("`installWebSocket()` after the app removed every `removeListener` listener and then Telefunc's upgrade listener takes the server again: the next page moves to WebSocket, and the app's own upgrade route answers as before", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  app.server.on('upgrade', appUpgrade)
+  expect(await upgradeStatus(app.host, '/app-ws')).toBe(418)
+  app.server.removeAllListeners('removeListener')
+  app.server.removeAllListeners('upgrade')
+  app.server.on('upgrade', appUpgrade)
+  app.telefunc.installWebSocket(app.server)
+  webSockets.clear()
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  expect(app.server.listenerCount('upgrade')).toBe(2)
+  expect(await upgradeStatus(app.host, '/app-ws')).toBe(418)
 })
 
 // Node has it from 22.21 and 24.9; its typings here don't.
@@ -429,6 +467,29 @@ test("removing the head's upgrade listener frees the server for either copy's ne
   app.telefunc.installWebSocket(app.server)
   expect(app.server.listenerCount('upgrade')).toBe(1)
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+})
+
+test("after a removal of the head's upgrade listener that no `removeListener` listener saw, 0.3.1's install skips the server, and the head's next install takes it: one listens, and the head's pages move to WebSocket", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  app.server.removeAllListeners('removeListener')
+  app.server.removeAllListeners('upgrade')
+  install031(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(0)
+  app.telefunc.installWebSocket(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+})
+
+test("after a removal of the head's upgrade listener that no `removeListener` listener saw, the head's next install takes the server, and 0.3.1's install after it adds no second listener", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  app.server.removeAllListeners('removeListener')
+  app.server.removeAllListeners('upgrade')
+  app.telefunc.installWebSocket(app.server)
+  install031(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
 
 /** An HTTP proxy in front of `host` that forwards each request, upgrades too, with its path rewritten by `rewrite`, as
