@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 import { once } from 'node:events'
-import { createServer, Server } from 'node:http'
+import { createServer, request as httpRequest, Server } from 'node:http'
 import { connect, createServer as createTcpServer, type Socket } from 'node:net'
 import { serve as honoServe } from '@hono/node-server'
 import { Hono } from 'hono'
@@ -361,4 +361,54 @@ test("removing the head's upgrade listener frees the server for either copy's ne
   app.telefunc.installWebSocket(app.server)
   expect(app.server.listenerCount('upgrade')).toBe(1)
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+})
+
+/** An HTTP proxy in front of `host` that forwards each request, upgrades too, with its path rewritten by `rewrite`, as
+ *  it rewrote it: no normalizing on the way. */
+async function rewritingProxy(host: string, rewrite: (path: string) => string): Promise<string> {
+  const [hostname, port] = host.split(':')
+  const sockets = new Set<Socket>()
+  const proxy = createServer((req, res) => {
+    const upstream = httpRequest(
+      { hostname, port: Number(port), method: req.method, path: rewrite(req.url ?? '/'), headers: req.headers },
+      (response) => {
+        res.writeHead(response.statusCode ?? 502, response.headers)
+        response.pipe(res)
+      },
+    )
+    upstream.on('error', () => res.destroy())
+    req.pipe(upstream)
+  })
+  proxy.on('upgrade', (req, client: Socket, head: Buffer) => {
+    const upstream = connect(Number(port), hostname, () => {
+      const lines = [`${req.method} ${rewrite(req.url ?? '/')} HTTP/1.1`]
+      for (let i = 0; i < req.rawHeaders.length; i += 2) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`)
+      upstream.write(`${lines.join('\r\n')}\r\n\r\n`)
+      upstream.write(head)
+      client.pipe(upstream).pipe(client)
+    })
+    for (const socket of [client, upstream]) {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+      socket.on('error', () => {
+        client.destroy()
+        upstream.destroy()
+      })
+    }
+  })
+  proxy.on('connection', (socket: Socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve))
+  closers.push(() => closeServer(proxy, sockets))
+  return hostOf(proxy)
+}
+
+test('a page behind a proxy that forwards its requests with a dot segment in the path is offered WebSocket, and moves to it', async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  const publicHost = await rewritingProxy(app.host, (path) => path.replace(/^\/_telefunc/, '/x/../_telefunc'))
+  expect(await openPage(app, publicHost)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+  expect(app.markers).not.toEqual([])
 })
