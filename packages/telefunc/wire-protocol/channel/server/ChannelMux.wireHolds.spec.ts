@@ -401,3 +401,25 @@ test('a named id the server has no record of, with channels it never had, is ans
     unknown.leave()
   }
 })
+
+test('a reopen retires what the old holder awaited: the channel registering later attaches on the new wire alone', async () => {
+  const pending = new ServerChannel<string, string>()
+  const first = wire()
+  const second = wire()
+  try {
+    await first.send(reconcile({ open: [entry(pending.id, 0)] }, 1))
+    const sessionId = first.sessionId()
+    await second.send(reconcile({ sessionId, open: [entry(pending.id, 0)] }, 2))
+    const firstBefore = first.frames.length
+    getChannelMux().registerChannel(pending)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect({
+      onFirst: first.frames.slice(firstBefore).some((frame) => frame[0] === TAG.ATTACH_RESULT),
+      onSecond: second.tags().includes(TAG.ATTACH_RESULT),
+    }).toEqual({ onFirst: false, onSecond: true })
+  } finally {
+    first.leave()
+    second.leave()
+    pending.abort()
+  }
+})

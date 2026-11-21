@@ -42,10 +42,10 @@ class SessionRegistry {
     return this.byChannel.get(channelId)?.get(sessionId)
   }
 
-  /** `entry`, the page's wire numbered `attempt`, holds the session from now on; the wire that held it holds nothing,
-   *  and is returned. */
+  /** `entry`, the page's wire numbered `attempt`, holds the session from now on; another wire that held it holds
+   *  nothing, and is returned. */
   handOver(session: Session, entry: WireEntry, attempt: number): WireEntry | null {
-    const previous = session.holder
+    const previous = session.holder === entry ? null : session.holder
     if (previous !== null) previous.holds = null
     session.holder = entry
     session.high = Math.max(session.high, attempt)

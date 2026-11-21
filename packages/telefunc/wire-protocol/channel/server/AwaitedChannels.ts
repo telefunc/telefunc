@@ -145,8 +145,12 @@ class AwaitedChannels {
     if (awaited.phase === 'attached') this.attachedCount--
   }
 
+  /** Awaits none of them any more, and drops what it held. */
   stop(): void {
-    for (const awaited of this.byIx.values()) this.waits.stop(awaited)
+    for (const awaited of this.byIx.values()) {
+      this.waits.stop(awaited)
+      this.drop(awaited)
+    }
     this.byIx.clear()
     this.attachedCount = 0
   }

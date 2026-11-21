@@ -777,8 +777,10 @@ class ChannelMux implements UpgradeStagesOwner {
     const { released } = ctrl
     // The page names what changed only on the wire that holds its session: elsewhere it can't know what the server holds.
     assertProtocol(released === undefined || held !== null, 'RECONCILE released on another wire')
-    // The wire that held the session holds nothing from now on: what it reads later is a loss of its own.
+    // The wire that held the session holds nothing from now on: what it reads later is a loss of its own, and the
+    // channels it awaited attach where the new holder's RECONCILE names them.
     const previous = this.sessions.handOver(session, entry, ctrl.attempt ?? session.high)
+    previous?.state.awaited.stop()
     const retiredWire = isBarrier ? (previous?.wire ?? null) : null
     const attached =
       released === undefined
@@ -891,8 +893,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (awaited.refused !== null) return channel._onServerEnd(awaited.refused)
     const { entry } = awaited
     const session = entry.holds
-    // Its wire's session went to another wire since, whose RECONCILE named the channel too: it attaches there.
-    if (session === null) return expireAwaited(awaited)
+    // A wire awaits only while it holds its session: the handover and the wire's close stop its waits.
+    assert(session !== null, 'a wire that holds no session awaits a channel')
     // A page holds one end of a channel: one that awaits it at a second index broke the protocol.
     if (this.sessions.indexOf(session.id, channel.id) !== undefined) {
       return this.endFault(entry.wire, { scope: 'session', cause: 'unreadable' })
@@ -922,9 +924,8 @@ class ChannelMux implements UpgradeStagesOwner {
   private dispatchHeld(awaited: AwaitedChannel): void {
     const { entry } = awaited
     const held = entry.state.awaited.take(awaited)
-    // Its wire's session went to another wire since: the page sends what it held there again.
     const session = entry.holds
-    if (session === null) return
+    assert(session !== null, 'a wire that holds no session awaits a channel')
     try {
       for (const { frame } of held) this.dispatchChannelFrame(session, frame)
     } catch (err) {
