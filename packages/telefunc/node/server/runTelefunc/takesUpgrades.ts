@@ -23,8 +23,9 @@ const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrade
   upgradeServers: new WeakSet<object>(),
 })
 
+/** A server that has begun to close takes no new connection, so no upgrade, though it still serves those it has. */
 function upgradesOfServer(server: object): TakesUpgrades {
-  return () => upgradeServers.has(server)
+  return () => upgradeServers.has(server) && 'listening' in server && server.listening === true
 }
 
 /** Node, through the request's socket: the server it arrived on. */
