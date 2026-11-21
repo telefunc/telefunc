@@ -74,6 +74,61 @@ describe('BackendCall', () => {
     expect(outcomeOf(failure)).toBe('may-have-run')
   })
 
+  describe('all(): steps side by side', () => {
+    it("tells 'may-have-run' for a step's 'not-run' once a sibling that was still reading hands a write over", async () => {
+      const call = new BackendCall()
+      let readDone = () => {}
+      const read = new Promise<void>((resolve) => (readDone = resolve))
+      const sibling = async () => {
+        await call.read(() => read)
+        await call.write(answered)
+      }
+      const refused = call.read(failingWith(notRun()))
+
+      const joined = call.all([refused, sibling()]).catch((error: unknown) => error)
+      await refused.catch(() => {})
+      readDone()
+
+      expect(outcomeOf(await joined)).toBe('may-have-run')
+    })
+
+    it("keeps 'not-run' where no step of the call wrote", async () => {
+      const call = new BackendCall()
+
+      const failure = await call
+        .all([call.read(failingWith(notRun())), call.read(answered)])
+        .catch((error: unknown) => error)
+
+      expect(outcomeOf(failure)).toBe('not-run')
+    })
+
+    it('gives the values in the order of the steps', async () => {
+      const call = new BackendCall()
+      let first = (_value: string) => {}
+
+      const joined = call.all([
+        call.read(() => new Promise<string>((resolve) => (first = resolve))),
+        call.read(answered),
+      ])
+      first('first')
+
+      expect(await joined).toEqual(['first', 'ok'])
+    })
+
+    it('waits for every step before it tells a failure', async () => {
+      const call = new BackendCall()
+      let settled = false
+      const slow = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        settled = true
+      }
+
+      await call.all([call.read(failingWith(notRun())), slow()]).catch(() => {})
+
+      expect(settled).toBe(true)
+    })
+  })
+
   it('passes a failure that is not a BackendError through', async () => {
     const call = new BackendCall()
     await call.write(answered)

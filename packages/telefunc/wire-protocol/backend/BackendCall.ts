@@ -32,6 +32,15 @@ class BackendCall {
     }
   }
 
+  /** The values of `steps`, which run side by side, in order; else, once every one of them settled, the first failure
+   *  as the call stands then. A step that fails before a sibling hands its write over is told after that write. */
+  async all<T extends readonly unknown[]>(steps: T): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+    for (const result of await Promise.allSettled(steps)) {
+      if (result.status === 'rejected') throw this.failure(result.reason, 0)
+    }
+    return await Promise.all(steps)
+  }
+
   /** What `error` of a step tells of the whole call; `own` is the step's own write, still counted in `writing`. */
   private failure(error: unknown, own: 0 | 1): unknown {
     if (!(error instanceof BackendError) || error.outcome !== 'not-run') return error

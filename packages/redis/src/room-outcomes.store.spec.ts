@@ -2,7 +2,9 @@
 // says, on the oldest and the newest Redis and Valkey Telefunc supports.
 // - `Room.list()`: a room listed as open needs no repair of its listing, so the call wrote nothing, and it says it
 //   didn't run; called again once the store allows the read, it lists the room. One that cleaned up a lapsed room on
-//   its first page and fails on its second may have run: the call's writes are one account.
+//   its first page and fails on its second may have run: the call's writes are one account. So may one that cleaned
+//   up a lapsed room beside the room on the same page whose read fails: the call settles once every step it started
+//   did.
 // - `Room.removeParticipant()` by id: a store's refusal is a `BackendError`, which says nothing of the participant;
 //   another error means the participant is no longer in the room.
 // - `Room.removeParticipant()` and `Room.send()` that reaped a lapsed lease while finding the participant, then were
@@ -102,6 +104,35 @@ describe.runIf(runs)('Room.list() whose read the store refuses', () => {
         () => 'resolved',
         (error: unknown) => error,
       )
+      const cleaned = {
+        keys: (await lapsedKeys()).length,
+        listed: await admin.zscore('tf:0:room-dir:{tf:0:dir}:index', lapsed),
+      }
+      admin.disconnect()
+
+      expect({ left: left > 0, refused, cleaned }).toMatchObject({
+        left: true,
+        refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
+        cleaned: { keys: 0, listed: null },
+      })
+    }, 60_000)
+
+    it(`${store.name}: may have run where a room on the page whose read fails was cleaned up beside it`, async () => {
+      const admin = await reached(store)
+      // One page, in id order: the room whose head read the store refuses, then a lapsed one.
+      const unread = `c-${i}-unread`
+      const lapsed = `c-${i}-z-lapsed`
+      for (const id of [unread, lapsed]) await Room.create(id)
+      await admin.del(`tf:0:room:{${lapsed}}:head`)
+      const lapsedKeys = () => admin.keys(`tf:0:room:{${lapsed}}:*`)
+      const left = (await lapsedKeys()).length
+      // GET is refused but on the lapsed room's keys: the first room's head read fails, the lapsed room's goes through.
+      await admin.call('ACL', 'SETUSER', 'telefunc', '-get', `(+get ~*room:{${lapsed}}:*)`)
+      const refused = await Room.list().then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      // Read once the call settled, which it does only after every step it started: the cleanup is done by then.
       const cleaned = {
         keys: (await lapsedKeys()).length,
         listed: await admin.zscore('tf:0:room-dir:{tf:0:dir}:index', lapsed),

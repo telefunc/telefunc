@@ -1,4 +1,4 @@
-export { readPrefix, readPrefixAt, readOpenCells, eachInFlight, bothSettled, deleteCells }
+export { readPrefix, readPrefixAt, readOpenCells, eachInFlight, deleteCells }
 export type { CellsAt }
 
 import { getRoomPlane } from '../../backend/plane.js'
@@ -63,15 +63,6 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   }
   await Promise.all(Array.from({ length: ROOM_BACKEND_CALLS_IN_FLIGHT_MAX }, worker))
   if (failure) throw failure.error
-}
-
-/** Both values, or the first failure once both settled: a step of a call that fails while the other has yet to hand
- *  its write over is told once the other settled, so the call's account has that write. */
-async function bothSettled<A, B>(a: Promise<A>, b: Promise<B>): Promise<[A, B]> {
-  const [first, second] = await Promise.allSettled([a, b])
-  if (first.status === 'rejected') throw first.reason
-  if (second.status === 'rejected') throw second.reason
-  return [first.value, second.value]
 }
 
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */

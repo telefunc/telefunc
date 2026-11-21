@@ -38,7 +38,7 @@ import type {
 } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
-import { bothSettled, eachInFlight } from './store/cellStore.js'
+import { eachInFlight } from './store/cellStore.js'
 import { evictMember } from './store/members.js'
 import {
   reapAndCountPresence,
@@ -171,12 +171,10 @@ async function openRoom(incarnation: RoomIncarnation & RoomConfigRecord, call: B
   const { id } = incarnation
   const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) return await call.read(() => held.sharedHandle())
-  const [roster, meta] = await call.read(() =>
-    bothSettled(
-      reapAndReadRoster(incarnation, call),
-      call.read(() => requireRoomMeta(id, incarnation)),
-    ),
-  )
+  const [roster, meta] = await call.all([
+    reapAndReadRoster(incarnation, call),
+    call.read(() => requireRoomMeta(id, incarnation)),
+  ])
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
   // One seeded meanwhile for a join alone has read no roster.
   return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle()
@@ -272,7 +270,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
     for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
       const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
-      const listed = await Promise.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, call, roomId, incTag)))
+      const listed = await call.all(chunk.map(({ roomId, incTag }) => listedRoom(plane, call, roomId, incTag)))
       for (const info of listed) if (info !== null) rooms.push(info)
     }
   } while (cursor !== undefined)
@@ -288,9 +286,10 @@ async function listedRoom(
   incTag: string,
 ): Promise<RoomInfo | null> {
   const head = await call.read(() => plane.driver.readHead(roomId))
-  const [, info] = await call.read(() =>
-    bothSettled(repairRoomIndex(plane, roomId, incTag, head, call), openRoomInfo(plane, call, roomId, head)),
-  )
+  const [, info] = await call.all([
+    repairRoomIndex(plane, roomId, incTag, head, call),
+    openRoomInfo(plane, call, roomId, head),
+  ])
   return info
 }
 
@@ -302,12 +301,10 @@ async function openRoomInfo(
 ): Promise<RoomInfo | null> {
   const config = openConfig(head)
   if (config === null) return null
-  const [count, stored] = await call.read(() =>
-    bothSettled(
-      countListedRoom(plane, call, roomId, config),
-      call.read(() => readRoomMeta(roomId, config)),
-    ),
-  )
+  const [count, stored] = await call.all([
+    countListedRoom(plane, call, roomId, config),
+    call.read(() => readRoomMeta(roomId, config)),
+  ])
   if (count === null || stored === null) return null
   return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
 }
