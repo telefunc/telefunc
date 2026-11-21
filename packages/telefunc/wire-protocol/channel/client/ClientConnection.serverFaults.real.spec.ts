@@ -382,7 +382,9 @@ test.each([
       // Past the late close, so that no request it could make goes unseen.
       await delay(1_200)
       const sent = world.started.flatMap((kind, at) => (at < requestsBefore || pingsAt.includes(at) ? [] : [kind]))
-      expect([sent, ends, decides.withheld.includes(TAG.END)]).toEqual([
+      // The barrier's hook ran: the barrier POST went with the bytes the server can't frame.
+      expect([requestsBefore >= 0, sent, ends, decides.withheld.includes(TAG.END)]).toEqual([
+        true,
         requests,
         [sessionEndOnPage, sessionEndOnPage],
         true,
