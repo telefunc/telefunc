@@ -10,7 +10,7 @@ import { encodeSseRequest } from '../../wire/envelope.js'
 import { decode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
-import { getChannelMux, type ServerTransport, type WireClose } from './ChannelMux.js'
+import { getChannelMux, type ServerEnd, type ServerTransport, type WireClose } from './ChannelMux.js'
 import { handleSseChannelRequest } from './sse.js'
 
 type ServePath = 'web' | 'node'
@@ -77,7 +77,12 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
   const mux = getChannelMux()
   const wire: FakeWire = { sessionId: undefined }
   const frames: Uint8Array[] = []
-  const state = { buffered: 0, terminated: false }
+  // `closedAs`: how the server ended the wire, where it did.
+  const state: { buffered: number; terminated: boolean; closedAs: ServerEnd['how'] | null } = {
+    buffered: 0,
+    terminated: false,
+    closedAs: null,
+  }
   const transport: ServerTransport<FakeWire> = {
     getSessionId: (w) => w.sessionId,
     setSessionId: (w, sessionId) => {
@@ -91,8 +96,9 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
     type: CHANNEL_TRANSPORT.WS,
     wholeMessages: true,
     bufferedAmount: () => (knowsBacklog ? state.buffered : undefined),
-    terminateWire: () => {
+    close: (_wire, { how }) => {
       state.terminated = true
+      state.closedAs = how
     },
   }
   mux.onWireOpen(wire, transport)

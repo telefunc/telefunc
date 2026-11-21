@@ -875,7 +875,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal The page's wire ended for good, and the channel with it: with `ChannelPageLeftError` where the page left,
-   *  the `frameRefused` cause's error where the server refused its wire. */
+   *  a session cause's error where the server ended the page's session. */
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null

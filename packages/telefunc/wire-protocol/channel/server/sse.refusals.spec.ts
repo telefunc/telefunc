@@ -7,7 +7,12 @@ import { afterEach, expect, test } from 'vitest'
 
 import { createDeferred } from '../../../utils/createDeferred.js'
 
-import { WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../../constants.js'
+import {
+  CREDIT_MSG_WINDOW_MAX,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  WIRE_RECV_BACKLOG_BASE_FRAMES,
+  WIRE_VERSION,
+} from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import { config } from '../../../node/server/serverConfig.js'
@@ -104,19 +109,23 @@ test('a batch POST whose body ends in the middle of a frame is refused `retry`',
   await cancel(opened)
 })
 
+/** The code of a session's end for frames the server can't read: no channel's own. */
+const UNREADABLE = 0x08
+
 test.each([
-  ["a channel's frame", encode.close(3, 0, 1), '3'],
-  ["a frame of the connection's own", encode.ping([]), ''],
+  ['a frame of a channel the session holds', encode.close(0, 0, 1), '0', END_CAUSE.frameOverLimit.code],
+  ['a frame of an index the session holds in no form', encode.close(3, 0, 1), '', UNREADABLE],
+  ["a frame of the connection's own", encode.ping([]), '', UNREADABLE],
 ])(
-  '%s over the frame limit is refused `frames`, naming its channel where it has one: the server reads its header',
-  async (_frame, frame, channel) => {
+  '%s over the frame limit is refused `frames`, naming its channel where the session holds it: the server reads its header',
+  async (_frame, frame, channel, cause) => {
     const { connId, opened } = await openWire()
     // The length says more than the limit; only the header follows it.
     const answer = await post(
       bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(WIRE_MAX_RAW_FRAME_BYTES + 1), frame),
     )
     expect(answer.statusCode).toBe(400)
-    expect(answer.contentType).toMatch(refusal('frames', channel, END_CAUSE.frameOverLimit.code))
+    expect(answer.contentType).toMatch(refusal('frames', channel, cause))
     await cancel(opened)
   },
 )
@@ -126,7 +135,39 @@ test('a body the server cannot frame is refused `frames`, naming no channel', as
   // A frame of no bytes: no tag, no header.
   const answer = await post(bodyOf(encodeSseRequestMetadata({ connId }), encodeU32(0)))
   expect(answer.statusCode).toBe(400)
-  expect(answer.contentType).toMatch(refusal('frames', '', END_CAUSE.frameRefused.code))
+  expect(answer.contentType).toMatch(refusal('frames', '', UNREADABLE))
+  await cancel(opened)
+})
+
+test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, and the POST is refused `frames` naming no channel", async () => {
+  const attached = new ServerChannel()
+  getChannelMux().registerChannel(attached)
+  const ends: [string, string][] = []
+  attached.onClose((err) => void ends.push(err === null ? ['clean', ''] : [err.name, err.message]))
+  // The second channel isn't registered: the server holds what the page sends it until it is.
+  const connId = crypto.randomUUID()
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [
+      encode.reconcile({
+        open: [
+          { id: attached.id, ix: 0, lastSeq: 0, initial: true },
+          { id: new ServerChannel().id, ix: 1, lastSeq: 0, initial: true },
+        ],
+      }),
+    ]),
+  )
+  // One frame past the base and a window for the one channel the session holds.
+  const held = Array.from({ length: WIRE_RECV_BACKLOG_BASE_FRAMES + CREDIT_MSG_WINDOW_MAX + 1 }, (_, i) =>
+    encode.text(1, '"x"', i + 1),
+  )
+  const answer = await post(encodeSseRequest({ connId }, held))
+  expect(ends).toEqual([
+    [
+      'ChannelOverflowError',
+      "Channel closed: the page's connection ended: The page sent more on its connection than the server holds while it works on what came before.",
+    ],
+  ])
+  expect(answer.contentType).toMatch(refusal('frames', '', 0x09))
   await cancel(opened)
 })
 

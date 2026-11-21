@@ -7,7 +7,7 @@ import { WIRE_VERSION, WS_CLOSE_REJECTED, WIRE_REJECTED_REASON } from '../../con
 import { encode } from '../../wire/frame.js'
 import { END_CAUSE } from '../endCause.js'
 
-test('a frame of no channel the server cannot read reaches the page as 4002 with its reason, and ends its channels with the reason', async () => {
+test("a frame of no channel the server cannot read reaches the page as 4002 with its reason, and ends its channels with the connection's sentence", async () => {
   const telefunc = new Telefunc()
   const server = createServer((req, res) => void telefunc.serve({ req, res }))
   telefunc.installWebSocket(server)
@@ -28,8 +28,5 @@ test('a frame of no channel the server cannot read reaches the page as 4002 with
   server.close()
 
   expect({ code, reason }).toEqual({ code: WS_CLOSE_REJECTED, reason: WIRE_REJECTED_REASON })
-  await expect(channel.closed).resolves.toHaveProperty(
-    'message',
-    `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
-  )
+  await expect(channel.closed).resolves.toHaveProperty('message', END_CAUSE.unreadable.error().message)
 })

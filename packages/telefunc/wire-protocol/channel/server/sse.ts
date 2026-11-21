@@ -22,7 +22,7 @@ import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
-import type { ReconcileOutcome, ServerTransport, WireClose } from './ChannelMux.js'
+import type { Fault, ReconcileOutcome, ServerTransport, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
@@ -36,13 +36,7 @@ import {
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
-import {
-  WIRE_VERSION_REFUSAL,
-  frameRefusal,
-  refusalContentType,
-  type Refusal,
-  type RefusalContentType,
-} from '../../refusal.js'
+import { WIRE_VERSION_REFUSAL, refusalContentType, type Refusal, type RefusalContentType } from '../../refusal.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400 | 409
@@ -55,8 +49,6 @@ type SseWire = {
   connId: string
   events: EventStream
   closed: boolean
-  /** It closed because the server refused a frame of it. */
-  rejected: boolean
   sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed. Data
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
@@ -65,7 +57,7 @@ type SseWire = {
   /** Dispatches in flight for this wire. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
-  /** The server ended the wire for a frame of the page's: what the POSTs that meet it closed answer. */
+  /** What the POSTs that meet the wire closed are answered, where the server decided its end. */
   refused: Refusal | null
 }
 
@@ -256,9 +248,9 @@ class SseServerTransport {
    *  wire — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingWires = new Map<string, Set<(wire: SseWire | null) => void>>()
-  /** When each wire closed and the session it had, for `connectTtl`: a page never reuses a connId, so a POST for one is
-   *  refused. */
-  private readonly closedWires = new Map<string, { at: number; sessionId: string | null }>()
+  /** When each wire closed, the session it had, and what the server decided its end to be answered with, for
+   *  `connectTtl`: a page never reuses a connId, so a POST for one is refused, as a POST that met its close is. */
+  private readonly closedWires = new Map<string, { at: number; sessionId: string | null; refused: Refusal | null }>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseWire> = {
     getSessionId: (wire) => wire.sessionId ?? undefined,
@@ -274,7 +266,7 @@ class SseServerTransport {
     // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
     queuedAhead: (wire) => Math.floor((wire.events.streamBytes * 3) / 4),
     queueOf: (wire) => wire.events,
-    terminateWire: (wire, refused) => this.terminateWire(wire, refused),
+    close: (wire, { how, refusal }) => this.closeWire(wire, how, refusal),
   }
 
   /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
@@ -321,16 +313,13 @@ class SseServerTransport {
       // A typed protocol-input fault is the client's: refused, quietly. Anything else is our bug — rethrow so the request
       // pipeline (`runTelefunc`) logs it and masks it as a 500.
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
-      // An over-limit frame is read no further than its header, so the request's frames after it go unread: its
-      // channel ends, named by that header, and its wire closes (`refuseFrame`).
-      if (err instanceof OversizeFrameError) {
-        const channel = channelOf(err.head)
-        const wire = this.mux.getWireByConnId<SseWire>(connId)
-        if (wire) this.mux.refuseFrame(wire, 'frameOverLimit', channel)
-        return refuse(frameRefusal('frameOverLimit', channel))
-      }
-      if (isProtocolViolationError(err)) return refuse(REFUSED.unframed)
-      throw err
+      const fault = faultOf(err)
+      if (fault === null) throw err
+      const wire = this.mux.getWireByConnId<SseWire>(connId)
+      if (!wire) return refuse(this.answerFor(connId))
+      // The mux decides what the fault ends; the request is answered as any request that meets that end is.
+      this.mux.endFault(wire, fault)
+      return closedUnder(wire)
     }
   }
 
@@ -356,7 +345,6 @@ class SseServerTransport {
       connId,
       events,
       closed: false,
-      rejected: false,
       sessionId: null,
       ready,
       resolveReady,
@@ -382,7 +370,7 @@ class SseServerTransport {
    *  frame is dispatched fire-and-forget — awaiting one would stall the read loop behind it. */
   private async handleStreamRequestPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
-    if (!wire) return refuse(REFUSED.noWire)
+    if (!wire) return refuse(this.answerFor(connId))
     reader.onChunk = () => this.mux.onWireBytes(wire)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
@@ -423,7 +411,7 @@ class SseServerTransport {
    *  `runStreamResponse` won't send its own reconciled mid-batch. */
   private async handleBatchPost(connId: string, reader: BodyReader): Promise<SseChannelHttpResponse> {
     const wire = await this.resolveWire(connId)
-    if (!wire) return refuse(REFUSED.noWire)
+    if (!wire) return refuse(this.answerFor(connId))
     reader.onChunk = () => this.mux.onWireBytes(wire)
     if (!(await this.waitReady(wire))) return refuse(REFUSED.notReady)
     const drain = this.drain(wire, reader, (outcome) => {
@@ -454,7 +442,8 @@ class SseServerTransport {
       // A truncation is the client hanging up (channels keep their grace); an over-limit frame is refused as on any
       // other request, its channel told on this stream or at its next attach.
       reportDispatchBug(err)
-      if (err instanceof OversizeFrameError) this.mux.refuseFrame(wire, 'frameOverLimit', channelOf(err.head))
+      const fault = faultOf(err)
+      if (fault !== null) this.mux.endFault(wire, fault)
       else this.closeWire(wire, 'transient')
     } finally {
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
@@ -501,13 +490,19 @@ class SseServerTransport {
     return await this.waitForWire(connId)
   }
 
-  private rememberClosed({ connId, sessionId }: SseWire): void {
+  private rememberClosed({ connId, sessionId, refused }: SseWire): void {
     const now = performance.now()
     for (const [closed, { at }] of this.closedWires) {
       if (now - at < this.mux.connectTtl) break
       this.closedWires.delete(closed)
     }
-    this.closedWires.set(connId, { at: now, sessionId })
+    this.closedWires.set(connId, { at: now, sessionId, refused })
+  }
+
+  /** What a request for `connId`, whose wire the server no longer has, is answered: the end the server decided for it,
+   *  else a loss. */
+  private answerFor(connId: string): Refusal {
+    return this.closedWires.get(connId)?.refused ?? REFUSED.noWire
   }
 
   /** As `RegistrationWaits.stop`: the timeout path must remove the
@@ -559,22 +554,18 @@ class SseServerTransport {
     })
   }
 
-  /** `rejected`: the server refused a frame of it; its stream sends what it holds, then says so last, as a WebSocket's
-   *  close code does. */
-  private closeWire(wire: SseWire, how: WireClose): void {
+  /** `refused`: what the POSTs that meet the close are answered, where the server decided it. An end for good the
+   *  server decided sends what the stream holds, then says so last, as a WebSocket's close code does. */
+  private closeWire(wire: SseWire, how: WireClose, refused: Refusal | null = null): void {
     if (wire.closed) return
     wire.closed = true
-    wire.rejected = how === 'rejected'
+    wire.refused = refused
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     this.mux.onWireClosed(wire, how)
-    wire.events.close({ flush: wire.rejected, last: wire.rejected ? encode.rejected() : undefined })
-  }
-
-  private terminateWire(wire: SseWire, refused: Refusal | undefined): void {
-    if (refused && !wire.closed) wire.refused = refused
-    this.closeWire(wire, this.mux.readRejection(wire) ? 'rejected' : 'transient')
+    const forGood = how !== 'transient' && how !== 'pageLeft'
+    wire.events.close({ flush: forGood, last: forGood ? encode.rejected() : undefined })
   }
 }
 
@@ -587,6 +578,16 @@ function parseMetadata(raw: string): SseRequestMetadata {
     throw new ProtocolViolationError('malformed SSE request metadata')
   }
   return parseSseRequestMetadata(metadata)
+}
+
+/** The fault a failed read of a request's frames is: an over-limit frame is read no further than its header, so the
+ *  request's frames after it go unread, and its channel, named by that header, ends; a body the server can't read as
+ *  frames ends the session. Null for any other failure. */
+function faultOf(err: unknown): Fault | null {
+  if (err instanceof OversizeFrameError) {
+    return { scope: 'channel', ix: channelOf(err.head), cause: 'frameOverLimit', wire: 'loss' }
+  }
+  return isProtocolViolationError(err) ? { scope: 'session', cause: 'unreadable' } : null
 }
 
 function reportDispatchBug(err: unknown): void {
@@ -610,7 +611,6 @@ const REFUSED = {
   notReady: { kind: 'retry', reason: "The connection this request is for didn't open in time." },
   closed: { kind: 'retry', reason: 'The connection this request is for closed under it.' },
   truncated: { kind: 'retry', reason: 'The request ended in the middle of a frame.' },
-  unframed: { kind: 'frames', reason: "The server can't read the request's frames." },
 } as const satisfies Record<string, Refusal>
 
 /** Telefunc's own refusal, which says so in its media type (`refusal.ts`); the body repeats its reason for a person. */

@@ -2,7 +2,7 @@ export { REFUSAL_MEDIA_TYPE, REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, frameRe
 export type { Refusal, RefusalKind, RefusalContentType }
 
 import { STATUS_BODY_MALFORMED_REQUEST } from '../shared/constants.js'
-import { END_CAUSE, type FrameRefusalCause } from './channel/endCause.js'
+import { END_CAUSE, type RefusalCause } from './channel/endCause.js'
 
 /** The media type of Telefunc's own refusals of the page's SSE requests, so that the page tells them from an answer of
  *  anything in front of the server, at the headers, from any origin (`Content-Type` is a CORS-safelisted response
@@ -34,9 +34,9 @@ const WIRE_VERSION_REFUSAL = {
  *  with the body a telefunction call reads. */
 const REQUEST_KIND_REFUSAL = { kind: 'route', reason: STATUS_BODY_MALFORMED_REQUEST } as const satisfies Refusal
 
-/** The `frames` refusal of a frame refused for `cause`, naming `channel` where its header says one. Its reason is the
- *  cause's, and so is the error an `ERROR` of its code gives where no refusal tells the channel's end. */
-function frameRefusal(cause: FrameRefusalCause, channel: number | undefined): Refusal {
+/** The `frames` refusal of an end for `cause`: of one channel's frame, naming `channel`; of the page's session, naming
+ *  none. Its reason is the cause's, and so is the error an `ERROR` of its code gives where no refusal tells the end. */
+function frameRefusal(cause: RefusalCause, channel: number | undefined): Refusal {
   const { code, reason } = END_CAUSE[cause]
   return { kind: 'frames', channel, cause: code, reason }
 }

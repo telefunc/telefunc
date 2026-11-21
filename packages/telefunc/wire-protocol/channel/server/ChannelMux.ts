@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { WireEntry, ReconcileOutcome, ServerTransport, Wire, WireClose }
+export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, Wire, WireClose }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -35,7 +35,7 @@ import { textEncoder } from '../../wire/envelope.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import { frameRefusal, type Refusal } from '../../refusal.js'
 import { ChannelPageLeftError } from '../channelErrors.js'
-import { END_CAUSE, type FrameRefusalCause } from '../endCause.js'
+import { END_CAUSE, type FrameRefusalCause, type SessionCause } from '../endCause.js'
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   BarrierPayload,
@@ -80,9 +80,24 @@ type ServerTransport<TWire> = {
   queuedAhead?(wire: TWire): number | undefined
   /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
   queueOf?(wire: TWire): WireQueue
-  /** `refused`: the frame of the page's it ends for, which an HTTP transport answers the page's requests with. */
-  terminateWire(wire: TWire, refused?: Refusal): void
+  /** Ends the wire as `end` says, and tells the mux with `onWireClosed`. */
+  close(wire: TWire, end: ServerEnd): void
 }
+
+/** How the server ends a wire: lost, or for good for a session cause; `refusal` is what an HTTP transport answers the
+ *  page's requests that meet the end with, null for a plain loss. */
+type ServerEnd = { how: Exclude<WireClose, 'pageLeft'>; refusal: Refusal | null }
+
+/** What the server can't go on with on a wire, which `endFault` ends. */
+type Fault =
+  /** A frame of the channel at `ix` it can't take: that channel ends with `cause`. `wire`: whether the wire goes on, or
+   *  closes as a loss, the others reattaching under their session. An `ix` the session holds in no form (undefined
+   *  where the frame names none) makes it a fault of the session. */
+  | { scope: 'channel'; ix: number | undefined; cause: FrameRefusalCause; wire: 'kept' | 'loss' }
+  /** Every channel of the page's session ends with `cause`, and the wire for good. */
+  | { scope: 'session'; cause: SessionCause }
+  /** The wire is lost: its channels wait `reconnectTimeout` for their page. */
+  | { scope: 'loss' }
 
 /** What a RECONCILE or a barrier settled, which `sendReconciled` answers with the RECONCILED. */
 type ReconcileOutcome = {
@@ -112,8 +127,9 @@ type MuxServerOptions = {
   transports: ChannelTransports
 }
 
-/** How a wire closed: lost (its page may reconnect), its page left for good, or refused by the server. */
-type WireClose = 'transient' | 'pageLeft' | 'rejected'
+/** How a wire closed: lost (its page may reconnect), its page left for good, or ended for good by the server for a
+ *  session cause, which each channel of the session ends with. */
+type WireClose = 'transient' | 'pageLeft' | SessionCause
 type DetachReason = WireClose | 'recoveryFailed'
 
 type WireState = {
@@ -124,8 +140,6 @@ type WireState = {
   deliveries: Deliveries
   /** When the last PONG went out. */
   pongedAt: number
-  /** `terminateWire` refused it: its page sent what the server can't read. */
-  rejected: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind, which its session's channels
    *  detach with. */
@@ -245,7 +259,6 @@ class ChannelMux implements UpgradeStagesOwner {
         lastReceivedAt: 0,
         deliveries,
         pongedAt: performance.now(),
-        rejected: false,
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
@@ -326,10 +339,6 @@ class ChannelMux implements UpgradeStagesOwner {
     this.detachSession(sessionId, 'pageLeft')
   }
 
-  readRejection(wire: Wire): boolean {
-    return this.wires.get(wire)?.state.rejected ?? false
-  }
-
   /** SSE data POST: resolve the stream wire by its stable connId. Undefined when the
    *  wire hasn't reconciled yet or has already torn down. */
   getWireByConnId<TWire>(connId: string): TWire | undefined {
@@ -361,7 +370,7 @@ class ChannelMux implements UpgradeStagesOwner {
       }
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
-      this.terminateWire(wire)
+      this.endFault(wire, { scope: 'session', cause: 'unreadable' })
     }
     return outcome ?? Promise.resolve(null)
   }
@@ -374,8 +383,14 @@ class ChannelMux implements UpgradeStagesOwner {
   ): Promise<ReconcileOutcome | null> {
     const { state } = entry
     const byteLength = rawFrame.byteLength
-    if (this.isOverBudget(entry, rawFrame)) {
-      this.terminateWire(entry.wire)
+    const over = this.overBudget(entry, rawFrame)
+    if (over !== null) {
+      this.endFault(
+        entry.wire,
+        over === 'frame'
+          ? { scope: 'channel', ix: channelOf(rawFrame), cause: 'frameOverLimit', wire: 'loss' }
+          : { scope: 'session', cause: 'receiveBudget' },
+      )
       return Promise.resolve(null)
     }
     const tag = peekTag(rawFrame)
@@ -444,25 +459,26 @@ class ChannelMux implements UpgradeStagesOwner {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, [])
   }
 
-  /** Only data frames and pieces get the raw frame cap; the backlog adds a full window per channel of the session. */
-  private isOverBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): boolean {
+  /** What `rawFrame` is over, if anything: its cap (only data frames and pieces get the raw frame cap), or the backlog
+   *  of what the wire received and hasn't handled, which adds a full window per channel of the session. */
+  private overBudget(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): 'frame' | 'backlog' | null {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
       tag !== undefined && isWireCtrlTag(tag) && tag !== TAG.PIECE
         ? WIRE_MAX_CTRL_FRAME_BYTES
         : WIRE_MAX_RAW_FRAME_BYTES
     const byteLength = rawFrame.byteLength
-    if (byteLength > maxFrameBytes) return true
+    if (byteLength > maxFrameBytes) return 'frame'
     const { state, transport } = entry
     const backlogBytes = state.recvBacklog.bytes + byteLength
     const backlogFrames = state.recvBacklog.frames
-    if (backlogBytes <= WIRE_RECV_BACKLOG_BASE_BYTES && backlogFrames < WIRE_RECV_BACKLOG_BASE_FRAMES) return false
+    if (backlogBytes <= WIRE_RECV_BACKLOG_BASE_BYTES && backlogFrames < WIRE_RECV_BACKLOG_BASE_FRAMES) return null
     const sessionId = transport.getSessionId(entry.wire)
     const channels = sessionId === undefined ? 0 : (this.sessions.peekSession(sessionId)?.size ?? 0)
-    return (
+    const over =
       backlogBytes > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
       backlogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
-    )
+    return over ? 'backlog' : null
   }
 
   private async runInboundTurn(
@@ -476,8 +492,11 @@ class ChannelMux implements UpgradeStagesOwner {
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
       // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
-      if (isProtocolViolationError(err)) this.refuseFrame(err.target ?? entry.wire, 'frameRefused', channelOf(rawFrame))
-      else handleTelefunctionBug(err)
+      if (!isProtocolViolationError(err)) handleTelefunctionBug(err)
+      else {
+        const fault = { scope: 'channel', ix: channelOf(rawFrame), cause: 'frameRefused', wire: 'loss' } as const
+        this.endFault(err.target ?? entry.wire, fault)
+      }
       return null
     } finally {
       entry.state.recvBacklog.bytes -= byteLength
@@ -485,29 +504,43 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** The server can't take a frame its page sent on `wire`, for `cause`. A frame of one of the session's channels ends
-   *  that channel, told to its page, and the wire closes as a loss: the others reattach under their session, and what
-   *  they sent that the server didn't confirm goes again. A frame of no channel the session has ends the wire for good. */
-  refuseFrame(wire: Wire, cause: FrameRefusalCause, ix: number | undefined): void {
+  /** Every end the server decides on `wire` is decided here: what `fault` ends, how the wire goes, and what the page's
+   *  requests that meet the end are answered. `wire` may be a wire other than the one that sent the offending frame: a
+   *  barrier's violation is the staged probe's. A channel's end is told to its page on its own down stream, now or at
+   *  its next attach; what the others sent that the server didn't confirm goes again on the next wire. */
+  endFault(wire: Wire, fault: Fault): void {
     const entry = this.wires.get(wire)
     if (!entry) return
-    const refused = frameRefusal(cause, ix)
-    const sessionId = entry.transport.getSessionId(wire)
-    const handle = ix === undefined || !sessionId ? undefined : this.sessions.peekSession(sessionId)?.get(ix)
-    if (!handle) return this.terminateWire(wire, refused)
-    handle.channel._onFrameRefused(cause)
+    const channelEnded = fault.scope === 'channel' && this.endChannelAt(entry, fault.ix, fault.cause)
+    if (channelEnded && fault.wire === 'kept') return
     if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
-    entry.transport.terminateWire(wire, refused)
+    if (fault.scope === 'loss') return entry.transport.close(wire, { how: 'transient', refusal: null })
+    if (fault.scope === 'channel' && channelEnded) {
+      return entry.transport.close(wire, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
+    }
+    const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
+    entry.transport.close(wire, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
-  /** `wire` may be a wire other than the one that sent the offending frame — a barrier's
-   *  violation is the staged probe's. */
-  terminateWire(wire: Wire, refused?: Refusal): void {
-    const entry = this.wires.get(wire)
-    if (!entry) return
-    if (this.stages.get(wire)?.phase === 'staged') this.stages.clear(wire)
-    entry.state.rejected = true
-    entry.transport.terminateWire(wire, refused)
+  /** Ends the channel at `ix` with `cause` where the session holds it, or keeps the cause for its registration where
+   *  the wire awaits it; false where neither, as for a frame that names no channel. */
+  private endChannelAt(entry: WireEntry, ix: number | undefined, cause: FrameRefusalCause): boolean {
+    if (ix === undefined) return false
+    const sessionId = entry.transport.getSessionId(entry.wire)
+    const handle = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)?.get(ix)
+    if (handle) {
+      handle.channel._onFrameRefused(cause)
+      return true
+    }
+    const awaited = entry.state.awaited.get(ix)
+    if (!awaited) return false
+    entry.state.awaited.refuse(awaited, cause)
+    return true
+  }
+
+  /** A probe whose stage was abandoned ends for good. It holds no channel, so no channel reads the cause. */
+  endProbe(probe: Wire): void {
+    this.endFault(probe, { scope: 'session', cause: 'unreadable' })
   }
 
   /** Returns a RECONCILE's or barrier's `ReconcileOutcome` for the caller to send. Before a RECONCILE, a channel frame
@@ -678,7 +711,7 @@ class ChannelMux implements UpgradeStagesOwner {
     } catch (err) {
       // A bug: no RECONCILED will go, and what the wire holds for it would stay held on a wire that is up. It ends as a
       // lost wire does, its channels keeping their grace; a protocol violation ends it for good where it is caught.
-      if (!isProtocolViolationError(err)) entry.transport.terminateWire(entry.wire)
+      if (!isProtocolViolationError(err)) this.endFault(entry.wire, { scope: 'loss' })
       throw err
     }
   }
@@ -807,6 +840,7 @@ class ChannelMux implements UpgradeStagesOwner {
       held: [],
       phase: 'waiting',
       ttl: null,
+      refused: null,
     }
     this.registrationWaits.wait(awaited, this.options.connectTtl)
     entry.state.awaited.add(awaited)
@@ -815,11 +849,15 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Runs in `registerChannel`, between two reconciles. Waiters attach in the order they began; the latest one keeps
    *  the channel. */
   private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
+    // Its page sent it a frame the server can't take while it was awaited: it ends with that cause, unattached.
+    if (awaited.refused !== null) return channel._onFrameRefused(awaited.refused)
     const { entry } = awaited
     const sessionId = entry.transport.getSessionId(entry.wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
     // A page holds one end of a channel: one that awaits it at a second index broke the protocol.
-    if (this.sessions.indexOf(sessionId, channel.id) !== undefined) return this.terminateWire(entry.wire)
+    if (this.sessions.indexOf(sessionId, channel.id) !== undefined) {
+      return this.endFault(entry.wire, { scope: 'session', cause: 'unreadable' })
+    }
     entry.state.attaching.add(channel)
     const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)
@@ -833,26 +871,25 @@ class ChannelMux implements UpgradeStagesOwner {
     // lastSeq counts them.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
-      if (!this.dispatchHeld(awaited)) return
+      this.dispatchHeld(awaited)
       entry.sender.send(encode.attachResult(awaited.open.ix, channel._lastClientSeq))
       channel._confirmWant()
     }
     void this.chainRecv(entry, settle).catch(handleTelefunctionBug)
   }
 
-  /** Dispatches the frames held for `awaited`; returns false if they broke the protocol, which ends its wire. */
-  private dispatchHeld(awaited: AwaitedChannel): boolean {
+  /** Dispatches the frames held for `awaited`. One that breaks the protocol ends its channel alone: what the page sent
+   *  meanwhile was all read, so the wire goes on. */
+  private dispatchHeld(awaited: AwaitedChannel): void {
     const { entry } = awaited
     const held = entry.state.awaited.take(awaited)
     const sessionId = entry.transport.getSessionId(entry.wire)
     assert(sessionId)
     try {
       for (const { frame } of held) this.dispatchChannelFrame(sessionId, frame)
-      return true
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
-      this.terminateWire(entry.wire)
-      return false
+      this.endFault(entry.wire, { scope: 'channel', ix: awaited.open.ix, cause: 'frameRefused', wire: 'kept' })
     }
   }
 
@@ -890,10 +927,11 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   /** Transient: leave registry entries so the next reconcile's prev-comparison can fire
-   *  `recovery-failed` on abandoned channels. The page left or the wire was refused: remove outright — no resume. */
+   *  `recovery-failed` on abandoned channels. The page left or the server ended the session: remove outright — no
+   *  resume. */
   private detachSession(sessionId: string, reason: DetachReason): void {
-    const forGood = reason === 'pageLeft' || reason === 'rejected'
-    const session = forGood ? this.sessions.removeSession(sessionId) : this.sessions.peekSession(sessionId)
+    const session =
+      reason === 'transient' ? this.sessions.peekSession(sessionId) : this.sessions.removeSession(sessionId)
     if (!session) return
     for (const handle of session.values()) this.detachHandle(handle, reason)
   }
@@ -911,15 +949,14 @@ class ChannelMux implements UpgradeStagesOwner {
       case 'pageLeft':
         h.channel._onPeerGone(new ChannelPageLeftError())
         return
-      case 'rejected':
-        h.channel._onPeerGone(END_CAUSE.frameRefused.error())
-        return
       case 'transient':
         h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
         return
       case 'recoveryFailed':
         h.channel._onPeerRecoveryFailure()
         return
+      default:
+        h.channel._onPeerGone(END_CAUSE[reason].error())
     }
   }
 
@@ -957,7 +994,7 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Judges the wire at `dueAt`, on the `performance` clock. `recheck`: the deadline had passed when the timer last
    *  ran, and is judged again once the server read its sockets. */
   private armPingDeadline(entry: WireEntry, dueAt: number, recheck = false): void {
-    const { wire, state, transport } = entry
+    const { wire, state } = entry
     state.pingTimer.arm(dueAt, () => {
       // A PING waits behind what the page queued, so the wire is dead only a deadline after its last bytes and after
       // the data it announced.
@@ -971,7 +1008,7 @@ class ChannelMux implements UpgradeStagesOwner {
       if (!recheck) return this.armPingDeadline(entry, now + (now - dueAt), true)
       // Transient close so each channel gets its `reconnectTimeout` grace via
       // `_onPeerDisconnect`. Wire-level state is rebuilt by the next reconcile.
-      transport.terminateWire(wire)
+      this.endFault(wire, { scope: 'loss' })
     })
   }
 }

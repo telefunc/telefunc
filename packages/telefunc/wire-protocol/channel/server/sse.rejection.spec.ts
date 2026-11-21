@@ -16,7 +16,7 @@ const post = (body: BodyInit) =>
 /** A wire-level frame of a tag no version has: it names no channel. */
 const unreadable = new Uint8Array([0x0f, 0, 0])
 
-test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal, ends the page's event stream with a REJECTED event, and ends its channels with the reason", async () => {
+test("a frame of no channel the server cannot read is refused with the POST's `frames` refusal of the session, ends the page's event stream with a REJECTED event, and ends its channels with the connection's sentence", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
   getChannelMux().registerChannel(channel)
   const connId = crypto.randomUUID()
@@ -29,7 +29,7 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
 
   const refused = await post(encodeSseRequest({ connId }, [unreadable]))
 
-  const refusal = frameRefusal('frameRefused', undefined)
+  const refusal = frameRefusal('unreadable', undefined)
   expect({ statusCode: refused.statusCode, contentType: refused.contentType, body: refused.body }).toEqual({
     statusCode: 400,
     contentType: refusalContentType(refusal),
@@ -43,8 +43,5 @@ test("a frame of no channel the server cannot read is refused with the POST's `f
     decoder.push(read.value, (event) => events.push(event))
   }
   expect(events.at(-1)).toEqual(encode.rejected())
-  await expect(channel.closed).resolves.toHaveProperty(
-    'message',
-    `Channel closed: the server refused what the page sent on it: ${END_CAUSE.frameRefused.reason}`,
-  )
+  await expect(channel.closed).resolves.toHaveProperty('message', END_CAUSE.unreadable.error().message)
 })

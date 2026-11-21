@@ -27,7 +27,7 @@ function createHarness() {
         dropWaitingPublishes() {},
         dropWaitingFrom() {},
       }),
-      terminateWire: () => (terminated = true),
+      close: () => (terminated = true),
     }
     mux.onWireOpen(conn, transport)
     return {

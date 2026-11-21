@@ -1,5 +1,5 @@
 export { END_CAUSE, endCauseOf }
-export type { EndCause, FrameRefusalCause }
+export type { EndCause, FrameRefusalCause, RefusalCause, SessionCause }
 
 import { assert } from '../../utils/assert.js'
 import { NetworkError } from '../../shared/NetworkError.js'
@@ -55,10 +55,24 @@ const END_CAUSE = {
         true,
       ),
   },
+  /** Its page's connection sent what the server can't read as frames, or a frame of an index its session holds in no
+   *  form: every channel of the session ends. */
+  unreadable: sessionCause(0x08, ChannelClosedError, "The server can't read what the page sent on its connection."),
+  /** Its page's connection sent more than the server holds while it works on what came before: every channel of the
+   *  session ends. */
+  receiveBudget: sessionCause(
+    0x09,
+    ChannelOverflowError,
+    'The page sent more on its connection than the server holds while it works on what came before.',
+  ),
 } as const satisfies Record<string, EndCause>
 
-/** The causes of a frame the server can't take, which its refusal names. */
+/** The causes of a frame of one channel the server can't take, which end that channel. */
 type FrameRefusalCause = 'frameOverLimit' | 'frameRefused'
+/** The causes that end every channel of the page's session, the page's connection with them. */
+type SessionCause = 'unreadable' | 'receiveBudget'
+/** The causes a `frames` refusal names. */
+type RefusalCause = FrameRefusalCause | SessionCause
 
 const causeOfCode: ReadonlyMap<number, EndCause> = new Map(Object.values(END_CAUSE).map((cause) => [cause.code, cause]))
 // Two causes on one code would end a channel with one cause's error on one end and the other's on the other.
@@ -72,4 +86,10 @@ function endCauseOf(code: number): EndCause | undefined {
 /** A frame the server can't take for `reason`, the sentence its refusal carries. */
 function frameCause<Code extends number>(code: Code, reason: string) {
   return { code, reason, error: () => framesRefusedError(reason) }
+}
+
+/** The page's connection ends for `reason`, the sentence its refusal carries: of the connection, so that it is true of
+ *  every channel that ends with it, the ones that sent nothing wrong too. */
+function sessionCause<Code extends number>(code: Code, errorClass: new (message: string) => Error, reason: string) {
+  return { code, reason, error: () => new errorClass(`Channel closed: the page's connection ended: ${reason}`) }
 }

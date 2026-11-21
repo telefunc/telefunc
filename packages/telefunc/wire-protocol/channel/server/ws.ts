@@ -56,13 +56,12 @@ function getTelefuncChannelOptions({
     wholeMessages: true,
     copiesOnSend,
     bufferedAmount,
-    // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers. A page
-    // the server refused is told why, and doesn't reconnect.
-    terminateWire: (peer) => {
-      const rejected = mux.readRejection(peer)
-      if (rejected) peer.close(WS_CLOSE_REJECTED, WIRE_REJECTED_REASON)
-      else terminate(peer)
-      mux.onWireClosed(peer, rejected ? 'rejected' : 'transient')
+    // A loss closes at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
+    // A page whose session the server ended is told so, and doesn't reconnect.
+    close: (peer, { how }) => {
+      if (how === 'transient') terminate(peer)
+      else peer.close(WS_CLOSE_REJECTED, WIRE_REJECTED_REASON)
+      mux.onWireClosed(peer, how)
     },
   }
   /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
@@ -108,10 +107,12 @@ function getTelefuncChannelOptions({
     message: guard((peer, message: Message) =>
       mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     ),
-    close: guard((peer, details: Parameters<Hooks['close']>[1]) => {
-      if (mux.readRejection(peer)) mux.onWireClosed(peer, 'rejected')
-      else mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient')
-    }, false),
+    // A close the server decided was told to the mux as it closed: the mux has forgotten the peer.
+    close: guard(
+      (peer, details: Parameters<Hooks['close']>[1]) =>
+        mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
+      false,
+    ),
     error: guard((peer) => mux.onWireClosed(peer, 'transient'), false),
   })
   return {

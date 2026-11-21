@@ -156,7 +156,7 @@ test('a reconcile that throws a bug ends its wire, transiently: nothing stays he
   await Promise.resolve()
   expect(page.state.terminated).toBe(true)
   // The server's bug, not the page's fault: the page's channels keep their reconnect grace.
-  expect(page.mux.readRejection(page.wire)).toBe(false)
+  expect(page.state.closedAs).toBe('transient')
   vi.restoreAllMocks()
   page.close()
 })

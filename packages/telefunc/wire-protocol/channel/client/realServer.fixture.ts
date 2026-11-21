@@ -51,9 +51,11 @@ const world: {
   requests: { kind: Kind; bytes: number; status: number; contentType: string | null }[]
   /** Each request as it went, by its kind: a streaming upload is answered only at its end. */
   started: Kind[]
+  /** Each batch POST a hook changed, as it went: `again` sends it once more, past the hooks, whatever the page aborted. */
+  hooked: { again: () => Promise<Response> }[]
   sockets: number
   telefuncUrl: string
-} = { hooks: [], uploads: false, requests: [], started: [], sockets: 0, telefuncUrl: '' }
+} = { hooks: [], uploads: false, requests: [], started: [], hooked: [], sockets: 0, telefuncUrl: '' }
 
 /** `frame`'s channel and seq, where it carries `text`. */
 function textOf(frame: Uint8Array<ArrayBuffer>, text: string): { ix: number; seq: number } | null {
@@ -79,16 +81,16 @@ function findText(body: Uint8Array<ArrayBuffer>, text: string): { end: number; i
 async function takeHook(
   kind: Kind,
   body: unknown,
-): Promise<{ hook: Hook; bytes: Uint8Array<ArrayBuffer> | null } | null> {
+): Promise<{ hook: Hook; bytes: Uint8Array<ArrayBuffer> | null; taken: boolean } | null> {
   const bytes = body instanceof Blob ? new Uint8Array(await body.arrayBuffer()) : null
   const at = world.hooks.findIndex(
     (hook) =>
       hook.kind === kind && (hook.text === undefined || (bytes !== null && findText(bytes, hook.text) !== null)),
   )
   const hook = world.hooks[at]
-  if (hook === undefined) return bytes === null ? null : { hook: { kind }, bytes }
+  if (hook === undefined) return bytes === null ? null : { hook: { kind }, bytes, taken: false }
   world.hooks.splice(at, 1)
-  return { hook, bytes }
+  return { hook, bytes, taken: true }
 }
 
 const realFetch = globalThis.fetch
@@ -112,7 +114,10 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
         ? hook.upload(body)
         : body
   world.started.push(kind)
-  const response = await realFetch(hook.url ? hook.url(url) : url, { ...init, body: sent })
+  const target = hook.url ? hook.url(url) : url
+  if (taken?.taken && sent instanceof Blob)
+    world.hooked.push({ again: () => realFetch(target, { ...init, body: sent, signal: null }) })
+  const response = await realFetch(target, { ...init, body: sent })
   const contentType = response.headers.get('content-type')
   world.requests.push({ kind, bytes: bytes?.byteLength ?? 0, status: response.status, contentType })
   if (hook.stream && response.body) {
@@ -151,7 +156,7 @@ function useRealServer(transports: ('sse' | 'ws')[], channel: Omit<ChannelConfig
     world.telefuncUrl = `http://127.0.0.1:${address.port}/_telefunc`
   })
   afterEach(() => {
-    Object.assign(world, { hooks: [], uploads: false, requests: [], started: [], sockets: 0 })
+    Object.assign(world, { hooks: [], uploads: false, requests: [], started: [], hooked: [], sockets: 0 })
   })
   afterAll(() => {
     globalThis.fetch = realFetch

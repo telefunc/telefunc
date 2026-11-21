@@ -614,7 +614,7 @@ async function muxWebSocket(channels: ServerChannel[], request: Request) {
       wholeMessages: true,
       sendNow() {},
       bufferedAmount: () => 0,
-      terminateWire() {},
+      close() {},
     },
     request,
   )

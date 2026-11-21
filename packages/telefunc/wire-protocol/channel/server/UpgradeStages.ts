@@ -9,8 +9,8 @@ import type { Wire } from './ChannelMux.js'
 
 /** The mux, which ends a probe whose stage is abandoned. */
 interface UpgradeStagesOwner {
-  /** Ends the wire for good. */
-  terminateWire(wire: Wire): void
+  /** Ends the probe for good. */
+  endProbe(probe: Wire): void
 }
 
 type UpgradeStagesOptions = {
@@ -90,7 +90,7 @@ class UpgradeStages {
   abandon(probe: Wire): void {
     if (this.byProbe.get(probe)?.phase !== 'staged') return
     this.clear(probe)
-    this.owner.terminateWire(probe)
+    this.owner.endProbe(probe)
   }
 
   /** Forgets the stage and leaves the probe wire alone. */
