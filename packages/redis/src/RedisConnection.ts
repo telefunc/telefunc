@@ -2,7 +2,6 @@ export { RedisConnection }
 
 import { assert } from './assert.js'
 import {
-  callDefinedCommand,
   connectsAlike,
   createCommandClient,
   createSubscriberSocket,
@@ -122,13 +121,15 @@ class RedisConnection {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
-    const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    return command.parse(
-      await this.dispatch(command.writes, (client) => callDefinedCommand(client, name, keysAndArgs)),
-      input,
-    )
+    const name = command.binaryReply ? bufferForm(command.name) : command.name
+    // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
+    // arguments. The method is the script's, as definedCommands.ts types it.
+    return command.parse(await this.dispatch(command.writes, (client) => client[name](keysAndArgs)), input)
   }
 }
+
+/** The method of a defined command whose reply holds bytes. */
+const bufferForm = <Name extends string>(name: Name): `${Name}Buffer` => `${name}Buffer`
 
 /** The backend's own client for its commands, with its scripts defined. */
 function commandClientOf(redis: RedisClient): RedisClient {

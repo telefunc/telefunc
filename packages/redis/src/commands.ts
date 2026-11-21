@@ -6,7 +6,7 @@ export {
   holdsLua,
   parseOrdering,
 }
-export type { CommitInput, Hold, OperationOutcome, RedisCommand }
+export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
@@ -969,8 +969,8 @@ type Invocation = { keys: readonly string[]; argv: ReadonlyArray<string | Buffer
 
 /** One script: whether it writes, its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
  *  first; `binaryReply` reads bulk strings as Buffers. */
-type RedisCommand<Input, Output> = {
-  readonly name: string
+type RedisCommand<Input, Output, Name extends string = CommandName> = {
+  readonly name: Name
   readonly lua: string
   /** It may write: a failure that Redis doesn't prove came before it ran may have taken effect. */
   readonly writes: boolean
@@ -982,7 +982,12 @@ type RedisCommand<Input, Output> = {
   parse(reply: unknown, input: Input): Output
 }
 
-const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
+const command = <Input, Output, Name extends string>(
+  spec: RedisCommand<Input, Output, Name>,
+): RedisCommand<Input, Output, Name> => spec
+
+/** The name each script is defined under on the backend's client (`defineCommand`). */
+type CommandName = (typeof REDIS_COMMANDS)[keyof typeof REDIS_COMMANDS]['name']
 
 type RoomInc = { roomId: string; inc: string }
 type DirectoryPutInput = { roomId: string; incTag: string; checkAt: number; minDelayMs: number }

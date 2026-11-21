@@ -1,10 +1,9 @@
 // The client library's facts: the command client and subscriber socket the backend builds from an app's client, a
 // client's deployment and address, which raw commands write by ioredis's own command table, its wording for a command
-// it never wrote, and calls to defined commands. What a store's reply means is redisFailure.ts's.
+// it never wrote. What a store's reply means is redisFailure.ts's.
 export {
   createCommandClient,
   createSubscriberSocket,
-  callDefinedCommand,
   nextReady,
   isCluster,
   rawWrites,
@@ -21,7 +20,6 @@ import { isDeepStrictEqual } from 'node:util'
 import { hasFlag } from '@ioredis/commands'
 import { Cluster, type Redis } from 'ioredis'
 import { isObject } from 'telefunc/__internal'
-import { assert } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
@@ -258,24 +256,4 @@ function nextReady(client: RedisClient): Promise<void> {
   readyWaits.set(client, promise)
   if (client.status === 'wait') void client.connect().catch(() => {})
   return promise
-}
-
-/** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */
-function callDefinedCommand(
-  redis: RedisClient,
-  command: string,
-  keysAndArgs: ReadonlyArray<string | Uint8Array>,
-): Promise<unknown> {
-  const method: unknown = Reflect.get(redis, command)
-  assert(isDefinedCommand(method), command)
-  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
-  // arguments.
-  return method.call(redis, keysAndArgs)
-}
-
-/** A method `defineCommand` attached: a function, called on its client with the keys and arguments. */
-function isDefinedCommand(
-  method: unknown,
-): method is (this: RedisClient, keysAndArgs: ReadonlyArray<string | Uint8Array>) => Promise<unknown> {
-  return typeof method === 'function'
 }
