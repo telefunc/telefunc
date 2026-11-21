@@ -169,14 +169,14 @@ class EventStream implements WireQueue {
    *  wait here for as long as the socket stays open taking nothing. An end the server decided goes as the `last` event,
    *  after the event under way, which nothing passes once it started: what waits ended with the wire. */
   close(last: Uint8Array<ArrayBuffer> | null): void {
+    this.passing = new Fifo()
+    this.waiting = new Fifo()
+    this.waitingBytes = 0
     if (last !== null) {
       while (this.current !== null) this.pushChunks()
       this.stream.push(encodeChunk(last, 0, last.byteLength))
     }
     this.current = null
-    this.passing = new Fifo()
-    this.waiting = new Fifo()
-    this.waitingBytes = 0
     this.stream.close()
   }
 

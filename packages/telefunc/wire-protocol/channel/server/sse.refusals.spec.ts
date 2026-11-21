@@ -9,6 +9,7 @@ import { createDeferred } from '../../../utils/createDeferred.js'
 
 import {
   CREDIT_MSG_WINDOW_MAX,
+  SSE_EVENT_SLICE_BYTES,
   WIRE_GATHER_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
@@ -71,7 +72,11 @@ async function cancel(answer: SseChannelHttpResponse): Promise<void> {
 /** The frames an event stream carried, read to its end. */
 async function framesOfStream(answer: SseChannelHttpResponse): Promise<DecodedFrame[]> {
   if (!(answer.body instanceof ReadableStream)) throw new Error('no event stream')
-  const text = await new Response(answer.body).text()
+  return framesOfEvents(await new Response(answer.body).text())
+}
+
+/** The frames of an event stream's text. */
+function framesOfEvents(text: string): DecodedFrame[] {
   return text
     .split('\n')
     .filter((line) => line.startsWith('data: '))
@@ -318,3 +323,27 @@ test.each([
     ])
   },
 )
+
+test('a session end finishes the event its stream started, and what waits behind that event, control or data, goes with the wire', async () => {
+  const { connId, opened, channel } = await openWire()
+  await channel.opened
+  if (!(opened.body instanceof ReadableStream)) throw new Error('no event stream')
+  const decoder = new TextDecoder()
+  const events = opened.body.getReader()
+  // The stream's comment and the RECONCILED: read, the stream asks for more.
+  let text = ''
+  while (!text.includes('\n\ndata: ') || !text.endsWith('\n\n')) {
+    const { value } = await events.read()
+    text += decoder.decode(value)
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  // An event of two slices starts, and the stream takes its first; a PONG then waits to pass it, and a text behind it.
+  void channel.send('x'.repeat(SSE_EVENT_SLICE_BYTES)).catch(() => {})
+  await post(encodeSseRequest({ connId }, [encode.ping([])]))
+  void channel.send('behind').catch(() => {})
+  // A frame only a server sends ends the session.
+  const serverOnly = encode.attachResult(999, null)
+  await post(encodeSseRequest({ connId }, [serverOnly]))
+  for (let read = await events.read(); !read.done; read = await events.read()) text += decoder.decode(read.value)
+  expect(framesOfEvents(text).map(({ tag }) => tag)).toEqual([TAG.RECONCILED, TAG.TEXT, TAG.END])
+})
