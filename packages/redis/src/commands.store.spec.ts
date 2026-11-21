@@ -72,6 +72,17 @@ function changed(before: Snapshot, after: Snapshot, elapsed: number): string[] {
   return diff
 }
 
+/** The commands the store ran since its stats were reset, by name, its own calls to the stats and to scripts left out. */
+async function commandsRun(admin: Redis): Promise<Map<string, number>> {
+  const run = new Map<string, number>()
+  for (const [, name = '', calls = ''] of (await admin.info('commandstats')).matchAll(
+    /^cmdstat_([^:]+):calls=(\d+)/gm,
+  )) {
+    if (!/^(evalsha|eval|info|config\|.*|script\|.*)$/.test(name)) run.set(name, Number(calls))
+  }
+  return run
+}
+
 async function connected(host: string): Promise<Redis> {
   // Without lazyConnect: connect() rejects on the first refused attempt, while the server may still be starting.
   const redis = new Redis({ host, retryStrategy: (times) => (times > 200 ? null : 50), maxRetriesPerRequest: null })
@@ -190,9 +201,13 @@ function corrupted(call: Recorded): Fault[] {
   return faults
 }
 
-/** The call from its store with `fault` planted: it runs, or it is refused before any write and says it didn't run;
- *  anything else is a failure, described. */
-async function trial(store: Store, call: Recorded, fault: Fault): Promise<'ran' | 'refused' | { failure: string }> {
+/** The call from its store with `fault` planted: it runs, or it is refused before any write and says it didn't run, in
+ *  the words given; anything else is a failure, described. */
+async function trial(
+  store: Store,
+  call: Recorded,
+  fault: Fault,
+): Promise<'ran' | { refused: string } | { failure: string }> {
   await restore(store.admin, call.before)
   await fault.plant(store.admin)
   const listener = new Redis({ host: store.admin.options.host })
@@ -215,7 +230,7 @@ async function trial(store: Store, call: Recorded, fault: Fault): Promise<'ran' 
   const told =
     failure instanceof BackendError ? `${failure.code}/${failure.outcome}: ${failure.message}` : String(failure)
   const notRun = failure instanceof BackendError && failure.outcome === 'not-run'
-  if (notRun && diff.length === 0 && published === 0) return 'refused'
+  if (notRun && diff.length === 0 && published === 0) return { refused: failure.message }
   return {
     failure: `${call.name}, ${fault.name}: told ${told}; changed ${diff.slice(0, 3).join(', ') || 'nothing'}, published ${published}`,
   }
@@ -258,13 +273,87 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       for (const call of recorded) {
         for (const fault of anotherType(call)) {
           const verdict = await trial(store, call, fault)
-          if (verdict === 'refused') refused++
-          else if (verdict !== 'ran') failures.push(verdict.failure)
+          if (verdict === 'ran') continue
+          if ('refused' in verdict) refused++
+          else failures.push(verdict.failure)
         }
       }
       expect(failures).toEqual([])
       // A fault the store never saw refuses nothing: the trials reached it.
       expect(refused).toBeGreaterThan(0)
+    }, 300_000)
+
+    it(`${name}: a publish whose order holds another type is refused before its first write`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      if (store === undefined) throw new Error(`${name} didn't start`)
+      const publish = recorded.find((call) => call.name === REDIS_COMMANDS.publish.name && call.before.size > 0)
+      const [order] = publish?.keys ?? []
+      if (publish === undefined || order === undefined) throw new Error('the scenario made no publish of a known key')
+      const plants: Record<string, (admin: Redis) => Promise<unknown>> = {
+        list: (admin) => admin.rpush(order, 'x'),
+        hash: (admin) => admin.hset(order, 'x', '1'),
+        set: (admin) => admin.sadd(order, 'x'),
+        zset: (admin) => admin.zadd(order, 0, 'x'),
+      }
+      const verdicts: Record<string, unknown> = {}
+      for (const [type, plant] of Object.entries(plants)) {
+        const fault = {
+          name: `${order} holds a ${type}`,
+          plant: async (admin: Redis) => {
+            await admin.del(order)
+            await plant(admin)
+          },
+        }
+        verdicts[type] = await trial(store, publish, fault)
+      }
+      const refused = {
+        refused: expect.stringMatching(
+          /^Redis at .+ holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing \(WRONGTYPE\): keep that prefix to Telefunc$/,
+        ),
+      }
+      expect(verdicts).toEqual({ list: refused, hash: refused, set: refused, zset: refused })
+    }, 300_000)
+
+    it(`${name}: each write script's call that Redis doesn't refuse, by the commands it makes and its TYPEs`, async () => {
+      const store = stores.find((candidate) => candidate.name === name)
+      const connection = store && trials.get(store)
+      if (store === undefined || connection === undefined) throw new Error(`${name} didn't start`)
+      const made: Record<string, string[]> = {}
+      for (const call of recorded) {
+        await restore(store.admin, call.before)
+        await store.admin.config('RESETSTAT')
+        await call.replay(connection)
+        const run = await commandsRun(store.admin)
+        const commands = [...run.values()].reduce((sum, calls) => sum + calls, 0)
+        ;(made[call.name] ??= []).push(`${commands} commands, ${run.get('type') ?? 0} TYPE`)
+      }
+      // A key a call's first command on it reads, or a write that comes first, needs no TYPE: Redis refuses there.
+      const commit = '7 commands, 1 TYPE'
+      expect(made).toEqual({
+        tfBroadcastStart: ['3 commands, 0 TYPE'],
+        tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
+        tfRoomCellsExchange: ['19 commands, 2 TYPE', '16 commands, 2 TYPE'],
+        tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
+        tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
+        tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
+        tfRoomDropIncarnation: ['2 commands, 0 TYPE', '2 commands, 0 TYPE'],
+        tfRoomHeadExchange: [
+          '20 commands, 3 TYPE',
+          '4 commands, 0 TYPE',
+          '3 commands, 0 TYPE',
+          '4 commands, 0 TYPE',
+          '20 commands, 3 TYPE',
+          '3 commands, 0 TYPE',
+          '4 commands, 0 TYPE',
+        ],
+        tfRoomOperation: [
+          '40 commands, 2 TYPE',
+          '37 commands, 2 TYPE',
+          '28 commands, 2 TYPE',
+          '45 commands, 5 TYPE',
+          '48 commands, 5 TYPE',
+        ],
+      })
     }, 300_000)
 
     it(`${name}: each value in turn not as Telefunc wrote it`, async () => {
@@ -275,8 +364,9 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       for (const call of recorded) {
         for (const fault of corrupted(call)) {
           const verdict = await trial(store, call, fault)
-          if (verdict === 'refused') refused++
-          else if (verdict !== 'ran') failures.push(verdict.failure)
+          if (verdict === 'ran') continue
+          if ('refused' in verdict) refused++
+          else failures.push(verdict.failure)
         }
       }
       expect(failures).toEqual([])

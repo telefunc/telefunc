@@ -74,7 +74,7 @@ const CODES: Readonly<Record<string, { code: Code; notRun: boolean; toDo?: strin
 /** How Redis 5 and 6 and Dragonfly wrap the reply to a call a script makes; such a reply proves nothing about running. */
 const IN_SCRIPT = /^ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?-?/
 
-/** A write script's guard's refusal before its first write (`GUARD_LUA`, commands.ts), by its word: WRONGTYPE for a
+/** A write script's guard's refusal before its first write (`refuseLua`, commands.ts), by its word: WRONGTYPE for a
  *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
 const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
 

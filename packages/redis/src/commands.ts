@@ -1,11 +1,4 @@
-export {
-  REDIS_DELIVERY_FENCE_BYTE,
-  REDIS_DELIVERY_FENCE_TOKEN_LENGTH,
-  LANE_PAGE_SIZE,
-  REDIS_COMMANDS,
-  holdsLua,
-  parseOrdering,
-}
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering }
 export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
@@ -79,75 +72,102 @@ end
 `
 
 /** What a write script expects a key of its call to hold: the types Telefunc keeps there, `|`-separated, or `channel`
- *  for a Pub/Sub channel, which no key stands for. `repeats` is the index of an earlier key of the call that this one
- *  repeats when the call has none of its own (`COMMIT_KEYS`): it then stands for nothing. */
-type Hold = { readonly holds: string; readonly repeats?: number }
-
-/** The guard's check of `holds` on the Lua table `keys` names: the KEYS of a call, or a table of them. */
-function holdsLua(keys: string, holds: readonly Hold[]): string {
-  const entries = holds.flatMap(({ holds, repeats }, index) =>
-    holds === 'channel' ? [] : [`{${index + 1}, '${holds}'${repeats === undefined ? '' : `, ${repeats + 1}`}}`],
-  )
-  return `tf_holds(${keys}, {${entries.join(', ')}})`
-}
+ *  for a Pub/Sub channel, which no key stands for. */
+type Hold = string
 
 // A write script can't undo a write, so before its first one it checks what a later call of it could fail on: that
-// each key holds the type Telefunc keeps there, and that each value it decodes or adds to is one Telefunc writes. A
-// refusal there starts its reply with TFNOTRUN, which nothing else puts at the start of one (a Lua error's text comes
-// after `ERR`), and the backend tells it 'not-run'.
-const GUARD_LUA = `
-local TF_MAX_INTEGER = 9007199254740991
-local function tf_refuse(word, detail)
-  error({ err = 'TFNOTRUN ' .. word .. ' ' .. detail })
-end
--- Each entry {index, types[, repeated]} of holds: keys[index] holds one of types, or nothing, unless it repeats
--- keys[repeated].
-local function tf_holds(keys, holds)
-  for _, entry in ipairs(holds) do
-    local key = keys[entry[1]]
-    if key ~= nil and (entry[3] == nil or key ~= keys[entry[3]]) then
-      local held = redis.call('TYPE', key).ok
-      if held ~= 'none' and not string.find('|' .. entry[2] .. '|', '|' .. held .. '|', 1, true) then
-        local kept = string.gsub(entry[2], '|', ' or ')
-        tf_refuse('WRONGTYPE', key .. ' holds a ' .. held .. ' where Telefunc keeps a ' .. kept)
-      end
-    end
+// each key holds the type Telefunc keeps there, and that each value it decodes or adds to is one Telefunc writes.
+// - A key's first command, made before the first write, is the key's check (`heldCallLua`): Redis answers WRONGTYPE
+//   there, before anything is written. A key the script first reaches past its first write gets a TYPE before it
+//   (`holdsCheckLua`), on the calls that reach it.
+// - Each check is Lua at its place, with its message built inside its refusal: a call that isn't refused defines no
+//   function and builds no message for one.
+// A refusal starts its reply with TFNOTRUN, which nothing else puts at the start of one (a Lua error's text comes after
+// `ERR`), and the backend tells it 'not-run'.
+
+const TF_MAX_INTEGER = Number.MAX_SAFE_INTEGER
+
+/** Lua that refuses the call: `word`, then `detail`, a Lua string expression only the refusal evaluates. */
+function refuseLua(word: 'WRONGTYPE' | 'ERR', detail: string): string {
+  return `error({ err = 'TFNOTRUN ${word} ' .. ${detail} })`
+}
+
+/** Lua that refuses where the key `key` names holds a type other than `holds`, the types a `Hold` names. */
+function holdsCheckLua(key: string, holds: Hold): string {
+  const types = holds.split('|')
+  const other = types.map((type) => ` and held ~= '${type}'`).join('')
+  const detail = `${key} .. ' holds a ' .. held .. ' where Telefunc keeps a ${types.join(' or ')}'`
+  return `do
+  local held = redis.call('TYPE', ${key}).ok
+  if held ~= 'none'${other} then ${refuseLua('WRONGTYPE', detail)} end
+end`
+}
+
+/** Lua that checks `reply`, a Lua name holding what `redis.pcall` answered for the first command on the key `key`
+ *  names: WRONGTYPE refuses with `holdsCheckLua`'s words where the key holds a type other than `holds`, and with
+ *  `otherwise`, a Lua string expression, where it holds another of them than the command takes. Any other error reply
+ *  is raised as it came, so an ACL's refusal reads as Redis wrote it. */
+function heldReplyLua(reply: string, holds: Hold, key: string, otherwise?: string): string {
+  return `if type(${reply}) == 'table' and ${reply}.err then
+  if string.sub(${reply}.err, 1, 10) ~= 'WRONGTYPE ' then error(${reply}) end
+  ${holdsCheckLua(key, holds)}
+  ${otherwise === undefined ? `error(${reply})` : refuseLua('WRONGTYPE', otherwise)}
+end`
+}
+
+/** Lua that makes `call`, the first command on the key `key` names, with its arguments as Lua expressions, by
+ *  `redis.pcall` into `target` (a Lua name, `local` or not), checked by `heldReplyLua`. */
+function heldCallLua(target: string, holds: Hold, call: string, key: string): string {
+  return `${target} = redis.pcall(${call})
+${heldReplyLua(target.replace(/^local /, ''), holds, key)}`
+}
+
+/** Lua that declares `name`, the table `raw` decodes to, refused where `raw` isn't the JSON Telefunc writes; `what`
+ *  is a Lua string expression. */
+function jsonLua(name: string, raw: string, what: string): string {
+  return `local ${name}_decoded, ${name} = pcall(cjson.decode, ${raw})
+if not ${name}_decoded or type(${name}) ~= 'table' then ${refuseLua('ERR', `${what} .. " isn't the JSON Telefunc writes"`)} end`
+}
+
+/** Lua that refuses where `value`, a Lua name, isn't a finite number; `what` is a Lua string expression. */
+function numberLua(value: string, what: string): string {
+  return `if type(${value}) ~= 'number' or ${value} ~= ${value} or ${value} == math.huge or ${value} == -math.huge then
+  ${refuseLua('ERR', `${what} .. " isn't a number Telefunc writes"`)}
+end`
+}
+
+/** Lua that refuses where `value`, a Lua name, isn't an integer within ±2^53; `what` is a Lua string expression. */
+function integerLua(value: string, what: string): string {
+  const outside = `${value} ~= math.floor(${value}) or ${value} < -${TF_MAX_INTEGER} or ${value} > ${TF_MAX_INTEGER}`
+  return `if type(${value}) ~= 'number' or ${outside} then
+  ${refuseLua('ERR', `${what} .. " isn't an integer Telefunc writes"`)}
+end`
+}
+
+/** Lua that refuses where the key `key` names, which INCR counts, holds no count it can add one to. As the key's first
+ *  command, its GET is the key's check. */
+function incrementableLua(key: string): string {
+  return `do
+  ${heldCallLua('local count', 'string', `'GET', ${key}`, key)}
+  if count and not (string.match(count, '^%-?%d+$') and tonumber(count) < ${TF_MAX_INTEGER}) then
+    ${refuseLua('ERR', `${key} .. " holds no count Telefunc writes"`)}
   end
-end
-local function tf_json(raw, what)
-  local ok, value = pcall(cjson.decode, raw)
-  if not ok or type(value) ~= 'table' then tf_refuse('ERR', what .. " isn't the JSON Telefunc writes") end
-  return value
-end
-local function tf_number(value, what)
-  if type(value) ~= 'number' or value ~= value or value == math.huge or value == -math.huge then
-    tf_refuse('ERR', what .. " isn't a number Telefunc writes")
-  end
-  return value
-end
-local function tf_integer(value, what)
-  if type(value) ~= 'number' or value ~= math.floor(value) or value < -TF_MAX_INTEGER or value > TF_MAX_INTEGER then
-    tf_refuse('ERR', what .. " isn't an integer Telefunc writes")
-  end
-  return value
-end
--- A key INCR counts in holds a count it can add one to.
-local function tf_incrementable(key)
-  local raw = redis.call('GET', key)
-  if raw and not (string.match(raw, '^%-?%d+$') and tonumber(raw) < TF_MAX_INTEGER) then
-    tf_refuse('ERR', key .. " holds no count Telefunc writes")
-  end
-end
--- A counter cell tf_count changes by delta holds a count that stays an integer.
-local function tf_countable(values_key, key, delta)
-  tf_integer(delta, 'the change of counter ' .. key)
-  local raw = redis.call('HGET', values_key, key)
-  if raw then
-    local counter = tf_json(raw, 'counter ' .. key)
-    tf_integer(tf_integer(counter.value, 'counter ' .. key) + delta, 'counter ' .. key .. ' changed by ' .. delta)
-  end
-end
-`
+end`
+}
+
+/** Lua that refuses where the counter cell `key` of the hash `valuesKey`, changed by `delta` (a Lua name), holds no
+ *  count that stays an integer. As the hash's first command, its HGET is the hash's check. */
+function countableLua(valuesKey: string, key: string, delta: string): string {
+  return `${integerLua(delta, `'the change of counter ' .. ${key}`)}
+${heldCallLua('local raw', 'hash', `'HGET', ${valuesKey}, ${key}`, valuesKey)}
+if raw then
+  ${jsonLua('counter', 'raw', `'counter ' .. ${key}`)}
+  local value = counter.value
+  ${integerLua('value', `'counter ' .. ${key}`)}
+  local changed = value + ${delta}
+  ${integerLua('changed', `'counter ' .. ${key} .. ' changed by ' .. ${delta}`)}
+end`
+}
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 const NOW_LUA = `
@@ -157,14 +177,22 @@ local function tf_now()
 end
 `
 
-const HEAD_PRELUDE = `${GUARD_LUA}${NOW_LUA}
--- read the head, treating a logically-lapsed head as absent (a lapsed tombstone reopens the
--- absence epoch); the PX backstop only reclaims memory, it is never what makes it invisible.
-local function tf_live_head(key, now)
-  local raw = redis.call('GET', key)
+/** Lua that reads the head at the key `key` names into `local raw_head`: a write script's first command on its head. */
+function headReadLua(key: string): string {
+  return heldCallLua('local raw_head', 'string', `'GET', ${key}`, key)
+}
+
+const HEAD_PRELUDE = `${NOW_LUA}
+-- The head raw that key gave, treating a logically-lapsed head as absent (a lapsed tombstone reopens the absence epoch);
+-- the PX backstop only reclaims memory, it is never what makes it invisible.
+local function tf_live_head(raw, key, now)
   if not raw then return nil end
-  local h = tf_json(raw, key)
-  if h.exp ~= nil and tf_number(h.exp, key .. "'s expiry") <= now then return nil end
+  ${jsonLua('h', 'raw', 'key')}
+  local exp = h.exp
+  if exp ~= nil then
+    ${numberLua('exp', `key .. "'s expiry"`)}
+    if exp <= now then return nil end
+  end
   return h
 end
 `
@@ -184,17 +212,17 @@ end
 // place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
 //   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary')
-const PUBLISH_HOLDS: readonly Hold[] = [{ holds: 'string' }, { holds: 'channel' }]
-const PUBLISH_LUA = `${ALLOWED_LUA}${GUARD_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
-${holdsLua('KEYS', PUBLISH_HOLDS)}
-local prev = redis.call('GET', KEYS[1])
+const PUBLISH_HOLDS = ['string', 'channel'] as const
+const PUBLISH_LUA = `${ALLOWED_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
+${heldCallLua('local prev', PUBLISH_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
 local ts = tf_now()
 local seq
 local text, binary = 0, 0
 if prev then
   local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
-  if not pseq then tf_refuse('ERR', KEYS[1] .. " holds no order Telefunc writes") end
-  seq = tf_integer(tonumber(pseq) + 1, KEYS[1] .. "'s next publish")
+  if not pseq then ${refuseLua('ERR', `KEYS[1] .. " holds no order Telefunc writes"`)} end
+  seq = tonumber(pseq) + 1
+  ${integerLua('seq', `KEYS[1] .. "'s next publish"`)}
   if tonumber(pts) > ts then ts = tonumber(pts) end
   text, binary = tonumber(ptext), tonumber(pbinary)
 else
@@ -210,7 +238,7 @@ else
   binary = binary + 1
   place = binary
 end
-tf_integer(place, KEYS[1] .. "'s next publish of its kind")
+${integerLua('place', `KEYS[1] .. "'s next publish of its kind"`)}
 tf_allowed('PUBLISH', KEYS[2], '')
 redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
 local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
@@ -264,21 +292,14 @@ end
 //         head's incarnation
 //   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
 //         cell its key, delta and create ('1' or '')
-const CELL_HOLDS: readonly Hold[] = [
-  { holds: 'string' },
-  { holds: 'string' },
-  { holds: 'set' },
-  { holds: 'zset' },
-  { holds: 'hash' },
-  { holds: 'hash' },
-]
+const CELL_HOLDS = ['string', 'string', 'set', 'zset', 'hash', 'hash'] as const
 const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
-${holdsLua('KEYS', CELL_HOLDS)}
 local head_key = KEYS[1]
 local now = tf_now()
-local expected = tf_json(ARGV[1], 'the expected head')
-local nx = tf_json(ARGV[2], 'the next head')
-local cur = tf_live_head(head_key, now)
+${jsonLua('expected', 'ARGV[1]', "'the expected head'")}
+${jsonLua('nx', 'ARGV[2]', "'the next head'")}
+${headReadLua('head_key')}
+local cur = tf_live_head(raw_head, head_key, now)
 
 local matches = false
 if expected.form == 'absent' then
@@ -298,7 +319,8 @@ if not matches then
 end
 
 -- The count lapses with a tombstone; salted with authority time, a rev still never repeats.
-local n = tf_integer((cur and cur.n or 0) + 1, head_key .. "'s next count")
+local n = (cur and cur.n or 0) + 1
+${integerLua('n', `head_key .. "'s next count"`)}
 local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. n, n = n, state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
@@ -309,8 +331,15 @@ if #KEYS > 1 then
   tf_allowed('INCR', KEYS[2])
   tf_cell_writes_allowed()
   tf_allowed('SADD', KEYS[3], '')
-  tf_incrementable(KEYS[2])
-  for at = 3, #ARGV, 3 do tf_countable(KEYS[5], ARGV[at], tonumber(ARGV[at + 1])) end
+  ${incrementableLua('KEYS[2]')}
+  for at = 3, #ARGV, 3 do
+    local delta = tonumber(ARGV[at + 1])
+    ${countableLua('KEYS[5]', 'ARGV[at]', 'delta')}
+  end
+  -- The keys the writes below reach that no command above read (KEYS[2] and KEYS[5] were).
+  ${holdsCheckLua('KEYS[3]', CELL_HOLDS[2])}
+  ${holdsCheckLua('KEYS[4]', CELL_HOLDS[3])}
+  ${holdsCheckLua('KEYS[6]', CELL_HOLDS[5])}
 end
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
@@ -326,7 +355,7 @@ return '{"tag":"head","head":' .. encoded .. '}'
 //   KEYS: [1]=head
 const READ_HEAD_LUA = `${HEAD_PRELUDE}
 local now = tf_now()
-local head = tf_live_head(KEYS[1], now)
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
 if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
@@ -353,7 +382,7 @@ end
 
 const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
-local head = tf_live_head(KEYS[1], now)
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local keys, first = ARGV, 3
 if ARGV[2] == 'prefix' then
@@ -366,7 +395,7 @@ return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
 //   KEYS: [1]=head, then per cell its expiring key
 //   ARGV: [1]=inc, then per cell its key
 const READ_EXPIRING_CELLS_LUA = `${HEAD_PRELUDE}
-local head = tf_live_head(KEYS[1], tf_now())
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local reply = {'cells'}
 for i = 2, #KEYS do
@@ -386,7 +415,7 @@ return reply
 //   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
-local head = tf_live_head(KEYS[1], now)
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
@@ -401,7 +430,7 @@ return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 //   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
 //   Reply: nil once the incarnation is not the open head, else the lane's 'seq:ts', '' before its first commit
 const LANE_START_LUA = `${HEAD_PRELUDE}
-local head = tf_live_head(KEYS[1], tf_now())
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 local mark
 if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('HGET', KEYS[2], ARGV[2]) end
@@ -414,7 +443,7 @@ return mark or ''
 //   ARGV: [1]=inc [2]=HSCAN cursor
 //   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, 'seq:ts', ...}}
 const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}
-local head = tf_live_head(KEYS[1], tf_now())
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
 `
@@ -425,7 +454,7 @@ return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
 //   ARGV: [1]=inc [2]=SSCAN cursor
 //   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, ...}}
 const TRACK_LANES_LUA = `${HEAD_PRELUDE}
-local head = tf_live_head(KEYS[1], tf_now())
+local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 return redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
 `
@@ -442,10 +471,9 @@ return marks
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
 //   KEYS: [1]=order ('seq:ts:text publishes:binary publishes')
-const BROADCAST_START_HOLDS: readonly Hold[] = [{ holds: 'string' }]
-const BROADCAST_START_LUA = `${GUARD_LUA}
-${holdsLua('KEYS', BROADCAST_START_HOLDS)}
-local mark = redis.call('GET', KEYS[1])
+const BROADCAST_START_HOLDS = ['string'] as const
+const BROADCAST_START_LUA = `
+${heldCallLua('local mark', BROADCAST_START_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
 if mark then return mark end
 local t = redis.call('TIME')
 mark = string.format('%.0f', tonumber(t[1]) * 1000000 + tonumber(t[2])) .. ':0:0:0'
@@ -456,9 +484,9 @@ return mark
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
 //   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
-const DROP_INCARNATION_HOLDS: readonly Hold[] = [{ holds: 'channel' }, { holds: 'set' }]
-const DROP_INCARNATION_LUA = `${ALLOWED_LUA}${GUARD_LUA}
-${holdsLua('KEYS', DROP_INCARNATION_HOLDS)}
+// UNLINK, the first write, takes a key of any type.
+const DROP_INCARNATION_HOLDS = ['channel', 'set'] as const
+const DROP_INCARNATION_LUA = `${ALLOWED_LUA}
 tf_allowed('PUBLISH', KEYS[1], '')
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
@@ -471,26 +499,34 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 //         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
 //         create ('1' or '')
 const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
-${holdsLua('KEYS', CELL_HOLDS)}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
-local head = tf_live_head(head_key, now)
+${headReadLua('head_key')}
+local head = tf_live_head(raw_head, head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-incarnation'} end
-local mutated = tf_integer(tonumber(ARGV[2]), 'the count of mutated cells')
-local expected = tf_integer(tonumber(ARGV[3]), 'the count of expected cells')
-local counted = tf_integer(tonumber(ARGV[4]), 'the count of counted cells')
+local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+${integerLua('mutated', "'the count of mutated cells'")}
+${integerLua('expected', "'the count of expected cells'")}
+${integerLua('counted', "'the count of counted cells'")}
 local first_expected = 5 + 3 * mutated
 local first_counted = first_expected + 2 * expected
 for at = first_expected, first_counted - 1, 2 do
-  if (redis.call('HGET', versions_key, ARGV[at]) or '') ~= ARGV[at + 1] then return {'conflict'} end
+  ${heldCallLua('local version', CELL_HOLDS[5], "'HGET', versions_key, ARGV[at]", 'versions_key')}
+  if (version or '') ~= ARGV[at + 1] then return {'conflict'} end
 end
 tf_cell_writes_allowed()
 tf_allowed('SADD', incarnation_keys_key, '')
-tf_incrementable(rev_key)
+${incrementableLua('rev_key')}
 for at = first_counted, first_counted + 3 * counted - 1, 3 do
-  tf_countable(values_key, ARGV[at], tonumber(ARGV[at + 1]))
+  local delta = tonumber(ARGV[at + 1])
+  ${countableLua('values_key', 'ARGV[at]', 'delta')}
 end
+-- The keys the writes below reach that no command above read.
+${holdsCheckLua('incarnation_keys_key', CELL_HOLDS[2])}
+${holdsCheckLua('cell_index_key', CELL_HOLDS[3])}
+if expected == 0 then ${holdsCheckLua('versions_key', CELL_HOLDS[5])} end
+if counted == 0 then ${holdsCheckLua('values_key', CELL_HOLDS[4])} end
 local version = redis.call('INCR', rev_key)
 for at = 5, first_expected - 1, 3 do
   tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
@@ -566,21 +602,22 @@ const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
 const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
 
 /** What each of COMMIT's KEYS holds, by `COMMIT_KEYS`' names: an order is a string, or a member lane's order hash. */
-const COMMIT_HOLDS = holdList(COMMIT_KEYS, {
-  head: { holds: 'string' },
-  order: { holds: 'string|hash' },
-  retained: { holds: 'string' },
-  channel: { holds: 'channel' },
-  incarnationKeys: { holds: 'set' },
-  cellValues: { holds: 'hash' },
-  everyTrackChannel: { holds: 'channel' },
-  memberRetained: { holds: 'set', repeats: COMMIT_KEYS.retained },
-  trackRetained: { holds: 'set', repeats: COMMIT_KEYS.retained },
-  everyMemberChannel: { holds: 'channel' },
-  trackLanes: { holds: 'set', repeats: COMMIT_KEYS.order },
-  retainedLanes: { holds: 'set' },
-  retainedOwners: { holds: 'hash' },
-})
+const COMMIT_HOLD = {
+  head: 'string',
+  order: 'string|hash',
+  retained: 'string',
+  channel: 'channel',
+  incarnationKeys: 'set',
+  cellValues: 'hash',
+  everyTrackChannel: 'channel',
+  memberRetained: 'set',
+  trackRetained: 'set',
+  everyMemberChannel: 'channel',
+  trackLanes: 'set',
+  retainedLanes: 'set',
+  retainedOwners: 'hash',
+} satisfies Record<keyof typeof COMMIT_KEYS, Hold>
+const COMMIT_HOLDS = holdList(COMMIT_KEYS, COMMIT_HOLD)
 
 /** `holds` by the index `table` gives each name. */
 function holdList<Name extends string>(table: Record<Name, number>, holds: Record<Name, Hold>): Hold[] {
@@ -589,23 +626,25 @@ function holdList<Name extends string>(table: Record<Name, number>, holds: Recor
   return list
 }
 
-// A lane's last commit, as its order's watermark 'seq:ts' gives it (a member lane's under its lane key in the order
-// hash): its seq and time, 0 and 0 with none yet. An order a later commit couldn't add to is refused.
-const LANE_ORDER_LUA = `
-local function tf_lane_order(order_key, member_lane, lane_key)
-  local prev
-  if member_lane then prev = redis.pcall('HGET', order_key, lane_key) else prev = redis.pcall('GET', order_key) end
-  if type(prev) == 'table' and prev.err then
-    if string.sub(prev.err, 1, 10) ~= 'WRONGTYPE ' then error(prev) end
-    tf_refuse('WRONGTYPE', order_key .. " holds no order Telefunc writes for its lane")
+/** Lua that reads a lane's last commit, as the watermark 'seq:ts' its order at `orderKey` gives it (a member lane's
+ *  under `laneKey` in the order hash, as `memberLane` tells), into the locals `seq`, `ts` and `prev`: its seq and
+ *  time, 0 and 0 with none yet, and whether it has one. An order a later commit couldn't add to is refused. As the
+ *  order's first command, its read is the order's check. */
+function laneOrderLua(orderKey: string, memberLane: string, laneKey: string, [seq, ts, prev]: readonly string[]) {
+  return `local ${seq}, ${ts}, ${prev} = 0, 0, false
+do
+  local mark
+  if ${memberLane} then mark = redis.pcall('HGET', ${orderKey}, ${laneKey}) else mark = redis.pcall('GET', ${orderKey}) end
+  ${heldReplyLua('mark', COMMIT_HOLD.order, orderKey, `${orderKey} .. " holds no order Telefunc writes for its lane"`)}
+  if mark then
+    local pseq, pts = string.match(mark, '^(%d+):(%d+)$')
+    if not pseq then ${refuseLua('ERR', `${orderKey} .. " holds no order Telefunc writes"`)} end
+    local next_seq = tonumber(pseq) + 1
+    ${integerLua('next_seq', `${orderKey} .. "'s next commit"`)}
+    ${seq}, ${ts}, ${prev} = tonumber(pseq), tonumber(pts), true
   end
-  if not prev then return 0, 0, false end
-  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
-  if not pseq then tf_refuse('ERR', order_key .. " holds no order Telefunc writes") end
-  tf_integer(tonumber(pseq) + 1, order_key .. "'s next commit")
-  return tonumber(pseq), tonumber(pts), true
-end
-`
+end`
+}
 
 /** The checks of what COMMIT writes after its lane's order (`ALLOWED_LUA`). Run from OPERATION, past OPERATION's own
  *  writes, its reads and its order's write are checked too. */
@@ -648,16 +687,52 @@ if ${A.retain} == '1' then
 end`
 }
 
-/** COMMIT's body, reading its keys from `K` and its args from `A`, a table `args` names. */
+/** The checks of the keys COMMIT writes after its lane's order that no command before reads, on the commits that write
+ *  them (`prev`, a Lua name, tells whether the lane has a commit yet). Run from OPERATION, past OPERATION's own writes,
+ *  its head and its required cells' hash are checked too, unless OPERATION's checks cover them. */
+function commitHoldsLua(
+  K: Record<keyof typeof COMMIT_KEYS, string>,
+  A: Record<keyof typeof COMMIT_ARGS, string>,
+  args: string,
+  prev: string,
+  afterWrites: boolean,
+) {
+  return `${
+    afterWrites
+      ? `if ${K.head} ~= ${OPERATION_KEY.head} then ${holdsCheckLua(K.head, COMMIT_HOLD.head)} end
+if #${args} > ${COMMIT_ARGS.requiredCells} then ${holdsCheckLua(K.cellValues, COMMIT_HOLD.cellValues)} end
+if ${K.incarnationKeys} ~= ${OPERATION_KEY.incarnationKeys} then
+  ${holdsCheckLua(K.incarnationKeys, COMMIT_HOLD.incarnationKeys)}
+end
+`
+      : `${holdsCheckLua(K.incarnationKeys, COMMIT_HOLD.incarnationKeys)}
+`
+  }if not ${prev} and ${A.laneKind} == 'binary' then ${holdsCheckLua(K.trackLanes, COMMIT_HOLD.trackLanes)} end
+if ${A.retain} == '1' then
+  ${holdsCheckLua(K.retained, COMMIT_HOLD.retained)}
+  ${holdsCheckLua(K.retainedLanes, COMMIT_HOLD.retainedLanes)}
+  if ${A.laneKind} ~= 'binary' then
+    ${holdsCheckLua(K.retainedOwners, COMMIT_HOLD.retainedOwners)}
+  else
+    ${holdsCheckLua(K.memberRetained, COMMIT_HOLD.memberRetained)}
+    ${holdsCheckLua(K.trackRetained, COMMIT_HOLD.trackRetained)}
+  end
+end`
+}
+
+/** COMMIT's body, reading its keys from `K` and its args from `A`, a table `args` names. Run from OPERATION, its keys
+ *  are checked before OPERATION's first write (`commitHoldsLua`). */
 function commitLua(
   K: Record<keyof typeof COMMIT_KEYS, string>,
   A: Record<keyof typeof COMMIT_ARGS, string>,
   args: string,
+  afterWrites: boolean,
 ) {
   return `local head_key, order_key, retained_key, channel_key, incarnation_keys_key =
   ${K.head}, ${K.order}, ${K.retained}, ${K.channel}, ${K.incarnationKeys}
 local now = tf_now()
-local head = tf_live_head(head_key, now)
+${headReadLua('head_key')}
+local head = tf_live_head(raw_head, head_key, now)
 local ok = false
 if head and head.inc == ${A.inc} then
   if ${A.closingLease} == '' then
@@ -669,17 +744,19 @@ if head and head.inc == ${A.inc} then
 end
 if not ok then return '{"kind":"stale-incarnation"}' end
 for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
-  if redis.call('HEXISTS', ${K.cellValues}, ${args}[i]) == 0 then
+  ${heldCallLua('local present', COMMIT_HOLD.cellValues, `'HEXISTS', ${K.cellValues}, ${args}[i]`, K.cellValues)}
+  if present == 0 then
     return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}'
   end
 end
 
 local member_lane = ${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary'
-local base_seq, base_ts, prev = tf_lane_order(order_key, member_lane, ${A.laneKey})
+${laneOrderLua('order_key', 'member_lane', A.laneKey, ['base_seq', 'base_ts', 'prev'])}
 local seq = base_seq + 1
 local ts = now
 if base_ts > ts then ts = base_ts end
 ${commitAllowedLua(K, A, false)}
+${afterWrites ? '' : commitHoldsLua(K, A, args, 'prev', false)}
 -- tostring keeps only 14 significant digits.
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
@@ -733,10 +810,9 @@ return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. 
 `
 }
 
-const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${LANE_ORDER_LUA}
+const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
-${holdsLua('KEYS', COMMIT_HOLDS)}
-${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV')}`
+${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV', false)}`
 
 // Deletes one lane's retained frame. `member` and `track` are the retained lanes of a binary lane's member and its
 // track; another lane repeats `retained` for both, and its owner leaves `owners`.
@@ -778,57 +854,56 @@ const OPERATION_KEYS = {
   retainedOwners: 8,
 } as const
 const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
-const OPERATION_HOLDS = holdList(OPERATION_KEYS, {
-  head: { holds: 'string' },
-  rev: { holds: 'string' },
-  incarnationKeys: { holds: 'set' },
-  cellIndex: { holds: 'zset' },
-  cellValues: { holds: 'hash' },
-  cellVersions: { holds: 'hash' },
-  retainedLanes: { holds: 'set' },
-  semanticRetained: { holds: 'string' },
-  retainedOwners: { holds: 'hash' },
-})
+/** The KEYS and ARGV of the commit an operation carries, as OPERATION's tables CK and CA hold them. */
+const COMMIT_IN_OPERATION_KEY = luaRefs('CK', COMMIT_KEYS)
+const COMMIT_IN_OPERATION_ARG = luaRefs('CA', COMMIT_ARGS)
+const OPERATION_HOLD = {
+  head: 'string',
+  rev: 'string',
+  incarnationKeys: 'set',
+  cellIndex: 'zset',
+  cellValues: 'hash',
+  cellVersions: 'hash',
+  retainedLanes: 'set',
+  semanticRetained: 'string',
+  retainedOwners: 'hash',
+} satisfies Record<keyof typeof OPERATION_KEYS, Hold>
+const OPERATION_HOLDS = holdList(OPERATION_KEYS, OPERATION_HOLD)
 /** What each key the plan gives the index of holds, by the plan's field and the key's place in its entry. */
 const OPERATION_PLAN_HOLDS = {
-  members: [{ holds: 'hash' }, { holds: 'set' }],
-  retained: [{ holds: 'string' }, { holds: 'set' }, { holds: 'set' }],
-  trackLanes: [{ holds: 'set' }],
-  expiring: [{ holds: 'string' }],
-} satisfies Record<string, readonly Hold[]>
-/** The plan's entries' keys, each entry's first at the entry's field `at` (a Lua index), checked as tf_holds checks. */
-function planHoldsLua(field: keyof typeof OPERATION_PLAN_HOLDS, at: number): string {
-  const holds = OPERATION_PLAN_HOLDS[field]
-    .map(({ holds }, place) => `planned[#planned + 1] = {entry[${at}] + ${place}, '${holds}'}`)
-    .join('\n  ')
-  return `for _, entry in ipairs(plan.${field}) do\n  ${holds}\nend`
+  members: ['hash', 'set'],
+  retained: ['string', 'set', 'set'],
+  trackLanes: ['set'],
+  expiring: ['string'],
+} as const satisfies Record<string, readonly Hold[]>
+/** The checks of the plan's entries' keys, each entry's first at the entry's field `at` (a Lua index). */
+function planHoldsLua(field: 'retained' | 'trackLanes' | 'expiring', at: number): string {
+  const checks = OPERATION_PLAN_HOLDS[field].map((holds, place) =>
+    holdsCheckLua(`KEYS[entry[${at}] + ${place}]`, holds),
+  )
+  return `for _, entry in ipairs(plan.${field}) do\n  ${checks.join('\n  ')}\nend`
 }
 
-const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${LANE_ORDER_LUA}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
+const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
-${commitLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), 'CA')}
+${commitLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', true)}
 end
-local plan = tf_json(ARGV[2], 'the operation')
-${holdsLua('KEYS', OPERATION_HOLDS)}
-local planned = {}
-${planHoldsLua('members', 4)}
-${planHoldsLua('retained', 2)}
-${planHoldsLua('trackLanes', 2)}
-${planHoldsLua('expiring', 3)}
-tf_holds(KEYS, planned)
+${jsonLua('plan', 'ARGV[2]', "'the operation'")}
 local rev_key, incarnation_keys_key = ${OPERATION_KEY.rev}, ${OPERATION_KEY.incarnationKeys}
 local cell_index_key, retained_lanes_key = ${OPERATION_KEY.cellIndex}, ${OPERATION_KEY.retainedLanes}
 local semantic_key, owners_key = ${OPERATION_KEY.semanticRetained}, ${OPERATION_KEY.retainedOwners}
 local now = tf_now()
-local head = tf_live_head(${OPERATION_KEY.head}, now)
+${headReadLua(OPERATION_KEY.head)}
+local head = tf_live_head(raw_head, ${OPERATION_KEY.head}, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return '{"kind":"stale-incarnation"}' end
 for _, read in ipairs(plan.expect) do
-  if (redis.call('HGET', ${OPERATION_KEY.cellVersions}, read[1]) or '') ~= read[2] then return '{"kind":"conflict"}' end
+  ${heldCallLua('local version', OPERATION_HOLD.cellVersions, `'HGET', ${OPERATION_KEY.cellVersions}, read[1]`, OPERATION_KEY.cellVersions)}
+  if (version or '') ~= read[2] then return '{"kind":"conflict"}' end
 end
 for _, member in ipairs(plan.members) do
-  if redis.call('HLEN', KEYS[member[4]]) ~= member[2] or redis.call('SCARD', KEYS[member[4] + 1]) ~= member[3] then
-    return '{"kind":"conflict"}'
-  end
+  ${heldCallLua('local lanes', OPERATION_PLAN_HOLDS.members[0], "'HLEN', KEYS[member[4]]", 'KEYS[member[4]]')}
+  ${heldCallLua('local retained', OPERATION_PLAN_HOLDS.members[1], "'SCARD', KEYS[member[4] + 1]", 'KEYS[member[4] + 1]')}
+  if lanes ~= member[2] or retained ~= member[3] then return '{"kind":"conflict"}' end
 end
 local CK, CA = {}, {}
 if plan.commit[1] then
@@ -859,29 +934,49 @@ for _, lane in ipairs(plan.trackLanes) do
 end
 for _, cell in ipairs(plan.expiring) do tf_allowed('SET', KEYS[cell[3]], '', 'PX', '1') end
 if plan.commit[1] then
-${commitAllowedLua(luaRefs('CK', COMMIT_KEYS), luaRefs('CA', COMMIT_ARGS), true)}
+${commitAllowedLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, true)}
 end
 -- What a later write could fail on, checked before the first.
 for _, cell in ipairs(plan.expiring) do
-  local ttl_of = 'the TTL of ' .. KEYS[cell[3]]
-  if tf_integer(cell[2], ttl_of) <= 0 then tf_refuse('ERR', ttl_of .. ' is not positive') end
+  local ttl = cell[2]
+  ${integerLua('ttl', "'the TTL of ' .. KEYS[cell[3]]")}
+  if ttl <= 0 then ${refuseLua('ERR', "'the TTL of ' .. KEYS[cell[3]] .. ' is not positive'")} end
 end
-if #plan.mutations > 0 or #plan.counts > 0 then tf_incrementable(rev_key) end
-for _, count in ipairs(plan.counts) do tf_countable(${OPERATION_KEY.cellValues}, count[1], count[2]) end
+local takes_revision = #plan.mutations > 0 or #plan.counts > 0
+if takes_revision then ${incrementableLua('rev_key')} end
+for _, count in ipairs(plan.counts) do
+  local delta = count[2]
+  ${countableLua(OPERATION_KEY.cellValues, 'count[1]', 'delta')}
+end
 if plan.commit[1] then
-  ${holdsLua('CK', COMMIT_HOLDS)}
-  local commit_kind = ${luaRefs('CA', COMMIT_ARGS).laneKind}
+  local commit_kind = ${COMMIT_IN_OPERATION_ARG.laneKind}
   local commit_member_lane = commit_kind == 'inbox' or commit_kind == 'binary'
-  tf_lane_order(${luaRefs('CK', COMMIT_KEYS).order}, commit_member_lane, ${luaRefs('CA', COMMIT_ARGS).laneKey})
+  ${laneOrderLua(COMMIT_IN_OPERATION_KEY.order, 'commit_member_lane', COMMIT_IN_OPERATION_ARG.laneKey, ['commit_seq', 'commit_ts', 'commit_prev'])}
+  ${commitHoldsLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', 'commit_prev', true)}
 end
+-- The keys the writes below reach that no command above read: the cell keys a write reaches unread, the members'
+-- dropped frames and lane sets, and the expiring cells.
+${holdsCheckLua('incarnation_keys_key', OPERATION_HOLD.incarnationKeys)}
+if takes_revision or #plan.prefixes > 0 then
+  if #plan.counts == 0 then ${holdsCheckLua(OPERATION_KEY.cellValues, OPERATION_HOLD.cellValues)} end
+  if #plan.expect == 0 then ${holdsCheckLua(OPERATION_KEY.cellVersions, OPERATION_HOLD.cellVersions)} end
+  if #plan.prefixes == 0 then ${holdsCheckLua('cell_index_key', OPERATION_HOLD.cellIndex)} end
+end
+if #plan.members > 0 or #plan.retained > 0 then
+  ${holdsCheckLua('retained_lanes_key', OPERATION_HOLD.retainedLanes)}
+  ${holdsCheckLua('semantic_key', OPERATION_HOLD.semanticRetained)}
+  ${holdsCheckLua('owners_key', OPERATION_HOLD.retainedOwners)}
+end
+${planHoldsLua('retained', 2)}
+${planHoldsLua('trackLanes', 2)}
+${planHoldsLua('expiring', 3)}
 for _, prefix in ipairs(plan.prefixes) do
-  for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
-    tf_write(key, nil, nil)
-  end
+  ${heldCallLua('local keys', OPERATION_HOLD.cellIndex, "'ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255'", 'cell_index_key')}
+  for _, key in ipairs(keys) do tf_write(key, nil, nil) end
 end
 local counters = {}
 -- An operation that writes no cell, such as one that only checks what it read, takes no revision.
-if #plan.mutations > 0 or #plan.counts > 0 then
+if takes_revision then
   local version = redis.call('INCR', rev_key)
   for _, mutation in ipairs(plan.mutations) do
     tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version)
@@ -919,9 +1014,8 @@ return {commit, unpack(counters)}
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
 //   KEYS: [1]=index [2]=tags [3]=checks
 //   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
-const DIRECTORY_HOLDS: readonly Hold[] = [{ holds: 'zset' }, { holds: 'hash' }, { holds: 'zset' }]
-const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${GUARD_LUA}${NOW_LUA}
-${holdsLua('KEYS', DIRECTORY_HOLDS)}
+const DIRECTORY_HOLDS = ['zset', 'hash', 'zset'] as const
+const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${NOW_LUA}
 tf_allowed('HSET', KEYS[2], '', '')
 -- The check's time is read before the first write, as TIME is a call the user's ACL can refuse too.
 local at
@@ -929,10 +1023,15 @@ if ARGV[3] == '' then
   tf_allowed('ZREM', KEYS[3], '')
 else
   tf_allowed('ZADD', KEYS[3], '0', '')
-  local due, delay = tf_number(tonumber(ARGV[3]), 'the due time'), tf_number(tonumber(ARGV[4]), 'the least delay')
+  local due, delay = tonumber(ARGV[3]), tonumber(ARGV[4])
+  ${numberLua('due', "'the due time'")}
+  ${numberLua('delay', "'the least delay'")}
   at = math.max(due, tf_now() + delay)
 end
-redis.call('ZADD', KEYS[1], 0, ARGV[1])
+-- The first write, a ZADD, checks the index; the keys the writes after it reach are checked before it.
+${holdsCheckLua('KEYS[2]', DIRECTORY_HOLDS[1])}
+${holdsCheckLua('KEYS[3]', DIRECTORY_HOLDS[2])}
+${heldCallLua('local indexed', DIRECTORY_HOLDS[0], "'ZADD', KEYS[1], 0, ARGV[1]", 'KEYS[1]')}
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 if at == nil then
   redis.call('ZREM', KEYS[3], ARGV[1])
@@ -942,11 +1041,13 @@ end
 return 1
 `
 
-const DIRECTORY_DELETE_LUA = `${ALLOWED_LUA}${GUARD_LUA}
-${holdsLua('KEYS', DIRECTORY_HOLDS)}
-if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
+const DIRECTORY_DELETE_LUA = `${ALLOWED_LUA}
+${heldCallLua('local tag', DIRECTORY_HOLDS[1], "'HGET', KEYS[2], ARGV[1]", 'KEYS[2]')}
+if tag ~= ARGV[2] then return 0 end
 tf_allowed('ZREM', KEYS[1], '')
 tf_allowed('ZREM', KEYS[3], '')
+${holdsCheckLua('KEYS[1]', DIRECTORY_HOLDS[0])}
+${holdsCheckLua('KEYS[3]', DIRECTORY_HOLDS[2])}
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
@@ -974,7 +1075,7 @@ type RedisCommand<Input, Output, Name extends string = CommandName> = {
   readonly lua: string
   /** It may write: a failure that Redis doesn't prove came before it ran may have taken effect. */
   readonly writes: boolean
-  /** A write script's guard's table of what each of its KEYS holds, by index (`GUARD_LUA`). */
+  /** What each of a write script's KEYS holds, by index, as its checks read it. */
   readonly holds?: readonly Hold[]
   readonly numberOfKeys: number | null
   readonly binaryReply?: true
