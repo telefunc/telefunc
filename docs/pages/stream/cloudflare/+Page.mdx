@@ -38,7 +38,7 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later
-  // nodejs_als (or nodejs_compat): Room, and server code that subscribes to a broadcast, need it.
+  // nodejs_als (or nodejs_compat): server code that subscribes to a broadcast or a room needs it.
   // enable_request_signal: a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
@@ -52,7 +52,7 @@ export default {
 }
 ```
 
-> `nodejs_als` (or `nodejs_compat`, which includes it) is needed only when your server code subscribes to a broadcast or to a room, as `Broadcast.subscribe()`, `room.join()` and a server-side Room listener (`subscribe()`, `onJoin()`, …) do. Without it, `Broadcast.subscribe()` throws an error that names the flag, and Room's calls fail with it. So does `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
+> Server code that subscribes to a broadcast or a room needs AsyncLocalStorage. `nodejs_als` turns it on, as does `nodejs_compat`, which a `compatibility_date` of 2026-08-04 or later turns on by itself ([Node.js compatibility](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#nodejs-compatibility-flag)). Without it, `Broadcast.subscribe()` throws an error that names `nodejs_als`, and so do `room.join()`, a server-side Room listener, and `subscribe()` on a `BroadcastChannel` the client hasn't received yet, such as in the telefunction that returns it. Telefunctions, channels, and a `BroadcastChannel` the client subscribes to work without it.
 
 {/* spellcheck-ignore:off */}
 
