@@ -7,6 +7,7 @@ import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { readRequestUrl } from '../utils/getUrlPathname.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { hasProp } from '../utils/hasProp.js'
 import type { IncomingMessage, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
@@ -22,6 +23,10 @@ declare module 'crossws' {
 }
 
 type HttpServer = Server | Http2SecureServer
+
+// 0.3.1 checks this registry, under this key and in this shape, before it adds its own `upgrade` listener: a server in
+// it has one copy's listener already, and two would each take the same socket.
+const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServers: new WeakSet<object>() })
 
 // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
 // Each upgrade's socket, by the request its upgrade hook gets.
@@ -61,8 +66,9 @@ function upgradeOthersOnlyForTheirListeners(
  *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or off the
  *  store an app's own `installWebSocket()` adds (serve/node.ts). */
 function takeUpgrades(httpServer: HttpServer): void {
-  if (upgradeServers.has(httpServer)) return
+  if (upgradeServers.has(httpServer) || registeredServers.has(httpServer)) return
   upgradeServers.add(httpServer)
+  registeredServers.add(httpServer)
   const adapter = (ws ??= crossws(
     getTelefuncChannelOptions({
       upgrade: (request) => ({ context: { socket: sockets.get(request), request } }),
@@ -106,6 +112,7 @@ function takeUpgrades(httpServer: HttpServer): void {
     httpServer.off('removeListener', onRemoved)
     putBackCallback()
     upgradeServers.delete(httpServer)
+    registeredServers.delete(httpServer)
   }
   httpServer.on('removeListener', onRemoved)
 }

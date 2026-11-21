@@ -4,7 +4,9 @@ import { createServer, Server } from 'node:http'
 import { connect, createServer as createTcpServer, type Socket } from 'node:net'
 import { serve as honoServe } from '@hono/node-server'
 import { Hono } from 'hono'
+import type { Duplex } from 'node:stream'
 import { Telefunc } from './node.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
@@ -322,4 +324,41 @@ test('an app whose server closed and listens again offers WebSocket, and the tok
   closers.push(closerOf(app.server))
   await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve))
   expect(await openPage({ ...app, host: hostOf(app.server) })).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+})
+
+/** 0.3.1's `installWebSocket()` on a server, as its dist/serve/node.js does it: its registry under `'serve/node.ts'`
+ *  (lines 9-10), the server skipped where the registry has it and added where not (27-29), then its own `upgrade`
+ *  listener (30), which hands the socket to its own crossws. Here the listener drops it: no row's page upgrades to it. */
+function install031(server: Server): void {
+  const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServers: new WeakSet<object>() })
+  if (registeredServers.has(server)) return
+  registeredServers.add(server)
+  server.on('upgrade', (_req, socket: Duplex) => socket.destroy())
+}
+
+test('an app whose server 0.3.1 took first: the head adds no second upgrade listener, and offers its pages SSE alone', async () => {
+  const app = await fetchApp()
+  install031(app.server)
+  app.telefunc.installWebSocket(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
+})
+
+test("an app whose server the head took first: 0.3.1's install adds no second upgrade listener, and the head's pages move to WebSocket", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  install031(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+})
+
+test("removing the head's upgrade listener frees the server for either copy's next install, and only one listens", async () => {
+  const app = await fetchApp()
+  app.telefunc.installWebSocket(app.server)
+  app.server.removeAllListeners('upgrade')
+  install031(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  app.telefunc.installWebSocket(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
 })
