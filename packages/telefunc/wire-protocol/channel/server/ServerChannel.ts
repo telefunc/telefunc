@@ -529,7 +529,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** @internal It takes no more sends; the newest lossy send goes first, ahead of the stop. */
+  /** @internal */
   _stopSending(): void {
     this.lossySends?.flush()
   }

@@ -44,7 +44,8 @@ interface MemoryHolder {
   /** Its owner ended, so nothing is held for it any more (see `releaseHolder`). */
   released?: boolean
   shed?(toBytes: number, owner?: string): void
-  /** Lets go of all it holds, where its page may well have it already: reclaiming asks it before anything sheds. */
+  /** Lets go of all it holds where that is only the outcome of a close its page is in, having confirmed the server's
+   *  CLOSE: reclaiming asks it before anything sheds. */
   letGoKept?(): void
   readonly newestUnhanded?: PublishBody | undefined
 }
