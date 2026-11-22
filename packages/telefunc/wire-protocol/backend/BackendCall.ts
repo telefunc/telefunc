@@ -87,9 +87,9 @@ class BackendCall {
 }
 
 /** A write step that failed with a proof that it wrote nothing: a `not-run` `BackendError`, or a size refusal, which a
- *  store makes before its step's first write. Redis refuses a commit's payload before it sends the commit, a commit
- *  waiting for a new subscription before its turn, and a cells exchange's control record in its checks, before its first
- *  write; the in-memory and Cloudflare stores refuse no size. */
+ *  store raises only before its step's first write. Redis refuses a commit's payload before it sends the commit, a
+ *  commit waiting for a new subscription before its turn, and a cells exchange's control record in its checks, before
+ *  its first write. */
 function unwritten(error: unknown): boolean {
   return (error instanceof BackendError && error.outcome === 'not-run') || isChannelOverflowError(error)
 }
