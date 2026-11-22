@@ -5,7 +5,7 @@
 // - a first write, at seq 1;
 // - a merge whose read predicts seq 9, 99999999999999 or 999999999999999 while another merge commits first, so it
 //   writes 10, 100000000000000 or 1000000000000000;
-// - a replacement that a merge overtook, which still commits when it fits at the seq it writes.
+// - a replacement that a merge overtook, at the seq it writes.
 // The value that numbers the event is always there: the first write creates `meta:seq`, and a later one counts it
 // while `meta:gen`, written with it, is as read. A room closed and opened again before a replacement's exchange tells
 // the replacement it closed, and a first write another first write overtook writes as a replacement. An exchange whose
@@ -231,7 +231,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
       }, 300_000)
     }
 
-    it(`${store.name}: a replacement a merge overtook commits at the seq it writes, when it fits there`, async () => {
+    it(`${store.name}: a replacement a merge overtook, one byte over at the seq it writes, is refused before any write; one byte shorter commits`, async () => {
       const admin = await reached(store)
       const replaced = async (id: string, value: string) => {
         vi.restoreAllMocks()
@@ -243,22 +243,36 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
         const replacing = told(Room.setMeta(id, { big: value }))
         await write.held
         await Room.updateMeta(id, { b: '1' })
+        const before = await snapshot(admin)
         write.release()
-        return { answer: await replacing, commits, meta: Object.keys((await Room.get(id)).meta) }
+        const answer = await replacing
+        const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+        return { answer, unchanged, commits, meta: Object.keys((await Room.get(id)).meta) }
       }
       const probe = await replaced(`meta-replace-probe-${i}`, 'y')
       const besides = (probe.commits.find(({ seq }) => seq === '10')?.bytes ?? Number.NaN) - 1
+      const over = await replaced(`meta-replace-over-${i}`, 'y'.repeat(MAX + 1 - besides))
+      const refusal = fields(await commitRefusal(`meta-replace-over-${i}`, MAX + 1))
       const fits = await replaced(`meta-replace-fits-${i}`, 'y'.repeat(MAX - besides))
-      console.log(JSON.stringify({ store: store.name, besides, ...fits }))
+      console.log(JSON.stringify({ store: store.name, besides, over, fits }))
       admin.disconnect()
 
-      expect(fits).toEqual({
-        answer: 'resolved',
-        commits: [
-          { bytes: expect.any(Number), seq: '9' },
-          { bytes: MAX, seq: '10' },
-        ],
-        meta: ['big'],
+      expect({ over, fits }).toEqual({
+        over: {
+          answer: refusal,
+          unchanged: true,
+          commits: [{ bytes: expect.any(Number), seq: '9' }],
+          meta: ['a', 'b'],
+        },
+        fits: {
+          answer: 'resolved',
+          unchanged: false,
+          commits: [
+            { bytes: expect.any(Number), seq: '9' },
+            { bytes: MAX, seq: '10' },
+          ],
+          meta: ['big'],
+        },
       })
     }, 300_000)
   }
