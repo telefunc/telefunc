@@ -72,7 +72,8 @@ class BodyReader {
     if (source instanceof ReadableStream) {
       const reader = source.getReader()
       this.source = { next: () => reader.read() }
-      // A runtime of the streams standard before 2022 throws for a read under way: that read then ends with the body.
+      // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
+      // did before 2022: that read ends only at the body's next chunk, which it still gives, and nothing is read after.
       this.releaseSource = () => {
         try {
           reader.releaseLock()
