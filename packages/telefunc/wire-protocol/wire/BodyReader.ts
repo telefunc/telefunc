@@ -8,6 +8,17 @@ import { concatAll, decodeU32 } from './envelope.js'
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
 
+/** What the reader reads the body through: a Web body's reader, or a Node body's chunks (`ReadableChunks`). `letGo`
+ *  hands the body back to its owner unread, and does nothing more where called again. */
+type ChunkSource = {
+  next(): Promise<IteratorResult<Uint8Array<ArrayBuffer>>>
+  letGo(): void
+}
+
+/** Why the reader reads no more: the body ended, it was let go of, or a read failed as the client leaving, as nothing
+ *  says (`unknown`, a truncation either way), or as the app's own error. */
+type Stop = { why: 'ended' | 'letGo' } | { why: 'clientLeft' | 'unknown' | 'app'; error: unknown }
+
 /** A length-prefixed chunk says it is over the reader's limit. `head`: as much of the chunk's start as the reader was
  *  asked to read of it, so that the caller can say whose it was. */
 class OversizeFrameError extends Error {
@@ -45,19 +56,12 @@ class StreamTruncatedError extends Error {
  * which dominates CPU on hot streaming paths. Plain property access is cheap.
  */
 class BodyReader {
-  private source: AsyncIterator<Uint8Array<ArrayBuffer>>
-  /** Hands the source back to its owner unread (`letGo`): a Web body's lock released, a Node body's read under way
-   *  ended and its reading listeners off. */
-  private readonly releaseSource: () => void
-  private released = false
+  private readonly source: ChunkSource
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
   private fileSizes: Map<number, number> = new Map()
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
-  private disconnected = false
-  /** Why a read of the source failed: the app's own error, or not (its client left, or nothing says: the body is
-   *  truncated). */
-  private failure: { error: unknown; appsError: boolean } | undefined
+  private stop: Stop | null = null
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -71,20 +75,20 @@ class BodyReader {
     this.clientLeft = clientLeft
     if (source instanceof ReadableStream) {
       const reader = source.getReader()
-      this.source = { next: () => reader.read() }
-      // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
-      // did before 2022: that read ends only at the body's next chunk, which it still gives, and nothing is read after.
-      this.releaseSource = () => {
-        try {
-          reader.releaseLock()
-        } catch {}
+      this.source = {
+        next: () => reader.read(),
+        // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
+        // did before 2022: that read ends only at the body's next chunk, which it still gives, and nothing is read after.
+        letGo: () => {
+          try {
+            reader.releaseLock()
+          } catch {}
+        },
       }
     } else {
       // Read as a Node `Readable` is, which bypasses Node's webstreams `dequeueValue` overhead: that is why we accept
       // `Readable` at all — `serve/node.ts` passes its `IncomingMessage` through to skip the `Readable.toWeb` round-trip.
-      const chunks = new ReadableChunks(source)
-      this.source = chunks
-      this.releaseSource = () => chunks.letGo()
+      this.source = new ReadableChunks(source)
     }
   }
 
@@ -92,11 +96,11 @@ class BodyReader {
    *  one after it end as at the body's end. A Web body's lock is released; a Node body keeps only this reader's
    *  error listener, which reads nothing and takes an error it emits later. */
   letGo(): void {
-    if (this.released) return
-    this.released = true
-    this.disconnected = true
+    if (this.stop?.why === 'letGo') return
+    // A stop already there stays: a read after it ends as it did.
+    this.stop ??= { why: 'letGo' }
     this.onChunk = undefined
-    this.releaseSource()
+    this.source.letGo()
   }
 
   /** Read one frame: [u32 big-endian length][bytes], or null where the body ends before its first byte. A frame over
@@ -203,31 +207,31 @@ class BodyReader {
   /** Pull one chunk from the underlying source, or null once it ended or its client left, or failed where nothing says
    *  why. A read that fails as the app's own error throws it, and so does every pull after it. */
   private async pullChunk() {
-    if (this.disconnected) {
-      if (this.failure?.appsError) throw this.failure.error
+    if (this.stop) {
+      if (this.stop.why === 'app') throw this.stop.error
       return null
     }
     try {
       const { value, done } = await this.source.next()
       if (done) {
-        this.disconnected = true
+        this.stop ??= { why: 'ended' }
         return null
       }
       this.onChunk?.()
       return value
     } catch (error) {
-      this.disconnected = true
       // The read under way of a body let go of (a Web reader's released lock fails it) ends as at the body's end.
-      if (this.released) return null
-      this.failure = { error, appsError: this.clientLeft(error) === false }
-      if (this.failure.appsError) throw error
+      if (this.stop?.why === 'letGo') return null
+      const clientLeft = this.clientLeft(error)
+      this.stop = { why: clientLeft === null ? 'unknown' : clientLeft ? 'clientLeft' : 'app', error }
+      if (this.stop.why === 'app') throw error
       return null
     }
   }
 
   /** The body stopped short, with the runtime's error as the cause where a read failed. */
   truncation() {
-    return new StreamTruncatedError(this.failure && { cause: this.failure.error })
+    return new StreamTruncatedError(this.stop && 'error' in this.stop ? { cause: this.stop.error } : undefined)
   }
 
   /** Take up to `max` bytes from the internal buffer, or null if empty. */
@@ -291,7 +295,7 @@ const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
  *  read; and one read waits at a time: a read asked while one waits takes its place, and that one never settles. Unlike
  *  Node's own iterator, it can be let go of with a read under way (`letGo`): Node's ends a read under way only by
  *  destroying the stream. */
-class ReadableChunks implements AsyncIterator<Uint8Array<ArrayBuffer>> {
+class ReadableChunks implements ChunkSource {
   private readonly stream: Readable
   private waiting: {
     resolve: (result: IteratorResult<Uint8Array<ArrayBuffer>>) => void
