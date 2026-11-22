@@ -7,11 +7,12 @@ import { assert } from '../../utils/assert.js'
 import { STORE_DM_REPLY } from './dmReplies.js'
 import { CLAIM_LEASE, HOLD_VIEWS, REMOVE_LEASE, REMOVE_VIEW, RENEW_LEASE } from './lease.js'
 import { JOIN, LEAVE } from './members.js'
-import { SET_MEMBER_CONNECTION, SET_MEMBER_META } from './meta.js'
+import { SET_MEMBER_CONNECTION, SET_MEMBER_META, SET_ROOM_META } from './meta.js'
 
 const OPERATIONS = {
   join: JOIN,
   leave: LEAVE,
+  setRoomMeta: SET_ROOM_META,
   setMemberMeta: SET_MEMBER_META,
   setMemberConnection: SET_MEMBER_CONNECTION,
   holdViews: HOLD_VIEWS,
