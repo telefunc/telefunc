@@ -6,6 +6,8 @@ export {
   onUploadArrayBuffer,
   onReadTwice,
   onUploadOutOfOrder,
+  onUploadCancelSecond,
+  onUploadAfterFailedStart,
   onUploadBackpressure,
   onUploadSlice,
   onUploadEmpty,
@@ -125,6 +127,24 @@ const onUploadOutOfOrder = async (file1: File, file2: File) => {
   } catch (e: any) {
     return { text2, file1Error: e.message || String(e) }
   }
+}
+
+// The second file cancelled as it is asked for, before anything read the first: the third reads its own bytes
+const onUploadCancelSecond = async (file1: File, file2: File, file3: File) => {
+  await file2.stream().cancel()
+  return { text3: await file3.text() }
+}
+
+// The first file read after the second skipped it fails, and the third still reads its own bytes
+const onUploadAfterFailedStart = async (file1: File, file2: File, file3: File) => {
+  const text2 = await file2.text()
+  let file1Error: string | null = null
+  try {
+    await file1.text()
+  } catch (e) {
+    file1Error = e instanceof Error ? e.message : String(e)
+  }
+  return { text2, file1Error, text3: await file3.text() }
 }
 
 const onUploadEmpty = async (file: File) => {

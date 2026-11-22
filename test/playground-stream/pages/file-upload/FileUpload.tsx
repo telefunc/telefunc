@@ -9,6 +9,8 @@ import {
   onUploadArrayBuffer,
   onReadTwice,
   onUploadOutOfOrder,
+  onUploadCancelSecond,
+  onUploadAfterFailedStart,
   onUploadBackpressure,
   onUploadSlice,
   onUploadEmpty,
@@ -138,6 +140,35 @@ function FileUpload() {
         }}
       >
         Out of order
+      </button>
+
+      <button
+        id="test-cancel-second"
+        onClick={async () => {
+          // The first file large enough that its bytes still arrive as the server cancels the second
+          const res = await onUploadCancelSecond(
+            file('first.txt', 'A'.repeat(16 * 1024 * 1024)),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        Cancel the second file
+      </button>
+
+      <button
+        id="test-after-failed-start"
+        onClick={async () => {
+          const res = await onUploadAfterFailedStart(
+            file('first.txt', 'AAA'),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        After a failed start
       </button>
 
       <button

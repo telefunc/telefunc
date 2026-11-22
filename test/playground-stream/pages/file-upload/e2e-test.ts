@@ -85,6 +85,24 @@ function testFileUpload() {
     })
   })
 
+  test('file upload: the second file cancelled while the first still arrives, the third reads its own bytes', async () => {
+    await page.click('#test-cancel-second')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.text3).toBe('CCC')
+    })
+  })
+
+  test('file upload: after a skipped file fails to start, the next file reads its own bytes', async () => {
+    await page.click('#test-after-failed-start')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.text2).toBe('BBB')
+      expect(result.file1Error).toContain('has already been consumed')
+      expect(result.text3).toBe('CCC')
+    })
+  })
+
   // 100 MB upload via a 1 MB repeated chunk (client allocates only ~1 MB).
   // Server sleeps 3 s before reading — if backpressure works, OS/server buffers
   // should not absorb the full 100 MB during the sleep, keeping RSS growth low.
