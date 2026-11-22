@@ -417,6 +417,7 @@ class SseServerTransport {
     const wire = await this.resolveWire(connId)
     if (!wire) return badRequest()
     reader.onChunk = () => this.mux.onWireBytes(wire)
+    reader.stopWhen(wire.readsStop)
     if (!(await this.waitReady(wire))) return badRequest()
     const drain = this.drain(wire, reader, (outcome) => {
       if (shouldSendReconciled(outcome, wire)) this.mux.sendReconciled(outcome)
@@ -424,6 +425,9 @@ class SseServerTransport {
     wire.pendingDispatches.add(drain)
     try {
       await drain
+    } catch (err) {
+      // The wire's end stops the read, in the middle of a frame too.
+      if (!wire.closed || !(err instanceof StreamTruncatedError)) throw err
     } finally {
       wire.pendingDispatches.delete(drain)
     }

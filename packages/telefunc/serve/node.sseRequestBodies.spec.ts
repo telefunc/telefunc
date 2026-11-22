@@ -188,7 +188,7 @@ async function openedWire(via: Via, connId: string): Promise<{ socket: Socket; t
   return open
 }
 
-const UPLOADS = { 'stream-request': 'streamRequest' }
+const UPLOADS = { 'stream-request': 'streamRequest', batch: 'batch' }
 
 for (const via of Object.keys(servers) as Via[]) {
   for (const [uploadName, kind] of Object.entries(UPLOADS)) {
