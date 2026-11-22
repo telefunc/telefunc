@@ -786,13 +786,11 @@ class ChannelMux implements UpgradeStagesOwner {
     session.channels.get(frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** A RECONCILE that doesn't name its own wire's session abandons the probes staged for both sessions: the one it
-   *  names and its wire's. A claim on a stage that is committing is refused. */
+  /** A RECONCILE on a wire that holds no session abandons the probe staged for the session it names (`admitReconcile`
+   *  refused one that names another than its wire's). A claim on a stage that is committing is refused. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: WireEntry): void {
-    const own = entry.holds?.id
-    if (ctrl.sessionId === own) return
+    if (ctrl.sessionId === entry.holds?.id) return
     this.stages.claim(ctrl.sessionId)
-    if (own !== undefined) this.stages.claim(own)
   }
 
   private handlePrepare(entry: WireEntry, payload: PreparePayload, rawByteLength: number): null {
