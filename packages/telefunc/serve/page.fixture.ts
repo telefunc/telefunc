@@ -1,18 +1,17 @@
 export { rowOfPages, startPage }
 export type { Page, Row }
 
-import { spawn } from 'node:child_process'
-import { mkdir, rmdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { Server as TcpServer, Socket } from 'node:net'
 import { Worker } from 'node:worker_threads'
+import { inject } from 'vitest'
 import { hasProp } from '../utils/hasProp.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
 
 // A spec's page, in a realm of its own (`page.worker.mjs`): its `fetch`, `WebSocket`, `pagehide` and session token are
 // its own, and ending it ends all it started, as closing a tab ends its page. The page runs the package as built, which
-// the fixture builds before its first page; the spec's servers run its source.
+// vitest's `globalSetup` builds before the specs (`page.build.fixture.ts`); the spec's servers run its source.
 
 /** What a page does, from the test's realm. */
 type Page = {
@@ -44,42 +43,6 @@ type Page = {
 }
 
 const worker = new URL('./page.worker.mjs', import.meta.url)
-const packageDir = new URL('../', import.meta.url)
-
-/** The package's build, once in each spec's process before its first page: tsc's incremental `--build`, so that no page
- *  runs a `dist/` older than the source, one process at a time. A build that fails fails each page with its output. */
-let built: Promise<void> | undefined
-async function build(): Promise<void> {
-  const lock = new URL('node_modules/.page-build-lock/', packageDir)
-  for (;;) {
-    try {
-      await mkdir(lock)
-      break
-    } catch (err) {
-      if (!hasProp(err, 'code', 'string') || err.code !== 'EEXIST') throw err
-      // One its process left behind is older than any build.
-      const since = await stat(lock).then(
-        ({ mtimeMs }) => Date.now() - mtimeMs,
-        () => 0,
-      )
-      if (since > 120_000) await rmdir(lock).catch(() => {})
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-  }
-  try {
-    const tsc = spawn('pnpm', ['exec', 'tsc', '--build'], { cwd: packageDir })
-    let output = ''
-    tsc.stdout.on('data', (chunk: Buffer) => (output += chunk))
-    tsc.stderr.on('data', (chunk: Buffer) => (output += chunk))
-    const status = await new Promise<number | null>((resolve, reject) => {
-      tsc.once('error', reject)
-      tsc.once('close', resolve)
-    })
-    if (status !== 0) throw new Error(`The package's build, \`tsc --build\`, failed with ${status}:\n${output}`)
-  } finally {
-    await rmdir(lock)
-  }
-}
 
 /** Starts a page with a channel to `channelId` through `telefuncUrl`; `marker` is its own `x-telefunc-server` header,
  *  `idleTimeout` its connection's, null for its server's. */
@@ -89,9 +52,11 @@ async function startPage({
   marker,
   idleTimeout = 0,
 }: { telefuncUrl: string; channelId: string; marker?: string; idleTimeout?: number | null }): Promise<Page> {
-  built ??= build()
-  await built
-  const realm = new Worker(worker, { workerData: { telefuncUrl, channelId, marker, idleTimeout } })
+  const build = inject('pageBuild')
+  if (build === undefined)
+    throw new Error("The pages need the package as built, which vitest.config.ts's `globalSetup` builds")
+  if ('failed' in build) throw new Error(build.failed)
+  const realm = new Worker(worker, { workerData: { telefuncUrl, channelId, marker, idleTimeout, dist: build.dist } })
   const offers: string[][] = []
   const goodbyes: string[] = []
   const uncaught: string[] = []

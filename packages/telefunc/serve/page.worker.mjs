@@ -2,14 +2,15 @@
 // that nothing of it outlives the worker that `page.fixture.ts` ends as a closed tab ends its page.
 
 import { parentPort, workerData } from 'node:worker_threads'
-import { ClientChannel } from '../dist/wire-protocol/channel/client/ClientChannel.js'
-import { decode, isOneFrame, messageFrames } from '../dist/wire-protocol/wire/frame.js'
-import { TAG } from '../dist/wire-protocol/wire/tags.js'
-import { base64urlToUint8Array } from '../dist/wire-protocol/wire/base64url.js'
 
 /** `marker`: the page's own `x-telefunc-server` header on each of its requests; `idleTimeout`: its connection's, null for
- *  its server's. */
-const { telefuncUrl, channelId, marker, idleTimeout } = workerData
+ *  its server's; `dist`: the URL of its run's copy of the package as built. */
+const { telefuncUrl, channelId, marker, idleTimeout, dist } = workerData
+const built = (path) => import(new URL(path, dist).href)
+const { ClientChannel } = await built('wire-protocol/channel/client/ClientChannel.js')
+const { decode, isOneFrame, messageFrames } = await built('wire-protocol/wire/frame.js')
+const { TAG } = await built('wire-protocol/wire/tags.js')
+const { base64urlToUint8Array } = await built('wire-protocol/wire/base64url.js')
 const post = (message) => parentPort.postMessage(message)
 
 // The page's `pagehide`, where its transports listen for it: a WebSocket's on the global object, an SSE wire's on a
