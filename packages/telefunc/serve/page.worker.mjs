@@ -4,13 +4,15 @@
 import { parentPort, workerData } from 'node:worker_threads'
 
 /** `marker`: the page's own `x-telefunc-server` header on each of its requests; `idleTimeout`: its connection's, null for
- *  its server's; `dist`: the URL of its run's copy of the package as built. */
-const { telefuncUrl, channelId, marker, idleTimeout, dist } = workerData
+ *  its server's; `random`: what the page's `Math.random()` returns, null for its own; `dist`: the URL of its run's copy
+ *  of the package as built. */
+const { telefuncUrl, channelId, marker, idleTimeout, random, dist } = workerData
 const built = (path) => import(new URL(path, dist).href)
 const { ClientChannel } = await built('wire-protocol/channel/client/ClientChannel.js')
 const { decode, isOneFrame, messageFrames } = await built('wire-protocol/wire/frame.js')
 const { TAG } = await built('wire-protocol/wire/tags.js')
 const { base64urlToUint8Array } = await built('wire-protocol/wire/base64url.js')
+if (random !== null) Math.random = () => random
 const post = (message) => parentPort.postMessage(message)
 
 // The page's `pagehide`, where its transports listen for it: a WebSocket's on the global object, an SSE wire's on a

@@ -45,18 +45,27 @@ type Page = {
 const worker = new URL('./page.worker.mjs', import.meta.url)
 
 /** Starts a page with a channel to `channelId` through `telefuncUrl`; `marker` is its own `x-telefunc-server` header,
- *  `idleTimeout` its connection's, null for its server's. */
+ *  `idleTimeout` its connection's, null for its server's; `random` what its `Math.random()` returns, null for its own. */
 async function startPage({
   telefuncUrl,
   channelId,
   marker,
   idleTimeout = 0,
-}: { telefuncUrl: string; channelId: string; marker?: string; idleTimeout?: number | null }): Promise<Page> {
+  random = null,
+}: {
+  telefuncUrl: string
+  channelId: string
+  marker?: string
+  idleTimeout?: number | null
+  random?: number | null
+}): Promise<Page> {
   const build = inject('pageBuild')
   if (build === undefined)
     throw new Error("The pages need the package as built, which vitest.config.ts's `globalSetup` builds")
   if ('failed' in build) throw new Error(build.failed)
-  const realm = new Worker(worker, { workerData: { telefuncUrl, channelId, marker, idleTimeout, dist: build.dist } })
+  const realm = new Worker(worker, {
+    workerData: { telefuncUrl, channelId, marker, idleTimeout, random, dist: build.dist },
+  })
   const offers: string[][] = []
   const goodbyes: string[] = []
   const uncaught: string[] = []
@@ -154,7 +163,8 @@ type Row = {
    *  page's own errors, or a connection or request its server still had once the pages ended. */
   readonly left: string[]
   /** A page with a channel through `host`, whose server answers each send with `ack:` and the send. `marker`: its own
-   *  `x-telefunc-server` header; `idleTimeout`: its connection's, null for its server's; `serverTold`: whether its
+   *  `x-telefunc-server` header; `idleTimeout`: its connection's, null for its server's; `random`: what its
+   *  `Math.random()` returns, which its reconnect delays take that part of, null for its own; `serverTold`: whether its
    *  server can be told the page left, which a server that takes no new connection can't; `unload`: whether the tab's
    *  unload follows the page's `pagehide`; `onServerEnd`: called with the outcome its server channel ended with. */
   page(
@@ -162,6 +172,7 @@ type Row = {
     options?: {
       marker?: string
       idleTimeout?: number | null
+      random?: number | null
       serverTold?: boolean
       unload?: boolean
       onServerEnd?: (outcome: unknown) => void
@@ -181,6 +192,8 @@ function rowOfPages(): Row {
   const closers: (() => Promise<void>)[] = []
   const left: string[] = []
   const pages = new Set<{ host: string; page: Page }>()
+  /** Each server `closerOf()` follows: the addresses it took connections on, and its connections and requests open. */
+  const served = new Set<{ hosts: Set<string>; open: () => number }>()
   const closeOnceIdle = async (server: Server | TcpServer, sockets: Set<Socket>, requests = () => 0) => {
     const address = server.address()
     const host = typeof address === 'object' && address !== null ? `127.0.0.1:${address.port}` : 'a closed server'
@@ -196,13 +209,13 @@ function rowOfPages(): Row {
   return {
     closers,
     left,
-    async page(host, { marker, idleTimeout, serverTold = true, unload = false, onServerEnd } = {}) {
+    async page(host, { marker, idleTimeout, random, serverTold = true, unload = false, onServerEnd } = {}) {
       const serverChannel = new ServerChannel<string, string>()
       serverChannel.listen((data) => `ack:${data}`)
       getChannelMux().registerChannel(serverChannel)
       if (onServerEnd) void serverChannel.closed.then(onServerEnd, onServerEnd)
       const telefuncUrl = `http://${host}/_telefunc`
-      const page = await startPage({ telefuncUrl, channelId: serverChannel.id, marker, idleTimeout })
+      const page = await startPage({ telefuncUrl, channelId: serverChannel.id, marker, idleTimeout, random })
       const entry = { host, page }
       pages.add(entry)
       let serverEnded = false
@@ -211,19 +224,26 @@ function rowOfPages(): Row {
       }
       void serverChannel.closed.then(ended, ended)
       // The page leaves before its server, as a closed tab does: within 5 s its sockets are closed and its server ended
-      // its channel, or, where the server can't be told, still holds it for the page's reconnect. Then its realm ends.
+      // its channel. Then its realm ends. A server that can't be told still holds the channel for the page's reconnect
+      // once it has none of the page's connections and requests left, after which nothing of the page can reach it.
       closers.push(async () => {
         await page.leave()
         if (unload) await page.unload()
         const gone = await page.left(5_000)
         const deadline = Date.now() + 5_000
-        while (!serverEnded && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+        while (serverTold && !serverEnded && Date.now() < deadline)
+          await new Promise((resolve) => setTimeout(resolve, 20))
         if (!gone)
           left.push(...(await page.sockets()).filter((ws) => !/, (closed|failed)$/.test(ws)).map((ws) => `open ${ws}`))
         if (serverTold && !serverEnded) left.push(`channel ${serverChannel.id} on ${host} not ended by its server`)
-        if (!serverTold && serverEnded) left.push(`channel ${serverChannel.id} on ${host} ended by a server not told`)
         pages.delete(entry)
         left.push(...(await page.end()))
+        if (serverTold) return
+        const reached = [...served].filter(({ hosts }) => hosts.has(host))
+        while (reached.some(({ open }) => open() > 0) && Date.now() < deadline)
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        await new Promise((resolve) => setImmediate(resolve))
+        if (serverEnded) left.push(`channel ${serverChannel.id} on ${host} ended by a server not told`)
       })
       return page
     },
@@ -234,7 +254,11 @@ function rowOfPages(): Row {
     closerOf(server) {
       const sockets = new Set<Socket>()
       let requests = 0
+      const hosts = new Set<string>()
+      const follows = { hosts, open: () => sockets.size + requests }
+      served.add(follows)
       server.on('connection', (socket: Socket) => {
+        hosts.add(`127.0.0.1:${socket.localPort}`)
         sockets.add(socket)
         socket.once('close', () => sockets.delete(socket))
       })
@@ -242,7 +266,10 @@ function rowOfPages(): Row {
         requests++
         res.once('close', () => requests--)
       })
-      return () => closeOnceIdle(server, sockets, () => requests)
+      return async () => {
+        await closeOnceIdle(server, sockets, () => requests)
+        served.delete(follows)
+      }
     },
     closeOnceIdle,
     async end() {
