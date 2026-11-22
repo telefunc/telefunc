@@ -361,7 +361,8 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   // Read once, before the first await: what the caller changes later changes nothing, and an argument that can't be
   // taken is refused whatever the room holds.
   const ref = ownParticipantRef(target)
-  const cause = removedCause(target.reason === undefined ? undefined : ownMessage(target.reason))
+  const { reason } = target
+  const cause = removedCause(reason === undefined ? undefined : ownMessage(reason))
   // One account of the call's writes: the reap that finding the participant may do, and the evictions.
   await getRoomPlane().call(async (store) => {
     const incarnation = await findRoom(store, id)

@@ -626,22 +626,26 @@ describe.runIf(runs)('a removal by identity of a visible and a hidden tab', () =
         () => 'resolved',
         () => 'refused',
       )
-      // The ref, read through a getter.
-      let refReads = 0
+      // The ref and the reason, read through getters.
+      const reads = { ref: 0, reason: 0 }
       const counted = {
         get identity() {
-          refReads++
+          reads.ref++
           return 'nobody'
+        },
+        get reason() {
+          reads.reason++
+          return 'counted'
         },
       }
       await Room.removeParticipant(id, counted)
-      console.log(JSON.stringify({ store: store.name, causes, unserializable, refReads }))
+      console.log(JSON.stringify({ store: store.name, causes, unserializable, reads }))
       admin.disconnect()
 
-      expect({ causes, unserializable, refReads }).toEqual({
+      expect({ causes, unserializable, reads }).toEqual({
         causes: [{ type: 'removed', reason: 'at the call' }],
         unserializable: 'refused',
-        refReads: 1,
+        reads: { ref: 1, reason: 1 },
       })
     }, 180_000)
 
