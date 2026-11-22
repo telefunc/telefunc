@@ -1,4 +1,4 @@
-export { NativeWebSocket, RecordedWebSocket, failedWebSockets, movedToWebSocket, webSockets }
+export { NativeWebSocket, RecordedWebSocket, closedWithin, failedWebSockets, movedToWebSocket, webSockets }
 
 import type { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
 import { decode, isOneFrame, messageFrames } from '../wire-protocol/wire/frame.js'
@@ -51,6 +51,17 @@ async function movedToWebSocket(
       sockets().length > 0 &&
       sockets().every((ws) => ws.readyState === NativeWebSocket.CLOSED || failedWebSockets.has(ws))
     if (ended || Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+/** Whether each of `sockets` closed within `ms`. A page's socket closed by the page is closed once its server read the
+ *  page's close: the server knows the page left. */
+async function closedWithin(sockets: WebSocket[], ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms
+  for (;;) {
+    if (sockets.every((ws) => ws.readyState === NativeWebSocket.CLOSED || failedWebSockets.has(ws))) return true
+    if (Date.now() >= deadline) return false
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
 }

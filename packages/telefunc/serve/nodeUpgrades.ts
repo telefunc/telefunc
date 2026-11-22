@@ -35,6 +35,18 @@ const sockets = new WeakMap<Request, Duplex>()
 // `serve({ request })` doesn't have.
 let ws: ReturnType<typeof crossws> | undefined
 
+/** Made outside `takeUpgrades()`, whose scope holds a server: the process keeps the adapter and its hooks. */
+function webSocketAdapter(): ReturnType<typeof crossws> {
+  ws ??= crossws(
+    getTelefuncChannelOptions({
+      upgrade: (request) => ({ context: { socket: sockets.get(request), request } }),
+      send: sendInTaskWrite,
+      wireRequest: (peer) => peer.context.request,
+    }),
+  )
+  return ws
+}
+
 /** What Telefunc reads of a request with `Upgrade`, once: its URL, where it can be read, and the config. */
 type Handshake = { url: URL | null; config: ReturnType<typeof getServerConfig> }
 
@@ -111,13 +123,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   if (registeredServers.has(httpServer) && !before?.holdsRegistry) return
   // What a removal Telefunc didn't see left: its callback, still in front of the server's own.
   if (before !== undefined) putBackOwnCallback(httpServer, before)
-  const adapter = (ws ??= crossws(
-    getTelefuncChannelOptions({
-      upgrade: (request) => ({ context: { socket: sockets.get(request), request } }),
-      send: sendInTaskWrite,
-      wireRequest: (peer) => peer.context.request,
-    }),
-  ))
+  const adapter = webSocketAdapter()
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { url, config } = handshakes.get(req) ?? readHandshake(req)
