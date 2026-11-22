@@ -418,6 +418,21 @@ test('a binary call whose metadata declares the most a client can send waits for
   await serving
 })
 
+test('a binary call without a body is refused as malformed: answered 400, with no bug (Telefunc given a Fetch Request)', async () => {
+  const { printed, bugs } = recordErrors()
+  const request = new Request(`http://127.0.0.1${telefuncPath}`, {
+    method: 'POST',
+    headers: { 'x-telefunc-request': kinds.binary },
+  })
+  const response = await telefunc.serve({ request })
+  // In development a malformed request is printed as such, as every refused call is (`logParseError`).
+  expect({ status: response?.status, printed, bugs }).toEqual({
+    status: 400,
+    printed: [expect.stringContaining('The binary request has no body.')],
+    bugs: [],
+  })
+})
+
 // Telefunc's reader alone reads Node's request: the Fetch `Request` the Node adapter builds for the app reads it only
 // once something reads its body, so no Web stream copies a binary call's body into a queue nothing reads.
 test("a binary call through the Node adapter has its request read by Telefunc's reader alone: nothing else takes its data", async () => {

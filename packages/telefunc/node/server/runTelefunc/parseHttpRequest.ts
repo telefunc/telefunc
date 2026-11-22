@@ -191,7 +191,12 @@ async function readBody(
 > {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
-    assert(source)
+    // A Web `Request` sent without a body has `body === null`, which no Telefunc client sends; a Node one, an empty
+    // stream, which ends before its metadata.
+    if (!source) {
+      logParseError('The binary request has no body.', runContext)
+      return { isMalformedRequest: true }
+    }
     const reader = new BodyReader(source, clientLeft)
     runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
     const metadata = await reader.readFrame(CALL_METADATA_MAX_BYTES).catch((err: unknown): 'oversize' => {
