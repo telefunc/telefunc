@@ -257,6 +257,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       downlink.delivered(raw.byteLength, now)
       headroom.received()
       if (!receiveMessage(receiver, raw, now, take)) ws.close()
+      else if (receiver.heldTag === TAG.RECONCILED && ws !== this.abandoned?.ws)
+        this.owner.onTransportReconciledPiece(this)
     }
     ws.onclose = ({ code }: CloseEvent) => {
       headroom.close()

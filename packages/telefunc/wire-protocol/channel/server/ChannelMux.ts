@@ -115,6 +115,8 @@ type WireState = {
   /** `terminateWire` refused it: its page sent what the server can't read. */
   rejected: boolean
   recvChain: Promise<unknown> | null
+  /** The turn of the RECONCILE the message being dispatched completed: a message completes one at most. */
+  messageReconcile: Promise<ReconcileOutcome | null> | null
   /** Set by `onWireClosed` so an in-flight `reconcile` can see the close and its kind, which its session's channels
    *  detach with. */
   closed: { reason: WireClose } | null
@@ -242,6 +244,7 @@ class ChannelMux implements UpgradeStagesOwner {
         pongedAt: performance.now(),
         rejected: false,
         recvChain: null,
+        messageReconcile: null,
         closed: null,
         retiredByBarrier: false,
         recvBacklog,
@@ -340,7 +343,7 @@ class ChannelMux implements UpgradeStagesOwner {
   dispatchWireMessage(wire: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.wires.get(wire)
     if (!entry) return Promise.resolve(null)
-    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
+    entry.state.messageReconcile = null
     try {
       if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, rawFrame, 'alone')
       // Every frame but the last arrives riding.
@@ -350,14 +353,14 @@ class ChannelMux implements UpgradeStagesOwner {
       while (!next.done && entry.state.closed === null) {
         const frame = next.value
         next = frames.next()
-        const dispatched = this.dispatchFrame(entry, frame, next.done ? 'alone' : 'riding')
-        if (frame[0] === TAG.RECONCILE) outcome = dispatched
+        void this.dispatchFrame(entry, frame, next.done ? 'alone' : 'riding')
       }
     } catch (err) {
       if (!isProtocolViolationError(err)) throw err
       this.terminateWire(wire)
     }
-    return outcome
+    // Whichever frame completed it, a piece of it too.
+    return entry.state.messageReconcile ?? Promise.resolve(null)
   }
 
   /** PING and PIECES_ACK skip the recv chain, which would tie liveness to its slowest handler. */
@@ -387,8 +390,17 @@ class ChannelMux implements UpgradeStagesOwner {
     state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, rawFrame, byteLength, delivery)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
+    if (tag !== TAG.RECONCILE) {
+      this.answerArrival(entry)
+      return this.chainRecv(entry, exec)
+    }
+    // A page sends its next RECONCILE only after this one's RECONCILED.
+    assertProtocol(state.messageReconcile === null, 'two RECONCILEs in one message')
+    // From the receipt on, the page waits for the RECONCILED a deadline at most: nothing between waits.
+    if (entry.sender.pieces) entry.sender.send(encode.reconcileTaken())
     this.answerArrival(entry)
-    return this.chainRecv(entry, exec)
+    state.messageReconcile = this.chainRecv(entry, exec)
+    return state.messageReconcile
   }
 
   /** The frame a piece completes is dispatched as one that came whole. */
@@ -469,9 +481,13 @@ class ChannelMux implements UpgradeStagesOwner {
       entry.state.deliveries.handle(delivery)
       return (await this.handleFrame(entry, rawFrame)) ?? null
     } catch (err) {
-      // A bug is reported here and the wire goes on: no WebSocket host awaits a message's handling.
+      // A bug is reported here, as no WebSocket host awaits a message's handling. The wire goes on, unless its page
+      // waits for the RECONCILED that won't come: then it ends as a lost one, and the page resumes on the next.
       if (isProtocolViolationError(err)) this.terminateWire(err.target ?? entry.wire)
-      else handleTelefunctionBug(err)
+      else {
+        handleTelefunctionBug(err)
+        if (peekTag(rawFrame) === TAG.RECONCILE) entry.transport.terminateWire(entry.wire)
+      }
       return null
     } finally {
       entry.state.recvBacklog.bytes -= byteLength
@@ -519,6 +535,8 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
+      // Its message held a second RECONCILE, which ended the wire: it has no effect.
+      if (entry.state.rejected) return null
       this.claimSessionForReconcile(frame.payload, entry)
       return this.reconcile(entry, frame.payload)
     }

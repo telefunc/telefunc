@@ -56,6 +56,8 @@ const TAG = {
   /** Server → client, an SSE stream's last event: the server refused a frame of the wire and closed it, as a
    *  WebSocket's close with `WS_CLOSE_REJECTED` says. */
   REJECTED: 0x0e as const,
+  /** Server → client on a WebSocket: the wire's RECONCILE arrived whole, and its RECONCILED follows. */
+  RECONCILE_TAKEN: 0x0f as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,

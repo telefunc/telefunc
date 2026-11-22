@@ -157,6 +157,7 @@ type WireCtrlFrame =
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
   | { tag: typeof TAG.REJECTED }
+  | { tag: typeof TAG.RECONCILE_TAKEN }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
@@ -286,6 +287,7 @@ const encode = {
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
   rejected: () => encodeBareFrame(TAG.REJECTED),
+  reconcileTaken: () => encodeBareFrame(TAG.RECONCILE_TAKEN),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
   piece(total: number, piece: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -426,6 +428,7 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
   [TAG.REJECTED]: encode.rejected().byteLength,
+  [TAG.RECONCILE_TAKEN]: encode.reconcileTaken().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
   [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
@@ -574,6 +577,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
     case TAG.REJECTED:
       return { tag: TAG.REJECTED }
+    case TAG.RECONCILE_TAKEN:
+      return { tag: TAG.RECONCILE_TAKEN }
     case TAG.PREPARE:
       return { tag: TAG.PREPARE, payload: parsePreparePayload(parseJsonPayload(payload)) }
     case TAG.READY:

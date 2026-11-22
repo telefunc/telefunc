@@ -7,7 +7,7 @@ import type { SendGate } from './SendGate.js'
 import type { ProbeSession } from './Upgrade.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { ReconcileOpenEntry, ReconcilePayload, ReconciledPayload } from '../../wire/payloads.js'
-import { RECONCILE_TIMEOUT_MS } from '../../constants.js'
+import { CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import { replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
@@ -69,6 +69,9 @@ class AttachExchange {
    *  carries the first RECONCILE. Only `enterReconciling` and `exitReconciling` write it, so its deadline
    *  (`reconcileTimer`) never outlives it. */
   private isReconciling = false
+  /** On a WebSocket, a RECONCILE's deadline runs from its receipt, the server's RECONCILE_TAKEN: `'awaited'` till it
+   *  comes, then `'taken'`. `'none'` for a RECONCILE on SSE and a BARRIER, whose deadline runs from the start. */
+  private receipt: 'none' | 'awaited' | 'taken' = 'none'
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Resolved once no RECONCILE is in flight. */
   private reconcileSettledWaiters: (() => void)[] = []
@@ -102,6 +105,12 @@ class AttachExchange {
   /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
   get boundsWire(): boolean {
     return this.isReconciling && this.reconciledWire !== this.owner.wire
+  }
+
+  /** Whether that deadline runs from the start, so the heartbeat leaves the wire to it. A RECONCILE with a receipt
+   *  waits on the heartbeat until the receipt: its server answers the page's PINGs while the page's bytes arrive. */
+  get timesWire(): boolean {
+    return this.boundsWire && this.receipt === 'none'
   }
 
   /** Coalesces sync-burst registrations into one RECONCILE round-trip. */
@@ -154,7 +163,7 @@ class AttachExchange {
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
-    this.enterReconciling()
+    this.enterReconciling(false)
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
     const open = this.declareOpenEntries(this.channels.values(), { skipUndeclared: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
@@ -283,17 +292,32 @@ class AttachExchange {
 
   // ── The await-RECONCILED window ──
 
-  /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline. A follow-up RECONCILE for late
-   *  registrations opens it again, restarting the deadline. */
-  private enterReconciling(): void {
+  /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline, or, where `receipted`, waits for its
+   *  receipt to. A follow-up RECONCILE for late registrations opens it again, restarting the deadline. */
+  private enterReconciling(receipted: boolean): void {
     this.isReconciling = true
     this.inFlight = reconcileInFlight()
-    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
+    this.reconcileTimer = null
+    this.receipt = receipted ? 'awaited' : 'none'
+    if (!receipted) this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
   }
 
   /** The RECONCILE's deadline runs from now: the server answered the request that carried it. */
   restartReconcileDeadline(): void {
-    if (this.isReconciling) this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    if (this.isReconciling && this.receipt === 'none') this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+  }
+
+  /** The server took the RECONCILE whole: its RECONCILED comes within the deadline. */
+  takeReceipt(): void {
+    if (!this.isReconciling || this.receipt !== 'awaited') return
+    this.receipt = 'taken'
+    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+  }
+
+  /** A piece of the RECONCILED came: the rest comes within the deadline. */
+  reconciledPieceArrived(): void {
+    if (this.isReconciling && this.receipt === 'taken') this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
   }
 
   private armReconcileDeadline(ms: number): void {
@@ -304,6 +328,7 @@ class AttachExchange {
   /** Closes the wait: the RECONCILED settled, the wire was lost, or the connection was disposed. */
   private exitReconciling(): void {
     this.isReconciling = false
+    this.receipt = 'none'
     if (this.reconcileTimer) {
       clearTimeout(this.reconcileTimer)
       this.reconcileTimer = null
@@ -311,13 +336,13 @@ class AttachExchange {
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
 
-  /** The RECONCILED didn't come by the deadline. Unless the wire delivered something meanwhile, it is dropped as on a
-   *  missed pong, and `handleTransportLoss` reconnects. */
+  /** The RECONCILED didn't come by the deadline. Unless, without a receipt, the wire delivered something meanwhile, it
+   *  is dropped as on a missed pong, and `handleTransportLoss` reconnects. */
   private onReconcileTimeout(): void {
     if (!this.isReconciling) return
     const { transport } = this.owner
     // A RECONCILE waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
-    const quiet = transport.heartbeat?.quietFor() ?? Infinity
+    const quiet = this.receipt === 'none' ? (transport.heartbeat?.quietFor() ?? Infinity) : Infinity
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
     this.owner.onReconcileLate(transport)
   }
@@ -325,7 +350,7 @@ class AttachExchange {
   // ── The RECONCILE ──
 
   private buildReconcileFrame(): OutboundFrame {
-    this.enterReconciling()
+    this.enterReconciling(this.owner.transport.type === CHANNEL_TRANSPORT.WS)
     const { uplink } = this.owner.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.session !== null && this.reconciledWire === this.owner.wire

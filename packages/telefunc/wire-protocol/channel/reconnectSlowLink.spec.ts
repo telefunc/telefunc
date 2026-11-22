@@ -131,3 +131,90 @@ for (const channels of [1, 4_096])
         network.close()
       }
     }, 60_000)
+
+test('over a WebSocket, a page that handed 600 kB on a fast link that then drops to 400 kbit/s joins 100 channels behind it, which open on that wire', async () => {
+  const network = await link()
+  const register = vi.spyOn(WireLifecycle.prototype, 'register')
+  const pages: ClientChannel<string, string>[] = []
+  try {
+    const connection = {
+      telefuncUrl: network.telefuncUrl,
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const lead = new ServerChannel<string, string>()
+    getChannelMux().registerChannel(lead)
+    pages.push(new ClientChannel<string, string>({ channelId: lead.id, connection }))
+    const lifecycle = register.mock.contexts.at(-1)
+    register.mockRestore()
+    await Promise.all([lead.opened, pages[0]!.opened])
+    let took = 0
+    const all = Promise.withResolvers<void>()
+    lead.listenBinary((data) => {
+      took += data.byteLength
+      if (took >= 600_000) all.resolve()
+    })
+    const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    try {
+      // 12 s at the floor: a server channel waits `CHANNEL_CONNECT_TTL_MS`, 15 s, for its page.
+      void pages[0]!.sendBinary(new Uint8Array(600_000), { ack: false })
+      network.slow()
+      const joined = Array.from({ length: 100 }, () => {
+        const channel = new ServerChannel<string, string>()
+        getChannelMux().registerChannel(channel)
+        pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+        return channel
+      })
+      await Promise.all([...joined.map((channel) => channel.opened), ...pages.map((page) => page.opened), all.promise])
+      expect(lost.mock.contexts.filter((context) => context === lifecycle)).toEqual([])
+    } finally {
+      lost.mockRestore()
+    }
+  } finally {
+    register.mockRestore()
+    for (const page of pages) page.abort()
+    network.close()
+  }
+}, 60_000)
+
+test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 500 kB of its upload, while the server's 1 MB frame to it waits for room, gets the RECONCILED past that frame and opens", async () => {
+  const network = await link()
+  const register = vi.spyOn(WireLifecycle.prototype, 'register')
+  const pages: ClientChannel<string, string>[] = []
+  try {
+    const connection = {
+      telefuncUrl: network.telefuncUrl,
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const [lead, neighbour] = [new ServerChannel<string, string>(), new ServerChannel<string, string>()]
+    for (const channel of [lead, neighbour]) {
+      getChannelMux().registerChannel(channel)
+      pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+    }
+    const lifecycle = register.mock.contexts.at(-1)
+    register.mockRestore()
+    await Promise.all([lead.opened, neighbour.opened, ...pages.map((page) => page.opened)])
+    const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    try {
+      network.slow()
+      // 10 s up at the floor, ahead of the RECONCILE and of the page's confirmations of what the server sends.
+      void pages[0]!.sendBinary(new Uint8Array(500_000), { ack: false })
+      void neighbour.sendBinary(new Uint8Array(1_000_000), { ack: false })
+      const joined = Array.from({ length: 10 }, () => {
+        const channel = new ServerChannel<string, string>()
+        getChannelMux().registerChannel(channel)
+        pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+        return channel
+      })
+      await Promise.all([...joined.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
+      expect(lost.mock.contexts.filter((context) => context === lifecycle)).toEqual([])
+    } finally {
+      lost.mockRestore()
+    }
+  } finally {
+    register.mockRestore()
+    for (const page of pages) page.abort()
+    network.close()
+  }
+}, 60_000)

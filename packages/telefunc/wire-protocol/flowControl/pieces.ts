@@ -930,6 +930,11 @@ abstract class PieceReceiver implements AckScheduleOwner {
     return this.received
   }
 
+  /** The tag of the frame not yet whole, once its first bytes came. */
+  get heldTag(): number | undefined {
+    return this.received > 0 ? this.frame[0] : undefined
+  }
+
   /** Takes a piece that arrived at `at`, and returns the frame once its last piece arrived. */
   add(total: number, piece: Uint8Array, at: number): Uint8Array<ArrayBuffer> | null {
     const bytes = piece.byteLength

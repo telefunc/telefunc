@@ -286,28 +286,28 @@ test("over SSE, a page whose opens after a drop the network holds cuts the third
   }
 }, 40_000)
 
-for (const transport of ['sse', 'ws'] as const)
-  test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page whose next connection after a drop gets the server's head and never its RECONCILED closes that connection at its RECONCILE's 10 s, before the next, and sends on that`, async () => {
-    const { network, page, received } = await pair(transport)
-    try {
-      const droppedAt = performance.now()
-      network.drop('head')
-      void page.send('after')
-      expect(await received).toBe('after')
-      const since = network.requests.filter(({ at }) => at >= droppedAt)
-      const headOnly = since.find(({ take }) => take === 'head')
-      const closedAt = headOnly?.closedAt ?? Infinity
-      expect(closedAt - (headOnly?.at ?? 0)).toBeGreaterThan(9_500)
-      expect(closedAt - (headOnly?.at ?? 0)).toBeLessThan(11_000)
-      // The attempt's other connections, an SSE upload's, closed with it at the latest; the next attempt's came after.
-      const attempt = since.filter(({ at }) => at < closedAt)
-      expect(attempt.every(({ closedAt: end }) => end !== null && end < closedAt + 100)).toBe(true)
-      expect(since.some(({ at }) => at > closedAt)).toBe(true)
-      page.abort()
-    } finally {
-      network.close()
-    }
-  }, 20_000)
+// Over a WebSocket, the wire's heartbeat finds such a connection dead (reconnectHeadOnly.spec.ts).
+test("over SSE, a page whose next connection after a drop gets the server's head and never its RECONCILED closes that connection at its RECONCILE's 10 s, before the next, and sends on that", async () => {
+  const { network, page, received } = await pair('sse')
+  try {
+    const droppedAt = performance.now()
+    network.drop('head')
+    void page.send('after')
+    expect(await received).toBe('after')
+    const since = network.requests.filter(({ at }) => at >= droppedAt)
+    const headOnly = since.find(({ take }) => take === 'head')
+    const closedAt = headOnly?.closedAt ?? Infinity
+    expect(closedAt - (headOnly?.at ?? 0)).toBeGreaterThan(9_500)
+    expect(closedAt - (headOnly?.at ?? 0)).toBeLessThan(11_000)
+    // The attempt's other connections, an SSE upload's, closed with it at the latest; the next attempt's came after.
+    const attempt = since.filter(({ at }) => at < closedAt)
+    expect(attempt.every(({ closedAt: end }) => end !== null && end < closedAt + 100)).toBe(true)
+    expect(since.some(({ at }) => at > closedAt)).toBe(true)
+    page.abort()
+  } finally {
+    network.close()
+  }
+}, 20_000)
 
 test('over a WebSocket, a page whose next socket after a drop the server answers late cuts it at its allowance and sends on the next; the late one sends nothing, and the server lets it go and logs nothing', async () => {
   const { network, page, received } = await pair('ws')

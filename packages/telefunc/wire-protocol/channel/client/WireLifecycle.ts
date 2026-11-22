@@ -55,6 +55,8 @@ interface TransportOwner {
   ): void
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
+  /** A piece of a RECONCILED came on a WebSocket, the RECONCILED not yet whole. */
+  onTransportReconciledPiece(transport: ClientChannelTransport): void
   /** The transport may have headroom again, so the frames waiting for it are sent. */
   onTransportHeadroom(transport: ClientChannelTransport): void
   /** The wire's upload fell back to batch POSTs; a channel may have opened before that (see `onTransportOpen`). */
@@ -64,6 +66,9 @@ interface TransportOwner {
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
+
+/** The frames that answer a RECONCILE: from an abandoned wire, they answer one the next wire's replaced. */
+const ANSWERS_RECONCILE: ReadonlySet<number> = new Set([TAG.RECONCILED, TAG.RECONCILE_TAKEN, TAG.ATTACH_RESULT])
 
 type ConnectionState =
   | { tag: 'fresh' }
@@ -323,8 +328,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
-    // An abandoned wire still delivers, but its RECONCILED answers a RECONCILE the next wire's has replaced.
-    if (abandoned && frame.tag === TAG.RECONCILED) return
+    // An abandoned wire still delivers, but what answers its RECONCILE answers one the next wire's has replaced.
+    if (abandoned && ANSWERS_RECONCILE.has(frame.tag)) return
     switch (this.upgrade.takeHandoffFrame(frame, source, byteLength)) {
       case 'dispatch':
         this.dispatchFrame(frame)
@@ -369,6 +374,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       case TAG.RECONCILED:
         this.handleReconciled(frame.payload)
         return
+      case TAG.RECONCILE_TAKEN:
+        this.exchange.takeReceipt()
+        return
       case TAG.ATTACH_RESULT: {
         const lastSeq = frame.lastSeq === null ? null : this.channels.sentThrough(frame.index, frame.lastSeq)
         if (!this.exchange.handleAttachResult(frame.index, lastSeq)) return
@@ -403,6 +411,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.liveness.onPong(ended)
   }
 
+  onTransportReconciledPiece(transport: ClientChannelTransport): void {
+    if (transport === this.transport) this.exchange.reconciledPieceArrived()
+  }
+
   onReconcileLate(transport: ClientChannelTransport): void {
     // Till the server answered the request that carries it, the attempt's allowance bounds it.
     if (this.allowanceTimer !== null) return
@@ -417,10 +429,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.onTransportClosed(transport)
   }
 
-  /** Its PONG came late. Until a wire's first RECONCILED, the RECONCILE deadline bounds it: the wait may outlast the
-   *  pong deadline. */
+  /** Its PONG came late. Until a wire's first RECONCILED, a RECONCILE deadline that runs from the start bounds it: the
+   *  wait may outlast the pong deadline. */
   onWireLate(transport: ClientChannelTransport): void {
-    if (this.exchange.boundsWire) return
+    if (this.exchange.timesWire) return
     this.dropWire(transport)
   }
 

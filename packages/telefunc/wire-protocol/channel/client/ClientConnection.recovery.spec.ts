@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { CHANNEL_TRANSPORT } from '../../constants.js'
-import { encode } from '../../wire/frame.js'
+import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
 import { ClientConnection } from './ClientConnection.js'
 import { WireLifecycle } from './WireLifecycle.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
@@ -32,7 +33,8 @@ type Script =
   | 'hangs22'
   | 'throws'
 
-/** A WebSocket that plays the next script: the page's sockets, when it made each, and whether it closed them. */
+/** A WebSocket that plays the next script: the page's sockets, when it made each, and whether it closed them. Open,
+ *  it answers the page's PINGs and takes its RECONCILEs, as a live server does. */
 class ScriptedWebSocket {
   static OPEN = 1
   static scripts: Script[] = []
@@ -92,8 +94,12 @@ class ScriptedWebSocket {
     this.onopen()
     return this.readyState === 1
   }
-  send(): void {
+  send(message: Uint8Array<ArrayBuffer>): void {
     this.sent++
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+      if (frame[0] === TAG.PING) queueMicrotask(() => this.deliver(encode.pong([])))
+      if (frame[0] === TAG.RECONCILE) queueMicrotask(() => this.deliver(encode.reconcileTaken()))
+    }
   }
   close(): void {
     this.closedByPage = true
