@@ -1395,7 +1395,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-text-burst-acks-18000')
     // What the page receives is about 444 MB of events, so how long it takes is the link's: the card waits while the
-    // page gets further (it says so each 500 messages, about 44 MB).
+    // page gets further (it says so each 50 messages, about 4.4 MB).
     const burst = await textBurstEnded(30_000)
     expect(burst.closeErr).toBe(null)
     expect(burst.received).greaterThan(3000)

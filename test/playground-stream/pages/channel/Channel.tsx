@@ -1196,7 +1196,7 @@ function ChannelDemo() {
       channel.listen((message) => {
         if (message === 'end') return resolve(null)
         received.push(Number.parseInt(message))
-        if (received.length % 500 === 0) progressed()
+        if (received.length % 50 === 0) progressed()
         if (received.length === count) resolve(null)
       })
       channel.onClose((err) => resolve(err?.name ?? 'none'))
