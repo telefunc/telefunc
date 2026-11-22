@@ -83,8 +83,8 @@ type ServerTransport<TWire> = {
 }
 
 /** How the server ends a wire: lost, or for good for a session cause. `refusal`: the end the server decided, which the
- *  wire's own end carries (a WebSocket's close, the event stream's last event) and an HTTP transport answers the page's
- *  requests that meet the end with; null for a plain loss, which tells nothing. */
+ *  wire's own end carries (a WebSocket's close, the event stream's last event); null for a plain loss, which tells
+ *  nothing. */
 type ServerEnd = { how: Exclude<WireClose, 'pageLeft'>; refusal: Refusal | null }
 
 /** What the server can't go on with on a wire, which `endFault` ends. */
@@ -566,11 +566,11 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  /** Every end the server decides on `wire` is decided here: what `fault` ends, how the wire goes, and what the page's
-   *  requests that meet the end are answered. `wire` may be a wire other than the one that sent the offending frame: a
-   *  barrier's violation is the staged probe's. An end that keeps the wire is its channel's, told on its own down stream;
-   *  one that closes the wire rides the wire's own end, its refusal (see `ServerTransport.close`). What the others sent
-   *  that the server didn't confirm goes again on the next wire. */
+  /** Every end the server decides on `wire` is decided here: what `fault` ends and how the wire goes. `wire` may be a
+   *  wire other than the one that sent the offending frame: a barrier's violation is the staged probe's. An end that
+   *  keeps the wire is its channel's, told on its own down stream; one that closes the wire rides the wire's own end,
+   *  its refusal (see `ServerTransport.close`). What the others sent that the server didn't confirm goes again on the
+   *  next wire. */
   endFault(wire: Wire, fault: Fault): void {
     const entry = this.wires.get(wire)
     if (!entry) return
