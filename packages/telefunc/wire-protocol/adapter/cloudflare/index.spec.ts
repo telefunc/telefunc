@@ -76,6 +76,7 @@ vi.mock('../../channel/server/ws.js', () => ({
 
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
+  getTelefuncUrl: () => '/_telefunc',
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
   setAdapterMaxMemory: mocks.setAdapterMaxMemory,
 }))

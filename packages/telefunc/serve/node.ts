@@ -4,11 +4,9 @@ import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
 import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
 import { noUpgrades, upgradesOfServer } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import { getServerConfig } from '../node/server/serverConfig.js'
 import { takeUpgrades, takeUpgradesOfNewServer, type HttpServer } from './nodeUpgrades.js'
 import { markRequestsOfServer, serverOfRequest } from './requestServer.js'
-import { getTelefuncRequestUrl, toResponse } from './shared.js'
-import { getRequestPathname } from '../utils/getUrlPathname.js'
+import { getTelefuncRequestUrl, isTelefuncUrl, toResponse } from './shared.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 type HttpServerOrWrapper = HttpServer | { node?: { server?: HttpServer } }
@@ -88,7 +86,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
 
     const url = req.originalUrl || req.url
     if (!url) return false
-    if (getRequestPathname(url) !== getServerConfig().telefuncUrl) return false
+    if (!isTelefuncUrl(url)) return false
 
     const serveInput = {
       url,

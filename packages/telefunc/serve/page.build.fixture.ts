@@ -33,16 +33,17 @@ async function setup(project: TestProject): Promise<() => Promise<void>> {
     const build = await buildCopy()
     current = 'dist' in build ? build.dist : null
     project.provide('pageBuild', build)
-    if (previous !== null) await rm(new URL(previous), { recursive: true, force: true })
+    if (previous !== null) await rm(new URL('../', previous), { recursive: true, force: true })
   }
   await provide()
   project.onTestsRerun(provide)
   return async () => {
-    if (current !== null) await rm(new URL(current), { recursive: true, force: true })
+    if (current !== null) await rm(new URL('../', current), { recursive: true, force: true })
   }
 }
 
-/** The package's incremental `tsc --build`, then a copy of its `dist/`, named for this process, renamed into place. */
+/** The package's incremental `tsc --build`, then a copy of its `dist/`, named for this process, renamed into place. The
+ *  copy keeps its `dist/` folder: the Vite plugin reads its place in the package off its own path. */
 async function buildCopy(): Promise<PageBuild> {
   return withBuildLock(async () => {
     const tsc = spawn('pnpm', ['exec', 'tsc', '--build'], { cwd: packageDir })
@@ -57,9 +58,9 @@ async function buildCopy(): Promise<PageBuild> {
     const name = `${process.pid}-${copies++}`
     const partial = new URL(`${name}.partial/`, copiesDir)
     const copy = new URL(`${name}/`, copiesDir)
-    await cp(new URL('dist/', packageDir), partial, { recursive: true })
+    await cp(new URL('dist/', packageDir), new URL('dist/', partial), { recursive: true })
     await rename(partial, copy)
-    return { dist: copy.href }
+    return { dist: new URL('dist/', copy).href }
   })
 }
 

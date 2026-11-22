@@ -4,9 +4,8 @@ import type { EventEmitter } from 'node:events'
 import { IncomingMessage } from 'node:http'
 import { Http2ServerRequest } from 'node:http2'
 import type { HttpServer } from './nodeUpgrades.js'
-import { getTelefuncUrl } from '../node/server/serverConfig.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { getRequestPathname } from '../utils/getUrlPathname.js'
+import { isTelefuncUrl } from './shared.js'
 
 /** The header in which a server names itself to `serve({ request })`, on each request to Telefunc's URL it gets. */
 const SERVER_HEADER = 'x-telefunc-server'
@@ -41,21 +40,6 @@ function markRequest(req: unknown, token: string): void {
   if (req.url === undefined || !isTelefuncUrl(req.url)) return
   req.rawHeaders.push(SERVER_HEADER, token)
   req.headers[SERVER_HEADER] = token
-}
-
-/** A path with a dot segment, an escape or a backslash before its query: the URL parser may resolve it to another. */
-const RESOLVABLE_PATH = /^[^?#]*(?:\/\.|%|\\)/
-
-/** A Node request's URL names Telefunc's, as `serve()` reads it (serve/shared.ts): its path once parsed, or the path of
- *  the absolute URL a proxy request names. */
-function isTelefuncUrl(url: string): boolean {
-  const telefuncUrl = getTelefuncUrl()
-  if (url.startsWith(telefuncUrl)) {
-    const next = url[telefuncUrl.length]
-    if (next === undefined || next === '?' || next === '#') return true
-  }
-  if (url.startsWith('/') && !RESOLVABLE_PATH.test(url)) return false
-  return getRequestPathname(url) === telefuncUrl
 }
 
 /** The server the request came in on, where it marks its requests. A token names its server from the server's
