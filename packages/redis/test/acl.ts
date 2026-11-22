@@ -37,12 +37,20 @@ function documentedRule(): string[] {
     .map((word) => (word === '>your-password' ? '>pw' : word))
 }
 
+/** What `run` resolves with, or what it throws or rejects with. */
+async function settled<T>(run: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, value: await run() }
+  } catch (error) {
+    return { ok: false, error }
+  }
+}
+
 /** What the store answers `ACL SETUSER telefunc <rule>`. */
-function setUser(admin: Redis, rule: string[]): Promise<string> {
-  return admin.call('ACL', 'SETUSER', 'telefunc', ...rule).then(
-    (reply) => String(reply),
-    (error: unknown) => (error instanceof Error ? error.message : String(error)),
-  )
+async function setUser(admin: Redis, rule: string[]): Promise<string> {
+  const answer = await settled(() => admin.call('ACL', 'SETUSER', 'telefunc', ...rule))
+  if (answer.ok) return String(answer.value)
+  return answer.error instanceof Error ? answer.error.message : String(answer.error)
 }
 
 /** What the stores' ACL LOGs say they refused, each entry once. */
@@ -61,11 +69,10 @@ async function refused(admins: Redis[]): Promise<string[]> {
 
 /** Once a read of a room that isn't there gets past the store, or the store refuses it the user. */
 async function reaches(name: string): Promise<void> {
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !(error instanceof BackendError) || error.code === 'denied',
-    )
+  const answers = async () => {
+    const read = await settled(() => Room.get('r-none'))
+    return read.ok || !(read.error instanceof BackendError) || read.error.code === 'denied'
+  }
   for (let tries = 0; !(await answers()); tries++) {
     if (tries > 400) throw new Error(`the backend never reached ${name}`)
     await sleep(25)
@@ -74,12 +81,9 @@ async function reaches(name: string): Promise<void> {
 
 /** A call's outcome: `ok`, or its error's name and message. */
 async function outcomeOf(run: () => Promise<unknown>): Promise<string> {
-  try {
-    await run()
-    return 'ok'
-  } catch (error) {
-    return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  }
+  const done = await settled(run)
+  if (done.ok) return 'ok'
+  return done.error instanceof Error ? `${done.error.name}: ${done.error.message}` : String(done.error)
 }
 
 /** Every call Telefunc makes of the store, each one's outcome: `ok`, or its error's name and message. `tag` names the
@@ -87,12 +91,7 @@ async function outcomeOf(run: () => Promise<unknown>): Promise<string> {
 async function calls(tag = ''): Promise<Record<string, string>> {
   const told: Record<string, string> = {}
   const call = async (name: string, run: () => Promise<unknown>) => {
-    told[name] = await Promise.resolve()
-      .then(run)
-      .then(
-        () => 'ok',
-        (error: unknown) => (error instanceof Error ? `${error.name}: ${error.message}` : String(error)),
-      )
+    told[name] = await outcomeOf(run)
   }
   const channel = `acl${tag}`
   const received: unknown[] = []
