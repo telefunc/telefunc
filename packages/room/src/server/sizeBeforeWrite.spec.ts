@@ -1,17 +1,22 @@
-// A `Room.send()` of data, or a `Room.removeParticipant()` with a reason, that its commit would refuse for its size is
-// refused before the call's first write, also where finding the participant would reap a lapsed lease. The memory
+// A `Room.send()` of data, a participant's `send()` of data, or a `Room.removeParticipant()` with a reason, that its
+// commit would refuse for its size is refused before the call's first write, also where finding the participant would
+// reap a lapsed lease. The memory
 // store has no size rule, so these rows give it one: the commit refuses what `assertCommittable()` refuses, as the
 // Redis store's does (packages/redis/src/publish-send.store.spec.ts runs the same calls there).
 // A send's check is given its first member's message, which that member commits; every other member's is encoded at
 // its own commit, with the checked one's length.
 import { afterEach, expect, it, vi } from 'vitest'
+import { Abort } from 'telefunc'
 import { ChannelOverflowError } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
+import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
 import { RoomStore } from '../backend/RoomStore.js'
 import type { CommitOptions, CommitResult, CommitTarget, LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
-import { configFromHead } from './lanes/lanes.js'
-import { LEASE_CELL_PREFIX } from './store/cells.js'
+import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
+import { LEASE_CELL_PREFIX, leaseCellKey, memberCellKey } from './store/cells.js'
+import { RoomLease } from './store/lease.js'
+import { joinMember } from './store/members.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -99,6 +104,71 @@ for (const by of ['id', 'identity'] as const) {
   })
 }
 
+/** From here on, counts the reads of `member`'s record by id: the lookup in the store of a send that finds it there. */
+function countLookups(member: string): { count: number } {
+  const lookups = { count: 0 }
+  const { readCells } = MemoryRoomDriver.prototype
+  vi.spyOn(MemoryRoomDriver.prototype, 'readCells').mockImplementation(async function (
+    this: MemoryRoomDriver,
+    roomId,
+    inc,
+    sel,
+  ) {
+    if ('keys' in sel && sel.keys.includes(memberCellKey(member))) lookups.count++
+    return await readCells.bind(this)(roomId, inc, sel)
+  })
+  return lookups
+}
+
+/** A participant that another server joined to room `id` with `identity` under its own lease, as its join writes it:
+ *  no view this process opened before lists it. `lapse()` lets that lease lapse, as a server that stopped does. */
+async function joinedElsewhere(id: string, identity?: string): Promise<{ member: string; lapse: () => Promise<void> }> {
+  const { direct } = getRoomPlane()
+  const head = await direct.reads.readHead(id)
+  if (head === null) throw new Error(`room ${id} has no head`)
+  const room = { id, ...configFromHead(head) }
+  const lease = new RoomLease()
+  const member = crypto.randomUUID()
+  const joinedAt = Date.now()
+  const identified = identity === undefined ? {} : { identity }
+  await joinMember(
+    direct,
+    room,
+    lease,
+    {
+      id: member,
+      record: { joinedAt, metaSeq: 0, metaGen: 0, ...identified },
+      meta: {},
+      join: { __r: 'join', id: member, meta: {}, joinedAt, ...identified },
+    },
+    {},
+  )
+  const lapse = async () => {
+    const mutations = [{ key: leaseCellKey(lease.id), bytes: new TextEncoder().encode('{"until":0}') }]
+    await direct.compareExchangeCells(id, room.inc, { expect: [], mutations })
+  }
+  return { member, lapse }
+}
+
+it("a participant's send() of data over the size, to a participant this server holds no view of, found by its lookup in the store, where that lookup would reap a lapsed lease, is refused before its first write", async () => {
+  const id = `participant-send-large-${crypto.randomUUID()}`
+  await Room.create(id)
+  const { member: recipient } = await joinedElsewhere(id)
+  const sender = await Room.join(id)
+  const lease = await lapsedLease(id)
+  withSizeRule()
+  const lookups = countLookups(recipient)
+  const refused = await sender.send(recipient, LARGE).then(() => 'resolved', told)
+  vi.restoreAllMocks()
+
+  expect({ refused, lookups: lookups.count, lease: await lease.read() }).toEqual({
+    refused: 'ChannelOverflowError',
+    lookups: 1,
+    lease: '{"until":0}',
+  })
+  await Room.close(id)
+})
+
 for (const by of ['id', 'identity'] as const) {
   it(`Room.send() by ${by} encodes each member's message once, and commits the bytes its size check was given or bytes of their length`, async () => {
     const id = `send-encodes-${by}-${crypto.randomUUID()}`
@@ -143,6 +213,100 @@ for (const by of ['id', 'identity'] as const) {
       committedAsChecked: committed.filter((payload) => payload === checkedPayload).length,
       ofTheCheckedLength: committed.every((payload) => payload.byteLength === checkedPayload?.byteLength),
     }).toEqual({ encodes: members, checked: 1, commits: members, committedAsChecked: 1, ofTheCheckedLength: true })
+    await Room.close(id)
+  })
+}
+
+/** Which of `ids` room `id`'s store holds a member record of, hidden ones too. */
+async function storedMembers(id: string, ids: string[]): Promise<string[]> {
+  const { direct } = getRoomPlane()
+  const head = await direct.reads.readHead(id)
+  if (head === null) throw new Error(`room ${id} has no head`)
+  const read = await direct.reads.readCells(id, configFromHead(head).inc, { keys: ids.map(memberCellKey) })
+  return read.kind === 'read' ? ids.filter((member) => read.cells.has(memberCellKey(member))) : []
+}
+
+/** The length of `reason` at which a hidden tab's leave with it is `bytes` long: the leave Room commits for it. */
+function reasonForHiddenLeave(bytes: number): string {
+  const leave = (reason: string) =>
+    encodeRoomRecord({ __r: 'leave', id: crypto.randomUUID(), cause: 'removed', reason, hidden: true }).byteLength
+  return 'x'.repeat(bytes - leave(''))
+}
+
+for (const over of [0, 1]) {
+  it(`Room.removeParticipant() by identity of a visible and a hidden tab, with a reason whose hidden leave is ${over === 0 ? 'the size exactly: removes both' : 'one byte over the size: is refused, and removes neither'}`, async () => {
+    const id = `remove-threshold-${over}-${crypto.randomUUID()}`
+    await Room.create(id)
+    const visible = await Room.join(id, { identity: 'u1' })
+    const hidden = await Room.join(id, { identity: 'u1', hidden: true })
+    withSizeRule()
+    const reason = reasonForHiddenLeave(LIMIT + over)
+    const answer = await Room.removeParticipant(id, { identity: 'u1', reason }).then(() => 'resolved', told)
+    vi.restoreAllMocks()
+    const kept = await storedMembers(id, [visible.id, hidden.id])
+
+    expect({ answer, visible: kept.includes(visible.id), hidden: kept.includes(hidden.id) }).toEqual(
+      over === 0
+        ? { answer: 'resolved', visible: false, hidden: false }
+        : { answer: 'ChannelOverflowError', visible: true, hidden: true },
+    )
+    await Room.close(id)
+  })
+}
+
+it('Room.send() by identity whose checked first tab, in join order as the memory store reads them, is reaped by the lookup delivers to the tab that is left', async () => {
+  const id = `send-checked-reaped-${crypto.randomUUID()}`
+  await Room.create(id)
+  const first = await joinedElsewhere(id, 'u1')
+  const left = await Room.join(id, { identity: 'u1' })
+  await first.lapse()
+  const checked: string[] = []
+  vi.spyOn(RoomStore.prototype, 'assertCommittable').mockImplementation((lane) => {
+    if (lane.kind === 'inbox') checked.push(lane.member)
+  })
+  const receipts = await Room.send(id, { identity: 'u1' }, 'small')
+  vi.restoreAllMocks()
+  const listed = (await Room.getParticipants(id)).map((each) => each.id)
+
+  // The check runs on the first read and on the reread after the reap, each time on the message it was first given,
+  // of the reaped tab: every tab's has its length.
+  expect({ checked, delivered: receipts.length, listed }).toEqual({
+    checked: [first.member, first.member],
+    delivered: 1,
+    listed: [left.id],
+  })
+  await Room.close(id)
+})
+
+for (const listed of ['in the view', 'only in the store'] as const) {
+  it(`a participant's send() over the size, to a participant ${listed === 'in the view' ? 'in the view, found with no store lookup' : 'only in the store, found by its lookup there'}, is refused for its size before its send guard runs`, async () => {
+    const id = `participant-send-guarded-${listed === 'in the view' ? 'view' : 'store'}-${crypto.randomUUID()}`
+    const room = await Room.create(id)
+    let guarded = 0
+    Room.guard(room, {
+      anyoneCanJoin: true,
+      onBeforeSend: () => {
+        guarded++
+        throw Abort('Test: the guard refuses every send')
+      },
+    })
+    const elsewhere = listed === 'only in the store' ? (await joinedElsewhere(id)).member : null
+    const sender = await room.join()
+    const recipient = elsewhere ?? (await room.join()).id
+    withSizeRule()
+    const lookups = countLookups(recipient)
+    const oversized = await sender.send(recipient, LARGE).then(() => 'resolved', told)
+    vi.restoreAllMocks()
+    const guardedBefore = guarded
+    const fitting = await sender.send(recipient, 'small').then(() => 'resolved', told)
+
+    expect({ oversized, lookups: lookups.count, guardedBefore, fitting, guarded }).toEqual({
+      oversized: 'ChannelOverflowError',
+      lookups: listed === 'in the view' ? 0 : 1,
+      guardedBefore: 0,
+      fitting: 'Abort',
+      guarded: 1,
+    })
     await Room.close(id)
   })
 }

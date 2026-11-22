@@ -17,14 +17,13 @@
 //   changes nothing, and the call resolves, as the close ended the participant.
 // - `Room.removeParticipant()` by identity whose two leaves the store refuses, the second still on its way when the
 //   first tab's eviction reads the head after its refusal: it didn't run, and the store keeps everything.
-import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { fileURLToPath } from 'node:url'
-import { isDeepStrictEqual, promisify } from 'node:util'
+import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
+import { atAnotherServer, hostingLease, joinedByAnotherServer } from '../test/servers.js'
 import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
@@ -202,34 +201,6 @@ describe.runIf(runs)('a Room call refused after it reaped a lapsed lease', () =>
   }
 })
 
-/** What `work` prints, run on room `id` by another server: a process of its own, on the built packages, which then
- *  stops. */
-async function atAnotherServer(host: string, id: string, work: string): Promise<string[]> {
-  const server = `
-import { Redis } from 'ioredis'
-import { Room } from '@telefunc/room'
-import { installRedis } from '@telefunc/redis'
-installRedis(new Redis({ host: process.argv[1], username: 'telefunc', password: 'pw' }))
-const id = process.argv[2]
-${work}
-process.exit(0)
-`
-  const cwd = fileURLToPath(new URL('..', import.meta.url))
-  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', server, host, id], {
-    cwd,
-  })
-  return stdout.trim().split('\n')
-}
-
-/** A participant that another server joined to room `id` under its own lease, which it then left behind, as a server
- *  that stopped does: the participant's id. */
-async function joinedByAnotherServer(host: string, id: string): Promise<string> {
-  const printed = await atAnotherServer(host, id, 'console.log((await Room.join(id)).id)')
-  const participant = printed.at(-1)
-  if (participant === undefined || participant === '') throw new Error(`the other server joined no one: ${printed}`)
-  return participant
-}
-
 /** The ids `Room.getParticipants()` of room `id` lists at another server. */
 async function listedByAnotherServer(host: string, id: string): Promise<string[]> {
   const printed = await atAnotherServer(
@@ -285,16 +256,6 @@ describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up re
     }, 60_000)
   }
 })
-
-/** The incarnation's cells of room `id` and the lease that hosts `member`, as the store holds them. */
-async function hostingLease(admin: Redis, id: string, member: string): Promise<{ values: string; lease: string }> {
-  const [values] = await admin.keys(`tf:0:room:{${id}}:g:*:values`)
-  if (values === undefined) throw new Error(`room ${id} has no cells`)
-  const mark = (await admin.hkeys(values)).find((key) => key.startsWith('sm:') && key.endsWith(`:${member}`))
-  const lease = mark?.split(':')[1]
-  if (lease === undefined) throw new Error(`no lease hosts ${member}`)
-  return { values, lease }
-}
 
 describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the reap still writes', () => {
   for (const [i, store] of STORES.entries()) {

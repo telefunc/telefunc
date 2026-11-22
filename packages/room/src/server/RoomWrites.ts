@@ -32,13 +32,23 @@ import type {
   RoomResult,
   RoomDmEnvelope,
   SenderStamp,
+  MemberSnapshot,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
 import type { ParticipantMeta, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
+import {
+  SEMANTIC_LANE,
+  acceptedOrThrow,
+  commitFitsBeforeWriting,
+  commitLane,
+  encodeRoomRecord,
+  inboxOf,
+  type CommitFitsBeforeWriting,
+  type CommitsOf,
+} from './lanes/lanes.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
 import { setMemberConnection, setMemberMeta, type MemberMetaWrite } from './store/meta.js'
@@ -269,22 +279,28 @@ class RoomWrites {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
     // One account of the call's writes: the reap that finding the recipient may do, and the send.
     return await getRoomPlane().call(async (store) => {
-      const target = await this.resolveMember(to, store)
+      const inbox = inboxOf(this.incarnation.id, this.incarnation.inc, to)
+      const dm = new ParticipantDm(inbox.lane, () => {
+        const envelope: RoomDmEnvelope = {
+          __r: 'dm',
+          to,
+          from,
+          ...this.stampedSender(from, this.memberSender(from)),
+          data,
+        }
+        if (ackId) envelope.ackId = ackId
+        if (field !== undefined) envelope.field = field
+        return encodeRoomRecord(envelope)
+      })
+      const target = await this.resolveMember(to, store, commitFitsBeforeWriting(store, dm))
       if (!target) throw participantGoneError(to)
+      // Its size is checked before the guard, whether the view or the store listed the recipient.
+      const payload = dm.checked(store)
       const sender = this.memberSender(from)
-      const stamp = this.stampedSender(from, sender)
       const onBeforeSend = this.owner.guards?.onBeforeSend
       if (onBeforeSend) await onBeforeSend(sender, target, data)
-      const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
-      if (ackId) envelope.ackId = ackId
-      if (field !== undefined) envelope.field = field
       const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-      const committed = await commitLane(
-        store,
-        inboxOf(this.incarnation.id, this.incarnation.inc, to),
-        encodeRoomRecord(envelope),
-        { requiredCellKeys },
-      )
+      const committed = await commitLane(store, inbox, payload, { requiredCellKeys })
       const receipt = acceptedOrThrow(this.incarnation.id, committed)
       if (receipt.lost !== undefined) throw messageLostError()
       const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
@@ -306,12 +322,43 @@ class RoomWrites {
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
-  /** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of. */
-  private async resolveMember(id: string, store: RoomStore): Promise<Sender | null> {
+  /** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of; a lookup in the
+   *  store runs `fits` before them. */
+  private async resolveMember(id: string, store: RoomStore, fits: CommitFitsBeforeWriting): Promise<Sender | null> {
     const entry = this.model.entry(id)
     if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
-    const [member] = await reapAndReadMembersById(store, this.incarnation, [id])
+    const [member] = await reapAndReadMembersById(store, this.incarnation, [id], fits)
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
+  }
+}
+
+/** A participant's DM to one member, encoded once and checked for its size before the send guard runs: by the lookup
+ *  that finds the member in the store, before that lookup's reap, or else by `checked()` once the view lists it. */
+class ParticipantDm implements CommitsOf {
+  private encoded: Uint8Array | null = null
+  private sized = false
+
+  constructor(
+    private readonly lane: LaneId,
+    private readonly encode: () => Uint8Array,
+  ) {}
+
+  commits(members: readonly MemberSnapshot[]): { lane: LaneId; payload: Uint8Array }[] {
+    if (members.length === 0) return []
+    this.sized = true
+    return [{ lane: this.lane, payload: this.envelope() }]
+  }
+
+  /** The envelope, checked against `store`'s size rule unless a lookup checked it. */
+  checked(store: RoomStore): Uint8Array {
+    if (!this.sized) store.assertCommittable(this.lane, this.envelope())
+    this.sized = true
+    return this.envelope()
+  }
+
+  private envelope(): Uint8Array {
+    this.encoded ??= this.encode()
+    return this.encoded
   }
 }
 
