@@ -15,25 +15,17 @@ import { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
 import { decode, isOneFrame, messageFrames } from '../wire-protocol/wire/frame.js'
 import { TAG } from '../wire-protocol/wire/tags.js'
 import { base64urlToUint8Array } from '../wire-protocol/wire/base64url.js'
+import {
+  NativeWebSocket,
+  RecordedWebSocket,
+  failedWebSockets,
+  movedToWebSocket,
+  webSockets,
+} from './pageWebSocket.fixture.js'
 
 // Which page is offered WebSocket, as an app on `serve({ request })` (Hono, srvx…) sees it: each page's real connection
 // to real Node servers, the offer read from the RECONCILED its SSE wire carries, the WebSocket from the page's own.
 
-const NativeWebSocket = globalThis.WebSocket
-/** The page's WebSockets, by the host each went to, those that failed (Node 22's fire `error` and no `close`), and how
- *  many messages each brought. */
-const webSockets = new Map<string, WebSocket[]>()
-const failedWebSockets = new WeakSet<WebSocket>()
-const received = new WeakMap<WebSocket, number>()
-class RecordedWebSocket extends NativeWebSocket {
-  constructor(url: string | URL, protocols?: string | string[]) {
-    super(url, protocols)
-    const host = new URL(url).host
-    webSockets.set(host, [...(webSockets.get(host) ?? []), this])
-    this.addEventListener('error', () => failedWebSockets.add(this))
-    this.addEventListener('message', () => received.set(this, (received.get(this) ?? 0) + 1))
-  }
-}
 /** What the page's client sends as its own `x-telefunc-server` header, on each of its requests. */
 let clientMarker: string | undefined
 const nativeFetch = globalThis.fetch
@@ -239,28 +231,6 @@ async function openPage(app: App, host = app.host): Promise<{ offer: string[] | 
   const pageSockets = () => (webSockets.get(host) ?? []).slice(socketsBefore)
   const webSocketOpened = await movedToWebSocket(page, pageSockets, offer?.includes('ws') ? 10_000 : 0)
   return { offer, webSocketOpened }
-}
-
-/** Whether the page moved to one of `sockets()`, its own WebSockets, within `ms`: one is open, and a send its server
- *  acknowledges brings a message over it. False once each of them ended without that. */
-async function movedToWebSocket(
-  page: ClientChannel<string, string>,
-  sockets: () => WebSocket[],
-  ms: number,
-): Promise<boolean> {
-  const deadline = Date.now() + ms
-  for (;;) {
-    const open = sockets().find((ws) => ws.readyState === NativeWebSocket.OPEN)
-    if (open !== undefined) {
-      const before = received.get(open) ?? 0
-      if ((await page.send('moved', { ack: true })) === 'ack:moved' && (received.get(open) ?? 0) > before) return true
-    }
-    const ended =
-      sockets().length > 0 &&
-      sockets().every((ws) => ws.readyState === NativeWebSocket.CLOSED || failedWebSockets.has(ws))
-    if (ended || Date.now() >= deadline) return false
-    await new Promise((resolve) => setTimeout(resolve, 20))
-  }
 }
 
 test('a Fetch-only app offers its pages SSE alone', async () => {
