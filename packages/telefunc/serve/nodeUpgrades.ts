@@ -162,8 +162,9 @@ function takeUpgrades(httpServer: HttpServer): void {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)
     putBackOwnCallback(httpServer, taken)
-    registeredServers.delete(httpServer)
     taken.holdsRegistry = false
+    // An install from a `removeListener` listener that ran before this one took the server again: the registry is its.
+    if (upgradeServers.get(httpServer) === taken) registeredServers.delete(httpServer)
   }
   httpServer.on('removeListener', onRemoved)
 }

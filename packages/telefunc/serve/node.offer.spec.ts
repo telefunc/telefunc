@@ -494,6 +494,19 @@ test("an app whose server the head took first: 0.3.1's install adds no second up
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
 
+test("an app that installs Telefunc's WebSocket again from its own `removeListener` listener when Telefunc's upgrade listener is removed keeps one upgrade listener: 0.3.1's install after it adds none, and the head's pages move to WebSocket", async () => {
+  const app = await fetchApp()
+  app.server.on('removeListener', (event: string | symbol) => {
+    if (event === 'upgrade' && app.server.listenerCount('upgrade') === 0) app.telefunc.installWebSocket(app.server)
+  })
+  app.telefunc.installWebSocket(app.server)
+  app.server.removeAllListeners('upgrade')
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  install031(app.server)
+  expect(app.server.listenerCount('upgrade')).toBe(1)
+  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
+})
+
 test("removing the head's upgrade listener frees the server for either copy's next install, and only one listens", async () => {
   const app = await fetchApp()
   app.telefunc.installWebSocket(app.server)
