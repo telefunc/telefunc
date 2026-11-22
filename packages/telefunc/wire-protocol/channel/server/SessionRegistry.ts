@@ -4,8 +4,8 @@ export type { ChannelHandle }
 import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 
-/** A channel as one session holds it: its index there and the peer it sends through. */
-type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
+/** A channel as one session holds it: its index there and the peer it sends through, none once its wire went. */
+type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer | null }
 
 /** Each session's channels by index, and the sessions each channel is in: a frame finds its channel by session and
  *  index, and an ending channel leaves every session in O(its sessions). Every change writes both maps. */

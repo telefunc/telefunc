@@ -878,10 +878,13 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
+    const { peer } = h
+    // The session keeps its channels for the page's reconnect, and nothing of the wire that went.
+    h.peer = null
     // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
     // wire's RECONCILE, or leaving for good.
     if (this.ended.has(h.channel)) {
-      h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
+      if (peer) h.channel._onPeerDisconnect(peer, this.options.reconnectTimeout)
       if (reason === 'transient') this.ended.keep(h.channel, this.options.reconnectTimeout)
       else this.ended.release(h.channel)
       return
@@ -894,7 +897,7 @@ class ChannelMux implements UpgradeStagesOwner {
         h.channel._onPeerGone(rejectedFrameError())
         return
       case 'transient':
-        h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
+        if (peer) h.channel._onPeerDisconnect(peer, this.options.reconnectTimeout)
         return
       case 'recoveryFailed':
         h.channel._onPeerRecoveryFailure()
