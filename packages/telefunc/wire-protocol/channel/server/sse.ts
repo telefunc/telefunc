@@ -56,6 +56,8 @@ type SseWire = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
+  /** Ends the read of its open's body: once the wire is closed, nothing reads what that body still brings. */
+  stopOpenRead: () => void
   /** Dispatches in flight for this wire. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
@@ -334,6 +336,8 @@ class SseServerTransport {
     const events = new EventStream({ useNodeStream, onCancel })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
+    const { promise: openReadStops, resolve: stopOpenRead } = createDeferred()
+    reader.stopWhen(openReadStops)
     const wire: SseWire = {
       connId,
       events,
@@ -342,6 +346,7 @@ class SseServerTransport {
       sessionId: null,
       ready,
       resolveReady,
+      stopOpenRead,
       pendingDispatches: new Set(),
     }
     this.mux.onWireOpen(wire, this.transport, request)
@@ -553,6 +558,7 @@ class SseServerTransport {
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
+    wire.stopOpenRead()
     this.mux.onWireClosed(wire, how)
     wire.events.close({ flush: wire.rejected, last: wire.rejected ? encode.rejected() : undefined })
   }

@@ -51,6 +51,8 @@ class BodyReader {
   private clientLeft: (err: unknown) => boolean | null
   /** Called for each chunk the source yields. */
   onChunk?: () => void
+  /** Set by `stopWhen`: settles as the reader stops. */
+  private stop: Promise<IteratorReturnResult<undefined>> | undefined
 
   constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean | null) {
     this.clientLeft = clientLeft
@@ -60,6 +62,16 @@ class BodyReader {
     // `Readable` at all — `serve/node.ts` passes its `IncomingMessage` through
     // to skip the `Readable.toWeb` round-trip.
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
+  }
+
+  /** The body ends where `stop` settles: a read of the source still waiting ends there, the reader lets go of what it
+   *  holds, and it asks the source for nothing more. */
+  stopWhen(stop: Promise<void>) {
+    this.stop = stop.then((): IteratorReturnResult<undefined> => {
+      this.disconnected = true
+      this.buffer = EMPTY
+      return { done: true, value: undefined }
+    })
   }
 
   /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer buffers. */
@@ -170,8 +182,9 @@ class BodyReader {
       return null
     }
     try {
-      const { value, done } = await this.source.next()
-      if (done) {
+      const next = this.source.next()
+      const { value, done } = await (this.stop === undefined ? next : Promise.race([next, this.stop]))
+      if (done || this.disconnected) {
         this.disconnected = true
         return null
       }
