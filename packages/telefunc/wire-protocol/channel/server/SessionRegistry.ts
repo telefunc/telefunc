@@ -23,7 +23,9 @@ type Session = {
 
 /** What the server keeps of a session that left the registry, under its id, until `leavesAt`: why the server ended it,
  *  or `retired` where it emptied with no wire holding it or its page left; and the highest attempt of its page's that
- *  took it or that its end answered, which an attempt read later must be above to take anything, and which only rises. */
+ *  took it or that its end answered, which an attempt read later must be above to take anything, and which only rises.
+ *  A reopen answered from it raises that attempt in place and nothing more: no record is written again, and its instant
+ *  never moves. */
 type KeptEnd = {
   readonly end: SessionCause | 'retired'
   high: number
