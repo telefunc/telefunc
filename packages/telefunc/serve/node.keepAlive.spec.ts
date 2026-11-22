@@ -144,42 +144,53 @@ for (const via of vias) {
   )
 }
 
-test('a call that returns a Channel and leaves its Blob unread, then a second call on the same connection: the second is answered once the channel ends (Telefunc given a Node request)', async () => {
-  const listening = ports.get('Node request')
-  if (!listening) throw new Error('no server')
-  const { server, port } = listening
-  calls.length = 0
-  const made: Channel[] = []
-  const onChannel = (holder: { channel?: Channel }) => {
-    holder.channel = new Channel()
-    made.push(holder.channel)
-  }
-  process.on('requestBody.telefunc:channel', onChannel)
-  const socket = await connected(port)
-  const firstTaken = nextCall(server)
-  const first = ignoredBlobCall(512 * 1024, 'returnsChannelIgnoringBlob')
-  const second = encoder.encode(JSON.stringify({ file, name: 'hello', args: [] }))
-  for (const part of [head(port, 'bin', first.length), first, head(port, 'txt', second.length), second]) {
-    socket.write(part)
-  }
-  const firstAnswer = await firstTaken
-  if (!firstAnswer.writableFinished) await once(firstAnswer, 'finish')
-  await settle()
-  const answered = () => calls.map((res) => ({ status: res.statusCode, answered: res.writableFinished }))
-  // The channel holds the request, so its files stay readable and its body unread.
-  const whileHeld = answered()
-  made[0]?.abort()
-  await settle()
-  process.off('requestBody.telefunc:channel', onChannel)
-  expect({ whileHeld, ended: answered() }).toEqual({
-    whileHeld: [{ status: 200, answered: true }],
-    ended: [
-      { status: 200, answered: true },
-      { status: 200, answered: true },
-    ],
-  })
-  socket.destroy()
-})
+/** How a row ends the Channel its call returned, which no page attached: at once, so that the row needs no clock. */
+const channelEnds: [string, (channel: Channel) => void][] = [
+  ['abort()', (channel) => channel.abort()],
+  ['close({ timeout: 0 })', (channel) => void channel.close({ timeout: 0 })],
+]
+
+test.each(channelEnds)(
+  'a call that returns a Channel and leaves its Blob unread, then a second call on the same connection: the second is answered once the channel ends by %s, no page having attached it (Telefunc given a Node request)',
+  async (_end, endChannel) => {
+    const listening = ports.get('Node request')
+    if (!listening) throw new Error('no server')
+    const { server, port } = listening
+    calls.length = 0
+    const made: Channel[] = []
+    const onChannel = (holder: { channel?: Channel }) => {
+      holder.channel = new Channel()
+      made.push(holder.channel)
+    }
+    process.on('requestBody.telefunc:channel', onChannel)
+    const socket = await connected(port)
+    const firstTaken = nextCall(server)
+    const first = ignoredBlobCall(512 * 1024, 'returnsChannelIgnoringBlob')
+    const second = encoder.encode(JSON.stringify({ file, name: 'hello', args: [] }))
+    for (const part of [head(port, 'bin', first.length), first, head(port, 'txt', second.length), second]) {
+      socket.write(part)
+    }
+    const firstAnswer = await firstTaken
+    if (!firstAnswer.writableFinished) await once(firstAnswer, 'finish')
+    await settle()
+    const answered = () => calls.map((res) => ({ status: res.statusCode, answered: res.writableFinished }))
+    // The channel holds the request, so its files stay readable and its body unread.
+    const whileHeld = answered()
+    const channel = made[0]
+    if (!channel) throw new Error('no channel')
+    endChannel(channel)
+    await settle()
+    process.off('requestBody.telefunc:channel', onChannel)
+    expect({ whileHeld, ended: answered() }).toEqual({
+      whileHeld: [{ status: 200, answered: true }],
+      ended: [
+        { status: 200, answered: true },
+        { status: 200, answered: true },
+      ],
+    })
+    socket.destroy()
+  },
+)
 
 test('a call answered while its client keeps sending the Blob it left unread: the connection ends at the host request timeout', async () => {
   // Node checks its connections' request timeout every `connectionsCheckingInterval`, so the cut comes that often.
