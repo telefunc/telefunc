@@ -45,7 +45,7 @@ import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from
 interface TransportOwner {
   /** `startedAt`: when the socket or request that opened started. */
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void
-  /** The server answered the attempt's request with its event stream's head, before the wire opens. */
+  /** The server answered the attempt: a WebSocket's open, or the event stream's head before the wire opens. */
   onTransportAnswered(transport: ClientChannelTransport): void
   /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
    *  another `WIRE_VERSION`; `rejectedFrame`: it refused the wire for a frame it couldn't read. */
@@ -102,9 +102,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private attemptStartedAt: number | null = null
   /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
   private allowanceTimer: ReturnType<typeof setTimeout> | null = null
-  /** The attempt under way: the backoff its end waits, drawn as it starts; when it is cut unanswered (null: it runs to
-   *  the deadline, or was answered); and whether the server answered it. */
-  private attempt: { nextDelay: number; cutAt: number | null; answered: boolean } | null = null
+  /** The attempt under way: the backoff its end waits, drawn as it starts, and when it is cut unanswered (null: it runs
+   *  to the deadline, or was answered). */
+  private attempt: { nextDelay: number; cutAt: number | null } | null = null
   /** When the attempt under way started, till the server answered it. */
   private allowanceFrom = 0
   /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
@@ -182,7 +182,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
     const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
     const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
-    this.attempt = { nextDelay, cutAt: room > 0 ? now + allowance : null, answered: false }
+    this.attempt = { nextDelay, cutAt: room > 0 ? now + allowance : null }
     if (room > 0) this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
     this.transport.start()
   }
@@ -198,8 +198,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
   private attemptAnswered(): void {
-    if (this.attempt === null || this.attempt.answered) return
-    this.attempt.answered = true
+    if (this.attempt === null) return
     this.attempt.cutAt = null
     this.clearAllowance()
     this.answeredMs = performance.now() - this.allowanceFrom
@@ -299,7 +298,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (transport !== this.transport) return
-    this.attemptAnswered()
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
     if (this.attemptStartedAt !== null) this.attemptStartedAt = startedAt
@@ -457,7 +455,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.attemptAnswered()
     this.attempt = null
     this.endRecovery()
     if (this.attemptStartedAt !== null) {

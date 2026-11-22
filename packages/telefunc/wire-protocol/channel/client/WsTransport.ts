@@ -143,6 +143,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.connecting = null
     this.ws = socket.ws
     this.setupHandlers(socket.ws, socket.pieces)
+    this.owner.onTransportAnswered(this)
     this.owner.onTransportOpen(this, socket.startedAt)
   }
 
