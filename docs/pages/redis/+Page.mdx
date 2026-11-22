@@ -55,7 +55,7 @@ To give Telefunc a Redis user that may do only what it needs, create it with thi
 ACL SETUSER telefunc on >your-password ~tf:* resetchannels &tf:* +evalsha +eval +get +set +del +unlink +exists +type +incr +pexpireat +time +hget +hmget +hset +hdel +hexists +hlen +hkeys +hscan +sadd +srem +scard +smembers +sscan +zadd +zrem +zrangebylex +zrangebyscore +publish +subscribe +unsubscribe +ping +info +client|setname +cluster|slots +cluster|info +asking
 ```
 
-On Redis 7.2 and later and on Valkey, adding `+client|setinfo` lets the client library report its name and version. Without it, the server records one refused `CLIENT SETINFO` per new connection in its ACL log, and nothing else changes.
+On Redis 7.2 and later and on Valkey, adding `+client|setinfo` lets the client library report its name and version. Without it, the server can log refused `CLIENT SETINFO` commands in its ACL log, and nothing else changes.
 
 Such a user needs Redis 7 or later: there, a `publish()` or a room change that Redis refuses leaves nothing behind.
 
@@ -103,6 +103,8 @@ It is `'may-have-run'` when the call may have taken effect, for example when the
 | `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: a read is safe to call again whatever its `outcome` says. It says `'may-have-run'` only when it found a participant or a room that had lapsed, and the cleanup it started may have taken effect |
 
 While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
+
+When a replica takes over as the primary, the rooms on every server follow what the new primary holds, and `room.onChange()` fires with the room as the new primary holds it. Redis replicates asynchronously, so the new primary can lack the last writes the old one acknowledged, such as a `Room.updateMeta()` that resolved just before the failover.
 
 A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, it refuses the login (a wrong username or password), or it doesn't run a command the subscription needs, as its operator disabled or renamed it. That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access. While the server is a replica (`READONLY`), as during a failover, a subscription waits until a primary serves it again.
 
