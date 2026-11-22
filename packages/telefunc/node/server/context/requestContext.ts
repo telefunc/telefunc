@@ -36,14 +36,18 @@ type RequestContext = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** The call ended, whichever way: fires onClose callbacks once no item of trackPending is pending. */
+  /** Fires once the call has answered while what its response still sends (a channel, a stream) holds the request:
+   *  never where the client left first, nor where nothing holds the request on. */
+  onAnswered: (cb: () => void) => void
+  /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
+   *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
   /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
    *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void
 }
 
-/** Create a RequestContext and wire the abort signal to markComplete. */
+/** Create a RequestContext and wire the abort signal to the call's own hold. */
 function createRequestContext(request: Request): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
@@ -83,11 +87,19 @@ function createRequestContext(request: Request): RequestContext {
       if (--pendingCount === 0) fireClose()
     }
   }
-  // markComplete is the initial hold — released when the call ends, whichever way,
-  // or when the client disconnects, whichever comes first.
-  const markComplete = trackPending()
+  // The call's own hold — released when the call ends, whichever way, or when the client disconnects, whichever comes
+  // first.
+  const releaseCall = trackPending()
 
-  const responseAbort = createResponseAbortSource(markComplete)
+  const answeredCallbacks: Array<() => void> = []
+  const markComplete = () => {
+    releaseCall()
+    if (closed || request.signal.aborted) return
+    for (const cb of answeredCallbacks) invokeCloseCallback(cb)
+    answeredCallbacks.length = 0
+  }
+
+  const responseAbort = createResponseAbortSource(releaseCall)
 
   const ctx: RequestContext = {
     request,
@@ -102,6 +114,9 @@ function createRequestContext(request: Request): RequestContext {
       failedCallbacks.push(cb)
     },
     markCallFailed: fireFailed,
+    onAnswered(cb) {
+      answeredCallbacks.push(cb)
+    },
     onClose(cb) {
       if (closed) {
         invokeCloseCallback(cb)
@@ -116,9 +131,9 @@ function createRequestContext(request: Request): RequestContext {
   // request.signal fires when the page disconnects: it releases the call's hold, so onClose waits only for what
   // the response still carries.
   if (request.signal.aborted) {
-    markComplete()
+    releaseCall()
   } else {
-    request.signal.addEventListener('abort', markComplete, { once: true })
+    request.signal.addEventListener('abort', releaseCall, { once: true })
   }
 
   return ctx

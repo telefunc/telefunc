@@ -1,10 +1,12 @@
 // A Fetch `Request` built from Node's request as Hono's and srvx's Node servers build one: its body is
-// `Readable.toWeb(req)`, and its signal aborts once Node's request is cut short or its connection closes.
+// `Readable.toWeb(req)`, and its signal aborts once Node's request is cut short or its connection closes. An HTTP/2
+// request's pseudo-headers (`:method`, `:path`) are not headers of the `Request`.
 
 import type { IncomingMessage } from 'node:http'
+import type { Http2ServerRequest } from 'node:http2'
 import { Readable } from 'node:stream'
 
-export function frameworkRequest(req: IncomingMessage, url: string): Request {
+export function frameworkRequest(req: IncomingMessage | Http2ServerRequest, url: string): Request {
   const abort = new AbortController()
   req.on('close', () => {
     if (req.readableAborted) abort.abort()
@@ -13,7 +15,9 @@ export function frameworkRequest(req: IncomingMessage, url: string): Request {
   const init: RequestInit & { duplex: 'half' } = {
     method: 'POST',
     headers: Object.entries(req.headers).flatMap(([name, value]) =>
-      value === undefined ? [] : (Array.isArray(value) ? value : [value]).map((one): [string, string] => [name, one]),
+      value === undefined || name.startsWith(':')
+        ? []
+        : (Array.isArray(value) ? value : [value]).map((one): [string, string] => [name, one]),
     ),
     body: domStream(Readable.toWeb(req).getReader()),
     signal: abort.signal,

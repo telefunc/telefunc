@@ -23,7 +23,10 @@ export {
   onUploadIgnored,
   onKeepFile,
   onReadKeptFile,
+  onReturnChannelIgnoringFile,
 }
+
+import { Channel } from 'telefunc'
 
 const onUploadFile = async (file: File, description: string) => {
   const content = await file.text()
@@ -255,4 +258,12 @@ const onReadKeptFile = async () => {
     (text) => `read ${text.length} bytes`,
     (err: unknown) => `failed: ${err instanceof Error ? err.message : String(err)}`,
   )
+}
+
+/** Returns a Channel that says `open` once the page attaches, and never reads its File: the channel holds the call's
+ *  request while it lives. */
+const onReturnChannelIgnoringFile = async (_file: File) => {
+  const channel = new Channel<never, string>()
+  void channel.send('open').catch(() => {})
+  return channel
 }

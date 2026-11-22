@@ -5,6 +5,7 @@ import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { concatAll, decodeU32 } from './envelope.js'
 import { ProtocolViolationError } from './protocolViolation.js'
+import type { QueueMemory } from '../channel/channelMessages.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -88,9 +89,19 @@ class BodyReader {
   /** Who ended the file reads: the client, whose request ended through its abort, or the server, which answered or let
    *  the body go. */
   private filesEndedBy: 'client' | 'server' | null = null
-  /** The source's read under way, and whether the rest of the body is being read off: then it alone reads the source. */
+  /** The source's read under way. */
   private reading: Promise<IteratorResult<Uint8Array<ArrayBuffer>>> | null = null
-  private readingOff = false
+  /** The read-off of the rest of the body, once it began: from then on it alone reads the source. */
+  private readOff: Promise<void> | null = null
+  private readOffDone = false
+  /** What the read-off keeps for the file reads, where it began at the call's answer (`keepRest`): the chunks it read,
+   *  in order, each held on `keeping` until a file read takes it. Null where it drops what it reads. */
+  private keeping: QueueMemory | null = null
+  private kept: Uint8Array<ArrayBuffer>[] = []
+  /** Whether `keeping` refused a chunk: that chunk and every one after it were dropped. */
+  private dropped = false
+  /** What a file read that waits for the read-off's next chunk awaits. */
+  private keptMore: Deferred<void> | null = null
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -146,19 +157,86 @@ class BodyReader {
     return this.readExact(length)
   }
 
-  /** Ends the file reads, then reads the rest of the body and drops it, a chunk at a time, to its end or its client's
-   *  leaving. A read of the body under way finishes first, and every read but this one ends as at the body's end. A body
-   *  whose reads stopped already has no rest: an app's error that stopped them went to the read it failed. `endedBy`: who
-   *  ended the request, as the file reads say it where nothing stopped the body. */
+  /** Ends the file reads, lets go of what the read-off kept for them, then reads the rest of the body and drops it, a
+   *  chunk at a time, to its end or its client's leaving. A read of the body under way finishes first, and every read but
+   *  this one ends as at the body's end. A body whose reads stopped already has no rest: an app's error that stopped them
+   *  went to the read it failed. `endedBy`: who ended the request, as the file reads say it where nothing stopped the
+   *  body. */
   async discardRest(endedBy: 'client' | 'server'): Promise<void> {
     this.endFiles(endedBy)
-    this.readingOff = true
-    // Its own pull, awaiting it since it began, has taken its outcome by then.
-    if (this.reading !== null) await this.reading.catch(() => {})
-    if (this.stop) return
+    this.keeping?.release()
+    this.keeping = null
+    this.kept = []
     this.buffer = EMPTY
-    let chunk = await this.readChunk()
-    while (chunk !== null) chunk = await this.readChunk()
+    this.wakeKept()
+    await (this.readOff ??= this.readRest())
+  }
+
+  /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, keeping each
+   *  chunk on `memory` for the file reads, which take them in order as they read: the client's upload ends, so that a
+   *  browser, which delivers an answer only once it has sent the whole body, gets it. A chunk `memory` refuses is
+   *  dropped, and so is every one after it: a file read that reaches them fails, saying why. `discardRest`, at the end
+   *  of the call's holds, lets go of what is kept and drops the rest. */
+  keepRest(memory: QueueMemory): void {
+    if (this.readOff !== null || this.filesEndedBy !== null) return
+    this.keeping = memory
+    this.readOff = this.readRest()
+    // A failure, the app's own error, goes to `discardRest`, which awaits the same read-off.
+    this.readOff.catch(() => {})
+  }
+
+  /** The read-off: the source's chunks to its end or its client's leaving, each kept or dropped. A read of the body
+   *  under way finishes first: its own pull, awaiting it since it began, takes its outcome. */
+  private async readRest(): Promise<void> {
+    try {
+      if (this.reading !== null) await this.reading.catch(() => {})
+      if (this.keeping === null) this.buffer = EMPTY
+      if (this.stop) return
+      for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
+    } finally {
+      this.readOffDone = true
+      this.wakeKept()
+    }
+  }
+
+  private keep(chunk: Uint8Array<ArrayBuffer>): void {
+    if (this.keeping === null || this.dropped) return
+    if (this.keeping.tryHold(chunk.length)) this.kept.push(chunk)
+    else this.dropped = true
+    this.wakeKept()
+  }
+
+  /** The read-off's next chunk, for `by`'s read: null where it drops what it reads, as at the body's end; at the end of
+   *  what it read, the source's, as `readChunk` says it. */
+  private async takeKept(by: FileRead | null): Promise<Uint8Array<ArrayBuffer> | null> {
+    for (;;) {
+      if (this.keeping === null) return null
+      const chunk = this.kept.shift()
+      if (chunk !== undefined) {
+        this.keeping.letGo(chunk.length)
+        return chunk
+      }
+      if (this.dropped) throw this.droppedError(by)
+      if (this.readOffDone) return this.readChunk()
+      this.keptMore ??= createDeferred()
+      await this.keptMore.promise
+    }
+  }
+
+  private wakeKept(): void {
+    const keptMore = this.keptMore
+    if (keptMore === null) return
+    this.keptMore = null
+    keptMore.resolve()
+  }
+
+  /** A file read reached what the read-off dropped. Only a file read takes kept chunks: the call's metadata is read
+   *  before its answer. */
+  private droppedError(by: FileRead | null): Error {
+    assert(by !== null)
+    return new Error(
+      `The telefunction returned before it read this File (${this.fileSizes.get(by.index)} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File before the telefunction returns, or while what it returns streams, to keep all of it.`,
+    )
   }
 
   /** Settles once the source's read under way, if any, has settled, and its reader has taken its outcome. */
@@ -198,7 +276,7 @@ class BodyReader {
       if (left === 0) return this.fileDone(file)
       let bytes = this.buffer
       if (bytes.length === 0) {
-        const pulled = await this.pullChunk()
+        const pulled = await this.pullChunk(file)
         // Let go of while the read was under way: `letGo` errored the stream, and what came after is dropped.
         if (this.stop?.why === 'letGo') return
         if (pulled === null) throw this.truncation()
@@ -273,7 +351,7 @@ class BodyReader {
         `File arguments are being consumed out of order (reading ${by.index}, expected ${this.next}). Skipped files will be unreadable. For correct behavior, consume file arguments in the order they appear.`,
         { onlyOnce: true },
       )
-      await this.skipBytes(this.leftOfNext())
+      await this.skipBytes(this.leftOfNext(), by)
       this.next++
       this.left = undefined
     } finally {
@@ -318,15 +396,15 @@ class BodyReader {
 
   // ── Primitives ──
 
-  /** Pull one chunk from the underlying source, or null once it ended or its client left, or failed where nothing says
-   *  why, or once the rest of the body is being read off. A read that fails as the app's own error throws it, and so does
-   *  every pull after it. */
-  private async pullChunk() {
+  /** Pull one chunk, for `by`'s read (null: the metadata's), from the underlying source, or null once it ended or its
+   *  client left, or failed where nothing says why; once the rest of the body is being read off, from what the read-off
+   *  keeps (`takeKept`). A read that fails as the app's own error throws it, and so does every pull after it. */
+  private async pullChunk(by: FileRead | null) {
     // The read-off reads the source alone, as one read of it at a time holds (`ReadableChunks.next()` asserts it). A pass
     // under way when the read-off starts reaches this line, but no row sees what it prevents: without it, that pass reads
     // on beside the read-off, and on a Node body meets the assert (probed: it fires, and its error goes into a file that
     // has already failed), on a Web body takes a chunk the read-off would drop.
-    if (this.readingOff) return null
+    if (this.readOff !== null) return this.takeKept(by)
     return this.readChunk()
   }
 
@@ -388,7 +466,7 @@ class BodyReader {
       let length = this.buffer.length
       let last = EMPTY
       while (length < n) {
-        const chunk = await this.pullChunk()
+        const chunk = await this.pullChunk(null)
         if (!chunk) throw this.truncation()
         parts.push(chunk)
         last = chunk
@@ -405,20 +483,20 @@ class BodyReader {
   /** Read exactly `n` bytes, or null on clean EOF before any bytes are read. */
   private async readExactOrNull(n: number) {
     while (this.buffer.length === 0) {
-      const chunk = await this.pullChunk()
+      const chunk = await this.pullChunk(null)
       if (!chunk) return null
       this.buffer = chunk
     }
     return this.readExact(n)
   }
 
-  /** Skip exactly `n` bytes. Throws on disconnect. */
-  private async skipBytes(n: number) {
+  /** Skip exactly `n` bytes, for `by`'s read. Throws on disconnect. */
+  private async skipBytes(n: number, by: FileRead) {
     let remaining = n
     const buffered = this.takeBuffered(remaining)
     if (buffered) remaining -= buffered.length
     while (remaining > 0) {
-      const chunk = await this.pullChunk()
+      const chunk = await this.pullChunk(by)
       if (!chunk) throw this.truncation()
       remaining -= chunk.length
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)

@@ -175,7 +175,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
  *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read,
  *  and so is one whose body ends before its envelope is complete. A
- *  binary request's body is read off to its end once the call is done (`readOffBody`). */
+ *  binary request's body is read off to its end at the call's answer, kept for its files while a returned value holds
+ *  the request (`keepRest`), and dropped once the call is done (`readOffBody`). */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
@@ -194,6 +195,9 @@ async function readBody(
     const source = readable ?? request.body
     if (!source) return refuseEndedEnvelope(runContext)
     const reader = new BodyReader(source, clientLeft)
+    // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
+    // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    runContext.requestContext.onAnswered(() => reader.keepRest(queueMemory()))
     runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
     const metadata = await reader
       .readFrame(CALL_METADATA_MAX_BYTES)

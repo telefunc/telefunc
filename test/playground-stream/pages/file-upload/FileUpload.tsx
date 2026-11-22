@@ -24,7 +24,11 @@ import {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
+  onReturnChannelIgnoringFile,
 } from './FileUpload.telefunc'
+
+/** The channel `#test-channel-unread-file` got: held, so that it isn't collected while the row reads it. */
+let heldChannel: Awaited<ReturnType<typeof onReturnChannelIgnoringFile>> | undefined
 
 function FileUpload() {
   const [result, setResult] = useState<string>('')
@@ -295,6 +299,22 @@ function FileUpload() {
         }}
       >
         Ignored files
+      </button>
+
+      <button
+        id="test-channel-unread-file"
+        onClick={async () => {
+          // A browser delivers the answer only once it has sent the whole File, past what the connection buffers.
+          const big = new File([new Uint8Array(32 * 1024 * 1024)], 'big.bin', { type: 'application/octet-stream' })
+          try {
+            heldChannel = await onReturnChannelIgnoringFile(big)
+            heldChannel.listen((message) => setResult(JSON.stringify({ received: message })))
+          } catch (err) {
+            setResult(JSON.stringify({ failed: String(err) }))
+          }
+        }}
+      >
+        Channel returned, its File unread
       </button>
 
       <pre id="upload-result">{result}</pre>

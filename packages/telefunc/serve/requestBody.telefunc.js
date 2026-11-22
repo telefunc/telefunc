@@ -1,5 +1,6 @@
-// The telefunctions of serve/node.requestBody.spec.ts and serve/node.uploadBody.spec.ts, which Telefunc loads from
-// `config.telefuncFiles` with Node's own `import()`, as an app's: they tell the spec through `process` events.
+// The telefunctions of the serve/ specs of request bodies (node.requestBody, node.uploadBody, node.keepAlive and
+// node.heldUpload), which Telefunc loads from `config.telefuncFiles` with Node's own `import()`, as an app's: they tell
+// the spec through `process` events.
 
 export async function hello() {
   return 'hello'
@@ -47,5 +48,29 @@ export async function keepsBlob(blob) {
 export async function returnsChannelIgnoringBlob() {
   const made = {}
   process.emit('requestBody.telefunc:channel', made)
+  return made.channel
+}
+
+/** Answers with a Channel the spec makes, and hands the spec its `Blob` to read once the call is done. */
+export async function returnsChannelKeepingBlob(blob) {
+  const made = {}
+  process.emit('requestBody.telefunc:channel', made)
+  process.emit('requestBody.telefunc:kept', blob)
+  return made.channel
+}
+
+/** Answers with a Channel the spec makes, and reads its `Blob` as it arrives: tells the spec how that read ended. */
+export async function returnsChannelReadingBlob(blob) {
+  const made = {}
+  process.emit('requestBody.telefunc:channel', made)
+  void (async () => {
+    let read = 0
+    try {
+      for await (const chunk of blob.stream()) read += chunk.length
+      process.emit('requestBody.telefunc:readEnded', `read ${read} bytes`)
+    } catch (err) {
+      process.emit('requestBody.telefunc:readEnded', `failed after ${read} bytes: ${err.message}`)
+    }
+  })()
   return made.channel
 }

@@ -274,6 +274,17 @@ function testFileUpload() {
     })
   })
 
+  test('file upload: a call that returns a Channel and never reads its 32 MiB File is answered, and its channel opens on the page', async () => {
+    await page.click('#test-channel-unread-file')
+    await autoRetry(
+      async () => {
+        const result = await getResult('#upload-result')
+        expect(result).deep.equal({ received: 'open' })
+      },
+      { timeout: 10_000 },
+    )
+  })
+
   test("file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end fails with the server's truncation", async () => {
     expect((await post('bin', binaryCall('onKeepFile', 1000))).status).toBe(200)
     // The whole body came with the call, so the read-off that follows its answer has read it to the end.

@@ -187,8 +187,8 @@ function holdsEnough(): boolean {
   return memory.total > shedTarget(maxMemoryOf())
 }
 
-/** What a `messages()` loop's queue or a stream's reader holds, on the ledger as a holder of its own: nothing else can
- *  lower it. */
+/** What a `messages()` loop's queue, a stream's reader, or the upload a call keeps for its files once it has answered
+ *  (`BodyReader.keepRest`) holds, on the ledger as a holder of its own: nothing else can lower it. */
 function queueMemory(): QueueMemory {
   const holder: MemoryHolder = { heldBytes: 0 }
   return {

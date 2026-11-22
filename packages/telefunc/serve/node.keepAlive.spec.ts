@@ -2,8 +2,9 @@
 // both are answered, as Telefunc reads the first call's body off once its call is done. Node parses the second call off
 // the connection only once the first call's body is read to its end. Both calls are sent at once. The row waits for the
 // first call's answer to finish, then lets the event loop run a counted number of turns (`settle`, no clock) and reads
-// which calls the server took and answered. Then the bound: a client that keeps sending a body nobody reads holds its
-// connection only until the host's request timeout.
+// which calls the server took and answered. Then a call whose returned Channel holds it on (node.heldUpload.spec.ts has
+// its body read at its answer): once the channel ends, the call is done, and the Blob it handed on fails its read. Then
+// the bound: a client that keeps sending a body nobody reads holds its connection only until the host's request timeout.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -151,43 +152,40 @@ const channelEnds: [string, (channel: Channel) => void][] = [
 ]
 
 test.each(channelEnds)(
-  'a call that returns a Channel and leaves its Blob unread, then a second call on the same connection: the second is answered once the channel ends by %s, no page having attached it (Telefunc given a Node request)',
+  'a call that returns a Channel and hands its Blob on to be read once the call is done: once the channel ends by %s, no page having attached it, the call is done, and a read of the Blob fails (Telefunc given a Node request)',
   async (_end, endChannel) => {
     const listening = ports.get('Node request')
     if (!listening) throw new Error('no server')
     const { server, port } = listening
-    calls.length = 0
     const made: Channel[] = []
+    const kept: Blob[] = []
     const onChannel = (holder: { channel?: Channel }) => {
       holder.channel = new Channel()
       made.push(holder.channel)
     }
+    const onKept = (blob: Blob) => void kept.push(blob)
     process.on('requestBody.telefunc:channel', onChannel)
+    process.on('requestBody.telefunc:kept', onKept)
     const socket = await connected(port)
-    const firstTaken = nextCall(server)
-    const first = ignoredBlobCall(512 * 1024, 'returnsChannelIgnoringBlob')
-    const second = encoder.encode(JSON.stringify({ file, name: 'hello', args: [] }))
-    for (const part of [head(port, 'bin', first.length), first, head(port, 'txt', second.length), second]) {
-      socket.write(part)
-    }
-    const firstAnswer = await firstTaken
-    if (!firstAnswer.writableFinished) await once(firstAnswer, 'finish')
+    const taken = nextCall(server)
+    const call = ignoredBlobCall(512 * 1024, 'returnsChannelKeepingBlob')
+    socket.write(head(port, 'bin', call.length))
+    socket.write(call)
+    const answer = await taken
+    if (!answer.writableFinished) await once(answer, 'finish')
     await settle()
-    const answered = () => calls.map((res) => ({ status: res.statusCode, answered: res.writableFinished }))
-    // The channel holds the request, so its files stay readable and its body unread.
-    const whileHeld = answered()
     const channel = made[0]
-    if (!channel) throw new Error('no channel')
+    const blob = kept[0]
+    if (!channel || !blob) throw new Error('no channel or Blob')
     endChannel(channel)
     await settle()
     process.off('requestBody.telefunc:channel', onChannel)
-    expect({ whileHeld, ended: answered() }).toEqual({
-      whileHeld: [{ status: 200, answered: true }],
-      ended: [
-        { status: 200, answered: true },
-        { status: 200, answered: true },
-      ],
-    })
+    process.off('requestBody.telefunc:kept', onKept)
+    const read = await blob.text().then(
+      (text) => `read ${text.length} bytes`,
+      (err: Error) => err.message,
+    )
+    expect(read).toBe('The server answered before reading the request body to its end')
     socket.destroy()
   },
 )
