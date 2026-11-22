@@ -42,12 +42,15 @@ type SessionRegistryOptions = {
  *  wire holds it or it has a channel. One that leaves is kept under its id as a record, written once, until an instant
  *  fixed as it is written: a page that missed its wire's last word reopens naming its session, and is answered with
  *  the same end; an older attempt of the page's, read after a newer one, takes nothing. Records are written with one
- *  window, so the map's insertion order is their instants' order, and one timer frees them. */
+ *  window, so the map's insertion order is their instants' order, and one timer frees them; where a host dropped that
+ *  timer, the next record written does. */
 class SessionRegistry {
   private readonly bySession = new Map<string, Session>()
   private readonly byChannel = new Map<string, Map<string, number>>()
   private readonly kept = new Map<string, KeptEnd>()
   private readonly sweep = new DeadlineTimer({ unref: true })
+  /** The instant the sweep waits for, while it waits. */
+  private sweepAt: number | null = null
   private readonly retiredLeavesAt: () => number
 
   constructor({ retiredLeavesAt }: SessionRegistryOptions) {
@@ -57,10 +60,13 @@ class SessionRegistry {
   /** Keeps `end` under `sessionId` until `leavesAt`, where no record is kept under it; one kept already stands. */
   keepEnd(sessionId: string, end: KeptEnd['end'], high: number, leavesAt: number): void {
     if (this.keptOf(sessionId) !== undefined) return
+    // The sweep is past its instant where its timer didn't run: a host may drop the timers of a request it answered
+    // (workerd). What it would have freed goes now.
+    if (this.sweepAt !== null && this.sweepAt <= performance.now()) this.drain()
     // One past its instant that the sweep hasn't freed yet goes, so that the map stays in the order of the instants.
     this.kept.delete(sessionId)
     this.kept.set(sessionId, { end, high, leavesAt })
-    if (this.kept.size === 1) this.sweep.arm(leavesAt, this.drain)
+    if (this.kept.size === 1) this.waitFor(leavesAt)
   }
 
   /** The record kept under `sessionId`, before its instant; from the instant on, none. */
@@ -76,11 +82,17 @@ class SessionRegistry {
 
   /** Frees the records whose instant passed, oldest first, and waits for the first one that is not yet due. */
   private readonly drain = (): void => {
+    this.sweepAt = null
     const now = performance.now()
     for (const [sessionId, { leavesAt }] of this.kept) {
-      if (leavesAt > now) return this.sweep.arm(leavesAt, this.drain)
+      if (leavesAt > now) return this.waitFor(leavesAt)
       this.kept.delete(sessionId)
     }
+  }
+
+  private waitFor(at: number): void {
+    this.sweepAt = at
+    this.sweep.arm(at, this.drain)
   }
 
   get(sessionId: string): Session | undefined {
