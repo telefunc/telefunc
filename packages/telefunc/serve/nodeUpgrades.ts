@@ -31,8 +31,7 @@ const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServe
 // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
 // Each upgrade's socket, by the request its upgrade hook gets.
 const sockets = new WeakMap<Request, Duplex>()
-// Made with the first upgrade listener: the hooks enable the WebSocket transport, which an app that serves only
-// `serve({ request })` doesn't have.
+// Made with the first upgrade listener, so an app that takes no upgrades makes no adapter.
 let ws: ReturnType<typeof crossws> | undefined
 
 /** Made outside `takeUpgrades()`, whose scope holds a server: the process keeps the adapter and its hooks. */
