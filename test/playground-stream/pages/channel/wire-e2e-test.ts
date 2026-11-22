@@ -224,7 +224,9 @@ function testWire(isDev: boolean) {
           // CLOSING from the server's close frame on, ahead of the close event.
           if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
           settle = resolve
-          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
+          // The first, on a wire that holds no session yet, numbers its attempt, as the page's does.
+          const attempt = sessionId === undefined ? { attempt: 1 } : {}
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...attempt, ...reconcile }))
           // A RECONCILE: its tag, then index 0 and seq 0 in the 7-byte header.
           const frame = new Uint8Array(7 + payload.byteLength)
           frame[0] = TAG.RECONCILE
