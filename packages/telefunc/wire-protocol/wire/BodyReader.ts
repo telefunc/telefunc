@@ -49,7 +49,7 @@ class StreamTruncatedError extends Error {
  * the Node `serve()` adapter passes `IncomingMessage` directly to skip the
  * `Readable.toWeb` round-trip (whose pure-JS `dequeueValue` dominates CPU on hot
  * SSE / binary-RPC paths); other adapters pass `request.body`. Both shapes
- * collapse to one `AsyncIterator<Uint8Array>` so the rest of the class is
+ * collapse to one `ChunkSource` so the rest of the class is
  * source-agnostic, and both can be let go of with a read under way (`letGo`).
  *
  * Fields use TS `private` rather than JS `#private`: the inner read loop touches

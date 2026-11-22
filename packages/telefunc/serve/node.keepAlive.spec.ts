@@ -13,7 +13,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
-import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
+import { frameworkRequest } from './frameworkRequest.fixture.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
 
 // The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
@@ -32,8 +32,8 @@ function nodeRequest(req: IncomingMessage, res: ServerResponse) {
 }
 /** Telefunc given a Fetch `Request` built from Node's request, as Hono's or srvx's Node server builds one. */
 function fetchRequest(req: IncomingMessage, res: ServerResponse) {
-  nodeReadableToWebRequest(req, `http://127.0.0.1${telefuncPath}`, 'POST', req.headers)
-    .then(({ request }) => telefunc.serve({ request }))
+  telefunc
+    .serve({ request: frameworkRequest(req, `http://127.0.0.1${telefuncPath}`) })
     .then(async (response) => {
       res.writeHead(response?.status ?? 404)
       for await (const chunk of response?.body ?? []) res.write(chunk)

@@ -9,7 +9,7 @@ import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
 import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
-import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
+import { frameworkRequest } from './frameworkRequest.fixture.js'
 
 // The body of a binary call (a telefunction given a `Blob`) and of an SSE upload, read through Telefunc's body reader,
 // fails on the app's side: printed and given to `onBug()` as the app's own error. A client that leaves stays quiet.
@@ -99,8 +99,8 @@ function nodeRequest(req: IncomingMessage, res: ServerResponse) {
 }
 /** Telefunc given a Fetch `Request` built from Node's request, as Hono's or srvx's Node server builds one. */
 function fetchRequest(req: IncomingMessage, res: ServerResponse) {
-  nodeReadableToWebRequest(req, `http://127.0.0.1${telefuncPath}`, 'POST', req.headers)
-    .then(({ request }) => telefunc.serve({ request }))
+  telefunc
+    .serve({ request: frameworkRequest(req, `http://127.0.0.1${telefuncPath}`) })
     .then(async (response) => {
       res.writeHead(response?.status ?? 404)
       for await (const chunk of response?.body ?? []) res.write(chunk)
@@ -416,4 +416,18 @@ test('a binary call whose metadata declares the most a client can send waits for
   // Its body ends short: the call is answered as a truncation is.
   end()
   await serving
+})
+
+// Telefunc's reader alone reads Node's request: the Fetch `Request` the Node adapter builds for the app reads it only
+// once something reads its body, so no Web stream copies a binary call's body into a queue nothing reads.
+test("a binary call through the Node adapter has its request read by Telefunc's reader alone: nothing else takes its data", async () => {
+  const reading = blobRead()
+  const { socket, req } = await startUpload('binary', binaryStart)
+  await reading
+  expect({ dataListeners: req.listenerCount('data'), flowing: req.readableFlowing }).toEqual({
+    dataListeners: 0,
+    flowing: false,
+  })
+  socket.destroy()
+  await closed(socket)
 })

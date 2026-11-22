@@ -2,23 +2,21 @@ export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
-import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 type HeadersInput = Record<string, string | string[] | undefined> | [string, string][] | Headers
 
-async function nodeReadableToWebRequest(
+function nodeReadableToWebRequest(
   readable: Readable,
   url: string,
   method: string,
   headers: HeadersInput,
   response?: Writable,
-): Promise<{ request: Request; unwatch: () => void }> {
-  const { Readable: ReadableClass } = await loadStreamNodeModule()
+): { request: Request; unwatch: () => void } {
   // `new Request()` refuses a body for these methods.
   const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
-  const body = hasBody ? (ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>) : null
+  const body = hasBody ? webBodyOf(readable) : null
 
   const headerPairs = normalizeHeaders(headers)
 
@@ -52,6 +50,26 @@ async function nodeReadableToWebRequest(
     unwatch = () => socket.off('close', abort)
   }
   return { request, unwatch }
+}
+
+/** `readable` as a Web body that reads it only once read itself. A binary call's or an SSE upload's body is read off
+ *  `readable` by Telefunc's own reader: `Readable.toWeb()` would copy all of it into a queue nothing reads. */
+function webBodyOf(readable: Readable): ReadableStream<Uint8Array> {
+  // Its generator starts at the first `next()`: until then nothing listens to `readable`.
+  const chunks = readable[Symbol.asyncIterator]()
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const { value, done } = await chunks.next()
+        if (done) controller.close()
+        else controller.enqueue(value)
+      },
+      async cancel() {
+        await chunks.return?.()
+      },
+    },
+    { highWaterMark: 0 },
+  )
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {

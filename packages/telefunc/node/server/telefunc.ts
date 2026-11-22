@@ -13,7 +13,8 @@ type HttpRequestResolved = {
   request: Request
   /** Node `Readable` source for the request body, when the entry adapter has one
    *  (currently: `serve/node.ts` passes its `IncomingMessage`). Downstream body
-   *  consumers prefer this over `request.body` to skip Node's webstreams overhead.
+   *  consumers prefer this over `request.body` to skip Node's webstreams overhead,
+   *  and are then its one reader: `request.body` reads it only once something reads it.
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
@@ -118,7 +119,7 @@ async function resolveHttpRequest(
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
-    const { request, unwatch } = await nodeReadableToWebRequest(
+    const { request, unwatch } = nodeReadableToWebRequest(
       httpRequest.readable,
       url,
       httpRequest.method,
