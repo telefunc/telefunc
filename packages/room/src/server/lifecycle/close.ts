@@ -6,17 +6,23 @@ import type { RoomStore } from '../../backend/RoomStore.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from '../constants.js'
 import { commitLane, configFromHead, controlLane, encodeRoomRecord } from '../lanes/lanes.js'
 
-/** Closes the room, or only its incarnation `inc` when given; returns the incarnation that ended closed, if any. */
+/** Closes the incarnation `inc`, or when not given the one its first read finds; returns the incarnation that ended
+ *  closed, if any. Once that incarnation is gone, closed, lapsed or replaced, it writes nothing to the room under `id`. */
 async function closeIncarnation(store: RoomStore, id: string, inc?: string): Promise<string | null> {
+  let closing = inc
   for (;;) {
     const current = await store.reads.readHead(id)
     if (current === null) return null
     if (current.state === 'closed') {
+      const closed = configFromHead(current).inc
+      if (closing !== undefined && closed !== closing) return null
       await cleanupFinalizedIncarnation(store, id, current)
-      return configFromHead(current).inc
+      return closed
     }
-    if (inc !== undefined && current.currentInc !== inc) return null
-    if (await takeOverClose(store, id, current)) return current.currentInc
+    assert(current.currentInc !== null) // an open or a closing head names its incarnation
+    closing ??= current.currentInc
+    if (current.currentInc !== closing) return null
+    if (await takeOverClose(store, id, current)) return closing
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
 }
