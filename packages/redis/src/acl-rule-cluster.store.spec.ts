@@ -8,8 +8,10 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
+import { Broadcast } from 'telefunc'
 import { Room } from '@telefunc/room'
 import {
+  arrived,
   CLIENT_INFO_GRANT,
   calls,
   documentedRule,
@@ -69,6 +71,17 @@ async function settled(nodes: Nodes, node: Nodes['primary'], role: string): Prom
   }
 }
 
+/** The user's connections on every node, by node and id. */
+async function userConnections(nodes: Nodes): Promise<string[]> {
+  const lists = await Promise.all(listed(nodes).map(({ admin }) => admin.call('CLIENT', 'LIST')))
+  return lists.flatMap((list, node) =>
+    String(list)
+      .split('\n')
+      .filter((line) => line.includes(' user=telefunc '))
+      .map((line) => `${node}:${/^id=(\d+) /.exec(line)?.[1]}`),
+  )
+}
+
 /** Moves room `id`'s slot from the primary to the spare: `whileMigrating` runs once every key of the slot is on the
  *  spare and the slot still migrates, so a command on it is asked there (ASK, then ASKING on the spare). */
 async function moveRoom(nodes: Nodes, id: string, whileMigrating: () => Promise<unknown>) {
@@ -123,14 +136,44 @@ describe.runIf(runs)("the Redis page's ACL rule on a Cluster", () => {
       await nodes.replica.admin.call('CLUSTER', 'FAILOVER')
       await settled(nodes, nodes.replica, 'master')
       const promoted = await calls('-promoted')
-      for (const { admin } of listed(nodes)) await admin.call('CLIENT', 'KILL', 'USER', 'telefunc')
+      // A subscription held across the end of every connection, live once its first message arrived.
+      const held: unknown[] = []
+      const holding = Broadcast.subscribe('acl-held', (message) => held.push(message))
+      await holding.ready
+      await Broadcast.publish('acl-held', 'before')
+      if (!(await arrived(held))) throw new Error('the held subscription got no message')
+      const before = await userConnections(nodes)
+      let killed = 0
+      for (const { admin } of listed(nodes)) killed += Number(await admin.call('CLIENT', 'KILL', 'USER', 'telefunc'))
       await reaches(`the ${store.name} Cluster`)
       const reconnected = await calls('-reconnected')
-      expect({ asked, moved, promoted, reconnected, refused: await refusedBesidesModes(nodes) }).toEqual({
+      // The held subscription subscribes again on its new connection after the call returns: the message is published
+      // again until one arrives.
+      held.length = 0
+      let heldAgain = false
+      for (let tries = 0; !heldAgain && tries <= 40; tries++) {
+        await Broadcast.publish('acl-held', 'after')
+        heldAgain = await arrived(held, 10)
+      }
+      const after = await userConnections(nodes)
+      holding()
+      expect({
+        asked,
+        moved,
+        promoted,
+        killed: killed > 0,
+        kept: before.filter((connection) => after.includes(connection)),
+        reconnected,
+        heldAgain,
+        refused: await refusedBesidesModes(nodes),
+      }).toEqual({
         asked: 'ok',
         moved: 'ok',
         promoted: EVERY_CALL_RUNS,
+        killed: true,
+        kept: [],
         reconnected: EVERY_CALL_RUNS,
+        heldAgain: true,
         refused: knowsClientInfo(store) ? ['command client|setinfo'] : [],
       })
     }, 240_000)

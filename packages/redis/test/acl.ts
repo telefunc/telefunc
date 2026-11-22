@@ -8,6 +8,7 @@ export {
   reaches,
   calls,
   outcomeOf,
+  arrived,
   EVERY_CALL_RUNS,
 }
 
