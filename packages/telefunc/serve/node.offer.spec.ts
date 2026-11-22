@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
+import { afterEach, expect, test } from 'vitest'
 import { once } from 'node:events'
 import { createServer, type IncomingMessage, request as httpRequest, Server } from 'node:http'
 import { connect, createServer as createTcpServer, type Socket } from 'node:net'
@@ -9,45 +9,23 @@ import { Telefunc } from './node.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { hasProp } from '../utils/hasProp.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
-import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
-import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
-import { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
 import { decode, isOneFrame, messageFrames } from '../wire-protocol/wire/frame.js'
 import { TAG } from '../wire-protocol/wire/tags.js'
 import { base64urlToUint8Array } from '../wire-protocol/wire/base64url.js'
-import {
-  NativeWebSocket,
-  RecordedWebSocket,
-  failedWebSockets,
-  movedToWebSocket,
-  webSockets,
-} from './pageWebSocket.fixture.js'
+import { rowOfPages, type Page } from './page.fixture.js'
 
 // Which page is offered WebSocket, as an app on `serve({ request })` (Hono, srvx…) sees it: each page's real connection
-// to real Node servers, the offer read from the RECONCILED its SSE wire carries, the WebSocket from the page's own.
+// to real Node servers, the offer read from the RECONCILED its SSE wire carries, the WebSocket from the page's own. Each
+// page runs in a realm of its own, which the row's end ends; a server closes only after the pages opened since did.
 
-/** What the page's client sends as its own `x-telefunc-server` header, on each of its requests. */
+/** What the next page sends as its own `x-telefunc-server` header, on each of its requests. */
 let clientMarker: string | undefined
-const nativeFetch = globalThis.fetch
-beforeAll(() => {
-  globalThis.WebSocket = RecordedWebSocket
-  globalThis.fetch = (input, init) => {
-    if (clientMarker === undefined) return nativeFetch(input, init)
-    const headers = new Headers(init?.headers)
-    headers.append('x-telefunc-server', clientMarker)
-    return nativeFetch(input, { ...init, headers })
-  }
-})
-afterAll(() => {
-  globalThis.WebSocket = NativeWebSocket
-  globalThis.fetch = nativeFetch
-})
 
-const closers: (() => Promise<void>)[] = []
+const row = rowOfPages()
 afterEach(async () => {
-  for (const close of closers.splice(0).reverse()) await close()
-  webSockets.clear()
+  await row.end()
   clientMarker = undefined
+  expect(row.left.splice(0)).toEqual([])
 })
 
 /** `markers`: the `x-telefunc-server` header of each request the app's handler got with one. */
@@ -92,7 +70,7 @@ async function fetchApp(port = 0): Promise<App> {
       res.destroy()
     }
   })
-  closers.push(closerOf(server))
+  row.closers.push(row.closerOf(server))
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
   return { telefunc, server, host: hostOf(server), offers, markers }
 }
@@ -124,7 +102,7 @@ async function honoApp(): Promise<App> {
   // `serve()` is typed as returning any of Node's HTTP servers, and `installWebSocket()` doesn't take its HTTP/2 one.
   if (!(server instanceof Server)) throw new Error('@hono/node-server made no `http.Server`')
   telefunc.installWebSocket(server)
-  closers.push(closerOf(server))
+  row.closers.push(row.closerOf(server))
   await once(server, 'listening')
   return { telefunc, server, host: hostOf(server), offers, markers }
 }
@@ -164,16 +142,6 @@ function offerRecorder(offers: string[][]): (chunk: Uint8Array) => void {
   }
 }
 
-/** Closes the server and destroys the connections still open to it. */
-function closerOf(server: Server | ReturnType<typeof createTcpServer>): () => Promise<void> {
-  const sockets = new Set<Socket>()
-  server.on('connection', (socket: Socket) => {
-    sockets.add(socket)
-    socket.once('close', () => sockets.delete(socket))
-  })
-  return () => closeServer(server, sockets)
-}
-
 /** The transports each RECONCILED in an SSE event offers. */
 function offersIn(event: string): string[][] {
   if (!event.startsWith('data: ')) return []
@@ -189,54 +157,25 @@ function hostOf(server: Server | ReturnType<typeof createTcpServer>): string {
   return `127.0.0.1:${address.port}`
 }
 
-async function closeServer(server: Server | ReturnType<typeof createTcpServer>, sockets: Set<Socket>): Promise<void> {
-  const closed = new Promise<void>((resolve) => server.close(() => resolve()))
-  for (const socket of sockets) socket.destroy()
-  await closed
-}
-
-/** A page opens a channel through `host` (the app's, or a proxy's in front of it), and its first send is answered: the
- *  transports its wire is offered. */
-async function connectPage(
-  app: App,
-  host = app.host,
-): Promise<{ page: ClientChannel<string, string>; offer: string[] | undefined }> {
+/** A page opens a channel through `host`, and its first send is answered: the transports its wire is offered. */
+async function connectPage(app: App, host = app.host): Promise<{ page: Page; offer: string[] | undefined }> {
   const offersBefore = app.offers.length
-  const serverChannel = new ServerChannel<string, string>()
-  serverChannel.listen((data) => `ack:${data}`)
-  getChannelMux().registerChannel(serverChannel)
-  const page = new ClientChannel<string, string>({
-    channelId: serverChannel.id,
-    connection: {
-      telefuncUrl: `http://${host}/_telefunc`,
-      transports: ['sse', 'ws'],
-      idleTimeout: 0,
-      connectionKey: crypto.randomUUID(),
-    },
-  })
-  // The page leaves before its server, as a closed tab's page does: one whose wire drops before the server has its
-  // close reconnects to deliver it, to whatever listens on that address by then.
-  closers.push(async () => {
-    await page.close()
-  })
-  expect(await page.send('page', { ack: true })).toBe('ack:page')
+  const page = await row.page(host, { marker: clientMarker })
+  expect(await page.send('page')).toBe('ack:page')
   return { page, offer: app.offers[offersBefore] }
 }
 
 /** A page opens a channel through `host`: the transports its wire is offered, and whether it moved to a WebSocket of its
  *  own. */
 async function openPage(app: App, host = app.host): Promise<{ offer: string[] | undefined; webSocketOpened: boolean }> {
-  const socketsBefore = webSockets.get(host)?.length ?? 0
   const { page, offer } = await connectPage(app, host)
-  const pageSockets = () => (webSockets.get(host) ?? []).slice(socketsBefore)
-  const webSocketOpened = await movedToWebSocket(page, pageSockets, offer?.includes('ws') ? 10_000 : 0)
-  return { offer, webSocketOpened }
+  return { offer, webSocketOpened: await page.moved(offer?.includes('ws') ? 10_000 : 0) }
 }
 
 test('a Fetch-only app offers its pages SSE alone', async () => {
   const app = await fetchApp()
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(app.host)).toBeUndefined()
+  expect(await row.socketsTo(app.host)).toEqual([])
 })
 
 test('a page opened after the app installed its upgrade listener is offered WebSocket, and moves to it', async () => {
@@ -251,9 +190,9 @@ test("a page opened after the app removed Telefunc's upgrade listener is offered
   app.telefunc.installWebSocket(app.server)
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   app.server.removeAllListeners('upgrade')
-  const opened = webSockets.get(app.host)?.length
+  const opened = (await row.socketsTo(app.host)).length
   expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(app.host)?.length).toBe(opened)
+  expect(await row.socketsTo(app.host)).toHaveLength(opened)
 })
 
 test("a page opened after the app removed Telefunc's upgrade listener, with no `removeListener` listener left to see it, is offered SSE alone", async () => {
@@ -274,7 +213,6 @@ test("`installWebSocket()` after the app removed every `removeListener` listener
   app.server.removeAllListeners('upgrade')
   app.server.on('upgrade', appUpgrade)
   app.telefunc.installWebSocket(app.server)
-  webSockets.clear()
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   expect(app.server.listenerCount('upgrade')).toBe(2)
   expect(await upgradeStatus(app.host, '/app-ws')).toBe(418)
@@ -316,7 +254,7 @@ test('of two apps in one process, only the one with an upgrade listener offers W
   const b = await fetchApp()
   expect(await openPage(a)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   expect(await openPage(b)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(b.host)).toBeUndefined()
+  expect(await row.socketsTo(b.host)).toEqual([])
 })
 
 test('a Fetch-only app started on the address of one with an upgrade listener offers SSE alone', async () => {
@@ -324,11 +262,10 @@ test('a Fetch-only app started on the address of one with an upgrade listener of
   a.telefunc.installWebSocket(a.server)
   expect(await openPage(a)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   const port = Number(a.host.split(':')[1])
-  for (const close of closers.splice(0).reverse()) await close()
-  webSockets.clear()
+  await row.end()
   const b = await fetchApp(port)
   expect(await openPage(b)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(b.host)).toBeUndefined()
+  expect(await row.socketsTo(b.host)).toEqual([])
 })
 
 test('an app behind a proxy that forwards upgrades on its public port offers WebSocket, and its pages move to it', async () => {
@@ -349,7 +286,7 @@ test('an app behind a proxy that forwards upgrades on its public port offers Web
     client.pipe(upstream).pipe(client)
   })
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve))
-  closers.push(() => closeServer(proxy, sockets))
+  row.closers.push(() => row.closeOnceIdle(proxy, sockets))
   const publicHost = hostOf(proxy)
   expect(await openPage(app, publicHost)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
@@ -384,7 +321,7 @@ test("a page that sends its own `x-telefunc-server` header is offered what its s
   expect(hono.markers).not.toEqual([])
   expect(hono.markers.every((marker) => marker.startsWith('made-up, '))).toBe(true)
   expect(await openPage(other)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(other.host)).toBeUndefined()
+  expect(await row.socketsTo(other.host)).toEqual([])
 })
 
 test("a page that sends the token of the docs' Hono app to a Fetch-only app beside it is offered WebSocket there: its upgrade is refused, its channel answers over SSE, and the Hono app's server sees no upgrade", async () => {
@@ -399,26 +336,36 @@ test("a page that sends the token of the docs' Hono app to a Fetch-only app besi
   clientMarker = token
   const { page, offer } = await connectPage(other)
   expect(offer).toEqual(['sse', 'ws'])
-  await expect.poll(() => webSockets.get(other.host)?.some((ws) => failedWebSockets.has(ws)) ?? false).toBe(true)
-  expect(await page.send('again', { ack: true })).toBe('ack:again')
-  expect(webSockets.get(other.host)?.some((ws) => ws.readyState === NativeWebSocket.OPEN)).toBe(false)
+  await expect.poll(async () => (await page.sockets()).some((ws) => ws.endsWith(', failed'))).toBe(true)
+  expect(await page.send('again')).toBe('ack:again')
+  expect((await page.sockets()).some((ws) => ws.endsWith(', open'))).toBe(false)
   expect(honoUpgrades).toBe(1)
 })
 
-test("a page whose stream request carries its server's token after the server began to close is offered SSE alone", async () => {
+test("a page whose stream request carries its server's token after the server began to close is offered SSE alone, and the closing server can't be told the page left", async () => {
   const app = await fetchApp()
   app.telefunc.installWebSocket(app.server)
   // Before the app's handler: the page's stream request, the one its offer comes back on.
   app.server.prependListener('request', (req) => {
     if (req.headers.accept === 'text/event-stream' && app.server.listening) app.server.close()
   })
+  // After the page left: the closing server refused its goodbye's connection.
+  let goodbyes: string[] = []
+  row.closers.push(async () => {
+    if (goodbyes.join() !== 'refused: ECONNREFUSED') row.left.push(`goodbye ${goodbyes.join(', ') || 'not sent'}`)
+  })
   const offersBefore = app.offers.length
-  void connectPage(app).catch(() => {}) // The server takes no new connection for the page's other requests.
+  // The server takes no new connection for the page's other requests, nor for its goodbye. A tab's unload ends the
+  // page's requests sent without `keepalive`, its stream too: of a page whose goodbye can't arrive, its stream's end is
+  // all its server sees.
+  const page = await row.page(app.host, { marker: clientMarker, serverTold: false, unload: true })
+  goodbyes = page.goodbyes
+  void page.send('page').catch(() => {})
   await expect.poll(() => app.offers.length, { timeout: 10_000 }).toBeGreaterThan(offersBefore)
   expect(app.server.listening).toBe(false)
   expect(app.markers).not.toEqual([])
   expect(app.offers[offersBefore]).toEqual(['sse'])
-  expect(webSockets.get(app.host)).toBeUndefined()
+  expect(await row.socketsTo(app.host)).toEqual([])
 }, 20_000)
 
 test('an app whose server closed and listens again offers WebSocket, and the token it marked requests with before names no server', async () => {
@@ -427,13 +374,12 @@ test('an app whose server closed and listens again offers WebSocket, and the tok
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   const [token] = app.markers
   expect(token).toMatch(/^[0-9a-f-]{36}$/)
-  for (const close of closers.splice(0).reverse()) await close()
-  webSockets.clear()
+  await row.end()
   const other = await fetchApp()
   clientMarker = token
   expect(await openPage(other)).toEqual({ offer: ['sse'], webSocketOpened: false })
   clientMarker = undefined
-  closers.push(closerOf(app.server))
+  row.closers.push(row.closerOf(app.server))
   await new Promise<void>((resolve) => app.server.listen(0, '127.0.0.1', resolve))
   expect(await openPage({ ...app, host: hostOf(app.server) })).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
@@ -517,14 +463,23 @@ async function rewritingProxy(host: string, rewrite: (path: string) => string): 
   const [hostname, port] = host.split(':')
   const sockets = new Set<Socket>()
   const proxy = createServer((req, res) => {
+    // Each request on a connection of its own, which ends with its client's, as a proxy's to its app does.
     const upstream = httpRequest(
-      { hostname, port: Number(port), method: req.method, path: rewrite(req.url ?? '/'), headers: req.headers },
+      {
+        hostname,
+        port: Number(port),
+        method: req.method,
+        path: rewrite(req.url ?? '/'),
+        headers: req.headers,
+        agent: false,
+      },
       (response) => {
         res.writeHead(response.statusCode ?? 502, response.headers)
         response.pipe(res)
       },
     )
     upstream.on('error', () => res.destroy())
+    res.once('close', () => upstream.destroy())
     req.pipe(upstream)
   })
   proxy.on('upgrade', (req, client: Socket, head: Buffer) => {
@@ -549,7 +504,7 @@ async function rewritingProxy(host: string, rewrite: (path: string) => string): 
     socket.once('close', () => sockets.delete(socket))
   })
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve))
-  closers.push(() => closeServer(proxy, sockets))
+  row.closers.push(() => row.closeOnceIdle(proxy, sockets))
   return hostOf(proxy)
 }
 

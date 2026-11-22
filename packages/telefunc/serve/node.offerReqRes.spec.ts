@@ -1,77 +1,23 @@
-import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
+import { afterEach, expect, test } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
-import { connect, type Socket } from 'node:net'
+import { connect } from 'node:net'
 import type { Duplex } from 'node:stream'
 import { hasProp } from '../utils/hasProp.js'
 import { Telefunc } from './node.js'
-import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
-import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
-import { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
-import { decode, isOneFrame, messageFrames } from '../wire-protocol/wire/frame.js'
-import { TAG } from '../wire-protocol/wire/tags.js'
-import { base64urlToUint8Array } from '../wire-protocol/wire/base64url.js'
-import { NativeWebSocket, RecordedWebSocket, movedToWebSocket, webSockets } from './pageWebSocket.fixture.js'
+import { rowOfPages } from './page.fixture.js'
 
 // Which page is offered WebSocket, as an app on `serve({ req, res })` sees it: each page's real connection to a real Node
 // server, the offer read on the page's side off the RECONCILED its SSE stream carries, the WebSocket from the page's own.
+// Each page runs in a realm of its own, which the row's end ends; a server closes only after the pages opened since did.
 
-/** The transports each RECONCILED offered, by the host of the SSE stream that carried it. */
-const offers = new Map<string, string[][]>()
-const nativeFetch = globalThis.fetch
-beforeAll(() => {
-  globalThis.WebSocket = RecordedWebSocket
-  globalThis.fetch = async (input, init) => {
-    const response = await nativeFetch(input, init)
-    if (response.headers.get('content-type') !== 'text/event-stream' || !response.body) return response
-    const host = new URL(input instanceof Request ? input.url : input).host
-    const [toPage, toTest] = response.body.tee()
-    const record = offerRecorder(host)
-    void toTest.pipeTo(new WritableStream({ write: record })).catch(() => {})
-    return new Response(toPage, response)
-  }
-})
-afterAll(() => {
-  globalThis.WebSocket = NativeWebSocket
-  globalThis.fetch = nativeFetch
-})
-
-const closers: (() => Promise<void>)[] = []
+const row = rowOfPages()
 afterEach(async () => {
-  for (const close of closers.splice(0).reverse()) await close()
-  webSockets.clear()
-  offers.clear()
+  await row.end()
+  expect(row.left.splice(0)).toEqual([])
 })
-
-function offerRecorder(host: string): (chunk: Uint8Array) => void {
-  const decoder = new TextDecoder()
-  let events = ''
-  return (chunk) => {
-    events += decoder.decode(chunk, { stream: true })
-    const complete = events.split('\n\n')
-    events = complete.pop() ?? ''
-    for (const event of complete) offers.set(host, [...(offers.get(host) ?? []), ...offersIn(event)])
-  }
-}
-
-function offersIn(event: string): string[][] {
-  if (!event.startsWith('data: ')) return []
-  const raw = base64urlToUint8Array(event.slice('data: '.length))
-  return (isOneFrame(raw) ? [raw] : [...messageFrames(raw)])
-    .map((bytes) => decode(bytes))
-    .flatMap((frame) => (frame.tag === TAG.RECONCILED ? [frame.payload.transports] : []))
-}
 
 async function listen(server: Server): Promise<string> {
-  const sockets = new Set<Socket>()
-  server.on('connection', (socket: Socket) => {
-    sockets.add(socket)
-    socket.once('close', () => sockets.delete(socket))
-  })
-  closers.push(async () => {
-    const closed = new Promise<void>((resolve) => server.close(() => resolve()))
-    for (const socket of sockets) socket.destroy()
-    await closed
-  })
+  row.closers.push(row.closerOf(server))
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   return hostOf(server)
 }
@@ -82,36 +28,12 @@ function hostOf(server: Server): string {
   return `127.0.0.1:${address.port}`
 }
 
-/** A page that opens a channel to `host`. */
-function pageOf(host: string): ClientChannel<string, string> {
-  const serverChannel = new ServerChannel<string, string>()
-  serverChannel.listen((data) => `ack:${data}`)
-  getChannelMux().registerChannel(serverChannel)
-  const page = new ClientChannel<string, string>({
-    channelId: serverChannel.id,
-    connection: {
-      telefuncUrl: `http://${host}/_telefunc`,
-      transports: ['sse', 'ws'],
-      idleTimeout: 0,
-      connectionKey: crypto.randomUUID(),
-    },
-  })
-  closers.push(async () => {
-    await page.close()
-  })
-  return page
-}
-
 /** The transports the page's wire is offered, and whether it moved to a WebSocket of its own. */
 async function openPage(host: string): Promise<{ offer: string[] | undefined; webSocketOpened: boolean }> {
-  const offersBefore = offers.get(host)?.length ?? 0
-  const socketsBefore = webSockets.get(host)?.length ?? 0
-  const page = pageOf(host)
-  expect(await page.send('page', { ack: true })).toBe('ack:page')
-  const offer = offers.get(host)?.[offersBefore]
-  const pageSockets = () => (webSockets.get(host) ?? []).slice(socketsBefore)
-  const webSocketOpened = await movedToWebSocket(page, pageSockets, offer?.includes('ws') ? 10_000 : 0)
-  return { offer, webSocketOpened }
+  const page = await row.page(host)
+  expect(await page.send('page')).toBe('ack:page')
+  const [offer] = page.offers
+  return { offer, webSocketOpened: await page.moved(offer?.includes('ws') ? 10_000 : 0) }
 }
 
 /** An app that serves Telefunc with `serve({ req, res })`. */
@@ -160,13 +82,13 @@ test('a page whose request an app on `serve({ req, res })` serves after it began
   })
   nodeApp(new Telefunc(), server)
   const host = await listen(server)
-  void pageOf(host)
-    .send('page', { ack: true })
-    .catch(() => {}) // The server takes no new connection for the page's other requests.
-  await expect.poll(() => offers.get(host)?.length ?? 0, { timeout: 10_000 }).toBeGreaterThan(0)
+  // The server takes no new connection for the page's other requests, nor for its goodbye.
+  const page = await row.page(host, { serverTold: false })
+  void page.send('page').catch(() => {})
+  await expect.poll(() => page.offers.length, { timeout: 10_000 }).toBeGreaterThan(0)
   expect(server.listening).toBe(false)
-  expect(offers.get(host)?.[0]).toEqual(['sse'])
-  expect(webSockets.get(host)).toBeUndefined()
+  expect(page.offers[0]).toEqual(['sse'])
+  expect(await row.socketsTo(host)).toEqual([])
 }, 20_000)
 
 test("a page of an app on `serve({ req, res })` opened after the app removed Telefunc's upgrade listener is offered SSE alone, and the server gets no upgrade listener back", async () => {
@@ -175,9 +97,9 @@ test("a page of an app on `serve({ req, res })` opened after the app removed Tel
   const host = await listen(server)
   expect(await openPage(host)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
   server.removeAllListeners('upgrade')
-  const opened = webSockets.get(host)?.length
+  const opened = (await row.socketsTo(host)).length
   expect(await openPage(host)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(host)?.length).toBe(opened)
+  expect(await row.socketsTo(host)).toHaveLength(opened)
   expect(server.listenerCount('upgrade')).toBe(0)
 })
 
@@ -190,7 +112,6 @@ test("`installWebSocket()` on an app on `serve({ req, res })` after it removed T
   server.removeAllListeners('upgrade')
   telefunc.installWebSocket(server)
   expect(server.listenerCount('upgrade')).toBe(1)
-  webSockets.clear()
   expect(await openPage(host)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
 
@@ -203,7 +124,7 @@ test("an app on `serve({ req, res })` that called `installWebSocket()` and remov
   server.on('upgrade', appUpgrade)
   const host = await listen(server)
   expect(await openPage(host)).toEqual({ offer: ['sse'], webSocketOpened: false })
-  expect(webSockets.get(host)).toBeUndefined()
+  expect(await row.socketsTo(host)).toEqual([])
   expect(server.listeners('upgrade')).toEqual([appUpgrade])
   expect(await upgradeStatus(host, '/app-ws')).toBe(418)
 })

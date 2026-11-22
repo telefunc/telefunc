@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from 'vitest'
+import { expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { Socket } from 'node:net'
 import { setFlagsFromString } from 'node:v8'
@@ -6,27 +6,13 @@ import { runInNewContext } from 'node:vm'
 import { Telefunc } from './node.js'
 import { getChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { ServerChannel } from '../wire-protocol/channel/server/ServerChannel.js'
-import { ClientChannel } from '../wire-protocol/channel/client/ClientChannel.js'
-import {
-  NativeWebSocket,
-  RecordedWebSocket,
-  closedWithin,
-  movedToWebSocket,
-  webSockets,
-} from './pageWebSocket.fixture.js'
+import { startPage } from './page.fixture.js'
 
 // What Telefunc keeps of a Node server the app gave `installWebSocket()`, once the app closed it and let it go. The first
 // row has to be the file's first install: Telefunc makes its WebSocket adapter once, at the first install.
 
 setFlagsFromString('--expose-gc')
 const gc: () => void = runInNewContext('gc')
-
-beforeAll(() => {
-  globalThis.WebSocket = RecordedWebSocket
-})
-afterAll(() => {
-  globalThis.WebSocket = NativeWebSocket
-})
 
 /** The app's Telefunc, made once and kept for the process's life, as an app makes it. */
 const telefunc = new Telefunc()
@@ -54,39 +40,35 @@ async function startApp(state: {
   return { server, host: `127.0.0.1:${address.port}`, close }
 }
 
-/** A page opens a channel to `host`: whether it moved to a WebSocket of its own within 10 s, and whether its sockets
- *  closed when it left. It leaves before its server closes, so that its server reads its sockets' close as the page
- *  leaving and keeps nothing of it for a reconnect. */
-async function pageMovesToWebSocket(host: string): Promise<{ moved: boolean; socketsClosed: boolean }> {
-  const socketsBefore = webSockets.get(host)?.length ?? 0
-  const pageSockets = () => (webSockets.get(host) ?? []).slice(socketsBefore)
+/** A page, in a realm of its own, opens a channel to `host`: whether it moved to a WebSocket of its own within 10 s,
+ *  whether its sockets closed when it left, and what of it didn't end with its realm. It leaves before its server closes,
+ *  so that its server reads its sockets' close as the page leaving and keeps nothing of it for a reconnect. */
+async function pageMovesToWebSocket(
+  host: string,
+): Promise<{ moved: boolean; socketsClosed: boolean; leftBehind: string[] }> {
   const serverChannel = new ServerChannel<string, string>()
   serverChannel.listen((data) => `ack:${data}`)
   getChannelMux().registerChannel(serverChannel)
-  const page = new ClientChannel<string, string>({
-    channelId: serverChannel.id,
-    connection: {
-      telefuncUrl: `http://${host}/_telefunc`,
-      transports: ['sse', 'ws'],
-      idleTimeout: 0,
-      connectionKey: crypto.randomUUID(),
-    },
-  })
+  const page = await startPage({ telefuncUrl: `http://${host}/_telefunc`, channelId: serverChannel.id })
   let moved = false
+  let socketsClosed = false
+  let leftBehind: string[] = []
   try {
-    expect(await page.send('page', { ack: true })).toBe('ack:page')
-    moved = await movedToWebSocket(page, pageSockets, 10_000)
+    expect(await page.send('page')).toBe('ack:page')
+    moved = await page.moved(10_000)
+    await page.leave()
+    socketsClosed = await page.left(10_000)
   } finally {
-    await page.close()
+    leftBehind = await page.end()
   }
-  return { moved, socketsClosed: await closedWithin(pageSockets(), 10_000) }
+  return { moved, socketsClosed, leftBehind }
 }
 
 test('a server the app gave `installWebSocket()`, closed and let go, is collected, with what its `request` listener holds', async () => {
   async function serveOnePage(): Promise<{
     server: WeakRef<Server>
     state: WeakRef<object>
-    page: { moved: boolean; socketsClosed: boolean }
+    page: { moved: boolean; socketsClosed: boolean; leftBehind: string[] }
   }> {
     const state = { cache: new ArrayBuffer(1024 * 1024) }
     const app = await startApp(state)
@@ -107,6 +89,7 @@ test('a server the app gave `installWebSocket()`, closed and let go, is collecte
   }).toEqual({
     moved: true,
     socketsClosed: true,
+    leftBehind: [],
     serverCollected: true,
     stateCollected: true,
   })
@@ -116,7 +99,7 @@ test('a second server the app gives `installWebSocket()` after the first closed 
   const app = await startApp({ cache: new ArrayBuffer(0) })
   telefunc.installWebSocket(app.server)
   try {
-    expect(await pageMovesToWebSocket(app.host)).toEqual({ moved: true, socketsClosed: true })
+    expect(await pageMovesToWebSocket(app.host)).toEqual({ moved: true, socketsClosed: true, leftBehind: [] })
   } finally {
     await app.close()
   }
