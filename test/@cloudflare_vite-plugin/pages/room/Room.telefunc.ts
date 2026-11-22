@@ -22,6 +22,7 @@ export {
   onRemovalOutcome,
   onJoinOutcome,
   onMetaUpdateOutcome,
+  onSendOutcome,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
@@ -301,5 +302,14 @@ async function onMetaUpdateOutcome(length: number) {
     const told = await outcomeOf(Room.updateMeta(id, { ['k'.repeat(1000)]: 'v'.repeat(length) }))
     const keys = Object.keys((await Room.get(id)).meta)
     return { told, keys, nextUpdate: await outcomeOf(Room.updateMeta(id, { n: '1' })) }
+  })
+}
+
+/** What a `Room.send()` by id with `length` characters of data told: its commit hands the message on and keeps no
+ *  row of it. */
+async function onSendOutcome(length: number) {
+  return inNewRoom(async (room, id) => {
+    const recipient = await room.join()
+    return { told: await outcomeOf(Room.send(id, { id: recipient.id }, 'v'.repeat(length))) }
   })
 }

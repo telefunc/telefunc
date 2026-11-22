@@ -14,6 +14,7 @@ import type {
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
+  CommitKept,
   LaneId,
   OperationOptions,
   OperationResult,
@@ -105,12 +106,12 @@ class CloudflareRoomDriver implements RoomDriver {
     return wire.kind === 'accepted' ? acceptedCommit(lane, wire) : wire
   }
 
-  /** Refuses a payload that the rows its two callers store it in would hold over the authority's SQLite row limit: a
-   *  DM reply's cell, and a leave's handoff row and expiring cell. A commit on its own keeps no row of its payload, or
-   *  payload chunks of up to 1.5 MB where it is retained. Any other row over the limit is refused inside its write's
-   *  transaction (`rowLimited()`). */
-  assertCommittable(_lane: LaneId, payload: Uint8Array): void {
-    if (payload.byteLength <= CLOUDFLARE_PAYLOAD_MAX_BYTES) return
+  /** A delivered payload is handed on and kept in no row, or in chunks of up to 1.5 MB where it is retained, so the
+   *  authority's SQLite row limit doesn't bound it. A stored one is kept in rows that would hold it over that limit: a
+   *  DM reply's cell, and a leave's handoff row and expiring cell. Any other row over the limit is refused inside its
+   *  write's transaction (`rowLimited()`). */
+  assertCommittable(_lane: LaneId, payload: Uint8Array, kept: CommitKept): void {
+    if (kept === 'delivered' || payload.byteLength <= CLOUDFLARE_PAYLOAD_MAX_BYTES) return
     throw new ChannelOverflowError(
       `Telefunc's Cloudflare backend takes a Room value of ${CLOUDFLARE_PAYLOAD_MAX_BYTES} bytes at most, and this one has ${payload.byteLength}`,
     )

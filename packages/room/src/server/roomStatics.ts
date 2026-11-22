@@ -4,7 +4,7 @@ export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
-import { DIRECTORY_PAGE_SIZE, type LaneId, type RoomHead } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
 import type { RoomStore } from '../backend/RoomStore.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -53,6 +53,7 @@ import {
   commitLane,
   type CommitFitsBeforeWriting,
   type CommitsOf,
+  type SizedCommit,
   configFromHead,
   inboxOf,
   openConfig,
@@ -450,11 +451,11 @@ class DmEnvelopes implements CommitsOf {
 
   constructor(private readonly message: unknown) {}
 
-  commits(members: readonly MemberSnapshot[]): { lane: LaneId; payload: Uint8Array }[] {
+  commits(members: readonly MemberSnapshot[]): SizedCommit[] {
     const [first] = members
     if (first === undefined) return []
     this.checked ??= { member: first.id, envelope: this.encode(first.id) }
-    return [{ lane: { kind: 'inbox', member: this.checked.member }, payload: this.checked.envelope }]
+    return [{ lane: { kind: 'inbox', member: this.checked.member }, payload: this.checked.envelope, kept: 'delivered' }]
   }
 
   of(member: string): Uint8Array {

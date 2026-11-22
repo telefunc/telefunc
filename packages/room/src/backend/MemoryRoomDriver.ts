@@ -14,6 +14,7 @@ import type {
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
+  CommitKept,
   LaneId,
   RoomDriver,
   RoomHead,
@@ -409,8 +410,8 @@ class MemoryRoomDriver implements RoomDriver {
     return await this.commitOn(incarnation, lane, payload, opts)
   }
 
-  /** The memory store has no size rule: every payload is committable. */
-  assertCommittable(): void {}
+  /** The memory store has no size rule: it keeps a payload at any size, delivered or stored. */
+  assertCommittable(_lane: LaneId, _payload: Uint8Array, _kept: CommitKept): void {}
 
   /** Assigns the commit's seq and queues its delivery in one synchronous step, so deliveries run in seq order. */
   private async commitOn(

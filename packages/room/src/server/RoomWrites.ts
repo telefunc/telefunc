@@ -48,6 +48,7 @@ import {
   inboxOf,
   type CommitFitsBeforeWriting,
   type CommitsOf,
+  type SizedCommit,
 } from './lanes/lanes.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
@@ -343,15 +344,15 @@ class ParticipantDm implements CommitsOf {
     private readonly encode: () => Uint8Array,
   ) {}
 
-  commits(members: readonly MemberSnapshot[]): { lane: LaneId; payload: Uint8Array }[] {
+  commits(members: readonly MemberSnapshot[]): SizedCommit[] {
     if (members.length === 0) return []
     this.sized = true
-    return [{ lane: this.lane, payload: this.envelope() }]
+    return [{ lane: this.lane, payload: this.envelope(), kept: 'delivered' }]
   }
 
   /** The envelope, checked against `store`'s size rule unless a lookup checked it. */
   checked(store: RoomStore): Uint8Array {
-    if (!this.sized) store.assertCommittable(this.lane, this.envelope())
+    if (!this.sized) store.assertCommittable(this.lane, this.envelope(), 'delivered')
     this.sized = true
     return this.envelope()
   }
@@ -366,7 +367,7 @@ class ParticipantDm implements CommitsOf {
 function dmAckFrame(store: RoomStore, lane: LaneId, envelope: RoomDmAckEnvelope): Uint8Array {
   const frame = encodeRoomRecord(envelope)
   try {
-    store.assertCommittable(lane, frame)
+    store.assertCommittable(lane, frame, 'stored')
     return frame
   } catch (error) {
     if (!isChannelOverflowError(error)) throw error

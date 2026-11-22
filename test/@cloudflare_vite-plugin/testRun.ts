@@ -690,6 +690,11 @@ function testRoomStorage() {
     })
   })
 
+  test("Room: a Room.send() of a message over the store's row limit goes through, as its commit keeps no row of it", async () => {
+    await openRoomPage()
+    expect(await outcomeAt('send-outcome', ROW_LIMIT_BYTES)).deep.equal({ told: 'resolved' })
+  })
+
   test("Room: a join over the store's row limit is refused with ChannelOverflowError, and the next join goes through", async () => {
     await openRoomPage()
     expect(await overRowLimit('join-outcome')).deep.equal({

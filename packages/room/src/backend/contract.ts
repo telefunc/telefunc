@@ -11,6 +11,7 @@ export type {
   CellsRead,
   ExpiringCell,
   ExpiringCellsRead,
+  CommitKept,
   CommitOptions,
   CommitTarget,
   DirectoryPage,
@@ -128,6 +129,10 @@ type HeadNext = {
 type StaleIncarnation = { kind: 'stale-incarnation' }
 
 type HeadExchangeResult = { kind: 'committed'; head: RoomHead } | { kind: 'conflict'; current: RoomHead | null }
+
+/** What a write keeps of a payload, as its size goes: `delivered`, a commit that hands it to the lane's subscribers;
+ *  `stored`, also a record of its own that a later read takes (a DM's reply, a leave's handoff). */
+type CommitKept = 'delivered' | 'stored'
 
 /** `bytes: null` deletes the cell. */
 type CellMutation = { key: string; bytes: Uint8Array | null }
@@ -281,9 +286,9 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   ): Promise<OperationResult<Value>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
-  /** Throws the `ChannelOverflowError` a commit of `payload` on `lane` rejects with, and returns otherwise: the commit's
-   *  own size rule, for a call that must know it before it writes anything else. */
-  assertCommittable(lane: LaneId, payload: Uint8Array): void
+  /** Throws the `ChannelOverflowError` the write of `payload` on `lane` that `kept` names rejects with, and returns
+   *  otherwise: the store's size rule for that write, for a call that must know it before it writes anything else. */
+  assertCommittable(lane: LaneId, payload: Uint8Array, kept: CommitKept): void
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
   readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>

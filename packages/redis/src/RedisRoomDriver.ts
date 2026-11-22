@@ -12,6 +12,7 @@ import type {
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
+  CommitKept,
   LaneId,
   OperationOptions,
   OperationResult,
@@ -273,7 +274,9 @@ class RedisRoomDriver implements RoomDriver {
     return this.commitInTurn(target, waiting, opts)
   }
 
-  assertCommittable(lane: LaneId, payload: Uint8Array): void {
+  /** A delivered payload is published, and a stored one is also committed, so both meet the commit's rule: a stored
+   *  one is kept in a value of its own, which Redis takes far larger. */
+  assertCommittable(lane: LaneId, payload: Uint8Array, _kept: CommitKept): void {
     assertCommittable({ lane, payload, kit: this.kit })
   }
 

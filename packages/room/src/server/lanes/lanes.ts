@@ -21,7 +21,7 @@ export {
   publishedBytes,
   withinRoomHorizon,
 }
-export type { CommitFitsBeforeWriting, CommitsOf, LaneCommit }
+export type { CommitFitsBeforeWriting, CommitsOf, LaneCommit, SizedCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -30,6 +30,7 @@ import { raceTimeout } from '../../utils/raceTimeout.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import type {
   CommitAccepted,
+  CommitKept,
   CommitOptions,
   CommitTarget,
   LaneId,
@@ -135,11 +136,14 @@ async function commitLane(
   return lost !== null && target.lane.kind === 'inbox' ? { ...result, lost } : result
 }
 
-/** The commits a call would make to `members`, as their size goes. */
-type CommitsOf = { commits(members: readonly MemberSnapshot[]): readonly { lane: LaneId; payload: Uint8Array }[] }
+/** A write a call would make, as its size goes: its lane, its payload, and what the write keeps of it. */
+type SizedCommit = { lane: LaneId; payload: Uint8Array; kept: CommitKept }
 
-/** A call's check that its commits fit, for a lookup to run on the members it read before it writes: each lane and
- *  payload `call.commits()` gives for them must be committable, or `check()` throws the refusal the commit would meet. */
+/** The commits a call would make to `members`, as their size goes. */
+type CommitsOf = { commits(members: readonly MemberSnapshot[]): readonly SizedCommit[] }
+
+/** A call's check that its commits fit, for a lookup to run on the members it read before it writes: each commit
+ *  `call.commits()` gives for them must be committable, or `check()` throws the refusal the commit would meet. */
 class CommitFitsBeforeWriting {
   constructor(
     private readonly store: RoomStore,
@@ -147,7 +151,7 @@ class CommitFitsBeforeWriting {
   ) {}
 
   check(members: readonly MemberSnapshot[]): void {
-    for (const { lane, payload } of this.call.commits(members)) this.store.assertCommittable(lane, payload)
+    for (const { lane, payload, kept } of this.call.commits(members)) this.store.assertCommittable(lane, payload, kept)
   }
 }
 

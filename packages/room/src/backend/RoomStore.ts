@@ -12,6 +12,7 @@ import type {
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
+  CommitKept,
   LaneId,
   OperationOptions,
   OperationResult,
@@ -73,8 +74,8 @@ class RoomStore {
   }
 
   /** The commit's size rule, asked before the call writes anything else: it writes nothing, so it counts for nothing. */
-  assertCommittable(lane: LaneId, payload: Uint8Array): void {
-    this.driver.assertCommittable(lane, payload)
+  assertCommittable(lane: LaneId, payload: Uint8Array, kept: CommitKept): void {
+    this.driver.assertCommittable(lane, payload, kept)
   }
 
   async runOperation<Args, Value>(
