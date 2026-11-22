@@ -253,6 +253,41 @@ test("a first SSE wire whose RECONCILED and last word both never reach the page:
   }
 }, 20_000)
 
+test("a first SSE wire whose RECONCILED and last word both never reach the page, and whose reopen reaches the server later than `reconnectTimeout` after the end: the reopen reads the server's cause", async () => {
+  let connId = ''
+  const first = rewriting((frame) => (frame[0] === TAG.RECONCILED || frame[0] === TAG.END ? null : frame))
+  world.hooks = [
+    {
+      kind: 'open',
+      stream: first.stream,
+      body: (bytes) => {
+        connId = connIdOf(bytes)
+        return [bytes]
+      },
+    },
+    // The page's reopen is held on the way, past the time the page's channels wait for it on the server.
+    { kind: 'open', delayMs: 2_500 },
+  ]
+  const live = pair(crypto.randomUUID(), ['sse'])
+  const serverEnds: string[] = []
+  live.channel.onClose((err) => void serverEnds.push(err ? err.message : 'clean'))
+  try {
+    await until(() => connId !== '' && getChannelMux().getWireByConnId(connId) !== undefined)
+    await delay(200)
+    const wire = getChannelMux().getWireByConnId(connId)
+    if (wire !== undefined) getChannelMux().endFault(wire, { scope: 'session', cause: 'receiveBudget' })
+    first.cut()
+    await until(() => live.ended.length > 0, 12_000).catch(() => {})
+    const budget = 'The page sent more on its connection than the server holds while it works on what came before.'
+    expect([
+      live.ended.map((err) => err.message.includes(budget)),
+      serverEnds.map((end) => end.includes(budget)),
+    ]).toEqual([[true], [true]])
+  } finally {
+    live.page.abort()
+  }
+}, 20_000)
+
 test("a first WebSocket wire whose RECONCILED and last word both never reach the page: the reopen reads the server's cause", async () => {
   // An unreadable message behind the page's first RECONCILE ends the session that RECONCILE took.
   let garbled = false

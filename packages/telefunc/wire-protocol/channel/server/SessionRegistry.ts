@@ -5,7 +5,7 @@ import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { WireEntry } from './ChannelMux.js'
 import type { SessionCause } from '../endCause.js'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { DeadlineTimer } from '../DeadlineTimer.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through. */
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
@@ -21,55 +21,64 @@ type Session = {
   high: number
 }
 
-/** What the server keeps of a session that left the registry, under its id: why the server ended it, or `retired`
- *  where it emptied with no wire holding it or its page left; and the highest attempt of its page's that took it or
- *  that its end answered, which an attempt read later must be above to take anything. */
+/** What the server keeps of a session that left the registry, under its id, until `leavesAt`: why the server ended it,
+ *  or `retired` where it emptied with no wire holding it or its page left; and the highest attempt of its page's that
+ *  took it or that its end answered, which an attempt read later must be above to take anything, and which only rises. */
 type KeptEnd = {
   readonly end: SessionCause | 'retired'
-  readonly high: number
-  readonly timer: ReturnType<typeof setTimeout>
+  high: number
+  readonly leavesAt: number
 }
 
 type SessionRegistryOptions = {
-  /** How long a session's record is kept from the time it is kept. */
-  keepMs: () => number
+  /** The instant, on the `performance` clock, a session that retires now leaves its record at. */
+  retiredLeavesAt: () => number
 }
 
 /** Each session by id, and the sessions each channel is in: a frame finds its channel by session and index, and an
  *  ending channel leaves every session in O(its sessions). Every change writes both maps. A session is stored while a
- *  wire holds it or it has a channel. One that leaves is kept under its id as a record, for as long as its page may
- *  come back: a page that missed its wire's last word reopens naming its session, and is answered with the same end;
- *  an older attempt of the page's, read after a newer one, takes nothing. */
+ *  wire holds it or it has a channel. One that leaves is kept under its id as a record, written once, until an instant
+ *  fixed as it is written: a page that missed its wire's last word reopens naming its session, and is answered with
+ *  the same end; an older attempt of the page's, read after a newer one, takes nothing. Records are written with one
+ *  window, so the map's insertion order is their instants' order, and one timer frees them. */
 class SessionRegistry {
   private readonly bySession = new Map<string, Session>()
   private readonly byChannel = new Map<string, Map<string, number>>()
   private readonly kept = new Map<string, KeptEnd>()
-  private readonly keepMs: () => number
+  private readonly sweep = new DeadlineTimer({ unref: true })
+  private readonly retiredLeavesAt: () => number
 
-  constructor({ keepMs }: SessionRegistryOptions) {
-    this.keepMs = keepMs
+  constructor({ retiredLeavesAt }: SessionRegistryOptions) {
+    this.retiredLeavesAt = retiredLeavesAt
   }
 
-  /** Keeps `end` under `sessionId`, with `high` or the record's own if higher, for `keepMs` from now, also where a
-   *  record is kept under that id already. */
-  keepEnd(sessionId: string, end: KeptEnd['end'], high: number): void {
+  /** Keeps `end` under `sessionId` until `leavesAt`, where no record is kept under it; one kept already stands. */
+  keepEnd(sessionId: string, end: KeptEnd['end'], high: number, leavesAt: number): void {
+    if (this.keptOf(sessionId) !== undefined) return
+    // One past its instant that the sweep hasn't freed yet goes, so that the map stays in the order of the instants.
+    this.kept.delete(sessionId)
+    this.kept.set(sessionId, { end, high, leavesAt })
+    if (this.kept.size === 1) this.sweep.arm(leavesAt, this.drain)
+  }
+
+  /** The record kept under `sessionId`, before its instant; from the instant on, none. */
+  keptOf(sessionId: string): KeptEnd | undefined {
     const kept = this.kept.get(sessionId)
-    if (kept) clearTimeout(kept.timer)
-    const timer = unrefTimer(setTimeout(() => this.kept.delete(sessionId), this.keepMs()))
-    this.kept.set(sessionId, { end, high: Math.max(high, kept?.high ?? 0), timer })
-  }
-
-  /** The record kept under `sessionId`, while it is kept. */
-  keptOf(sessionId: string): Pick<KeptEnd, 'end' | 'high'> | undefined {
-    return this.kept.get(sessionId)
+    return kept !== undefined && performance.now() < kept.leavesAt ? kept : undefined
   }
 
   /** A newer attempt of the page's takes the retired session `sessionId` again: its record goes. */
   revive(sessionId: string): void {
-    const kept = this.kept.get(sessionId)
-    if (kept === undefined) return
-    clearTimeout(kept.timer)
     this.kept.delete(sessionId)
+  }
+
+  /** Frees the records whose instant passed, oldest first, and waits for the first one that is not yet due. */
+  private readonly drain = (): void => {
+    const now = performance.now()
+    for (const [sessionId, { leavesAt }] of this.kept) {
+      if (leavesAt > now) return this.sweep.arm(leavesAt, this.drain)
+      this.kept.delete(sessionId)
+    }
   }
 
   get(sessionId: string): Session | undefined {
@@ -179,6 +188,6 @@ class SessionRegistry {
   /** The session leaves the registry. Unless the server ended it, whose end is kept already, it is kept as retired. */
   private leave(session: Session): void {
     this.bySession.delete(session.id)
-    if (!this.kept.has(session.id)) this.keepEnd(session.id, 'retired', session.high)
+    this.keepEnd(session.id, 'retired', session.high, this.retiredLeavesAt())
   }
 }

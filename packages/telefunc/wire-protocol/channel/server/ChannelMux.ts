@@ -27,7 +27,7 @@ import {
   withTook,
 } from '../../wire/frame.js'
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
-import { pingDeadline } from '../../wire/pingDeadline.js'
+import { keptEndWindowOf, pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
 import { frameRefusal, type Refusal } from '../../refusal.js'
@@ -181,7 +181,7 @@ class ChannelMux implements UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
-  private readonly sessions = new SessionRegistry({ keepMs: () => this.options.reconnectTimeout })
+  private readonly sessions = new SessionRegistry({ retiredLeavesAt: () => performance.now() + this.keptEndWindow() })
   private readonly wires = new Map<unknown, WireEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
@@ -194,7 +194,6 @@ class ChannelMux implements UpgradeStagesOwner {
       channel._release()
     },
   })
-  /** Kept `reconnectTimeout`, for a page that reopens naming a session the server ended. */
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -579,6 +578,8 @@ class ChannelMux implements UpgradeStagesOwner {
       entry.sender.close('dropped')
       return this.closeWire(entry, { how: 'transient', refusal: null })
     }
+    // The instant a session's end, where this is one, is kept until: counted from the decision, before its teardown.
+    const keptUntil = performance.now() + this.keptEndWindow()
     // A wire the end closes says it as its last word: what its channels send on it from here goes no more, kept in
     // their replay for their next attach.
     if (fault.scope !== 'channel' || fault.wire !== 'kept') entry.sender.close('first')
@@ -587,17 +588,23 @@ class ChannelMux implements UpgradeStagesOwner {
     if (fault.scope === 'channel' && channelEnded) {
       return this.closeWire(entry, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
     }
-    this.endSessionOn(entry, session.id, fault.scope === 'session' ? fault.cause : 'unreadable', session.high)
+    const cause = fault.scope === 'session' ? fault.cause : 'unreadable'
+    // Its page, should it miss the wire's last word, reads the end at its reopen.
+    this.sessions.keepEnd(session.id, cause, session.high, keptUntil)
+    this.endSessionOn(entry, cause)
   }
 
-  /** The session `sessionId` ends for `cause` on `entry`'s wire, which closes for good with it as its last word: its
-   *  channels end as the wire closes (`detachHandle`); those it awaits, as they register; and its page, should it miss
-   *  the wire's last word, at its reopen. `high`: the page's attempt the end answers, which its record keeps. */
-  private endSessionOn(entry: WireEntry, sessionId: string, cause: SessionCause, high: number): void {
+  /** The session ends for `cause` on `entry`'s wire, which closes for good with it as its last word: its channels end as
+   *  the wire closes (`detachHandle`), and those it awaits, as they register. */
+  private endSessionOn(entry: WireEntry, cause: SessionCause): void {
     entry.sender.close('first')
     entry.state.awaited.refuseAll(cause)
-    this.sessions.keepEnd(sessionId, cause, high)
     this.closeWire(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
+  }
+
+  /** How long a session's record is kept from the time the server decided it. */
+  private keptEndWindow(): number {
+    return keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout)
   }
 
   /** The channels of the session `entry`'s wire holds, by index; undefined while it holds none. */
@@ -660,10 +667,12 @@ class ChannelMux implements UpgradeStagesOwner {
           return null
         }
         // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or
-        // awaited, and so does each channel it names.
+        // awaited, and so does each channel it names. The record is not written again: only its highest attempt
+        // rises, so that one between this and the last, read later still, takes nothing; its instant stays.
         if (kept.end !== 'retired') {
+          kept.high = ctrl.attempt
           this.refuseNamed(ctrl.open, entry, kept.end)
-          this.endSessionOn(entry, ctrl.sessionId, kept.end, ctrl.attempt)
+          this.endSessionOn(entry, kept.end)
           return null
         }
         // A newer attempt of a session that retired takes it again.

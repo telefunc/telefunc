@@ -1,13 +1,13 @@
 // A page the server's tests play against the real SSE handler and ChannelMux: its event stream, read as the page reads
-// it, and a WebSocket the mux sends on.
+// it, a WebSocket the mux sends on, and its reopens of a session the server ended.
 
-export { openStream, order, openWebSocket }
+export { endedSession, openStream, order, openWebSocket, reopen }
 
 import { Readable } from 'node:stream'
 
 import { CHANNEL_TRANSPORT, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
-import { decode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
+import { decode, encode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux, type ServerEnd, type ServerTransport, type WireClose } from './ChannelMux.js'
@@ -117,4 +117,29 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
     /** The page's connection ends: the server's wire closes as `how` says, as the page leaving unless told. */
     close: (how: WireClose = 'pageLeft') => mux.onWireClosed(wire, how),
   }
+}
+
+/** What the wire's first RECONCILE came to: the session (`took`), a loss (`transient`), or the session's end. */
+const came = (ws: ReturnType<typeof openWebSocket>) =>
+  ws.frames.some((frame) => frame[0] === TAG.RECONCILED) ? 'took' : (ws.state.closedAs ?? 'nothing')
+
+/** The page's wire numbered `attempt`, whose first RECONCILE names `sessionId`, and what it came to. */
+async function reopen(sessionId: string, attempt: number, open: { id: string; ix: number }[] = []) {
+  const ws = openWebSocket()
+  await ws.mux.onWireMessage(
+    ws.wire,
+    encode.reconcile({ sessionId, attempt, open: open.map(({ id, ix }) => ({ id, ix, lastSeq: 0, initial: true })) }),
+  )
+  ws.close()
+  return came(ws)
+}
+
+/** A session attempt 1 took, which the server ended for what it couldn't read; the clock then reads the decision. */
+async function endedSession() {
+  const ws = openWebSocket()
+  await ws.mux.onWireMessage(ws.wire, encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }))
+  const sessionId = ws.wire.sessionId ?? ''
+  const decidedAt = performance.now()
+  ws.mux.endFault(ws.wire, { scope: 'session', cause: 'unreadable' })
+  return { sessionId, decidedAt }
 }

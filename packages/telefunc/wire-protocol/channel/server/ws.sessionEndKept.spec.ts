@@ -1,5 +1,6 @@
-// A session's end the server keeps for `reconnectTimeout`, on the real Node server and raw WebSockets: each reopen it
-// answers with that end keeps it again, so a page that misses the reopen's last word too reads the cause at its next.
+// A session's end the server keeps, on the real Node server and raw WebSockets: from the time it decided, for its page's
+// whole recovery, which runs past `reconnectTimeout`. A page that misses the reopen's last word too reads the cause at
+// its next.
 import { createServer } from 'node:http'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { Telefunc } from '../../../serve/node.js'
@@ -9,7 +10,7 @@ import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 
-/** How long the server keeps a session's end: short, so a row outlasts it. */
+/** How long a page's channels wait for it: short, so a row outlasts it. */
 const KEEP_MS = 1_000
 config.channel = { reconnectTimeout: KEEP_MS }
 
@@ -66,7 +67,7 @@ async function endedSession(): Promise<string> {
 
 const sessionEnd = { code: 4002, reason: `text/vnd.telefunc.refusal; kind=frames; cause=${END_CAUSE.unreadable.code}` }
 
-test("a reopen the server answers with a session's end keeps that end again: a second reopen, later than one keep after the end and within one keep of the first, reads the cause too", async () => {
+test('two reopens of a session the server ended, the second later than `reconnectTimeout` after the end, both read the cause', async () => {
   const sessionId = await endedSession()
   await delay(KEEP_MS * 0.6)
   const first = await reopen(sessionId)
@@ -75,10 +76,9 @@ test("a reopen the server answers with a session's end keeps that end again: a s
   expect([first.answer, second.answer]).toEqual([sessionEnd, sessionEnd])
 })
 
-test("a reopen after the session's end was kept for its time, with no reopen between, finds no end: a session under the id it named, where the page reads its channels lost", async () => {
+test("a first reopen later than `reconnectTimeout` after the session's end, with no reopen between, reads the cause", async () => {
   const sessionId = await endedSession()
   await delay(KEEP_MS * 1.2)
-  const { socket, answer } = await reopen(sessionId)
-  socket.close()
-  expect(answer).toEqual({ reconciled: sessionId })
+  const { answer } = await reopen(sessionId)
+  expect(answer).toEqual(sessionEnd)
 })
