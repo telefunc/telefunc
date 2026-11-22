@@ -4,7 +4,7 @@ export { redisFailure, isRefusal, isLoginRefusal }
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
-import { addressOf, ClusterNodesFailed, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
+import { addressOf, ClusterNodesFailed, isCluster, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
 
 type Code = BackendError['code']
 
@@ -128,7 +128,7 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
     const failure = new BackendError({
       code: row.code,
       outcome: outcome(row.notRun && wrapper === null),
-      message: sentence(row.kind, where, tagged),
+      message: sentence(row.kind, where, tagged, isCluster(redis)),
     })
     if (row.stands) refusals.set(failure, row.kind)
     return failure
@@ -143,9 +143,20 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
   })
 }
 
-function sentence(kind: Kind, where: string, tagged: string): string {
+/** A reply's sentence, by its kind. A Cluster is named by the startup nodes the app gave (`addressOf()`), as the reply
+ *  doesn't say which node sent it. */
+function sentence(kind: Kind, where: string, tagged: string, cluster: boolean): string {
   switch (kind) {
     case 'replica':
+      // A Cluster client reaches each slot's primary by itself: ioredis hands a write to a replica only while it holds
+      // no connection to the slot's primary (redis/ioredis#2274), so no other client would help.
+      if (cluster) {
+        return (
+          `A replica of the Redis Cluster at ${where} refused a write of Telefunc's Redis backend${tagged}, as ioredis ` +
+          "sent it there while it held no connection to the slot's primary: a later call reaches the primary once " +
+          "ioredis reads the Cluster's slots again"
+        )
+      }
       return (
         `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
         'client of the primary'

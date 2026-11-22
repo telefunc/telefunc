@@ -294,6 +294,31 @@ describe("a store's reply, as the backend reports it", () => {
   })
 })
 
+describe("a replica's READONLY on a Cluster, as the backend reports it", () => {
+  const sentence =
+    "A replica of the Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 refused a write of Telefunc's Redis backend " +
+    "(READONLY), as ioredis sent it there while it held no connection to the slot's primary: a later call reaches the " +
+    "primary once ioredis reads the Cluster's slots again"
+  it.each([
+    ["READONLY You can't write against a read only replica.", 'not-run'],
+    [
+      "READONLY You can't write against a read only replica. script: bd6f3018b28bbdb36260f19d3c44afed740db987, on @user_script:1.",
+      'not-run',
+    ],
+    [
+      "ERR Error running script (call to f_bd6f3018b28bbdb36260f19d3c44afed740db987): @user_script:1: @user_script: 1: -READONLY You can't write against a read only replica.",
+      'may-have-run',
+    ],
+  ])('%s names the Cluster, not a node, and asks for no other client', (message, outcome) => {
+    expect(redisFailure(reply(message), cluster, true)).toMatchObject({
+      name: 'BackendError',
+      code: 'unavailable',
+      outcome,
+      message: sentence,
+    })
+  })
+})
+
 describe("a Cluster's connect that failed on its nodes, as the backend reports it", () => {
   const refusedLogin = () => reply('WRONGPASS invalid username-password pair or user is disabled.')
   const timedOut = () => new Error('timeout')
