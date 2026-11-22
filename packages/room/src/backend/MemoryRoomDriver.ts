@@ -59,7 +59,7 @@ import {
   unrefTimer,
 } from 'telefunc/__internal'
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
-import { MemoryCommitQueue } from './MemoryCommitQueue.js'
+import { MemoryCommitQueue, type MemoryAttempt } from './MemoryCommitQueue.js'
 
 type Expiring = { expiresAt: number | null }
 /** `lapsesAt`: the authority time the cell lapses at, for one written with `lapsesInMs`. */
@@ -88,6 +88,8 @@ type Incarnation = {
   everyTrackSubs: Subscribers
   /** Every-member subscriptions by track, likewise. */
   everyMemberSubs: Subscribers
+  /** Its lanes' subscriptions, which end with it. */
+  attempts: Set<MemoryAttempt>
 }
 
 type RoomRecord = { head: StoredHead | null; incarnations: Map<string, Incarnation> }
@@ -128,6 +130,7 @@ function newIncarnation(): Incarnation {
     subs: new Map(),
     everyTrackSubs: new Map(),
     everyMemberSubs: new Map(),
+    attempts: new Set(),
   }
 }
 
@@ -320,15 +323,18 @@ class MemoryRoomDriver implements RoomDriver {
       return { kind: 'conflict', current: currentView }
     }
     // Only an exchange that actually applies materializes a room record.
-    const head = this.storeHead(this.roomFor(roomId), next)
+    const head = this.storeHead(roomId, this.roomFor(roomId), next)
     return { kind: 'committed', head: publicHead(head, copyBytes(head.config)) }
   }
 
-  private storeHead(room: RoomRecord, next: HeadNext): StoredHead {
+  /** The head's turn: an incarnation it no longer names ends in it, whatever call about it comes later. */
+  private storeHead(roomId: string, room: RoomRecord, next: HeadNext): StoredHead {
     const materialized = materializeHead(next, Date.now())
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
-    if (stored.currentInc !== null) {
+    for (const inc of [...room.incarnations.keys()]) if (inc !== stored.currentInc) this.endIncarnation(room, inc)
+    if (stored.currentInc === null) this.releaseWhenLapsed(roomId, room)
+    else {
       const incarnation = this.incarnation(room, stored.currentInc)
       if (next.counts !== undefined) applyCells(incarnation, [], next.counts)
     }
@@ -536,16 +542,14 @@ class MemoryRoomDriver implements RoomDriver {
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    return this.commits.subscribe(subscribers, key, receiver)
+    return this.commits.subscribe(subscribers, key, receiver, incarnation.attempts)
   }
 
+  /** Drops nothing a live head names: that incarnation ends in the turn its head stops naming it. */
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
     const room = this.rooms.get(roomId)
-    if (room === undefined) return
-    const incarnation = room.incarnations.get(inc)
-    if (incarnation === undefined) return // already dropped (the janitor is resumable)
-    for (const { timer } of incarnation.expiring.values()) clearTimeout(timer)
-    room.incarnations.delete(inc)
+    if (room === undefined || this.liveHead(room)?.currentInc === inc) return
+    this.endIncarnation(room, inc)
     this.releaseWhenLapsed(roomId, room)
   }
 
@@ -609,6 +613,15 @@ class MemoryRoomDriver implements RoomDriver {
     }
     if (head.expiresAt === null) return
     unrefTimer(setTimeout(() => this.releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
+  }
+
+  /** Its data goes now, and its lanes end once what was committed on them is delivered. */
+  private endIncarnation(room: RoomRecord, inc: string): void {
+    const incarnation = room.incarnations.get(inc)
+    if (incarnation === undefined) return // already ended (the janitor is resumable)
+    for (const { timer } of incarnation.expiring.values()) clearTimeout(timer)
+    room.incarnations.delete(inc)
+    this.commits.endAfterDeliveries(incarnation.attempts)
   }
 
   private incarnation(room: RoomRecord, inc: string): Incarnation {

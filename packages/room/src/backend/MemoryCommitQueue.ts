@@ -1,4 +1,5 @@
 export { MemoryCommitQueue }
+export type { MemoryAttempt }
 
 import {
   addSubscriber,
@@ -83,14 +84,31 @@ class MemoryCommitQueue {
   }
 
   /** Adds `receiver` to `key`'s subscribers: ready once what was committed before it is delivered, as a network
-   *  subscriber hears its confirmation after the messages sent before it, and before what is committed after it. */
-  subscribe(subscribers: Subscribers, key: string, receiver: BackendReceiver): DriverAttempt {
+   *  subscriber hears its confirmation after the messages sent before it, and before what is committed after it. The
+   *  attempt is in `of` until it ends. */
+  subscribe(subscribers: Subscribers, key: string, receiver: BackendReceiver, of: Set<MemoryAttempt>): DriverAttempt {
     addSubscriber(subscribers, key, receiver)
-    const attempt = new MemoryAttempt(() => removeSubscriber(subscribers, key, receiver))
+    const attempt = new MemoryAttempt(() => {
+      removeSubscriber(subscribers, key, receiver)
+      of.delete(attempt)
+    })
+    of.add(attempt)
     if (this.queuing > 0) queueMicrotask(() => this.deliveries.deliver(() => attempt.delivered()))
     else if (!this.deliveries.isIdle) this.deliveries.deliver(() => attempt.delivered())
     else attempt.delivered()
     return attempt
+  }
+
+  /** Ends each of `attempts` once what was committed before is delivered, as every backend ends a dropped
+   *  incarnation's lanes. */
+  endAfterDeliveries(attempts: Set<MemoryAttempt>): void {
+    this.queuing++
+    queueMicrotask(() => {
+      this.queuing--
+      this.deliveries.deliver(() => {
+        for (const attempt of [...attempts]) attempt.end()
+      })
+    })
   }
 
   /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Returns the turn the caller
@@ -121,7 +139,8 @@ class MemoryCommitQueue {
   }
 }
 
-/** An in-process subscription: its receiver is in its key's subscribers until it unsubscribes. */
+/** An in-process subscription: its receiver is in its key's subscribers until it unsubscribes or its incarnation
+ *  ends. */
 class MemoryAttempt extends DriverAttempt {
   constructor(private readonly remove: () => void) {
     super()
@@ -132,8 +151,13 @@ class MemoryAttempt extends DriverAttempt {
     this.transition('ready')
   }
 
-  async unsubscribe(): Promise<void> {
+  /** Over on purpose, as its incarnation ended; again, nothing. */
+  end(): void {
     this.transition('closed')
     this.remove()
+  }
+
+  async unsubscribe(): Promise<void> {
+    this.end()
   }
 }
