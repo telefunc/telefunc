@@ -345,6 +345,7 @@ class SseServerTransport {
       pendingDispatches: new Set(),
     }
     this.mux.onWireOpen(wire, this.transport, request)
+    reader.onChunk = () => this.mux.onWireBytes(wire)
     this.resolvePendingWires(connId, wire)
     void this.runStreamResponse(wire, reader)
 

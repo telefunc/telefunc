@@ -2,7 +2,9 @@ import { expect, test, vi } from 'vitest'
 
 import { WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
-import { encode } from '../../wire/frame.js'
+import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { SseEvents } from '../../wire/SseEvents.js'
+import { TAG } from '../../wire/tags.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { handleSseChannelRequest } from './sse.js'
@@ -93,6 +95,62 @@ test('a page that held its PING for a POST, then stalled for most of an interval
   // Its PING goes an interval on, held half an interval for a POST, and the page stalls 0.8 interval more.
   await new Promise((resolve) => setTimeout(resolve, 2_300))
   expect((await post(encodeSseRequest({ connId }, [encode.ping([])]))).statusCode).toBe(200)
+})
+
+test("a page whose open's RECONCILE crosses for longer than the ping deadline, its bytes arriving all along, gets its RECONCILED before its wire ends", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const connId = crypto.randomUUID()
+    // 64 channels' entries, 512 bytes every 500 ms: about 4.5 s, past the deadline of 2.5 s.
+    const open = Array.from({ length: 64 }, (_, ix) => ({ id: crypto.randomUUID(), ix, lastSeq: 0 }))
+    const bytes = new Uint8Array(
+      await encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })]).arrayBuffer(),
+    )
+    let sent = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull: (controller) =>
+          new Promise<void>((resolve) => {
+            if (sent >= bytes.byteLength) {
+              controller.close()
+              return resolve()
+            }
+            setTimeout(() => {
+              controller.enqueue(bytes.slice(sent, sent + 512))
+              sent += 512
+              resolve()
+            }, 500)
+          }),
+      },
+      { highWaterMark: 0 },
+    )
+    const answering = post(body)
+    let answered = false
+    void answering.then(() => void (answered = true))
+    while (!answered) await vi.advanceTimersByTimeAsync(100)
+    const opened = await answering
+    if (!(opened.body instanceof ReadableStream)) throw new Error('no event stream')
+    const events = opened.body.getReader()
+    const decoder = new SseEvents()
+    // What the page reads first of the two: the RECONCILED, or the stream's end.
+    const order: string[] = []
+    void (async () => {
+      while (order.length === 0) {
+        const { done, value } = await events.read()
+        if (done) return void order.push('ended')
+        decoder.push(value, (event) => {
+          for (const frame of isOneFrame(event) ? [event] : messageFrames(event)) {
+            if (frame[0] === TAG.RECONCILED) order.push('RECONCILED')
+          }
+        })
+      }
+    })()
+    while (order.length === 0) await vi.advanceTimersByTimeAsync(100)
+    expect(order).toEqual(['RECONCILED'])
+    await events.cancel()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('a page that stays silent past the ping deadline loses its wire', async () => {
