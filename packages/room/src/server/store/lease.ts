@@ -3,6 +3,7 @@ export {
   REMOVE_VIEW,
   RENEW_LEASE,
   CLAIM_LEASE,
+  RENEW_CLAIM,
   REMOVE_LEASE,
   RoomLease,
   leaseHosting,
@@ -21,7 +22,7 @@ export type { LeaseState }
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { CellCounter, CellMutation, OperationOptions, RoomOperation } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
-import { ROOM_LEASE_TTL_MS } from '../constants.js'
+import { ROOM_CLOSE_LEASE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import { decodeRoomText } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import type { HoldConfig, RoomIncarnation } from '../protocol.js'
@@ -48,10 +49,18 @@ function decodeLeaseRecord(raw: Uint8Array): LeaseRecord {
   return JSON.parse(decodeRoomText(raw)) as LeaseRecord
 }
 
-/** A lease from `now`, the authority time its write read. */
-function leaseRecordBytes(now: number, cleaner?: string): Uint8Array {
-  const record: LeaseRecord = { until: now + ROOM_LEASE_TTL_MS, cleaner }
+function leaseCellBytes(record: LeaseRecord): Uint8Array {
   return leaseTextEncoder.encode(JSON.stringify(record))
+}
+
+/** A lease from `now`, the authority time its write read. */
+function leaseRecordBytes(now: number): Uint8Array {
+  return leaseCellBytes({ until: now + ROOM_LEASE_TTL_MS })
+}
+
+/** `cleaner`'s claim from `now`: a lease on the reap's work, as long as a close's, which the reap renews while it runs. */
+function claimRecordBytes(now: number, cleaner: string): Uint8Array {
+  return leaseCellBytes({ until: now + ROOM_CLOSE_LEASE_MS, cleaner })
 }
 
 /** One per replica. Its id changes once its cell is lost: claimed, or removed after a claim. */
@@ -164,7 +173,18 @@ const CLAIM_LEASE: RoomOperation<LeaseCleanArgs, boolean> = {
   plan(tx, { key, cleaner }) {
     const raw = tx.cell(key)
     if (raw === undefined || decodeLeaseRecord(raw).until >= tx.now) return false
-    tx.write({ key, bytes: leaseRecordBytes(tx.now, cleaner) })
+    tx.write({ key, bytes: claimRecordBytes(tx.now, cleaner) })
+    return true
+  },
+}
+
+/** Writes `cleaner`'s claim again; false once it no longer names `cleaner`. */
+const RENEW_CLAIM: RoomOperation<LeaseCleanArgs, boolean> = {
+  name: 'renewClaim',
+  plan(tx, { key, cleaner }) {
+    const raw = tx.cell(key)
+    if (raw === undefined || decodeLeaseRecord(raw).cleaner !== cleaner) return false
+    tx.write({ key, bytes: claimRecordBytes(tx.now, cleaner) })
     return true
   },
 }
@@ -204,7 +224,8 @@ async function renewLease(store: RoomStore, room: RoomIncarnation, lease: RoomLe
 }
 
 /** Claims each lapsed lease and removes what it hosted: its members, each leaving `'disconnected'`, and its pages'
- *  views; then the lease. A claim lapses as a lease does, so a claimant that stops leaves the rest to the next. */
+ *  views; then the lease. A claim lapses `ROOM_CLOSE_LEASE_MS` after it was last written, so a claimant that stops or
+ *  fails leaves the rest to the next within that. */
 async function reapLapsedLeases(store: RoomStore, room: RoomIncarnation): Promise<void> {
   await reapLeases(store, room, await readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX))
 }
@@ -218,26 +239,80 @@ async function reapLeases(store: RoomStore, room: RoomIncarnation, { cells, now 
 }
 
 async function reapLease(store: RoomStore, room: RoomIncarnation, key: string, cleaner: string): Promise<void> {
+  const claim = new LeaseClaim(store, room, key, cleaner)
   const { value: claimed } = await runOperation(store, room, CLAIM_LEASE, { key, cleaner })
-  if (claimed) await cleanLease(store, room, key.slice(LEASE_CELL_PREFIX.length), cleaner)
+  if (claimed) await cleanLease(store, room, key.slice(LEASE_CELL_PREFIX.length), claim)
 }
 
-async function evictLeaseMembers(store: RoomStore, room: RoomIncarnation, lease: string): Promise<void> {
+/** A reap's claim on a lapsed lease. Before each removal the reap starts, once half the claim's length passed since it
+ *  was last written, by this server's clock, the claim is written again; once that answers that another reap holds it,
+ *  the reap starts no more removals. */
+class LeaseClaim {
+  private readonly _store: RoomStore
+  private readonly _room: RoomIncarnation
+  private readonly _args: LeaseCleanArgs
+  /** Taken before the write is sent, so the claim lapses no sooner than `ROOM_CLOSE_LEASE_MS` after it. */
+  private _writtenAt = performance.now()
+  /** The renewal under way, or the last one's answer once it was false or failed. */
+  private _renewal: Promise<boolean> | null = null
+
+  constructor(store: RoomStore, room: RoomIncarnation, key: string, cleaner: string) {
+    this._store = store
+    this._room = room
+    this._args = { key, cleaner }
+  }
+
+  get cleaner(): string {
+    return this._args.cleaner
+  }
+
+  /** Whether the reap still holds the claim, written again first once half its length passed. */
+  async held(): Promise<boolean> {
+    if (this._renewal === null && performance.now() - this._writtenAt < ROOM_CLOSE_LEASE_MS / 2) return true
+    this._renewal ??= this.renew()
+    return await this._renewal
+  }
+
+  private async renew(): Promise<boolean> {
+    const writtenAt = performance.now()
+    const { value: renewed } = await runOperation(this._store, this._room, RENEW_CLAIM, this._args)
+    if (renewed) {
+      this._writtenAt = writtenAt
+      this._renewal = null
+    }
+    return renewed
+  }
+}
+
+async function evictLeaseMembers(
+  store: RoomStore,
+  room: RoomIncarnation,
+  lease: string,
+  claim: LeaseClaim,
+): Promise<void> {
   const marks = await readPrefix(store, room.id, room.inc, leaseMemberCellPrefix(lease))
-  await eachInFlight(marks.keys(), (key) =>
-    evictMember(store, room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' }),
-  )
+  await eachInFlight(marks.keys(), async (key) => {
+    if (await claim.held()) await evictMember(store, room, memberIdOfLeaseMemberKey(key), { type: 'disconnected' })
+  })
 }
 
-async function removeLeaseViews(store: RoomStore, room: RoomIncarnation, lease: string): Promise<void> {
+async function removeLeaseViews(
+  store: RoomStore,
+  room: RoomIncarnation,
+  lease: string,
+  claim: LeaseClaim,
+): Promise<void> {
   const views = await readPrefix(store, room.id, room.inc, leaseViewCellPrefix(lease))
-  await eachInFlight(views.keys(), (key) => removeView(store, room, key))
+  await eachInFlight(views.keys(), async (key) => {
+    if (await claim.held()) await removeView(store, room, key)
+  })
 }
 
-async function cleanLease(store: RoomStore, room: RoomIncarnation, lease: string, cleaner: string): Promise<void> {
+async function cleanLease(store: RoomStore, room: RoomIncarnation, lease: string, claim: LeaseClaim): Promise<void> {
   // A failed eviction is told at once, and the store refuses the removals the views would still hand over; a failed
   // removal is told once the evictions, which wait for each leave's handoff, settled.
-  const evicting = evictLeaseMembers(store, room, lease)
-  await Promise.all([evicting, failingAfter(evicting, removeLeaseViews(store, room, lease))])
-  await runOperation(store, room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner })
+  const evicting = evictLeaseMembers(store, room, lease, claim)
+  await Promise.all([evicting, failingAfter(evicting, removeLeaseViews(store, room, lease, claim))])
+  if (await claim.held())
+    await runOperation(store, room, REMOVE_LEASE, { key: leaseCellKey(lease), cleaner: claim.cleaner })
 }

@@ -301,21 +301,7 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
     it(`${store.name}: rejects once every write it started ended, handing over no more; the next reap removes the rest once`, async () => {
       const admin = await reached(store)
       const room = await Room.create(`drained-${i}`)
-      const member = await joinedByAnotherServer(String(admin.options.host), room.id)
-      const { values, lease } = await hostingLease(admin, room.id, member)
-      const incarnation = values.slice(0, -':values'.length)
-      // The other server's pages held more views than a reap removes at once, each counted in the room's holds.
-      const views = Array.from({ length: 300 }, (_, n) => `v:${lease}:view-${n}`)
-      for (const view of views) {
-        await admin.zadd(`${incarnation}:cells`, 0, view)
-        await admin.hset(values, view, '')
-        await admin.hset(`${incarnation}:versions`, view, '1')
-      }
-      const holds = (await admin.hget(values, 'holds')) ?? ''
-      const held = /"value":(\d+)/.exec(holds)?.[1]
-      if (held === undefined) throw new Error(`room ${room.id} counts no holds`)
-      await admin.hset(values, 'holds', holds.replace(/"value":\d+/, `"value":${Number(held) + views.length}`))
-      await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+      const { values, lease, member, held } = await lapsedWithViews(admin, room.id)
       // The store refuses the read that plans the member's removal; the views' removals go on beside it.
       await admin.call('ACL', 'SETUSER', 'telefunc', '-hkeys')
       // The removals the views' sibling still hands over after the close are refused inside it, never unhandled.
@@ -335,7 +321,7 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       const viewsLeft = async () => (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length
       // The failed call handed over no removal after its close: the views not yet removed stay, the lease claimed.
       const leftAtRejection = await viewsLeft()
-      // How long the claim keeps other reapers off, by the store's clock: a lease's length.
+      // How long the claim keeps other reapers off, by the store's clock: a close lease's length, 15 s.
       const claim = (await admin.hget(values, `session:${lease}`)) ?? ''
       const [seconds, micros] = await admin.time()
       const claimMs =
@@ -353,13 +339,7 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       // Once the claim lapses, two reapers come at once: one removes the rest.
       await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
       await Promise.all([Room.getParticipants(room.id), Room.getParticipants(room.id)])
-      const afterNextReap = {
-        viewsLeft: await viewsLeft(),
-        leaseLeft: await admin.hexists(values, `session:${lease}`),
-        memberListed: (await Room.getParticipants(room.id)).some(({ id }) => id === member),
-        // Each view's hold and the member's left the count once: it is the count before the views, less the member.
-        holds: /"value":(\d+)/.exec((await admin.hget(values, 'holds')) ?? '')?.[1],
-      }
+      const afterNextReap = await reapedOnce(admin, room.id, values, lease, member)
       admin.disconnect()
       console.log(`${store.name}: the failed call's claim on the lease lasts ${claimMs} ms`)
 
@@ -368,15 +348,180 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
         unchanged,
         unhandled,
         someLeftAtRejection: leftAtRejection > 0,
-        claimedForALease: claimMs > 110_000 && claimMs <= 120_000,
+        claimedForACloseLease: claimMs > 0 && claimMs <= 15_000,
         afterNextReap,
       }).toMatchObject({
         refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
         unchanged: true,
         unhandled: [],
         someLeftAtRejection: true,
-        claimedForALease: true,
-        afterNextReap: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: String(Number(held) - 1) },
+        claimedForACloseLease: true,
+        afterNextReap: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: held - 1 },
+      })
+    }, 60_000)
+  }
+})
+
+/** Room `id`, with a member another server joined and 300 views its pages held, more than a reap removes at once, each
+ *  counted in the room's holds; the server's lease then lapsed. The room's cells, the lease, the member, and the holds
+ *  counted before the views. */
+async function lapsedWithViews(
+  admin: Redis,
+  id: string,
+): Promise<{ values: string; lease: string; member: string; held: number }> {
+  const member = await joinedByAnotherServer(String(admin.options.host), id)
+  const { values, lease } = await hostingLease(admin, id, member)
+  const incarnation = values.slice(0, -':values'.length)
+  const views = Array.from({ length: 300 }, (_, n) => `v:${lease}:view-${n}`)
+  for (const view of views) {
+    await admin.zadd(`${incarnation}:cells`, 0, view)
+    await admin.hset(values, view, '')
+    await admin.hset(`${incarnation}:versions`, view, '1')
+  }
+  const holds = (await admin.hget(values, 'holds')) ?? ''
+  const held = /"value":(\d+)/.exec(holds)?.[1]
+  if (held === undefined) throw new Error(`room ${id} counts no holds`)
+  await admin.hset(values, 'holds', holds.replace(/"value":\d+/, `"value":${Number(held) + views.length}`))
+  await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+  return { values, lease, member, held: Number(held) }
+}
+
+/** What the store holds of `lease` once its reaps ended: its views, its cell, whether its member is listed, and the
+ *  room's holds. Each view's hold and the member's left the count once when it is the count before the views, less
+ *  the member. */
+async function reapedOnce(admin: Redis, id: string, values: string, lease: string, member: string) {
+  return {
+    viewsLeft: (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length,
+    leaseLeft: await admin.hexists(values, `session:${lease}`),
+    memberListed: (await Room.getParticipants(id)).some((participant) => participant.id === member),
+    holds: Number(/"value":(\d+)/.exec((await admin.hget(values, 'holds')) ?? '')?.[1]),
+  }
+}
+
+// The removals a reap starts, and how many it keeps in flight: its member's leave beside the first 64 views'.
+const REAP_REMOVALS = new Set(['leave', 'removeView', 'removeLease'])
+const REAP_REMOVALS_HELD = 65
+
+/** Holds the reap this process runs in room `id` at its first removals, as many as it keeps in flight, until
+ *  `release()`. Records the operations the reap starts after the release, and what each renewal of its claim answered. */
+function holdingReap(id: string) {
+  const { runOperation } = RedisRoomDriver.prototype
+  const allHeld = Promise.withResolvers<void>()
+  const released = Promise.withResolvers<void>()
+  let isReleased = false
+  let holding = 0
+  const startedAfterRelease: string[] = []
+  const renewals: unknown[] = []
+  async function holdingRemovals<Args, Value>(
+    this: RedisRoomDriver,
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<Args, Value>,
+    args: Args,
+    options?: OperationOptions,
+  ): Promise<OperationResult<Value>> {
+    if (roomId === id && isReleased) startedAfterRelease.push(operation.name)
+    else if (roomId === id && REAP_REMOVALS.has(operation.name)) {
+      if (++holding === REAP_REMOVALS_HELD) allHeld.resolve()
+      await released.promise
+    }
+    const result = await runOperation.bind(this)(roomId, inc, operation, args, options)
+    if (roomId === id && operation.name === 'renewClaim' && result.kind === 'done') renewals.push(result.value)
+    return result
+  }
+  vi.spyOn(RedisRoomDriver.prototype, 'runOperation').mockImplementation(holdingRemovals)
+  return {
+    allHeld: allHeld.promise,
+    release() {
+      isReleased = true
+      released.resolve()
+    },
+    startedAfterRelease,
+    renewals,
+  }
+}
+
+/** Sets this process's clock `ms` ahead, as once its reap ran that long. */
+function clockAhead(ms: number): void {
+  const now = performance.now.bind(performance)
+  vi.spyOn(performance, 'now').mockImplementation(() => now() + ms)
+}
+
+describe.runIf(runs)('a reap of a lapsed lease that runs longer than half its claim', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: writes its claim again before its next removal, and keeps another server's read from reaping meanwhile`, async () => {
+      const admin = await reached(store)
+      const room = await Room.create(`renewed-${i}`)
+      const { values, lease, member, held } = await lapsedWithViews(admin, room.id)
+      const reap = holdingReap(room.id)
+      const reaping = Room.getParticipants(room.id)
+      await reap.allHeld
+      const claim = await admin.hget(values, `session:${lease}`)
+      // Another server reads the room while the claim is live: it reaps nothing.
+      await listedByAnotherServer(String(admin.options.host), room.id)
+      const claimKept = (await admin.hget(values, `session:${lease}`)) === claim
+      // Half the claim's 15 s passed by this process's clock.
+      clockAhead(8_000)
+      reap.release()
+      await reaping
+      vi.restoreAllMocks()
+      const afterReap = await reapedOnce(admin, room.id, values, lease, member)
+      admin.disconnect()
+
+      expect({ claimKept, renewals: reap.renewals, afterReap }).toEqual({
+        claimKept: true,
+        renewals: [true],
+        afterReap: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: held - 1 },
+      })
+    }, 60_000)
+  }
+})
+
+describe.runIf(runs)('a reap of a lapsed lease that runs longer than its claim', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: the next reader takes the lease over and removes it all once, and the first reap starts no removal more`, async () => {
+      const admin = await reached(store)
+      const room = await Room.create(`taken-over-${i}`)
+      const { values, lease, member, held } = await lapsedWithViews(admin, room.id)
+      const unhandled: unknown[] = []
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason)
+      }
+      process.on('unhandledRejection', onUnhandled)
+      const reap = holdingReap(room.id)
+      const reaping = Room.getParticipants(room.id).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      )
+      await reap.allHeld
+      // The claim lapses while the reap's removals are held, as once they took longer than it, and another server's
+      // read takes the lease over and reaps it.
+      const claim = (await admin.hget(values, `session:${lease}`)) ?? ''
+      await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
+      const takenOver = !(await listedByAnotherServer(String(admin.options.host), room.id)).includes(member)
+      clockAhead(16_000)
+      reap.release()
+      const reaped = await reaping
+      vi.restoreAllMocks()
+      await sleep(2_000)
+      process.off('unhandledRejection', onUnhandled)
+      const afterBoth = await reapedOnce(admin, room.id, values, lease, member)
+      admin.disconnect()
+
+      expect({
+        takenOver,
+        reaped,
+        renewals: reap.renewals,
+        startedAfterRelease: reap.startedAfterRelease,
+        unhandled,
+        afterBoth,
+      }).toEqual({
+        takenOver: true,
+        reaped: 'resolved',
+        renewals: [false],
+        startedAfterRelease: ['renewClaim'],
+        unhandled: [],
+        afterBoth: { viewsLeft: 0, leaseLeft: 0, memberListed: false, holds: held - 1 },
       })
     }, 60_000)
   }
