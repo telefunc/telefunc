@@ -239,6 +239,14 @@ class BodyReader {
     )
   }
 
+  /** The client left before the body's end, where the body's own read may not end (Node's, once the call answered):
+   *  the read under way and every one after it end as at its leaving, `reason` their cause. */
+  leftByClient(reason: unknown): void {
+    if (this.stop) return
+    this.stop = { why: 'clientLeft', error: reason }
+    this.source.letGo()
+  }
+
   /** Settles once the source's read under way, if any, has settled, and its reader has taken its outcome. */
   async readSettled(): Promise<void> {
     if (this.reading !== null) await this.reading.catch(() => {})
@@ -424,8 +432,9 @@ class BodyReader {
       this.onChunk?.()
       return value
     } catch (error) {
-      // The read under way of a body let go of (a Web reader's released lock fails it) ends as at the body's end.
-      if (this.stop?.why === 'letGo') return null
+      // A stop that came while the read was under way ends it as that stop: the body let go of (a Web reader's released
+      // lock fails the read), or its client's leaving as the request's signal says it (`leftByClient`).
+      if (this.stop !== null) return null
       const clientLeft = this.clientLeft(error)
       this.stop = { why: clientLeft === null ? 'unknown' : clientLeft ? 'clientLeft' : 'app', error }
       if (this.stop.why === 'app') throw error

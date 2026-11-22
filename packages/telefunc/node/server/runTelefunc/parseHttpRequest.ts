@@ -197,7 +197,14 @@ async function readBody(
     const reader = new BodyReader(source, clientLeft)
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
-    runContext.requestContext.onAnswered(() => reader.keepRest(queueMemory()))
+    runContext.requestContext.onAnswered(() => {
+      reader.keepRest(queueMemory())
+      // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
+      // its signal says it.
+      const { signal } = request
+      if (signal.aborted) reader.leftByClient(signal.reason)
+      else signal.addEventListener('abort', () => reader.leftByClient(signal.reason), { once: true })
+    })
     runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
     const metadata = await reader
       .readFrame(CALL_METADATA_MAX_BYTES)

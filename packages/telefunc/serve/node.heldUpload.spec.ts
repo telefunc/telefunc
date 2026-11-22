@@ -3,7 +3,8 @@
 // Telefunc reads the rest of the body at the answer, keeping it for the call's Files. These rows send such a call and
 // read whether its body is read to its end while the channel still lives, over HTTP/1.1 (then the connection's next call
 // is answered too) and over HTTP/2. Then a File the call reads as it arrives, and one it reads only once the call is done,
-// are both read whole.
+// are both read whole; and where the client leaves mid-upload once the call is answered, a read of the File fails as its
+// client's leaving, where Node no longer ends the request by itself.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -262,5 +263,34 @@ for (const via of vias) {
     channels.end()
     socket.destroy()
     expect(read).toBe(size)
+  })
+}
+
+for (const via of vias) {
+  test(`a call that returns a Channel and hands its Blob on, whose client leaves mid-upload once the call is answered: a read of the Blob fails, as its client left (Telefunc given a ${via})`, async () => {
+    const listening = http1.get(via)
+    if (!listening) throw new Error('no server')
+    const channels = holdChannels()
+    const socket = await connected(listening.port)
+    const size = 512 * 1024
+    const call = blobCall(size, 'returnsChannelKeepingBlob')
+    socket.write(head(listening.port, 'bin', call.length))
+    socket.write(call.subarray(0, call.length - size / 2))
+    const { req } = await answered(socket.localPort, 0)
+    // The client's socket closes with bytes the server hasn't read: the server's reads a reset (`once` would reject at it).
+    const closed = new Promise((resolve) => req.socket.once('close', resolve))
+    socket.destroy()
+    await closed
+    await settle()
+    const blob = channels.kept[0]
+    if (!blob) throw new Error('no Blob')
+    const read = await within(
+      blob.text().then(
+        (text) => `read ${text.length} bytes`,
+        (err: Error) => err.message,
+      ),
+    )
+    channels.end()
+    expect(read).toBe('The client disconnected before the end of the request body')
   })
 }

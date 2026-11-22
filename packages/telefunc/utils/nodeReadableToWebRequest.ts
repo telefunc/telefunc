@@ -44,6 +44,13 @@ function nodeReadableToWebRequest(
     response.once('close', () => {
       if (!response.writableEnded) abortController.abort()
     })
+    // Once answered, Node no longer ends a request whose client leaves before the body's end: only the socket's close
+    // says it, watched until the body's end, as keep-alive reuses the socket.
+    if (socket) {
+      const left = () => abortController.abort()
+      socket.once('close', left)
+      readable.once('end', () => socket.off('close', left))
+    }
   } else if (socket) {
     const abort = () => abortController.abort()
     socket.once('close', abort)
