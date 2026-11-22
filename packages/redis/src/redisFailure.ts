@@ -3,7 +3,6 @@ export { redisFailure, isRefusal, isLoginRefusal }
 
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
-import { RECORD_REFUSAL, recordOverflowError } from './commands.js'
 import { getGlobalObject } from './getGlobalObject.js'
 import { addressOf, ClusterNodesFailed, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
 
@@ -79,17 +78,12 @@ const IN_SCRIPT = /^ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user
  *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
 const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
 
-/** The cells exchange's refusal of a count whose record its commit would refuse, before its first write, with how many
- *  bytes over the record would be; Redis 7 and Valkey append where the script raised it. */
-const RECORD_OVERFLOW = new RegExp(`^${RECORD_REFUSAL} (\\d+)(?: |$)`)
-
 /** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that may write
  *  (`writes`) or one that can't: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what
  *  failed and what to do, with Redis's error code (the first word of its reply) or the connection's, and holds nothing
  *  of ioredis' error: not the command, its arguments (a password, a message's bytes) or a nested error. A command that
  *  can't write changed nothing; one that may write didn't run only where ioredis never wrote it or the reply proves
- *  it. An error the backend's own `assert()` threw passes as it is, and so does one this made. The cells exchange's size
- *  refusal becomes the `ChannelOverflowError` the refused record's commit would throw. */
+ *  it. An error the backend's own `assert()` threw passes as it is, and so does one this made. */
 function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unknown {
   if (error instanceof BackendError || isBug(error)) return error
   if (error instanceof ClusterNodesFailed) {
@@ -110,9 +104,6 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
     })
   }
   const { message } = error
-  // Not a failure of Redis: the size refusal the record's commit would make, in its words.
-  const over = RECORD_OVERFLOW.exec(message)
-  if (over !== null) return recordOverflowError(Number(over[1]))
   const guarded = GUARD_REFUSAL.exec(message)
   if (guarded !== null) {
     // In Telefunc's own words, as for every reply: the reply's text names the key.

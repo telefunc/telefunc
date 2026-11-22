@@ -3,9 +3,7 @@ export {
   REDIS_DELIVERY_FENCE_TOKEN_LENGTH,
   LANE_PAGE_SIZE,
   REDIS_COMMANDS,
-  RECORD_REFUSAL,
   assertCommittable,
-  recordOverflowError,
   parseOrdering,
 }
 export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
@@ -96,10 +94,6 @@ type Hold = string
 // `ERR`), and the backend tells it 'not-run'.
 
 const TF_MAX_INTEGER = Number.MAX_SAFE_INTEGER
-
-/** How the cells exchange's reply starts when it refuses its control record, whose numbering value would take more
- *  digits than were left, before its first write; then how many bytes over the limit the record would be. */
-const RECORD_REFUSAL = 'TFOVERFLOW'
 
 /** Lua that refuses the call: `word`, then `detail`, a Lua string expression only the refusal evaluates. */
 function refuseLua(word: 'WRONGTYPE' | 'ERR', detail: string): string {
@@ -547,14 +541,16 @@ for at = first_counted, first_counted + 3 * counted - 1, 3 do
   local delta = tonumber(ARGV[at + 1])
   ${countableLua('values_key', 'ARGV[at]', 'delta')}
 end
--- The control record's commit would refuse it when the value numbering it takes more digits than were left.
+-- The control record's commit would refuse it when the value numbering it takes more digits than were left; a count
+-- that leaves its counter absent numbers nothing.
 local record = first_counted + 3 * counted
 if ARGV[record] then
   local at = first_counted + 3 * tonumber(ARGV[record])
   local counter = tf_checked[ARGV[at]].counter
+  if not counter and ARGV[at + 2] ~= '1' then return {'record-unnumbered'} end
   local digits = #string.format('%d', (counter and counter.value or 0) + tonumber(ARGV[at + 1]))
   local over = digits - tonumber(ARGV[record + 1])
-  if over > 0 then error({ err = '${RECORD_REFUSAL} ' .. over }) end
+  if over > 0 then return {'record-overflow', tostring(over)} end
 end
 -- The keys the writes below reach that no command above read.
 ${holdsCheckLua('incarnation_keys_key', CELL_HOLDS[2])}
@@ -1453,6 +1449,12 @@ const REDIS_COMMANDS = {
     },
     parse: (reply): CellsExchangeResult => {
       const [tag, ...counted] = reply as string[]
+      // Refused before the first write: the record's commit would refuse it, or no value numbers it.
+      if (tag === 'record-overflow') throw overflowError(PUBLISH_MAX_BYTES + Number(counted[0]))
+      assert(
+        tag !== 'record-unnumbered',
+        'cells exchange: its control record is numbered by a counter it leaves absent',
+      )
       if (tag !== 'committed') return { kind: tag as 'conflict' | 'stale-incarnation' }
       const counters = new Map<string, CellCounter>()
       for (let i = 0; i < counted.length; i += 3) {
@@ -1680,12 +1682,6 @@ function overflowError(bytes: number): ChannelOverflowError {
  *  the record's other bytes. A control record's whole length counts as published (`assertCommittable`). */
 function digitsLeft({ bytes }: ControlRecord): number {
   return PUBLISH_MAX_BYTES - bytes
-}
-
-/** The error the commit of a control record `over` bytes past the limit fails with: the cells exchange's refusal of
- *  its control record (`RECORD_REFUSAL`). */
-function recordOverflowError(over: number): ChannelOverflowError {
-  return overflowError(PUBLISH_MAX_BYTES + over)
 }
 
 /** A Room commit's ceiling counts what its publisher published, as a broadcast's does, and bounds what Room puts beside

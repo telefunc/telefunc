@@ -6,6 +6,10 @@
 // - a merge whose read predicts seq 9, 99999999999999 or 999999999999999 while another merge commits first, so it
 //   writes 10, 100000000000000 or 1000000000000000;
 // - a replacement that a merge overtook, which still commits when it fits at the seq it writes.
+// The value that numbers the event is always there: the first write creates `meta:seq`, and a later one counts it
+// while `meta:gen`, written with it, is as read. A room closed and opened again before a replacement's exchange tells
+// the replacement it closed, and a first write another first write overtook writes as a replacement. An exchange whose
+// control record is numbered by a counter it leaves absent is refused as a bug, before its first write.
 import { isDeepStrictEqual } from 'node:util'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Redis } from 'ioredis'
@@ -257,5 +261,92 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
         meta: ['big'],
       })
     }, 300_000)
+  }
+})
+
+describe.runIf(runs)('the value that numbers a room meta update', () => {
+  for (const store of STORES) {
+    it(`${store.name}: an exchange whose record is numbered by a counter it leaves absent is a bug, and writes nothing`, async () => {
+      const admin = await reached(store)
+      const id = 'meta-unnumbered'
+      await Room.create(id)
+      const head = await getRoomPlane().direct.reads.readHead(id)
+      if (head === null || head.currentInc === null) throw new Error(`room ${id} isn't open`)
+      const inc = head.currentInc
+      const before = await snapshot(admin)
+      const exchange = {
+        expect: [],
+        mutations: [{ key: 'k', bytes: new Uint8Array([1]) }],
+        counts: [{ key: 'absent', delta: 1 }],
+      }
+      const answer = await Promise.resolve()
+        .then(() =>
+          getRoomPlane().direct.compareExchangeCells(id, inc, exchange, {
+            counter: 'absent',
+            bytes: 1,
+          }),
+        )
+        .then(
+          () => 'exchanged',
+          (error: unknown) => String(error),
+        )
+      const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+      admin.disconnect()
+
+      expect({ answer, unchanged }).toEqual({
+        answer: expect.stringMatching(
+          /\[Bug\].*cells exchange: its control record is numbered by a counter it leaves absent/,
+        ),
+        unchanged: true,
+      })
+    })
+
+    it(`${store.name}: a replacement whose room closed and opened again before its exchange is told it closed, and writes nothing`, async () => {
+      const admin = await reached(store)
+      const id = 'meta-reopened'
+      await Room.create(id)
+      await Room.updateMeta(id, { a: 'x' })
+      const write = holdBigWrite(id)
+      const replacing = told(Room.setMeta(id, { big: 'y' }))
+      await write.held
+      await Room.close(id)
+      await Room.create(id)
+      await Room.updateMeta(id, { seed: 's' })
+      const commits = controlCommits(id)
+      const before = await snapshot(admin)
+      write.release()
+      const answer = await replacing
+      const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+      const meta = Object.keys((await Room.get(id)).meta)
+      admin.disconnect()
+
+      expect({ answer, unchanged, commits, meta }).toEqual({
+        answer: expect.objectContaining({ class: 'RoomError', message: `Room is closed: ${id}` }),
+        unchanged: true,
+        commits: [],
+        meta: ['seed'],
+      })
+    })
+
+    it(`${store.name}: a first write another first write overtook writes as a replacement, at the next seq`, async () => {
+      const admin = await reached(store)
+      const id = 'meta-first-overtaken'
+      await Room.create(id)
+      const commits = controlCommits(id)
+      const write = holdBigWrite(id)
+      const replacing = told(Room.setMeta(id, { big: 'y' }))
+      await write.held
+      await Room.setMeta(id, { seed: 's' })
+      write.release()
+      const answer = await replacing
+      const meta = Object.keys((await Room.get(id)).meta)
+      admin.disconnect()
+
+      expect({ answer, seqs: commits.map(({ seq }) => seq), meta }).toEqual({
+        answer: 'resolved',
+        seqs: ['1', '2'],
+        meta: ['big'],
+      })
+    })
   }
 })
