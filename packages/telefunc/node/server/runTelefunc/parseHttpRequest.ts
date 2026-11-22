@@ -8,7 +8,7 @@ import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
 import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
@@ -20,7 +20,7 @@ import { getGcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { CALL_METADATA_MAX_BYTES, isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { REQUEST_KIND_REFUSAL, type Refusal } from '../../../wire-protocol/refusal.js'
@@ -95,7 +95,9 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, clientLeft, requestKind)
+  const body = await readBody(request, readable, clientLeft, requestKind, runContext)
+  if (body.isMalformedRequest) return body
+  const { text, registerFile, consumeFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -170,30 +172,48 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 }
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
- *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. */
+ *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
+ *  whose metadata declares more than any client can send is malformed, refused before any of its metadata is read. */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
   clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
-): Promise<{
-  text: string
-  registerFile: ServerReviverContext['registerFile']
-  consumeFile: ServerReviverContext['consumeFile']
-}> {
+  runContext: RunContext,
+): Promise<
+  | {
+      isMalformedRequest: false
+      text: string
+      registerFile: ServerReviverContext['registerFile']
+      consumeFile: ServerReviverContext['consumeFile']
+    }
+  | { isMalformedRequest: true }
+> {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
     const reader = new BodyReader(source, clientLeft)
-    const metadata = await reader.readFrame(Number.POSITIVE_INFINITY)
+    const metadata = await reader.readFrame(CALL_METADATA_MAX_BYTES).catch((err: unknown): 'oversize' => {
+      if (err instanceof OversizeFrameError) return 'oversize'
+      throw err
+    })
+    if (metadata === 'oversize') {
+      logParseError(
+        `The binary request declares more metadata than any client can send (over ${CALL_METADATA_MAX_BYTES} bytes).`,
+        runContext,
+      )
+      return { isMalformedRequest: true }
+    }
     if (metadata === null) throw reader.truncation()
     return {
+      isMalformedRequest: false,
       text: new TextDecoder().decode(metadata),
       registerFile: (i, s) => reader.registerFile(i, s),
       consumeFile: (i, s) => reader.consumeFile(i, s),
     }
   }
   return {
+    isMalformedRequest: false,
     text: await readText(request, clientLeft),
     registerFile: () => {},
     consumeFile: () =>

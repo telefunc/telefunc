@@ -80,7 +80,7 @@ const sseStart = concat(
 const kinds = { binary: 'bin', sse: 'sse' }
 const telefuncPath = `/_telefunc?wire=${WIRE_VERSION}`
 
-let onRequest: ((req: IncomingMessage) => void) | undefined
+let onRequest: ((req: IncomingMessage, res: ServerResponse) => void) | undefined
 
 /** Telefunc given Node's request (`serve({ req, res })`). */
 function nodeRequest(req: IncomingMessage, res: ServerResponse) {
@@ -106,7 +106,7 @@ beforeAll(async () => {
   for (const via of vias) {
     const server = createServer((req, res) => {
       servers[via](req, res)
-      onRequest?.(req)
+      onRequest?.(req, res)
     })
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
@@ -143,14 +143,15 @@ async function blobRead(): Promise<void> {
 }
 
 /** Sends a POST of `kind` with `start` from a socket of the test's own to the server that gives Telefunc `via`; resolves
- *  once Telefunc read the first bytes. `answered` is the status code the server answers with, from its first bytes. */
+ *  once Telefunc read the first bytes, with the server's request and response. `answered` is the status code the server
+ *  answers with, from its first bytes. */
 async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: keyof typeof servers = 'Node request') {
   const port = ports.get(via)
   if (port === undefined) throw new Error('no server')
-  const arrived = new Promise<IncomingMessage>((resolve) => {
-    onRequest = (req) => {
+  const arrived = new Promise<{ req: IncomingMessage; res: ServerResponse }>((resolve) => {
+    onRequest = (req, res) => {
       onRequest = undefined
-      resolve(req)
+      resolve({ req, res })
     }
   })
   const socket = connect(port, '127.0.0.1')
@@ -165,9 +166,9 @@ async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: key
     `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: ${kinds[kind]}\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\n\r\n`,
   )
   socket.write(start)
-  const req = await arrived
+  const { req, res } = await arrived
   await vi.waitFor(() => expect(req.readableDidRead).toBe(true))
-  return { socket, req, answered }
+  return { socket, req, res, answered }
 }
 
 /** A Fetch request of `kind` whose body gives `start`, then fails with `error` once `when` resolves. */
@@ -319,3 +320,69 @@ test.each(vias)(
     expect(printed).toEqual([])
   },
 )
+
+// The most metadata a client can send: 536,870,888 UTF-16 code units, V8's longest string, of at most 3 UTF-8 bytes each.
+// A binary call that declares more is malformed, refused once its length is read, before any of its metadata.
+const METADATA_BOUND = 1_610_612_664
+
+/** A Fetch request of a binary call whose body gives `start` and stays open until `end()`. */
+function openRequest(start: Uint8Array) {
+  const sink: { controller: ReadableStreamDefaultController<Uint8Array> | null } = { controller: null }
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      sink.controller = controller
+      controller.enqueue(start)
+    },
+  })
+  const init: RequestInit & { duplex: 'half' } = {
+    method: 'POST',
+    headers: { 'x-telefunc-request': kinds.binary },
+    body,
+    duplex: 'half',
+  }
+  return { request: new Request(`http://127.0.0.1${telefuncPath}`, init), end: () => sink.controller?.close() }
+}
+
+/** The event loop's queued work, run to its end: `turns` macrotask turns, each after its microtasks. */
+async function settle(turns = 50) {
+  for (let i = 0; i < turns; i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
+/** The status `serve()` answered with once the event loop ran dry, or `pending`. */
+async function statusOnceSettled(serving: Promise<Response | undefined>) {
+  const outcome: { now: number | 'pending' } = { now: 'pending' }
+  serving.then((response) => void (outcome.now = response?.status ?? 404))
+  await settle()
+  return outcome.now
+}
+
+test('a binary call whose metadata declares more than any client can send is answered 400 before its metadata is sent (Telefunc given a Node request)', async () => {
+  const { printed } = recordErrors()
+  // Once the server has read the length, what it answered once the event loop ran dry, on its own side of the socket.
+  const { socket, res } = await startUpload('binary', u32(METADATA_BOUND + 1))
+  await settle()
+  expect(res.headersSent ? res.statusCode : 'pending').toBe(400)
+  socket.destroy()
+  await closed(socket)
+  expect(printed).toEqual([expect.stringContaining('more metadata than any client can send')])
+})
+
+test('a binary call whose metadata declares more than any client can send is answered 400 before its metadata is sent (Telefunc given a Fetch Request)', async () => {
+  const { printed } = recordErrors()
+  const { request, end } = openRequest(u32(METADATA_BOUND + 1))
+  const serving = telefunc.serve({ request })
+  expect(await statusOnceSettled(serving)).toBe(400)
+  end()
+  await serving
+  expect(printed).toEqual([expect.stringContaining('more metadata than any client can send')])
+})
+
+test('a binary call whose metadata declares the most a client can send waits for its metadata (Telefunc given a Fetch Request)', async () => {
+  recordErrors()
+  const { request, end } = openRequest(u32(METADATA_BOUND))
+  const serving = telefunc.serve({ request })
+  expect(await statusOnceSettled(serving)).toBe('pending')
+  // Its body ends short: the call is answered as a truncation is.
+  end()
+  await serving
+})
