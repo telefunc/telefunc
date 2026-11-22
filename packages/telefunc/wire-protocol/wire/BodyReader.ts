@@ -38,7 +38,7 @@ class StreamTruncatedError extends Error {
  * `Readable.toWeb` round-trip (whose pure-JS `dequeueValue` dominates CPU on hot
  * SSE / binary-RPC paths); other adapters pass `request.body`. Both shapes
  * collapse to one `AsyncIterator<Uint8Array>` so the rest of the class is
- * source-agnostic.
+ * source-agnostic, and both can be let go of with a read under way (`letGo`).
  *
  * Fields use TS `private` rather than JS `#private`: the inner read loop touches
  * `buffer`/`source` per chunk, and `#fields` compile to per-access `WeakMap.get/set`
@@ -46,6 +46,9 @@ class StreamTruncatedError extends Error {
  */
 class BodyReader {
   private source: AsyncIterator<Uint8Array<ArrayBuffer>>
+  /** Hands the source back to its owner unread (`letGo`): a Web body's lock released, a Node body's listeners off. */
+  private readonly releaseSource: () => void
+  private released = false
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
   private fileSizes: Map<number, number> = new Map()
   private nextFileIndex = 0
@@ -60,14 +63,37 @@ class BodyReader {
   /** Called for each chunk the source yields. */
   onChunk?: () => void
 
-  constructor(source: ReadableStream<Uint8Array> | Readable, clientLeft: (err: unknown) => boolean | null) {
+  constructor(
+    source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
+    clientLeft: (err: unknown) => boolean | null,
+  ) {
     this.clientLeft = clientLeft
-    // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
-    // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
-    // bypasses Node's webstreams `dequeueValue` overhead, which is why we accept
-    // `Readable` at all — `serve/node.ts` passes its `IncomingMessage` through
-    // to skip the `Readable.toWeb` round-trip.
-    this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
+    if (source instanceof ReadableStream) {
+      const reader = source.getReader()
+      this.source = { next: () => reader.read() }
+      // A runtime of the streams standard before 2022 throws for a read under way: that read then ends with the body.
+      this.releaseSource = () => {
+        try {
+          reader.releaseLock()
+        } catch {}
+      }
+    } else {
+      // Read as a Node `Readable` is, which bypasses Node's webstreams `dequeueValue` overhead: that is why we accept
+      // `Readable` at all — `serve/node.ts` passes its `IncomingMessage` through to skip the `Readable.toWeb` round-trip.
+      const chunks = new ReadableChunks(source)
+      this.source = chunks
+      this.releaseSource = () => chunks.letGo()
+    }
+  }
+
+  /** Reads no more of the body and hands it back to its owner, neither cancelled nor read: the read under way and every
+   *  one after it end as at the body's end, and nothing of this reader is left on the source. */
+  letGo(): void {
+    if (this.released) return
+    this.released = true
+    this.disconnected = true
+    this.onChunk = undefined
+    this.releaseSource()
   }
 
   /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer buffers. */
@@ -195,6 +221,8 @@ class BodyReader {
       return value
     } catch (error) {
       this.disconnected = true
+      // The read under way of a body let go of (a Web reader's released lock fails it) ends as at the body's end.
+      if (this.released) return null
       this.failure = { error, appsError: this.clientLeft(error) === false }
       if (this.failure.appsError) throw error
       return null
@@ -259,4 +287,80 @@ class BodyReader {
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }
   }
+}
+
+const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
+
+/** A Node `Readable`'s chunks, read as Node's own async iterator reads them: what `read()` gives at each `'readable'`, to
+ *  `'end'`, or failing at `'error'` or at a close before the end. Unlike that iterator, it can be let go of with a read
+ *  under way (`letGo`): Node's ends a read under way only by destroying the stream. */
+class ReadableChunks implements AsyncIterator<Uint8Array<ArrayBuffer>> {
+  private readonly stream: Readable
+  private waiting: {
+    resolve: (result: IteratorResult<Uint8Array<ArrayBuffer>>) => void
+    reject: (error: unknown) => void
+  } | null = null
+  private ended: boolean
+  private failed: { error: unknown } | null = null
+
+  constructor(stream: Readable) {
+    this.stream = stream
+    this.ended = stream.readableEnded
+    if (stream.errored) this.failed = { error: stream.errored }
+    else if (stream.destroyed && !this.ended) this.failed = { error: prematureClose() }
+    stream.on('readable', this.wake)
+    stream.on('end', this.end)
+    stream.on('error', this.fail)
+    stream.on('close', this.close)
+  }
+
+  next(): Promise<IteratorResult<Uint8Array<ArrayBuffer>>> {
+    const value: Uint8Array<ArrayBuffer> | null = this.stream.destroyed ? null : this.stream.read()
+    if (value !== null) return Promise.resolve({ value, done: false })
+    if (this.failed) return Promise.reject(this.failed.error)
+    if (this.ended) return Promise.resolve(DONE)
+    return new Promise((resolve, reject) => (this.waiting = { resolve, reject }))
+  }
+
+  /** Ends the read under way as at the stream's end and takes this reader's listeners off the stream. */
+  letGo(): void {
+    this.stream.off('readable', this.wake)
+    this.stream.off('end', this.end)
+    this.stream.off('error', this.fail)
+    this.stream.off('close', this.close)
+    this.settle(DONE)
+  }
+
+  private readonly wake = (): void => {
+    if (this.waiting === null) return
+    const value: Uint8Array<ArrayBuffer> | null = this.stream.read()
+    if (value !== null) this.settle({ value, done: false })
+  }
+
+  private readonly end = (): void => {
+    this.ended = true
+    this.settle(DONE)
+  }
+
+  private readonly fail = (error: unknown): void => {
+    this.failed ??= { error }
+    const waiting = this.waiting
+    this.waiting = null
+    waiting?.reject(this.failed.error)
+  }
+
+  private readonly close = (): void => {
+    if (!this.ended && this.failed === null) this.fail(prematureClose())
+  }
+
+  private settle(result: IteratorResult<Uint8Array<ArrayBuffer>>): void {
+    const waiting = this.waiting
+    this.waiting = null
+    waiting?.resolve(result)
+  }
+}
+
+/** A stream closed before its end, as Node's own iterator reports it (`ERR_STREAM_PREMATURE_CLOSE`). */
+function prematureClose(): Error {
+  return Object.assign(new Error('Premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' })
 }

@@ -1,9 +1,13 @@
 // A request the server holds when its wire ends is read off and answered at its body's end; a body still open one ping
-// deadline after the end, as behind a proxy that keeps it open after the page let it go, or a page that writes on, is
-// answered then, and read on and dropped: the server doesn't close a connection with the page's bytes unread, which
-// resets it and may lose the answer. Through the SSE handler with a Web body, and on a real Node server.
+// deadline after the end, as behind a proxy that keeps it open after the page let it go, or a sender that writes on,
+// is answered then, and let go of: the server reads it no further and cancels nothing, and the host ends the
+// connection in its own time. Through the SSE handler with a Web body, and on a real Node server, where the page's
+// upload is a raw socket that writes on and ignores the answer.
 
 import { createServer } from 'node:http'
+import { connect } from 'node:net'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { Telefunc } from '../../../serve/node.js'
 import { config } from '../../../node/server/serverConfig.js'
@@ -18,86 +22,105 @@ import { handleSseChannelRequest } from './sse.js'
 const PING_INTERVAL = 1_000
 config.channel = { pingInterval: PING_INTERVAL }
 const DEADLINE = pingDeadline(PING_INTERVAL, CHANNEL_TRANSPORT.SSE)
+const RETRY = /^text\/vnd\.telefunc\.refusal; kind=retry; reason="[^"]+"$/
 
-/** A real Node server serving Telefunc, which a page's own fetch reaches. */
-let served = ''
+setFlagsFromString('--expose-gc')
+const collect: unknown = runInNewContext('gc')
+
+/** Whether `ref`'s target is gone once garbage is collected, across turns, as a `WeakRef` keeps its target to its
+ *  job's end. */
+async function collected(ref: WeakRef<object>): Promise<boolean> {
+  if (typeof collect !== 'function') throw new Error('no gc')
+  for (let i = 0; i < 3; i++) {
+    collect()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return ref.deref() === undefined
+}
+
+const handlerUrl = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
+function post(body: BodyInit) {
+  // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
+  const init = { method: 'POST', body, duplex: 'half' }
+  return handleSseChannelRequest(new Request(handlerUrl, init), undefined, () => false)
+}
+
+/** A real Node server serving Telefunc. */
+let port = 0
 const server = createServer((req, res) => void new Telefunc().serve({ req, res }))
 beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('no port')
-  served = `http://127.0.0.1:${address.port}/_telefunc?wire=${WIRE_VERSION}`
+  port = address.port
 })
 afterAll(() => {
   server.closeAllConnections()
   server.close()
 })
-
-type Answer = { statusCode: number; contentType: string | null } | { error: string }
-
-/** A request's answer, through the SSE handler with a Web body or as a page's fetch gets it from the real Node server;
- *  a network error is its `error`. `stream`: the event stream an open is answered with. */
-async function send(
-  through: 'web' | 'node',
-  body: BodyInit,
-): Promise<{ answer: Answer; stream: ReadableStream | null }> {
-  // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
-  const init = { method: 'POST', body, duplex: 'half', headers: { 'x-telefunc-request': 'sse' } }
-  try {
-    if (through === 'web') {
-      const {
-        statusCode,
-        contentType,
-        body: answered,
-      } = await handleSseChannelRequest(
-        new Request(`http://test.local/_telefunc?wire=${WIRE_VERSION}`, init),
-        undefined,
-        () => false,
-      )
-      return { answer: { statusCode, contentType }, stream: answered instanceof ReadableStream ? answered : null }
-    }
-    const response = await fetch(served, init)
-    const contentType = response.headers.get('content-type')
-    if (contentType === 'text/event-stream')
-      return { answer: { statusCode: response.status, contentType }, stream: response.body }
-    await response.text()
-    return { answer: { statusCode: response.status, contentType }, stream: null }
-  } catch (err) {
-    return { answer: { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) }, stream: null }
-  }
+const path = `/_telefunc?wire=${WIRE_VERSION}`
+function fetchPost(body: BodyInit) {
+  return fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', body, headers: { 'x-telefunc-request': 'sse' } })
 }
 
-// Each row's names come first, for its title, then what they set: whether the body is the streaming upload, whether
-// the page writes on, and where the request goes.
+/** A frame of the page's text, length-prefixed as the upload carries it. */
+function textFrame(value: string, seq: number): Uint8Array<ArrayBuffer> {
+  const text = encode.text(0, JSON.stringify(value), seq)
+  const frame = new Uint8Array(4 + text.byteLength)
+  new DataView(frame.buffer).setUint32(0, text.byteLength)
+  frame.set(text, 4)
+  return frame
+}
+
+/** A session of one channel, opened through `through` and its event stream read to its end; `wire`: its wire, held
+ *  weakly; `end`: sends a frame only a server sends, which ends the session, and gives the time it was answered. */
+async function session(through: 'web' | 'node') {
+  const mux = getChannelMux()
+  const channel = new ServerChannel()
+  mux.registerChannel(channel)
+  const got: unknown[] = []
+  channel.listen((message) => void got.push(message))
+  const connId = crypto.randomUUID()
+  const opening = encodeSseRequest({ connId, streamResponse: true }, [
+    encode.reconcile({
+      sessionId: crypto.randomUUID(),
+      attempt: 1,
+      open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
+    }),
+  ])
+  const stream = through === 'web' ? (await post(opening)).body : (await fetchPost(opening)).body
+  if (stream instanceof ReadableStream) {
+    const events = stream.getReader()
+    void (async () => {
+      while (!(await events.read()).done);
+    })().catch(() => {})
+  }
+  await channel.opened
+  const opened = mux.getWireByConnId<object>(connId)
+  if (opened === undefined) throw new Error('no wire')
+  const wire = new WeakRef(opened)
+  const end = async () => {
+    const ending = encodeSseRequest({ connId }, [encode.attachResult(999, null)])
+    await (through === 'web' ? post(ending) : fetchPost(ending).then((answer) => answer.text()))
+    return performance.now()
+  }
+  return { connId, got, wire, end }
+}
+
+// Each row's names come first, for its title, then what they set: whether the body is the streaming upload, and
+// whether the page writes on.
 test.each([
-  ['the streaming upload', 'idle', 'the SSE handler with a Web body', true, false, 'web'],
-  ['a batch POST whose body streams', 'idle', 'the SSE handler with a Web body', false, false, 'web'],
-  ['the streaming upload', 'writing on', 'the SSE handler with a Web body', true, true, 'web'],
-  ['the streaming upload', 'idle', 'a real Node server', true, false, 'node'],
-  ['the streaming upload', 'writing on', 'a real Node server', true, true, 'node'],
+  ['the streaming upload', 'idle', true, false],
+  ['a batch POST whose body streams', 'idle', false, false],
+  ['the streaming upload', 'writing on', true, true],
 ] as const)(
-  "%s that the page's path keeps open, %s, after the server ended its session, on %s, is answered `retry` one ping deadline after the end, and what it writes after the end is read on and not run",
-  async (_request, _page, _server, streamRequest, writing, through) => {
-    const channel = new ServerChannel()
-    getChannelMux().registerChannel(channel)
-    const got: unknown[] = []
-    channel.listen((message) => void got.push(message))
-    const connId = crypto.randomUUID()
-    const { stream } = await send(
-      through,
-      encodeSseRequest({ connId, streamResponse: true }, [
-        encode.reconcile({
-          sessionId: crypto.randomUUID(),
-          attempt: 1,
-          open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
-        }),
-      ]),
-    )
-    await channel.opened
+  "%s that the page's path keeps open, %s, after the server ended its session, through the SSE handler with a Web body, is answered `retry` one ping deadline after the end, and let go of: none of what it writes past the end runs, the server reads none of it past the answer, and nothing of the closed wire is held through the request",
+  async (_request, _page, streamRequest, writing) => {
+    const { connId, got, wire, end } = await session('web')
     let ended = false
-    let done = false
     let seq = 0
     let pulls = 0
+    let done = false
     const body = new ReadableStream<Uint8Array>({
       start: (controller) =>
         controller.enqueue(encodeSseRequestMetadata(streamRequest ? { connId, streamRequest: true } : { connId })),
@@ -107,44 +130,112 @@ test.each([
         await new Promise((resolve) => setTimeout(resolve, 100))
         if (done) return controller.close()
         pulls++
-        const text = encode.text(0, JSON.stringify(ended ? 'after the end' : 'before the end'), ++seq)
-        const frame = new Uint8Array(4 + text.byteLength)
-        new DataView(frame.buffer).setUint32(0, text.byteLength)
-        frame.set(text, 4)
-        controller.enqueue(frame)
+        controller.enqueue(textFrame(ended ? 'after the end' : 'before the end', ++seq))
       },
     })
-    const answer = send(through, body)
+    // The request and its body stay held to the row's end, as their host holds them.
+    const init = { method: 'POST', body, duplex: 'half' }
+    const request = new Request(handlerUrl, init)
+    const answer = handleSseChannelRequest(request, undefined, () => false)
     await new Promise((resolve) => setTimeout(resolve, 300))
-    // A frame only a server sends ends the session.
-    await send(through, encodeSseRequest({ connId }, [encode.attachResult(999, null)]))
+    const endedAt = await end()
     ended = true
-    const endedAt = performance.now()
     const answered = await Promise.race([
-      answer.then(({ answer }) => {
+      answer.then(({ statusCode, contentType }) => {
         const after = performance.now() - endedAt
-        return { ...answer, onTime: after >= DEADLINE - 100 && after < DEADLINE * 1.5 }
+        return { statusCode, contentType, onTime: after >= DEADLINE - 100 && after < DEADLINE * 1.5 }
       }),
       new Promise<null>((resolve) => setTimeout(resolve, DEADLINE * 2, null)),
     ])
     const pullsAnswered = pulls
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    done = true
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    const released = await collected(wire)
     expect({
       answered,
       notRun: got.filter((message) => message === 'after the end'),
-      // Through the handler, nothing in front ends a writing page's body on the answer: the server reads on.
-      readOn: through === 'web' && writing ? pulls > pullsAnswered : null,
+      // A stream left unread fills its queue once: one chunk in flight.
+      readPastAnswer: pulls - pullsAnswered <= 1,
+      released,
+      held: request.body !== null,
     }).toEqual({
-      answered: {
-        statusCode: 400,
-        contentType: expect.stringMatching(/^text\/vnd\.telefunc\.refusal; kind=retry; reason="[^"]+"$/),
-        onTime: true,
-      },
+      answered: { statusCode: 400, contentType: expect.stringMatching(RETRY), onTime: true },
       notRun: [],
-      readOn: through === 'web' && writing ? true : null,
+      readPastAnswer: true,
+      released: true,
+      held: true,
     })
-    await stream?.cancel()
+    done = true
   },
-  DEADLINE * 4,
+  DEADLINE * 4 + 5_000,
+)
+
+test.each([
+  ['idle', false],
+  ['writing on', true],
+] as const)(
+  "the streaming upload on a real Node server, %s past its session's end and ignoring the answer, is answered `retry` one ping deadline after the end, and let go of: none of what it writes runs, the server reads no more than was in flight, nothing of the closed wire is held through the request, and the host closes the connection in its own time",
+  async (_page, writing) => {
+    const { connId, got, wire, end } = await session('node')
+    const socket = connect(port, '127.0.0.1')
+    await new Promise((resolve) => socket.once('connect', resolve))
+    let response = ''
+    let answeredAt: number | null = null
+    let closedAt: number | null = null
+    socket.on('data', (data) => {
+      response += data.toString('latin1')
+      if (answeredAt === null && response.includes('\r\n\r\n')) answeredAt = performance.now()
+    })
+    socket.on('close', () => void (closedAt = performance.now()))
+    socket.on('error', () => {})
+    const chunk = (bytes: Uint8Array) => {
+      socket.write(`${bytes.byteLength.toString(16)}\r\n`)
+      socket.write(Buffer.concat([bytes, Buffer.from('\r\n')]))
+    }
+    socket.write(
+      `POST ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: sse\r\nTransfer-Encoding: chunked\r\n\r\n`,
+    )
+    chunk(encodeSseRequestMetadata({ connId, streamRequest: true }))
+    let seq = 0
+    chunk(textFrame('before the end', ++seq))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const endedAt = await end()
+    // A writing page sends 64 KiB of text frames whenever its socket takes them, until the connection closes.
+    const big = textFrame(`after the end ${'x'.repeat(64 * 1024)}`, ++seq)
+    let writtenAtAnswer: number | null = null
+    let released: boolean | null = null
+    while (closedAt === null && performance.now() - endedAt < DEADLINE + 15_000) {
+      if (writing && !socket.writableNeedDrain) chunk(big)
+      await new Promise((resolve) => setTimeout(resolve, writing ? 5 : 50))
+      if (answeredAt === null) continue
+      writtenAtAnswer ??= socket.bytesWritten
+      // A second after the answer, the connection still open.
+      if (released === null && performance.now() - answeredAt > 1_000 && closedAt === null)
+        released = await collected(wire)
+    }
+    const head = response.split('\r\n\r\n')[0]?.split('\r\n') ?? []
+    const contentType = head.find((line) => /^content-type:/i.test(line))?.replace(/^content-type: */i, '') ?? null
+    const after = answeredAt === null ? null : answeredAt - endedAt
+    const takenPastAnswer = writtenAtAnswer === null ? null : socket.bytesWritten - writtenAtAnswer
+    const closedPastAnswer = closedAt === null || answeredAt === null ? null : closedAt - answeredAt
+    socket.destroy()
+    expect({
+      status: head[0],
+      contentType,
+      onTime: after !== null && after >= DEADLINE - 100 && after < DEADLINE * 1.5,
+      notRun: got.filter((message) => typeof message === 'string' && message.startsWith('after the end')),
+      // What the sockets' buffers take unread, a few MiB on loopback; a server that reads on takes 64 KiB each 5 ms.
+      inFlightOnly: takenPastAnswer !== null && takenPastAnswer < 16 * 1024 * 1024,
+      released,
+      closedByHost: closedPastAnswer !== null && closedPastAnswer < 10_000,
+    }).toEqual({
+      status: 'HTTP/1.1 400 Bad Request',
+      contentType: expect.stringMatching(RETRY),
+      onTime: true,
+      notRun: [],
+      inFlightOnly: true,
+      released: true,
+      closedByHost: true,
+    })
+  },
+  DEADLINE * 4 + 25_000,
 )
