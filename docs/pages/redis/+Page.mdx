@@ -104,7 +104,7 @@ It is `'may-have-run'` when the call may have taken effect, for example when the
 
 While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 
-When a replica takes over as the primary, the rooms on every server follow what the new primary holds, and `room.onChange()` fires with the room as the new primary holds it. Redis replicates asynchronously, so the new primary can lack the last writes the old one acknowledged, such as a `Room.updateMeta()` that resolved just before the failover.
+When a replica takes over as the primary, the rooms on every server catch up to what the new primary holds. Redis replicates asynchronously, so a write the old primary acknowledged can be lost, such as a `Room.updateMeta()` that resolved just before the failover.
 
 A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, it refuses the login (a wrong username or password), or it doesn't run a command the subscription needs, as its operator disabled or renamed it. That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access. While the server is a replica (`READONLY`), as during a failover, a subscription waits until a primary serves it again.
 
