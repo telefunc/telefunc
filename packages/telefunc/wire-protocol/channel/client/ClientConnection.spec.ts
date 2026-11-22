@@ -159,9 +159,10 @@ class ServerSocket {
   bufferedAmount = 0
   /** Whether it answers the page's PINGs. */
   answers = true
-  /** The RECONCILEs the page sent on it, and the seqs of its TEXT frames. */
+  /** The RECONCILEs the page sent on it, the seqs of its TEXT frames, and their texts in order. */
   readonly reconciles: ReconcilePayload[] = []
   readonly texts: number[] = []
+  readonly textOrder: string[] = []
 
   constructor() {
     ServerSocket.made.push(this)
@@ -171,7 +172,10 @@ class ServerSocket {
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
       if (frame.tag === TAG.PING && this.answers) queueMicrotask(() => this.deliver(encode.pong([])))
-      if (frame.tag === TAG.TEXT) this.texts.push(frame.seq)
+      if (frame.tag === TAG.TEXT) {
+        this.texts.push(frame.seq)
+        this.textOrder.push(frame.text)
+      }
       if (frame.tag !== TAG.RECONCILE) continue
       this.reconciles.push(frame.payload)
       ServerSocket.onReconcile(this, frame.payload)
@@ -351,6 +355,59 @@ describe("a WebSocket RECONCILE's deadline", () => {
     expect(opened).toEqual(ids)
     expect(lost).not.toHaveBeenCalled()
     expect(ServerSocket.made).toHaveLength(1)
+  })
+})
+
+describe("a page's channels on a live WebSocket", () => {
+  const realWebSocket = globalThis.WebSocket
+  afterEach(() => {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+    globalThis.WebSocket = realWebSocket
+    ServerSocket.made = []
+    ServerSocket.onReconcile = () => {}
+  })
+
+  /** A page's channels on one connection, over `ServerSocket`s: `add()` registers one, `open()` also runs the timers a
+   *  while. */
+  function pageOf() {
+    vi.useFakeTimers()
+    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    const connection = {
+      telefuncUrl: 'http://test.local/_telefunc',
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const pages: ClientChannel<string, string>[] = []
+    const add = () => {
+      const page = new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })
+      pages.push(page)
+      return page
+    }
+    const open = async () => {
+      const page = add()
+      await vi.advanceTimersByTimeAsync(100)
+      return page
+    }
+    return { pages, add, open }
+  }
+
+  test('the unacknowledged sends of two channels go again on the next wire in the order they were made', async () => {
+    const { pages, open } = pageOf()
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      socket.deliver(reconciledFor(reconcile))
+    }
+    const [a, b] = [await open(), await open()]
+    void b!.send('21')
+    void a!.send('11')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(ServerSocket.made[0]!.textOrder).toEqual(['"21"', '"11"'])
+    ServerSocket.made[0]!.drop()
+    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
+    expect(ServerSocket.made).toHaveLength(2)
+    expect(ServerSocket.made[1]!.textOrder).toEqual(['"21"', '"11"'])
+    for (const page of pages) page.abort()
   })
 })
 

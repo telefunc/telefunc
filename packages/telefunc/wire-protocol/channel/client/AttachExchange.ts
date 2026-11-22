@@ -232,7 +232,7 @@ class AttachExchange {
     { ixes, carriedFrom }: ReconcileInFlight,
     serverHas: Map<number, number>,
   ): { frames: OutboundFrame[]; channelsToOpen: MuxChannel[]; omitted: number[] } {
-    const frames: OutboundFrame[] = []
+    const replays: Replayed[] = []
     const channelsToOpen: MuxChannel[] = []
     const omitted: number[] = []
     for (const ix of ixes.keys()) {
@@ -247,10 +247,12 @@ class AttachExchange {
       }
       // The replay stops before the first seq the wire carries behind the RECONCILE.
       const carriedSeq = carriedFrom.get(ix) ?? Infinity
-      for (const frame of this.attachRecord(record, lastSeq, carriedSeq - 1)) frames.push(frame)
+      for (const replayed of this.attachRecord(record, lastSeq, carriedSeq - 1)) replays.push(replayed)
       if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
     }
-    return { frames, channelsToOpen, omitted }
+    // Across its channels, what the page sent goes again in the order it was sent.
+    replays.sort((a, b) => a.handed - b.handed)
+    return { frames: replays.map(({ frame }) => frame), channelsToOpen, omitted }
   }
 
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. False where it
@@ -273,7 +275,7 @@ class AttachExchange {
     // As `applyReconciled` does: its replay, then what it queued, which a RECONCILE out lets go at its RECONCILED, in
     // order with what the other channels queued meanwhile.
     const { transport } = this.owner
-    for (const frame of this.replayTo(record, lastSeq)) transport.sendFrame(frame)
+    for (const { frame } of this.replayTo(record, lastSeq)) transport.sendFrame(frame)
     if (!this.isReconciling) for (const frame of this.gate.drain((i) => i === ix)) transport.sendFrame(frame)
     if (opened && record.state.tag === 'open') {
       record.channel._onTransportOpen(transport.batched, transport.uplink, transport.downlink)
@@ -427,20 +429,22 @@ class AttachExchange {
   // ── The RECONCILED ──
 
   /** What a channel the RECONCILE named and the server attached replays to it, its state brought to the server's. */
-  private attachRecord(record: ChannelRecord, lastSeq: number, throughSeq: number): OutboundFrame[] {
+  private attachRecord(record: ChannelRecord, lastSeq: number, throughSeq: number): Replayed[] {
     if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
     if (record.state.tag === 'pending') this.channels.open(record)
     return this.replayTo(record, lastSeq, throughSeq)
   }
 
-  /** What the server lacks through `throughSeq`: the replay, or an ERROR ending the channel if the replay lost some. */
-  private replayTo(record: ChannelRecord, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
+  /** What the server lacks through `throughSeq`: the replay, or an ERROR ending the channel if the replay lost some,
+   *  which goes ahead of any replay. */
+  private replayTo(record: ChannelRecord, lastSeq: number, throughSeq = Infinity): Replayed[] {
     record.replay.acknowledge(lastSeq)
     const missed = record.replay.getAfter(lastSeq, throughSeq)
-    if (missed !== null) return missed.map((frame) => ({ kind: 'released', frame }))
+    if (missed !== null)
+      return missed.frames.map((frame, i) => ({ frame: { kind: 'released', frame }, handed: missed.handed[i]! }))
     // One the server ended needs nothing more.
     if (record.state.tag === 'closed' && record.state.delivered) return []
-    return [this.loseChannel(record)]
+    return [{ frame: this.loseChannel(record), handed: 0 }]
   }
 
   /** Ends the channel on both ends, dropping its queue; the ERROR isn't replayed, as the next reconcile sends one. */
@@ -451,6 +455,9 @@ class AttachExchange {
     return { kind: 'control', frame }
   }
 }
+
+/** A frame a replay sends again, with when the page first handed it among all its channels' frames. */
+type Replayed = { frame: OutboundFrame; handed: number }
 
 function appendReconcileBatch(target: OutboundFrame[], reconcileBatch: ReconcileBatch): void {
   target.push(reconcileBatch.reconcileFrame)

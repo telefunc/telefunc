@@ -4,6 +4,9 @@ import { replayKindOf, type ReplayKind } from '../../wire/tags.js'
 import { assert } from '../../../utils/assert.js'
 import { SeqQueue } from '../SeqQueue.js'
 
+/** The frames every channel of the page handed, counted in the order it handed them. */
+let handed = 0
+
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
 class ReplayBuffer {
   /** Each kind's queue, made at its first frame. */
@@ -37,7 +40,7 @@ class ReplayBuffer {
     this.pushedSeq = seq
     const kind = replayKindOf(frame[0]!)
     const queue = (this.queues[kind] ??= new ReplayQueue(this.budgets[kind]))
-    queue.push(seq, frame)
+    queue.push(seq, frame, ++handed)
   }
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -48,15 +51,16 @@ class ReplayBuffer {
     for (const kind of REPLAY_KINDS) this.queues[kind]?.acknowledge(lastSeq)
   }
 
-  /** The frames with afterSeq < seq <= throughSeq, by seq, or null if it dropped one of them. */
-  getAfter(afterSeq: number, throughSeq: number): Uint8Array<ArrayBuffer>[] | null {
-    let run: Run = { seqs: [], frames: [] }
+  /** The frames with afterSeq < seq <= throughSeq, by seq, each with when the page handed it among all its channels'
+   *  frames, or null if it dropped one of them. */
+  getAfter(afterSeq: number, throughSeq: number): { frames: Uint8Array<ArrayBuffer>[]; handed: number[] } | null {
+    let run: Run = { seqs: [], frames: [], handed: [] }
     for (const kind of REPLAY_KINDS) {
       const queue = this.queues[kind]
       if (queue) run = mergeBySeq(run, queue.getAfter(afterSeq, throughSeq))
     }
     // Every seq through the highest pushed was pushed, each to one queue, so one missing was dropped.
-    return run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq ? run.frames : null
+    return run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq ? run : null
   }
 
   get length(): number {
@@ -73,7 +77,7 @@ class ReplayBuffer {
 
 const REPLAY_KINDS: readonly ReplayKind[] = ['text', 'binary', 'closing']
 
-type Run = { seqs: number[]; frames: Uint8Array<ArrayBuffer>[] }
+type Run = { seqs: number[]; frames: Uint8Array<ArrayBuffer>[]; handed: number[] }
 
 /** Merges two sorted runs by their stored seq values. */
 function mergeBySeq(a: Run, b: Run): Run {
@@ -82,24 +86,29 @@ function mergeBySeq(a: Run, b: Run): Run {
   const length = a.frames.length + b.frames.length
   const seqs: number[] = new Array(length)
   const frames: Uint8Array<ArrayBuffer>[] = new Array(length)
+  const handed: number[] = new Array(length)
   let ai = 0
   let bi = 0
   for (let ri = 0; ri < length; ri++) {
     if (bi >= b.frames.length || (ai < a.frames.length && a.seqs[ai]! <= b.seqs[bi]!)) {
       seqs[ri] = a.seqs[ai]!
+      handed[ri] = a.handed[ai]!
       frames[ri] = a.frames[ai++]!
     } else {
       seqs[ri] = b.seqs[bi]!
+      handed[ri] = b.handed[bi]!
       frames[ri] = b.frames[bi++]!
     }
   }
-  return { seqs, frames }
+  return { seqs, frames, handed }
 }
 
 /** One kind's frames, oldest first, within a byte budget; `ReplayBuffer` keeps one per replay kind, made at its first
  *  frame. */
 class ReplayQueue {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
+  /** When the page handed each frame, among all its channels' frames. */
+  private readonly handed = new SeqQueue<number>()
   private totalBytes = 0
   private readonly maxBytes: number
 
@@ -112,34 +121,39 @@ class ReplayQueue {
   }
 
   /** Stores an encoded frame and evicts the oldest while over the budget; none larger than the budget. */
-  push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
+  push(seq: number, frame: Uint8Array<ArrayBuffer>, handed: number): void {
     const bytes = frame.byteLength
     if (bytes > this.maxBytes) return
     this.frames.push(seq, frame)
+    this.handed.push(seq, handed)
     this.totalBytes += bytes
     let evicted = 0
     while (this.totalBytes > this.maxBytes) this.totalBytes -= this.frames.at(evicted++).byteLength
     this.frames.dropOldest(evicted)
+    this.handed.dropOldest(evicted)
   }
 
   acknowledge(lastSeq: number): void {
     const acknowledged = this.frames.indexAfter(lastSeq)
     for (let i = 0; i < acknowledged; i++) this.totalBytes -= this.frames.at(i).byteLength
     this.frames.dropOldest(acknowledged)
+    this.handed.dropOldest(acknowledged)
   }
 
   /** The stored frames with afterSeq < seq <= throughSeq. */
   getAfter(afterSeq: number, throughSeq: number): Run {
-    const run: Run = { seqs: [], frames: [] }
+    const run: Run = { seqs: [], frames: [], handed: [] }
     for (let i = this.frames.indexAfter(afterSeq); i < this.frames.length && this.frames.seqAt(i) <= throughSeq; i++) {
       run.seqs.push(this.frames.seqAt(i))
       run.frames.push(this.frames.at(i))
+      run.handed.push(this.handed.at(i))
     }
     return run
   }
 
   dispose(): void {
     this.frames.clear()
+    this.handed.clear()
     this.totalBytes = 0
   }
 }
