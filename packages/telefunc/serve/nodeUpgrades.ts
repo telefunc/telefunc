@@ -51,7 +51,9 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
  *  server's current one: it upgrades Telefunc's handshake, and the server's own callback (the app's, or Node's default)
  *  decides every other request with `Upgrade`, as on the same server without Telefunc's listener. So Node's default
  *  upgrades a request only where another `upgrade` listener is there to take it, and sends any other to the app's
- *  `request` listeners. */
+ *  `request` listeners. Node offers no way to ask what a callback decides without one of the listeners, so while the
+ *  server's own callback runs, on the server as Node calls it, the server's `listenerCount` leaves Telefunc's listener
+ *  out; its `listeners('upgrade')` and `rawListeners('upgrade')` still show it. */
 function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
@@ -59,7 +61,22 @@ function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServ
     const handshake = readHandshake(req)
     handshakes.set(req, handshake)
     if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
-    return Boolean(own.call(taken.withoutTelefunc, req))
+    const before = Object.getOwnPropertyDescriptor(server, 'listenerCount')
+    const count = server.listenerCount
+    const withoutTelefunc = (...args: [event: string | symbol, listener?: (...args: never[]) => void]) => {
+      const [event, listener] = args
+      if (event !== 'upgrade' || (listener !== undefined && listener !== taken.listener))
+        return count.call(server, ...args)
+      if (listener === taken.listener) return 0
+      return count.call(server, 'upgrade') - count.call(server, 'upgrade', taken.listener)
+    }
+    Object.defineProperty(server, 'listenerCount', { value: withoutTelefunc, configurable: true, writable: true })
+    try {
+      return Boolean(own.call(server, req))
+    } finally {
+      if (before === undefined) Reflect.deleteProperty(server, 'listenerCount')
+      else Object.defineProperty(server, 'listenerCount', before)
+    }
   }
   server.shouldUpgradeCallback = callback
   taken.callback = callback
@@ -128,18 +145,11 @@ function takeUpgrades(httpServer: HttpServer): void {
     sockets.set(request, socket)
     adapter.handleUpgrade(req, socket, head, request)
   }
-  const listenerCount = (event: string | symbol, listener?: (...args: never[]) => void) => {
-    if (event !== 'upgrade' || (listener !== undefined && listener !== onUpgrade))
-      return httpServer.listenerCount(event, listener)
-    if (listener === onUpgrade) return 0
-    return httpServer.listenerCount('upgrade') - httpServer.listenerCount('upgrade', onUpgrade)
-  }
   const taken: TakenServer = {
     server: httpServer,
     listener: onUpgrade,
     callback: undefined,
     own: undefined,
-    withoutTelefunc: Object.create(httpServer, { listenerCount: { value: listenerCount } }),
     holdsRegistry: true,
   }
   registeredServers.add(httpServer)
