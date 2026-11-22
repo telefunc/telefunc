@@ -15,6 +15,7 @@ import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { frameworkRequest } from './frameworkRequest.fixture.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
+import { Channel } from '../wire-protocol/channel/server/ServerChannel.js'
 
 // The app's telefunctions (requestBody.telefunc.js), which Telefunc loads from `config.telefuncFiles` as an app's.
 const file = '/requestBody.telefunc.js'
@@ -78,12 +79,13 @@ async function settle(turns = 200) {
   for (let i = 0; i < turns; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
-/** A binary call to `ignoresBlob` with a `Blob` of `size` bytes: `[u32 length][metadata][the Blob's bytes]`. */
-function ignoredBlobCall(size: number): Uint8Array {
+/** A binary call to `name` (`ignoresBlob` by default) with a `Blob` of `size` bytes: `[u32 length][metadata][the Blob's
+ *  bytes]`. */
+function ignoredBlobCall(size: number, name = 'ignoresBlob'): Uint8Array {
   const metadata = encoder.encode(
     JSON.stringify({
       file,
-      name: 'ignoresBlob',
+      name,
       args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size, type: '' })}`],
     }),
   )
@@ -141,6 +143,43 @@ for (const via of vias) {
     },
   )
 }
+
+test('a call that returns a Channel and leaves its Blob unread, then a second call on the same connection: the second is answered once the channel ends (Telefunc given a Node request)', async () => {
+  const listening = ports.get('Node request')
+  if (!listening) throw new Error('no server')
+  const { server, port } = listening
+  calls.length = 0
+  const made: Channel[] = []
+  const onChannel = (holder: { channel?: Channel }) => {
+    holder.channel = new Channel()
+    made.push(holder.channel)
+  }
+  process.on('requestBody.telefunc:channel', onChannel)
+  const socket = await connected(port)
+  const firstTaken = nextCall(server)
+  const first = ignoredBlobCall(512 * 1024, 'returnsChannelIgnoringBlob')
+  const second = encoder.encode(JSON.stringify({ file, name: 'hello', args: [] }))
+  for (const part of [head(port, 'bin', first.length), first, head(port, 'txt', second.length), second]) {
+    socket.write(part)
+  }
+  const firstAnswer = await firstTaken
+  if (!firstAnswer.writableFinished) await once(firstAnswer, 'finish')
+  await settle()
+  const answered = () => calls.map((res) => ({ status: res.statusCode, answered: res.writableFinished }))
+  // The channel holds the request, so its files stay readable and its body unread.
+  const whileHeld = answered()
+  made[0]?.abort()
+  await settle()
+  process.off('requestBody.telefunc:channel', onChannel)
+  expect({ whileHeld, ended: answered() }).toEqual({
+    whileHeld: [{ status: 200, answered: true }],
+    ended: [
+      { status: 200, answered: true },
+      { status: 200, answered: true },
+    ],
+  })
+  socket.destroy()
+})
 
 test('a call answered while its client keeps sending the Blob it left unread: the connection ends at the host request timeout', async () => {
   // Node checks its connections' request timeout every `connectionsCheckingInterval`, so the cut comes that often.

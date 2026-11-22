@@ -42,3 +42,10 @@ export async function keepsBlob(blob) {
   process.emit('requestBody.telefunc:kept', blob)
   return 'kept'
 }
+
+/** Answers with a Channel the spec makes (and ends), leaving its `Blob` unread: the channel holds the request. */
+export async function returnsChannelIgnoringBlob() {
+  const made = {}
+  process.emit('requestBody.telefunc:channel', made)
+  return made.channel
+}
