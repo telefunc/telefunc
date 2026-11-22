@@ -5,6 +5,7 @@ import { BackendCall } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellsExchange,
+  ControlRecord,
   CellsExchangeResult,
   CommitAccepted,
   CommitResult,
@@ -113,8 +114,13 @@ class RedisRoomDriver implements RoomDriver {
     return await this.connection.run(REDIS_COMMANDS.readExpiringCells, { roomId, inc, keys })
   }
 
-  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange })
+  compareExchangeCells(
+    roomId: string,
+    inc: string,
+    exchange: CellsExchange,
+    record?: ControlRecord,
+  ): Promise<CellsExchangeResult> {
+    return this.connection.run(REDIS_COMMANDS.cellsExchange, { roomId, inc, exchange, record })
   }
 
   /** This process plans the operation over the cells it reads, and one script applies the plan while those cells are

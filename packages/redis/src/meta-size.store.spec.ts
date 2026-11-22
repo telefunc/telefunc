@@ -12,7 +12,7 @@ import { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
-import { getRoomPlane, type CellsExchange } from '@telefunc/room/backend'
+import { getRoomPlane, type CellsExchange, type ControlRecord } from '@telefunc/room/backend'
 import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
@@ -87,8 +87,8 @@ function controlCommits(id: string): { bytes: number; seq: string }[] {
   return commits
 }
 
-/** Until released, the first cells exchange of room `id` that writes the meta key `big` waits; the length its record
- *  count carries, once it reached the store. */
+/** Until released, the first cells exchange of room `id` that writes the meta key `big` waits; the length its control
+ *  record carries, once it reached the store. */
 function holdBigWrite(id: string) {
   const { compareExchangeCells } = RedisRoomDriver.prototype
   const held = Promise.withResolvers<void>()
@@ -100,14 +100,15 @@ function holdBigWrite(id: string) {
     roomId: string,
     inc: string,
     exchange: CellsExchange,
+    record?: ControlRecord,
   ) {
     if (holding && roomId === id && exchange.mutations.some(({ key }) => key.endsWith('"big"'))) {
       holding = false
-      for (const count of exchange.counts ?? []) if ('completes' in count) carried.bytes = count.completes.bytes
+      if (record !== undefined) carried.bytes = record.bytes
       held.resolve()
       await release.promise
     }
-    return await compareExchangeCells.call(this, roomId, inc, exchange)
+    return await compareExchangeCells.call(this, roomId, inc, exchange, record)
   })
   return { held: held.promise, release: () => release.resolve(), carried }
 }

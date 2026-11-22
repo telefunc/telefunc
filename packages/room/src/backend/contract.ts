@@ -3,7 +3,7 @@ export type {
   CellMutation,
   CellExpectation,
   CellCount,
-  RecordCount,
+  ControlRecord,
   CellCounter,
   CellsExchange,
   CellsExchangeResult,
@@ -149,14 +149,14 @@ type CellCounter = { value: number; changedAt: number }
 /** Adds `delta` to a counter cell. An absent counter stays absent, unless `create` makes it at `delta`. */
 type CellCount = { key: string; delta: number; create?: true }
 
-/** A count whose new value completes a record its caller commits on `completes.lane` once the exchange committed: the
- *  record is `completes.bytes` long besides the value's decimal digits. It creates its counter when absent, so the
- *  exchange always gives the value. A store whose commit on that lane would refuse the completed record refuses the
- *  exchange, before its first write, with the error that commit would throw. */
-type RecordCount = { key: string; delta: number; create: true; completes: { lane: LaneId; bytes: number } }
-
 /** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
-type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: (CellCount | RecordCount)[] }
+type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
+
+/** The control lane's record the caller commits once its exchange has committed, numbered by the value the exchange's
+ *  count of `counter` leaves: the record is `bytes` long besides that value's decimal digits. A store whose commit on the
+ *  control lane refuses a record over its size refuses the exchange instead, before its first write, with the error
+ *  that commit would throw. The caller owns the match between `bytes` and the record it then commits. */
+type ControlRecord = { counter: string; bytes: number }
 
 /** A committed exchange returns each counted counter as it left it. */
 type CellsExchangeResult =
@@ -253,7 +253,13 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *    Any other key written or removed during the read may or may not come.
    *  - A `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
-  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
+  /** With `record`, the control record the caller commits once the exchange has committed (`ControlRecord`). */
+  compareExchangeCells(
+    roomId: string,
+    inc: string,
+    exchange: CellsExchange,
+    record?: ControlRecord,
+  ): Promise<CellsExchangeResult>
   /** Runs `operation`'s plan while `inc` is open, and applies the writes of the run it validates:
    *  - The plan may run more than once. Redis runs it in this process, again after a run read a cell it hadn't read
    *    yet, and again from the start when a cell it read changed before the writes applied. Cloudflare and memory run

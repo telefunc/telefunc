@@ -20,7 +20,7 @@ import {
   CELL_PAGE_SIZE,
   type CellMutation,
   type CellsExchangeResult,
-  type RecordCount,
+  type ControlRecord,
   type RoomOperation,
 } from '../../backend/contract.js'
 import { assert } from '../../utils/assert.js'
@@ -224,13 +224,19 @@ async function writeRoomMeta(
       const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
       const prefix = roomMetaGenPrefix(0)
       const sized = sizedUpdate(roomId, 1, (seq) => ({ __r: 'update', seq, meta }))
-      const result = await store.compareExchangeCells(roomId, inc, {
-        expect: [{ key: META_SEQ_CELL_KEY, version: null }],
-        mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
-        counts: [sized.count],
-      })
+      const result = await store.compareExchangeCells(
+        roomId,
+        inc,
+        {
+          expect: [{ key: META_SEQ_CELL_KEY, version: null }],
+          mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
+          counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
+        },
+        sized.record,
+      )
       return sized.committed(result)
     }
+    const counts = [{ key: META_SEQ_CELL_KEY, delta: 1 }]
     const expect = [{ key: META_GEN_CELL_KEY, version: read.versions.get(META_GEN_CELL_KEY)! }]
     const count = decodeCellCounter(seq).value
     const gen = decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!)
@@ -240,7 +246,7 @@ async function writeRoomMeta(
       const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
       const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
       const sized = sizedUpdate(roomId, count + 1, (seq) => ({ __r: 'update', seq, meta }))
-      const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts: [sized.count] })
+      const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
       return result.kind === 'conflict' ? null : sized.committed(result)
     }
     const prefix = roomMetaGenPrefix(gen)
@@ -249,7 +255,7 @@ async function writeRoomMeta(
     const changes = metaChanges(write.merge, prefix, count, merging)
     const mutations = changes.map((change) => changeMutation(prefix, change))
     const sized = sizedUpdate(roomId, count + 1, (seq) => ({ __r: 'update', seq, changes }))
-    const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts: [sized.count] })
+    const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
     return sized.committed(result)
   })
   if (update === null) return
@@ -262,28 +268,26 @@ async function writeRoomMeta(
   acceptedOrThrow(roomId, commit)
 }
 
-/** An update's count of `meta:seq`, and the update's bytes once its exchange committed. The update is encoded once, at
- *  the `meta:seq` its read predicts (`predicted`), and its count carries that encoding's length besides the seq's
- *  digits: the store refuses, before its first write, an update its commit on the control lane would refuse. When
- *  merges committed between the read and the exchange, the exchange leaves another seq, and the update is encoded again
- *  at it: the store took that length, as the length besides the digits of the seq it wrote. */
+/** An update as the control record of its exchange's count of `meta:seq`, and the update's bytes once the exchange
+ *  committed. The update is encoded once, at the `meta:seq` its read predicts (`predicted`), and the record is that
+ *  encoding's length besides the seq's digits: the store refuses, before its first write, an update its commit on the
+ *  control lane would refuse. When merges committed between the read and the exchange, the exchange leaves another
+ *  seq, and the update is encoded again at it: the store took that length, as the length besides the digits of the seq
+ *  it wrote. */
 function sizedUpdate(
   roomId: string,
   predicted: number,
   update: (seq: number) => RoomMetaUpdate,
-): { count: RecordCount; committed(result: CellsExchangeResult): Uint8Array | typeof EXCHANGE_CONFLICT } {
+): { record: ControlRecord; committed(result: CellsExchangeResult): Uint8Array | typeof EXCHANGE_CONFLICT } {
   const bytes = encodeRoomRecord(update(predicted))
-  const completes: RecordCount['completes'] = {
-    lane: { kind: 'control' },
-    bytes: bytes.byteLength - String(predicted).length,
-  }
   return {
-    count: { key: META_SEQ_CELL_KEY, delta: 1, create: true, completes },
+    record: { counter: META_SEQ_CELL_KEY, bytes: bytes.byteLength - String(predicted).length },
     committed(result) {
       if (result.kind === 'stale-incarnation') throw roomClosedError(roomId)
       if (result.kind === 'conflict') return EXCHANGE_CONFLICT
       const counter = result.counters.get(META_SEQ_CELL_KEY)
-      assert(counter !== undefined) // a count that creates its counter always gives it
+      // The first write creates `meta:seq`, and a later one counts it while `meta:gen`, written with it, is as read.
+      assert(counter !== undefined)
       return counter.value === predicted ? bytes : encodeRoomRecord(update(counter.value))
     },
   }

@@ -19,7 +19,7 @@ import type {
   CellSelector,
   CellsExchange,
   CellsExchangeResult,
-  RecordCount,
+  ControlRecord,
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
@@ -97,8 +97,8 @@ type Hold = string
 
 const TF_MAX_INTEGER = Number.MAX_SAFE_INTEGER
 
-/** How the cells exchange's reply starts when it refuses a count whose value would take more digits than the record it
- *  completes has left, before its first write; then how many bytes over its lane's limit the record would be. */
+/** How the cells exchange's reply starts when it refuses its control record, whose numbering value would take more
+ *  digits than were left, before its first write; then how many bytes over the limit the record would be. */
 const RECORD_REFUSAL = 'TFOVERFLOW'
 
 /** Lua that refuses the call: `word`, then `detail`, a Lua string expression only the refusal evaluates. */
@@ -520,8 +520,9 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 // head precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
-//         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta,
-//         create ('1' or '') and, for a count that completes a record, how many digits its value may take ('' else)
+//         and value, per expected cell its key and version ('' while absent), per counted cell its key, delta and
+//         create ('1' or ''), then, with a control record, which counted cell numbers it (from 0) and how many digits
+//         that cell's value may take
 const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
@@ -542,16 +543,18 @@ end
 tf_cell_writes_allowed()
 tf_allowed('SADD', incarnation_keys_key, '')
 ${incrementableLua('rev_key')}
-for at = first_counted, first_counted + 4 * counted - 1, 4 do
+for at = first_counted, first_counted + 3 * counted - 1, 3 do
   local delta = tonumber(ARGV[at + 1])
   ${countableLua('values_key', 'ARGV[at]', 'delta')}
-  -- A count that completes a record: the record's commit would refuse it when the value takes more digits than left.
-  local left = ARGV[at + 3]
-  if left ~= '' then
-    local counter = tf_checked[ARGV[at]].counter
-    local over = #string.format('%d', (counter and counter.value or 0) + delta) - tonumber(left)
-    if over > 0 then error({ err = '${RECORD_REFUSAL} ' .. over }) end
-  end
+end
+-- The control record's commit would refuse it when the value numbering it takes more digits than were left.
+local record = first_counted + 3 * counted
+if ARGV[record] then
+  local at = first_counted + 3 * tonumber(ARGV[record])
+  local counter = tf_checked[ARGV[at]].counter
+  local digits = #string.format('%d', (counter and counter.value or 0) + tonumber(ARGV[at + 1]))
+  local over = digits - tonumber(ARGV[record + 1])
+  if over > 0 then error({ err = '${RECORD_REFUSAL} ' .. over }) end
 end
 -- The keys the writes below reach that no command above read.
 ${holdsCheckLua('incarnation_keys_key', CELL_HOLDS[2])}
@@ -563,7 +566,7 @@ for at = 5, first_expected - 1, 3 do
   tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
 end
 local reply = {'committed'}
-for at = first_counted, first_counted + 4 * counted - 1, 4 do
+for at = first_counted, first_counted + 3 * counted - 1, 3 do
   tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, reply)
 end
 redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, values_key, versions_key)
@@ -1418,7 +1421,10 @@ const REDIS_COMMANDS = {
     holds: CELL_HOLDS,
     lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 6,
-    invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
+    invoke: (
+      prefix,
+      { roomId, inc, exchange, record }: RoomInc & { exchange: CellsExchange; record: ControlRecord | undefined },
+    ) => {
       const { counts = [] } = exchange
       return {
         keys: [
@@ -1438,12 +1444,10 @@ const REDIS_COMMANDS = {
             bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
           ),
           ...exchange.expect.flatMap(({ key, version }) => [key, version ?? '']),
-          ...counts.flatMap((count) => [
-            count.key,
-            String(count.delta),
-            count.create ? '1' : '',
-            'completes' in count ? String(digitsLeft(count.completes)) : '',
-          ]),
+          ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
+          ...(record === undefined
+            ? []
+            : [String(counts.findIndex(({ key }) => key === record.counter)), String(digitsLeft(record))]),
         ],
       }
     },
@@ -1672,16 +1676,14 @@ function overflowError(bytes: number): ChannelOverflowError {
   )
 }
 
-/** How many digits the value of a count may take, for the record it completes to stay committable on its lane: the
- *  lane's limit less the record's other bytes. Only Room's own lanes take such a record, whose whole length counts as
- *  published (`assertCommittable`), so their limit is a length. */
-function digitsLeft({ lane, bytes }: RecordCount['completes']): number {
-  assert(lane.kind !== 'binary' && lane.kind !== 'semantic')
+/** How many digits the value numbering a control record may take, for the record to stay committable: the limit less
+ *  the record's other bytes. A control record's whole length counts as published (`assertCommittable`). */
+function digitsLeft({ bytes }: ControlRecord): number {
   return PUBLISH_MAX_BYTES - bytes
 }
 
-/** The error the commit of a record `over` bytes past its lane's limit fails with: the cells exchange's refusal of a
- *  count whose value would take more digits than were left (`RECORD_REFUSAL`). */
+/** The error the commit of a control record `over` bytes past the limit fails with: the cells exchange's refusal of
+ *  its control record (`RECORD_REFUSAL`). */
 function recordOverflowError(over: number): ChannelOverflowError {
   return overflowError(PUBLISH_MAX_BYTES + over)
 }

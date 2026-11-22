@@ -4,6 +4,7 @@ export type { RoomReads }
 import { assertDriverOrdering, type BackendCall, type OrderingInfo } from 'telefunc/__internal'
 import type {
   CellsExchange,
+  ControlRecord,
   CellsExchangeResult,
   CommitOptions,
   CommitResult,
@@ -55,9 +56,14 @@ class RoomStore {
     return this.driver.compareExchangeHead(roomId, expected, next)
   }
 
-  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    assertCellsExchangeWellFormed(exchange)
-    return this.driver.compareExchangeCells(roomId, inc, exchange)
+  compareExchangeCells(
+    roomId: string,
+    inc: string,
+    exchange: CellsExchange,
+    record?: ControlRecord,
+  ): Promise<CellsExchangeResult> {
+    assertCellsExchangeWellFormed(exchange, record)
+    return this.driver.compareExchangeCells(roomId, inc, exchange, record)
   }
 
   async commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
@@ -116,9 +122,14 @@ class CallStore extends RoomStore {
     return this.account.write(() => this.driver.compareExchangeHead(roomId, expected, next))
   }
 
-  override compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    assertCellsExchangeWellFormed(exchange)
-    return this.account.write(() => this.driver.compareExchangeCells(roomId, inc, exchange))
+  override compareExchangeCells(
+    roomId: string,
+    inc: string,
+    exchange: CellsExchange,
+    record?: ControlRecord,
+  ): Promise<CellsExchangeResult> {
+    assertCellsExchangeWellFormed(exchange, record)
+    return this.account.write(() => this.driver.compareExchangeCells(roomId, inc, exchange, record))
   }
 
   override commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
@@ -154,9 +165,9 @@ class CallStore extends RoomStore {
 }
 
 /** Every cells exchange is checked here: a counted cell is counted once and isn't also written, which a driver's check
- *  of each count before the exchange's first write rests on. */
-function assertCellsExchangeWellFormed(exchange: CellsExchange): void {
-  const malformed = malformedCount(exchange)
+ *  of each count before the exchange's first write rests on, and a control record is numbered by one of its counts. */
+function assertCellsExchangeWellFormed(exchange: CellsExchange, record: ControlRecord | undefined): void {
+  const malformed = malformedCount(exchange) ?? (record === undefined ? null : malformedRecord(exchange, record))
   assert(malformed === null, malformed)
 }
 
@@ -166,12 +177,14 @@ function malformedCount({ mutations, counts = [] }: CellsExchange): string | nul
     if (counts.findIndex((other) => other.key === key) < i) return `cells exchange: ${key} is counted twice`
     if (mutations.some((mutation) => mutation.key === key)) return `cells exchange: ${key} is both counted and written`
   }
-  for (const count of counts) {
-    if (!('completes' in count)) continue
-    const { bytes } = count.completes
-    if (!Number.isSafeInteger(bytes) || bytes < 0)
-      return `cells exchange: ${count.key} completes a record of ${bytes} bytes`
-  }
+  return null
+}
+
+/** What makes the control record one no caller makes, or null. */
+function malformedRecord({ counts = [] }: CellsExchange, { counter, bytes }: ControlRecord): string | null {
+  if (!counts.some(({ key }) => key === counter))
+    return `cells exchange: its record is numbered by ${counter}, uncounted`
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return `cells exchange: its record is ${bytes} bytes long`
   return null
 }
 
