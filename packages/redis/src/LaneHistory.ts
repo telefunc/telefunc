@@ -242,7 +242,8 @@ class LaneHistory {
   private resume(route: LaneRoute, start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
     let rest = early
     if (start.place > this.last) {
-      const arrived = early.filter((frame) => frame.place > this.last && frame.place <= start.place)
+      // From the lowest: below `last`, a history the lane never saw can have reached the new subscription too.
+      const arrived = early.filter((frame) => frame.place <= start.place)
       rest = early.filter((frame) => !arrived.includes(frame))
       let missed = 0
       for (const frame of arrived.sort((a, b) => a.place - b.place)) {

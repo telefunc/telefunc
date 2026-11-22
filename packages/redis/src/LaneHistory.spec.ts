@@ -192,6 +192,21 @@ describe('LaneHistory', () => {
     }
   })
 
+  it('on a resume ahead to a history it never saw, delivers the early frames below its last place too, in order', () => {
+    const log: string[] = []
+    const E = route(log)
+    const A = new Node()
+    const history = lane(E)
+    history.establish(E, fresh, [], false, E.pass)
+    E.offer(history, A.commit('x1', E))
+    // Restarted empty: two commits of the new history reached the new subscription before its start read.
+    const B = new Node()
+    const early = [B.commit('y1', E), B.commit('y2', E)]
+    history.establish(E, B.start(), early, true, E.pass)
+    E.offer(history, B.commit('y3', E))
+    expect(log).toEqual(['x1', 'lost null', 'y1 rewound', 'y2', 'y3'])
+  })
+
   it('on a resume, counts what it missed ahead, waits at a place it knows, and reports a start it doesn’t', () => {
     const log: string[] = []
     const E = route(log)
