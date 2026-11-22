@@ -153,9 +153,11 @@ type CellCount = { key: string; delta: number; create?: true }
 type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
 
 /** The control lane's record the caller commits once its exchange has committed, numbered by the value the exchange's
- *  count of `counter` leaves: the record is `bytes` long besides that value's decimal digits. A store whose commit on the
- *  control lane refuses a record over its size refuses the exchange instead, before its first write, with the error
- *  that commit would throw. The caller owns the match between `bytes` and the record it then commits. */
+ *  count of `counter` leaves: the record is `bytes` long besides that value's decimal digits. The Redis store refuses
+ *  an exchange whose record its commit on the control lane would refuse, before its first write, with the error that
+ *  commit would throw. The in-memory store has no size rule. The Cloudflare store checks no size: its SQLite refuses a
+ *  cell over its limit inside the exchange's transaction, which then writes nothing, and the platform refuses an RPC
+ *  argument over 32 MiB. The caller owns the match between `bytes` and the record it then commits. */
 type ControlRecord = { counter: string; bytes: number }
 
 /** A committed exchange returns each counted counter as it left it. */

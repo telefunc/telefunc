@@ -104,9 +104,9 @@ class CloudflareRoomDriver implements RoomDriver {
     return wire.kind === 'accepted' ? acceptedCommit(lane, wire) : wire
   }
 
-  /** Checks no length. A commit on its own keeps no row of its payload, or rows of 1.5 MB at most where it is retained,
-   *  but a cell, and an operation's commit while it waits in its handoff row, is one value in the authority's SQLite
-   *  storage, which refuses a value over its limit with `SQLITE_TOOBIG` inside the write's transaction. */
+  /** Checks no length. A commit on its own keeps no row of its payload, or payload chunks of up to 1.5 MB where it is
+   *  retained, but a cell, and an operation's commit while it waits in its handoff row, is one value in the authority's
+   *  SQLite storage, which refuses a value over its limit with `SQLITE_TOOBIG` inside the write's transaction. */
   assertCommittable(): void {}
 
   /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. An

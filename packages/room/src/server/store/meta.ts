@@ -270,10 +270,10 @@ async function writeRoomMeta(
 
 /** An update as the control record of its exchange's count of `meta:seq`, and the update's bytes once the exchange
  *  committed. The update is encoded once, at the `meta:seq` its read predicts (`predicted`), and the record is that
- *  encoding's length besides the seq's digits: the store refuses, before its first write, an update its commit on the
- *  control lane would refuse. When merges committed between the read and the exchange, the exchange leaves another
- *  seq, and the update is encoded again at it: the store took that length, as the length besides the digits of the seq
- *  it wrote. */
+ *  encoding's length besides the seq's digits: the Redis store refuses, before its first write, an update its commit
+ *  on the control lane would refuse (`ControlRecord` says what each store does). When merges committed between the
+ *  read and the exchange, the exchange leaves another seq, and the update is encoded again at it: the store took that
+ *  length, as the length besides the digits of the seq it wrote. */
 function sizedUpdate(
   roomId: string,
   predicted: number,
