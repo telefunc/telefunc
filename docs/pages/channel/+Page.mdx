@@ -725,8 +725,7 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are held and delivered in order on reconnect, up to the default per-channel limit of 320 MiB, within <Link href="/channel-config">`maxMemory`</Link>.
-- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`.
-- A connection attempt that gets no answer within 3 seconds, or three times as long as the last answered one took, is given up and tried again, each next one given twice as long.
+- Messages lost in the disconnect are resent after reconnect, if the client is back within `reconnectTimeout`. Telefunc keeps trying until then, and an attempt that gets no answer doesn't hold up the next.
 - Otherwise, the channel closes with `NetworkError`, as `ChannelCloseUnknownError` during a close, unless the end that decides already has the other end's result (see <Link href="#how-a-channel-ends" />).
 - A `BroadcastChannel` holds up to the default per-channel limit of 320 MiB of what's published while its client is away, and closes with `ChannelOverflowError` past that. A lossy one holds only the newest, and `info.seq` shows the jump.
 - While its client is away, a `Channel` keeps the newest `lossy` send between two sends without `lossy`.
