@@ -260,8 +260,9 @@ class SseServerTransport {
    *  lands before the stream-response POST. */
   private readonly pendingWires = new Map<string, Set<(wire: SseWire | null) => void>>()
   /** Each closed wire's session, for `connectTtl` from its close, for the page's close POST: a page never reuses a
-   *  connId, so meanwhile a POST for one is refused `retry` at once. */
-  private readonly closedWires = new Map<string, SessionHold | null>()
+   *  connId, so meanwhile a POST for one is refused `retry` at once. Each record is its own, so that the end of an older
+   *  wire's time removes no newer wire's of the same connId. */
+  private readonly closedWires = new Map<string, { hold: SessionHold | null }>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseWire> = {
     getConnId: (wire) => wire.connId,
@@ -418,7 +419,7 @@ class SseServerTransport {
       this.onWireGone(wire, 'pageLeft')
       return okResponse()
     }
-    const hold = this.closedWires.get(connId)
+    const hold = this.closedWires.get(connId)?.hold
     if (hold) this.mux.endSession(hold)
     return okResponse()
   }
@@ -514,8 +515,13 @@ class SseServerTransport {
   }
 
   private rememberClosed({ connId }: SseWire, hold: SessionHold | null): void {
-    this.closedWires.set(connId, hold)
-    unrefTimer(setTimeout(() => this.closedWires.delete(connId), this.mux.connectTtl))
+    const record = { hold }
+    this.closedWires.set(connId, record)
+    unrefTimer(
+      setTimeout(() => {
+        if (this.closedWires.get(connId) === record) this.closedWires.delete(connId)
+      }, this.mux.connectTtl),
+    )
   }
 
   /** As `RegistrationWaits.stop`: the timeout path must remove the
