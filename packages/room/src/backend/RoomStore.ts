@@ -56,6 +56,7 @@ class RoomStore {
   }
 
   compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
+    assertCellsExchangeWellFormed(exchange)
     return this.driver.compareExchangeCells(roomId, inc, exchange)
   }
 
@@ -116,7 +117,8 @@ class CallStore extends RoomStore {
   }
 
   override compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    return this.account.write(() => super.compareExchangeCells(roomId, inc, exchange))
+    assertCellsExchangeWellFormed(exchange)
+    return this.account.write(() => this.driver.compareExchangeCells(roomId, inc, exchange))
   }
 
   override commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
@@ -149,6 +151,22 @@ class CallStore extends RoomStore {
   override join<T>(shared: RoomStore, work: Promise<T>): Promise<T> {
     return shared instanceof CallStore ? this.account.join(shared.account, work) : work
   }
+}
+
+/** Every cells exchange is checked here: a counted cell is counted once and isn't also written, which a driver's check
+ *  of each count before the exchange's first write rests on. */
+function assertCellsExchangeWellFormed(exchange: CellsExchange): void {
+  const malformed = malformedCount(exchange)
+  assert(malformed === null, malformed)
+}
+
+/** What makes the exchange's counts ones no caller makes, or null. */
+function malformedCount({ mutations, counts = [] }: CellsExchange): string | null {
+  for (const [i, { key }] of counts.entries()) {
+    if (counts.findIndex((other) => other.key === key) < i) return `cells exchange: ${key} is counted twice`
+    if (mutations.some((mutation) => mutation.key === key)) return `cells exchange: ${key} is both counted and written`
+  }
+  return null
 }
 
 /** Every head write is checked here; drivers only compare-exchange. */
