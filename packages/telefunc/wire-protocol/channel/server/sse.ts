@@ -293,7 +293,7 @@ class SseServerTransport {
     const reader = new BodyReader(source, clientLeft)
     let metadata: SseRequestMetadata
     try {
-      const rawMetadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+      const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
       if (rawMetadata === null) return refuse(REFUSED.noBody)
       metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
     } catch (err) {
@@ -382,7 +382,7 @@ class SseServerTransport {
     try {
       while (true) {
         if (wire.closed) return await reader.discardRest()
-        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
+        const raw = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
         if (!raw) return
         if (!wire.closed) this.dispatchAndReport(wire, raw)
       }
@@ -500,7 +500,7 @@ class SseServerTransport {
   ): Promise<void> {
     while (true) {
       if (wire.closed) return reader.discardRest()
-      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
+      const raw = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
       if (!raw) return
       if (wire.closed) continue
       const outcome = await this.mux.dispatchWireMessage(wire, raw)

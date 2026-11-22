@@ -154,11 +154,10 @@ async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
   // A `Blob`'s stream doesn't fail.
   const reader = new BodyReader(body.stream(), () => false)
-  const metadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+  const metadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
   if (metadata === null) return { streamResponse: false, frames: [] }
   const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))
   const frames: DecodedFrame[] = []
-  for (let frame; (frame = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)); )
-    frames.push(decode(frame))
+  for (let frame; (frame = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES)); ) frames.push(decode(frame))
   return { streamResponse: kind === 'streamResponse', frames }
 }

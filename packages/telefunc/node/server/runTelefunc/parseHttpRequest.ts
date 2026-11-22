@@ -185,8 +185,10 @@ async function readBody(
     const source = readable ?? request.body
     assert(source)
     const reader = new BodyReader(source, clientLeft)
+    const metadata = await reader.readFrame(Number.POSITIVE_INFINITY)
+    if (metadata === null) throw reader.truncation()
     return {
-      text: await reader.readMetadata(Number.POSITIVE_INFINITY),
+      text: new TextDecoder().decode(metadata),
       registerFile: (i, s) => reader.registerFile(i, s),
       consumeFile: (i, s) => reader.consumeFile(i, s),
     }

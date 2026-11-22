@@ -99,16 +99,9 @@ class BodyReader {
     this.releaseSource()
   }
 
-  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. `maxBytes` bounds what a peer buffers. */
-  async readMetadata(maxBytes: number) {
-    const length = await this.readU32()
-    if (length > maxBytes) throw new OversizeFrameError()
-    return new TextDecoder().decode(await this.readExact(length))
-  }
-
-  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. A chunk over `maxBytes` throws, with
-   *  its first `headBytes` bytes read. */
-  async readLengthPrefixedBytesOrNull(maxBytes: number, headBytes = 0) {
+  /** Read one frame: [u32 big-endian length][bytes], or null where the body ends before its first byte. A frame over
+   *  `maxBytes` throws once its length is read, with its first `headBytes` bytes read. */
+  async readFrame(maxBytes: number, headBytes = 0) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
     const length = decodeU32(lengthBytes)
@@ -177,7 +170,7 @@ class BodyReader {
           const chunk = await this.pullChunk()
           if (!chunk) {
             remaining = 0
-            controller.error(this.truncated())
+            controller.error(this.truncation())
             return
           }
           const take = Math.min(chunk.length, remaining)
@@ -233,7 +226,7 @@ class BodyReader {
   }
 
   /** The body stopped short, with the runtime's error as the cause where a read failed. */
-  private truncated() {
+  truncation() {
     return new StreamTruncatedError(this.failure && { cause: this.failure.error })
   }
 
@@ -246,23 +239,22 @@ class BodyReader {
     return result
   }
 
-  /** Read a big-endian u32. Throws on disconnect. */
-  private async readU32() {
-    return decodeU32(await this.readExact(4)) // sizeof uint32
-  }
-
   /** Read exactly `n` bytes. Throws on disconnect. */
   private async readExact(n: number) {
-    let parts: Uint8Array<ArrayBuffer>[] | undefined
-    let length = this.buffer.length
-    while (length < n) {
-      const chunk = await this.pullChunk()
-      if (!chunk) throw this.truncated()
-      parts ??= this.buffer.length > 0 ? [this.buffer] : []
-      parts.push(chunk)
-      length += chunk.length
+    if (this.buffer.length < n) {
+      const parts = this.buffer.length > 0 ? [this.buffer] : []
+      let length = this.buffer.length
+      let last = EMPTY
+      while (length < n) {
+        const chunk = await this.pullChunk()
+        if (!chunk) throw this.truncation()
+        parts.push(chunk)
+        last = chunk
+        length += chunk.length
+      }
+      // One part is the one chunk read, with nothing buffered before it.
+      this.buffer = parts.length === 1 ? last : concatAll(parts)
     }
-    if (parts) this.buffer = parts.length === 1 ? parts[0]! : concatAll(parts)
     const result = this.buffer.subarray(0, n)
     this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
     return result
@@ -285,7 +277,7 @@ class BodyReader {
     if (buffered) remaining -= buffered.length
     while (remaining > 0) {
       const chunk = await this.pullChunk()
-      if (!chunk) throw this.truncated()
+      if (!chunk) throw this.truncation()
       remaining -= chunk.length
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }

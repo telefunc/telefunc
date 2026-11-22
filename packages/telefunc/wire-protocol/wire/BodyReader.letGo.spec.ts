@@ -10,7 +10,7 @@ const turn = () => new Promise<void>((resolve) => setImmediate(resolve))
 test("an error a Node source emits after the reader let go of it is the reader's, and nothing is thrown to the process", async () => {
   const source = new Readable({ read() {} })
   const reader = new BodyReader(source, () => true)
-  const reading = reader.readLengthPrefixedBytesOrNull(1 << 20)
+  const reading = reader.readFrame(1 << 20)
   await turn()
   reader.letGo()
   const read = await reading
@@ -26,7 +26,7 @@ test("an error a Node source emits after the reader let go of it is the reader's
 test("a Node source the reader let go of with a read under way reads on for its owner: a `'data'` listener and `resume()` drain it", async () => {
   const source = new Readable({ read() {} })
   const reader = new BodyReader(source, () => false)
-  const reading = reader.readLengthPrefixedBytesOrNull(1 << 20)
+  const reading = reader.readFrame(1 << 20)
   await turn()
   reader.letGo()
   const read = await reading
@@ -45,7 +45,7 @@ test("a Node source its owner paused with a `'data'` listener stays paused when 
   source.on('data', (chunk: Buffer) => void drained.push(chunk.toString()))
   source.pause()
   const reader = new BodyReader(source, () => false)
-  const reading = reader.readLengthPrefixedBytesOrNull(1 << 20)
+  const reading = reader.readFrame(1 << 20)
   await turn()
   reader.letGo()
   const read = await reading
