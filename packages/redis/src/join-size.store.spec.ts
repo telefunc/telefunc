@@ -2,33 +2,15 @@
 // Redis and Valkey Telefunc supports: it is refused with nothing stored, and the inbox it opened is unsubscribed. The
 // subscriber's UNSUBSCRIBE is held until the row saw the inbox still subscribed, then let go, and the row sees it gone.
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isDeepStrictEqual } from 'node:util'
-import { Redis } from 'ioredis'
+import type { Redis } from 'ioredis'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { changedKeys, endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { RedisConnection } from './RedisConnection.js'
-
-async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
-  const keys = (await admin.keys('tf:*')).sort()
-  const held = async (key: string) =>
-    (await admin.type(key)) === 'hash'
-      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      : await admin.dumpBuffer(key)
-  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
-}
-
-function changedKeys(before: Map<string, unknown>, after: Map<string, unknown>): string[] {
-  const keys = new Set([...before.keys(), ...after.keys()])
-  return [...keys].filter((key) => !isDeepStrictEqual(before.get(key), after.get(key))).sort()
-}
 
 /** While set, the next UNSUBSCRIBE of the backend's subscriber tells its channels and waits for `release`. */
 let unsubscribeHeld: { reached: PromiseWithResolvers<string[]>; release: PromiseWithResolvers<void> } | null = null
 
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
 beforeAll(() => {
   const open = RedisConnection.prototype.openSubscriberSocket
   // Every subscriber socket the backend opens, its first included, holds an UNSUBSCRIBE while the row asks.
@@ -51,38 +33,11 @@ beforeAll(() => {
 })
 afterAll(() => {
   vi.restoreAllMocks()
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
+  endReached()
 })
 afterEach(() => {
   unsubscribeHeld = null
 })
-
-/** A new store of the row's, which the backend reaches through the forwarder; reached once a read of a room that isn't
- *  there gets past the store. */
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !/ECONNRE|Connection is closed|ETIMEDOUT|EPIPE|connect/i.test(String(error)),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
 
 function told(error: unknown) {
   if (!(error instanceof Error)) return { value: typeof error }

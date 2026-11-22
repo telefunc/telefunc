@@ -3,49 +3,15 @@
 // head's revision never repeats under its id whatever the store's clock does. Two creates of one id with the head's lapse
 // between them carry different revisions.
 import { isDeepStrictEqual } from 'node:util'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { Redis } from 'ioredis'
+import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { getRoomPlane, type HeadNext } from '@telefunc/room/backend'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
 afterEach(() => vi.restoreAllMocks())
-afterAll(() => {
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
-})
-
-/** A new store of the row's, which the backend reaches through the forwarder; reached once a read of a room that isn't
- *  there gets past the store. */
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !(error instanceof BackendError),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
+afterAll(() => endReached())
 
 /** The key of room `id`'s head. */
 async function headKey(admin: Redis, id: string): Promise<string> {
@@ -60,14 +26,6 @@ async function storedRev(admin: Redis, id: string): Promise<unknown> {
   if (stored === null) return null
   const head: unknown = JSON.parse(stored)
   return typeof head === 'object' && head !== null && 'rev' in head ? head.rev : 'none'
-}
-
-/** Every key the store holds, with what it holds. */
-async function snapshot(admin: Redis): Promise<[string, Buffer | null][]> {
-  const keys = (await admin.keys('*')).sort()
-  return await Promise.all(
-    keys.map(async (key): Promise<[string, Buffer | null]> => [key, await admin.dumpBuffer(key)]),
-  )
 }
 
 describe.runIf(runs)("a head's revision", () => {

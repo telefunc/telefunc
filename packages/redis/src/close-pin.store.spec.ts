@@ -6,7 +6,7 @@
 // And, apart: a room closed by two closers, one taking over the other's lapsed lease, commits two close events, and a
 // room handle observes one close.
 import { setTimeout as sleep } from 'node:timers/promises'
-import { Redis } from 'ioredis'
+import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
 import {
@@ -18,45 +18,13 @@ import {
   type HeadExpectation,
   type HeadNext,
 } from '@telefunc/room/backend'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { endReached, reached, runs, STORES, type Store } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
-afterAll(() => {
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
-})
+afterAll(() => endReached())
 afterEach(() => {
   vi.restoreAllMocks()
 })
-
-/** A new store of the row's, which the backend reaches through the forwarder; reached once a read of a room that isn't
- *  there gets past the store. */
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !/ECONNRE|Connection is closed|ETIMEDOUT|EPIPE|connect/i.test(String(error)),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
 
 /** The close lease of a room, from packages/room/src/server/constants.ts, and a second past it: the store's own clock
  *  decides when it lapsed. */

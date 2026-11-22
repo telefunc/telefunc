@@ -25,58 +25,14 @@ import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
+import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 import type { OperationOptions, OperationResult, RoomOperation } from '@telefunc/room/backend'
 
-/** Every key of Telefunc's in the store, with what it holds: a hash's fields and values in field order, as a read
- *  that rehashes a large hash reorders what DUMP gives of it, and any other value as DUMP gives it. */
-async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
-  const keys = (await admin.keys('tf:*')).sort()
-  const held = async (key: string) =>
-    (await admin.type(key)) === 'hash'
-      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      : await admin.dumpBuffer(key)
-  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
-}
-
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
-afterAll(() => {
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
-})
-
-/** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last
- *  row's store goes first, so the file never removes more than one at its end. */
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  // Pointing the forwarder at this store dropped the backend's connections to the last one: a read gets past the
-  // store, to a room that isn't there, once they are back.
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !(error instanceof BackendError),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
+afterAll(() => endReached())
 
 describe.runIf(runs)('Room.list() whose read the store refuses', () => {
   for (const [i, store] of STORES.entries()) {

@@ -1,10 +1,28 @@
 // The stores the store specs (`pnpm run test:redis-stores`) run against, each in Docker, and what they share.
-export { STORES, runs, docker, pullImage, startStore, hostOf, removeStores, forwarder, type Store }
+export {
+  STORES,
+  runs,
+  docker,
+  pullImage,
+  startStore,
+  hostOf,
+  removeStores,
+  forwarder,
+  reached,
+  endReached,
+  snapshot,
+  changedKeys,
+  type Store,
+}
 
 import { execFileSync } from 'node:child_process'
 import { connect, createServer, type Socket } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
+import { BackendError } from 'telefunc'
+import { Room } from '@telefunc/room'
+import { installRedis } from '../src/index.js'
 
 type Store = { name: string; image: string; server: string }
 
@@ -130,4 +148,60 @@ async function forwarder(): Promise<{
       server.close()
     },
   }
+}
+
+/** The app's client a spec file's backend is installed on, and the forwarder it reaches each row's store through: made
+ *  by the file's first `reached()`. */
+let reach: { proxy: Awaited<ReturnType<typeof forwarder>>; app: Redis } | undefined
+
+/** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last row's
+ *  store goes first, so the file never removes more than one at its end. */
+async function reached(store: Store): Promise<Redis> {
+  if (reach === undefined) {
+    const proxy = await forwarder()
+    const app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
+    app.on('error', () => {})
+    installRedis(app)
+    reach = { proxy, app }
+  }
+  removeStores()
+  const { host, admin } = await startStore(store)
+  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
+  reach.proxy.to(host)
+  // Pointing the forwarder at this store dropped the backend's connections to the last one: a read gets past the
+  // store, to a room that isn't there, once they are back.
+  const answers = () =>
+    Room.get('r-none').then(
+      () => true,
+      (error: unknown) => !(error instanceof BackendError),
+    )
+  for (let tries = 0; !(await answers()); tries++) {
+    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
+    await sleep(25)
+  }
+  return admin
+}
+
+/** Ends the client and the forwarder `reached()` made, and removes the stores: a spec file's `afterAll`. */
+function endReached(): void {
+  reach?.app.disconnect()
+  reach?.proxy.close()
+  reach = undefined
+  removeStores()
+}
+
+/** Every key under Telefunc's prefix and what it holds, a hash's fields in order. */
+async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
+  const keys = (await admin.keys('tf:*')).sort()
+  const held = async (key: string) =>
+    (await admin.type(key)) === 'hash'
+      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      : await admin.dumpBuffer(key)
+  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
+}
+
+/** The keys whose value differs between two snapshots, one taken before and one after. */
+function changedKeys(before: Map<string, unknown>, after: Map<string, unknown>): string[] {
+  const keys = new Set([...before.keys(), ...after.keys()])
+  return [...keys].filter((key) => !isDeepStrictEqual(before.get(key), after.get(key))).sort()
 }

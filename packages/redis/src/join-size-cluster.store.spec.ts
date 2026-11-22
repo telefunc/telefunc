@@ -3,29 +3,14 @@
 // The subscriber's UNSUBSCRIBE is held until the row saw the inbox still subscribed on the node the subscriber is on,
 // then let go, and the row sees it gone there. A Cluster's PUBSUB NUMSUB counts the subscribers of the node it asks, so
 // the row asks each node and adds them up.
-import { isDeepStrictEqual } from 'node:util'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster, Redis } from 'ioredis'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
 import { appCluster, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
-import { forwarder, removeStores, runs, STORES, type Store } from '../test/stores.js'
+import { changedKeys, forwarder, removeStores, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 import { RedisConnection } from './RedisConnection.js'
-
-async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
-  const keys = (await admin.keys('tf:*')).sort()
-  const held = async (key: string) =>
-    (await admin.type(key)) === 'hash'
-      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      : await admin.dumpBuffer(key)
-  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
-}
-
-function changedKeys(before: Map<string, unknown>, after: Map<string, unknown>): string[] {
-  const keys = new Set([...before.keys(), ...after.keys()])
-  return [...keys].filter((key) => !isDeepStrictEqual(before.get(key), after.get(key))).sort()
-}
 
 /** While set, the next UNSUBSCRIBE of the backend's subscriber tells its channels and waits for `release`. */
 let unsubscribeHeld: { reached: PromiseWithResolvers<string[]>; release: PromiseWithResolvers<void> } | null = null

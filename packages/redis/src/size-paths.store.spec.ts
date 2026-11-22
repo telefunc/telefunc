@@ -16,8 +16,7 @@
 //   matches too, and the ref is read once. The size is checked as of the removal's read of the tabs: a tab that left,
 //   or a room that closed, after that read doesn't change the refusal.
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isDeepStrictEqual } from 'node:util'
-import { Redis } from 'ioredis'
+import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Room, type LeaveCause } from '@telefunc/room'
 import {
@@ -29,60 +28,14 @@ import {
   type OperationResult,
   type RoomOperation,
 } from '@telefunc/room/backend'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { changedKeys, endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
-async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
-  const keys = (await admin.keys('tf:*')).sort()
-  const held = async (key: string) =>
-    (await admin.type(key)) === 'hash'
-      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      : await admin.dumpBuffer(key)
-  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
-}
-
-function changedKeys(before: Map<string, unknown>, after: Map<string, unknown>): string[] {
-  const keys = new Set([...before.keys(), ...after.keys()])
-  return [...keys].filter((key) => !isDeepStrictEqual(before.get(key), after.get(key))).sort()
-}
-
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
-afterAll(() => {
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
-})
+afterAll(() => endReached())
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
 })
-
-/** A new store of the row's, which the backend reaches through the forwarder; reached once a read of a room that isn't
- *  there gets past the store. */
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !/ECONNRE|Connection is closed|ETIMEDOUT|EPIPE|connect/i.test(String(error)),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
 
 /** What the Redis backend commits at most, in bytes (packages/redis/src/commands.ts). */
 const CEILING = 28 * 1024 * 1024

@@ -11,58 +11,18 @@
 // the replacement it closed, and a first write another first write overtook writes as a replacement. An exchange whose
 // control record is numbered by a counter it leaves absent is refused as a bug, before its first write.
 import { isDeepStrictEqual } from 'node:util'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { Redis } from 'ioredis'
+import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { getRoomPlane, type CellsExchange, type ControlRecord } from '@telefunc/room/backend'
-import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
 /** The most a commit takes on a room's control lane: `PUBLISH_MAX_BYTES` in commands.ts. */
 const MAX = 28 * 1024 * 1024
 
-let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
-let app: Redis | undefined
 afterEach(() => vi.restoreAllMocks())
-afterAll(() => {
-  app?.disconnect()
-  proxy?.close()
-  removeStores()
-})
-
-async function reached(store: Store): Promise<Redis> {
-  if (proxy === undefined) {
-    proxy = await forwarder()
-    app = new Redis({ port: proxy.port, username: 'telefunc', password: 'pw', lazyConnect: true })
-    app.on('error', () => {})
-    installRedis(app)
-  }
-  removeStores()
-  const { host, admin } = await startStore(store)
-  await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  proxy.to(host)
-  const answers = () =>
-    Room.get('r-none').then(
-      () => true,
-      (error: unknown) => !(error instanceof BackendError),
-    )
-  for (let tries = 0; !(await answers()); tries++) {
-    if (tries > 200) throw new Error(`the backend never reached ${store.name}`)
-    await sleep(25)
-  }
-  return admin
-}
-
-/** Every key the store holds, with what it holds. */
-async function snapshot(admin: Redis): Promise<[string, Buffer | null][]> {
-  const keys = (await admin.keys('*')).sort()
-  return await Promise.all(
-    keys.map(async (key): Promise<[string, Buffer | null]> => [key, await admin.dumpBuffer(key)]),
-  )
-}
+afterAll(() => endReached())
 
 /** Room `id`'s `meta:seq` counter at `value`, as a merge after the first write would have left it. */
 async function seqAt(admin: Redis, id: string, value: number): Promise<void> {
