@@ -87,11 +87,13 @@ class BodyReader {
       this.source = {
         next: () => reader.read(),
         // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
-        // did before 2022: that read ends only at the body's next chunk, which it still gives, and nothing is read after.
+        // did before 2022, so that read would end only at the body's next chunk: the cancel ends it now.
         letGo: () => {
           try {
             reader.releaseLock()
-          } catch {}
+          } catch {
+            reader.cancel().catch(() => {})
+          }
         },
       }
     } else {
