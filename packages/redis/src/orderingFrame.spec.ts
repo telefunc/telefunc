@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { decodeOrderingFrame } from './orderingFrame.js'
 
-/** A frame as commands.ts's publish script writes it: `[seq_hi][seq_lo][ts_hi][ts_lo][payload]`, u32 big-endian. */
+/** A frame as commands.ts's publish script writes it: `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, its id and
+ *  its predecessor's, then the payload. */
 function frameOf(seq: number, timestamp: number, payload: Uint8Array): Uint8Array {
-  const frame = new Uint8Array(16 + payload.byteLength)
+  const frame = new Uint8Array(32 + payload.byteLength)
   const view = new DataView(frame.buffer)
   const word = 0x1_0000_0000
   view.setUint32(0, Math.floor(seq / word))
   view.setUint32(4, seq % word)
   view.setUint32(8, Math.floor(timestamp / word))
   view.setUint32(12, timestamp % word)
-  frame.set(payload, 16)
+  view.setBigUint64(16, BigInt(seq))
+  view.setBigUint64(24, BigInt(seq - 1))
+  frame.set(payload, 32)
   return frame
 }
 

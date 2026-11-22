@@ -3,7 +3,9 @@ export type { OrderingInfo }
 
 import { assert } from '../../utils/assert.js'
 
-type OrderingInfo = { seq: number; timestamp: number }
+/** `rewound`: a failover replaced what the driver delivered on the lane, and it follows the new history from this
+ *  message, whose `seq` is at or below one it delivered before. */
+type OrderingInfo = { seq: number; timestamp: number; rewound?: true }
 
 /** A positive safe-integer `seq` and a non-negative safe-integer `timestamp`. */
 function isOrdering({ seq, timestamp }: OrderingInfo): boolean {

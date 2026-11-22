@@ -1,12 +1,14 @@
 export { RedisSubscriptions, neverReachedSubscription }
 
 import { randomUUID } from 'node:crypto'
-import type { BackendReceiver, OrderingInfo } from 'telefunc/__internal'
-import { DriverAttempt, createDeferred, unrefTimer, type Deferred } from 'telefunc/__internal'
+import type { BackendReceiver } from 'telefunc/__internal'
+import { DriverAttempt, createDeferred, getOrCreate, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, redisFailure, type SubscriberSocket } from './ioredis.js'
+import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
 import { decodeOrderingFrame } from './orderingFrame.js'
+import type { LaneStart } from './orderRecord.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionsOptions = { connection: RedisConnection }
@@ -29,9 +31,12 @@ type RedisAttemptOptions = {
   /** A Room lane's incarnation channel: a message on it means the incarnation was dropped. */
   invalidationChannel: string | null
   frames: FrameShape
+  /** On a fan-in channel, the channel of the lane a frame's lane key names: a lane is one across the channels that
+   *  carry it. */
+  laneChannel: ((laneKey: string) => string) | null
   /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another; null
    *  once a Room source's incarnation is not the open head. */
-  readStarts: () => Promise<Map<string, OrderingInfo> | null>
+  readStarts: () => Promise<Map<string, LaneStart> | null>
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
@@ -54,16 +59,8 @@ type SocketState =
 
 type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 
-/** A lane's last place delivered, and the frames parked past a missing one, by their predecessor's place, until it
- *  arrives or the wait ends. */
-type LaneOrder = {
-  last: number
-  lastTimestamp: number
-  parked: Map<number, LaneFrame> | null
-  releaseTimer: ReturnType<typeof setTimeout> | null
-}
-
-type LaneFrame = { lane: string; place: number; payload: Uint8Array; info: OrderingInfo; token: string | null }
+/** A lane an attempt carries, and the highest place the attempt brought it. */
+type CarriedLane = { history: LaneHistory; passed: number }
 
 const textDecoder = new TextDecoder()
 
@@ -75,9 +72,6 @@ function neverReachedSubscription(count: number | null, noun: string): string {
 
 const RECONNECT_DELAY_MIN_MS = 50
 const RECONNECT_DELAY_MAX_MS = 2_000
-// Redis Cluster forwards a channel's frames from the old and the new slot owner over separate bus links during a
-// reshard or a failover, so the old owner's last frame can arrive after the new owner's first.
-const REORDER_WAIT_MS = 1_000
 // A partition closes no socket, and pub/sub is silent while nothing is published, so only a ping can tell.
 const SUBSCRIBER_PING_MS = 10_000
 
@@ -91,6 +85,8 @@ class RedisSubscriptions {
   private readonly connection: RedisConnection
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisAttempt>>()
+  /** Each lane some attempt carries, by its channel. */
+  private readonly lanes = new Map<string, LaneHistory>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
   private changedChannels = new Set<string>()
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
@@ -175,6 +171,19 @@ class RedisSubscriptions {
         for (const channel of all) for (const attempt of channel.attempts) attempt.settleFence(token)
       },
     }
+  }
+
+  /** The lane named `channel`, which `route` now carries. */
+  joinLane(channel: string, route: LaneRoute): LaneHistory {
+    const lane = getOrCreate(this.lanes, channel, () => new LaneHistory())
+    lane.routes.add(route)
+    return lane
+  }
+
+  /** `route` carries the lane no more; it is forgotten once no attempt does. */
+  leaveLane(channel: string, lane: LaneHistory, route: LaneRoute): void {
+    lane.leave(route)
+    if (lane.done && this.lanes.get(channel) === lane) this.lanes.delete(channel)
   }
 
   /** Forgets an attempt that unsubscribed or ended. */
@@ -372,7 +381,7 @@ class RedisSubscriptions {
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
   private async confirm(attempt: RedisAttempt, { id, socket }: ConnectedSocket): Promise<void> {
-    let starts: Map<string, OrderingInfo> | null
+    let starts: Map<string, LaneStart> | null
     try {
       starts = await attempt.readStarts()
       // A resume delivers what the starts count that reached this connection. A frame published just before the read can
@@ -428,19 +437,21 @@ class RedisSubscriptions {
   }
 }
 
-/** One source on the shared connection: delivers its lanes in place order to core's `receiver`. */
-class RedisAttempt extends DriverAttempt {
+/** One source on the shared connection: hands each frame to its lane, which decides it once across the attempts that
+ *  carry the lane, and delivers what its lane delivers through it to core's `receiver`. */
+class RedisAttempt extends DriverAttempt implements LaneRoute {
   readonly channel: string
   readonly invalidationChannel: string | null
   readonly readStarts: RedisAttemptOptions['readStarts']
   readonly channels: readonly string[]
+  readonly reportMissed: RedisAttemptOptions['reportMissed']
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
-  private readonly reportMissed: RedisAttemptOptions['reportMissed']
+  private readonly laneChannel: RedisAttemptOptions['laneChannel']
   private readonly fences = new Map<string, Deferred<void>>()
-  /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
-   *  channel one lane, keyed `''`. */
-  private orders = new Map<string, LaneOrder>()
+  /** Each lane it carries: an every-track or every-member channel carries many binary lanes, keyed by lane key; any
+   *  other channel one lane, keyed `''`. */
+  private readonly lanes = new Map<string, CarriedLane>()
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private early: Buffer[] = []
   /** A frame in another form was dropped and reported. */
@@ -455,6 +466,7 @@ class RedisAttempt extends DriverAttempt {
     channel,
     invalidationChannel,
     frames,
+    laneChannel,
     readStarts,
     receiver,
     reportMissed,
@@ -464,6 +476,7 @@ class RedisAttempt extends DriverAttempt {
     this.channel = channel
     this.invalidationChannel = invalidationChannel
     this.frames = frames
+    this.laneChannel = laneChannel
     this.readStarts = readStarts
     this.receiver = receiver
     this.reportMissed = reportMissed
@@ -505,56 +518,36 @@ class RedisAttempt extends DriverAttempt {
     return state === 'establishing' || state === 'lost'
   }
 
-  /** A lane missing from `starts` has no commit yet. A first establish promises nothing from before it is ready; on a
-   *  resume, what reached the new subscription while the starts were read goes out, and only the rest was missed. */
-  markReady(starts: Map<string, OrderingInfo>): void {
+  /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
+   *  before it is ready; on a resume, each lane it carried compares its start with what it delivered. */
+  markReady(starts: Map<string, LaneStart>): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
-    const early: LaneFrame[] = []
+    const early = new Map<string, LaneFrame[]>()
     for (const message of this.early) {
       const frame = this.decodeLaneFrame(message)
-      if (frame !== null) early.push(frame)
+      if (frame !== null) getOrCreate(early, frame.lane, () => []).push(frame)
     }
     this.early = []
-    const missed = resuming ? this.missedBefore(starts) : 0
-    const arrived = resuming && missed !== null ? this.arrivedOfMissed(early, starts) : []
-    this.orders = new Map()
-    for (const [lane, start] of starts) {
-      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, parked: null, releaseTimer: null })
+    const lanes = new Set([...starts.keys(), ...early.keys()])
+    for (const [laneKey, { history }] of resuming ? this.lanes : []) {
+      if (lanes.has(laneKey)) continue
+      // A member's lane missing from the starts left with its member; any other lane's order went with Redis's data.
+      if (!this.frames.lanesEndWithMembers) {
+        lanes.add(laneKey)
+      } else {
+        this.owner.leaveLane(this.laneName(laneKey), history, this)
+        this.lanes.delete(laneKey)
+      }
     }
     this.transition('ready')
-    const neverArrived = missed === null ? null : missed - arrived.length
-    if (neverArrived !== 0) this.reportMissed(neverArrived)
-    for (const { payload, info, token } of arrived) {
+    for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
-      this.deliver(payload, info, token)
+      const lane = this.laneOf(laneKey)
+      const pass = (frame: LaneFrame) => this.pass(lane, frame)
+      lane.history.establish(this, starts.get(laneKey), early.get(laneKey) ?? [], resuming, pass)
     }
-    for (const frame of early) {
-      if (this.state() !== 'ready') return
-      this.order(frame)
-    }
-  }
-
-  /** The frames held that its lanes' starts count as passed by, in place order. */
-  private arrivedOfMissed(early: LaneFrame[], starts: Map<string, OrderingInfo>): LaneFrame[] {
-    const arrived = early.filter(({ lane, place }) => {
-      return place > (this.orders.get(lane)?.last ?? 0) && place <= (starts.get(lane)?.seq ?? 0)
-    })
-    return arrived.sort((a, b) => a.place - b.place)
-  }
-
-  /** What its lost connection passed by, or null once a lane's order is behind what it delivered: a failover's rewind or
-   *  a flush took the count with it. */
-  private missedBefore(starts: Map<string, OrderingInfo>): number | null {
-    if (!this.frames.lanesEndWithMembers && this.orders.size > starts.size) return null
-    let missed = 0
-    for (const [lane, start] of starts) {
-      const last = this.orders.get(lane)?.last ?? 0
-      if (start.seq < last) return null
-      missed += start.seq - last
-    }
-    return missed
   }
 
   fail(error: unknown): void {
@@ -568,8 +561,7 @@ class RedisAttempt extends DriverAttempt {
   lose(error: unknown): void {
     this.early = []
     if (this.state() !== 'ready') return
-    // What arrived goes out: what it waits for can no longer arrive on this connection.
-    for (const order of this.orders.values()) if (order.parked !== null) this.release(order)
+    for (const { history } of this.lanes.values()) history.releaseParked()
     this.rejectFences(error)
     this.transition('lost')
   }
@@ -578,10 +570,38 @@ class RedisAttempt extends DriverAttempt {
     if (channel === this.invalidationChannel) return this.end()
     if (this.state() === 'ready') {
       const frame = this.decodeLaneFrame(message)
-      if (frame !== null) this.order(frame)
-      return
+      if (frame === null) return
+      const lane = this.laneOf(frame.lane)
+      return lane.history.offer(frame, this.pass(lane, frame))
     }
     if (this.awaitsConfirmation()) this.early.push(message)
+  }
+
+  /** `LaneRoute`: a frame its lane delivers. */
+  deliver({ payload, info, token }: LaneFrame, rewound: boolean): void {
+    try {
+      if (this.state() === 'closed') return
+      const delivered = this.frames.text ? textDecoder.decode(payload) : Uint8Array.from(payload)
+      this.receiver.deliver(delivered, rewound ? { ...info, rewound } : info)
+    } catch (error) {
+      // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
+      console.error(error)
+    } finally {
+      this.settleFence(token)
+    }
+  }
+
+  /** `LaneRoute`: a frame its lane drops. */
+  dropped({ token }: LaneFrame): void {
+    this.settleFence(token)
+  }
+
+  /** `LaneRoute`: what a lane waited for isn't coming. `lost` says it may have missed messages, which is what makes
+   *  Room catch up (`deliveries-lost`). */
+  waitEnded(): void {
+    if (this.state() !== 'ready') return
+    this.transition('lost')
+    if (this.state() === 'lost') this.transition('ready')
   }
 
   /** Its incarnation was dropped: closed on purpose, with no reason. */
@@ -596,6 +616,25 @@ class RedisAttempt extends DriverAttempt {
     this.forgetFrames()
     this.rejectFences(reason)
     this.owner.detach(this)
+  }
+
+  /** The lane a frame's lane key names, which it carries from now on. */
+  private laneOf(laneKey: string): CarriedLane {
+    return getOrCreate(this.lanes, laneKey, () => ({
+      history: this.owner.joinLane(this.laneName(laneKey), this),
+      passed: 0,
+    }))
+  }
+
+  private laneName(laneKey: string): string {
+    return this.laneChannel === null ? this.channel : this.laneChannel(laneKey)
+  }
+
+  /** The highest place it brought `lane` before `frame`, which it now brought. */
+  private pass(lane: CarriedLane, frame: LaneFrame): number {
+    const before = lane.passed
+    lane.passed = Math.max(before, frame.place)
+    return before
   }
 
   /** A frame on the wire: its commit's fence token, if armed; its lane key and its place, if its shape has them; then
@@ -622,7 +661,8 @@ class RedisAttempt extends DriverAttempt {
     if (decoded === null) return this.dropForeign()
     if (!placed) place = decoded.info.seq
     if (!Number.isSafeInteger(place) || place < 1) return this.dropForeign()
-    return { lane, place, payload: decoded.payload, info: decoded.info, token }
+    const { payload, info, id, prev } = decoded
+    return { lane, place, id, prev, payload, info, token, via: this }
   }
 
   /** A frame in a form Telefunc's scripts don't write, from another client publishing to the channel: reported once. */
@@ -638,96 +678,10 @@ class RedisAttempt extends DriverAttempt {
     return null
   }
 
-  /** Delivers each lane in order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for it,
-   *  and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
-  private order(frame: LaneFrame): void {
-    let order = this.orders.get(frame.lane)
-    if (order === undefined) {
-      // A lane with no commit when the attempt went live: every one of its commits is after.
-      order = { last: 0, lastTimestamp: 0, parked: null, releaseTimer: null }
-      this.orders.set(frame.lane, order)
-    }
-    if (frame.place === order.last + 1) {
-      this.advance(order, frame)
-      if (order.parked !== null) this.drain(order)
-      return
-    }
-    if (frame.place > order.last) return this.park(order, frame)
-    // A commit never sets its lane's time back, so a later time on a place at or below the last is a failover's rewind.
-    if (frame.info.timestamp <= order.lastTimestamp) return this.settleFence(frame.token)
-    if (order.parked !== null) this.release(order)
-    this.advance(order, frame)
-  }
-
-  private advance(order: LaneOrder, { place, payload, info, token }: LaneFrame): void {
-    order.last = place
-    order.lastTimestamp = info.timestamp
-    this.deliver(payload, info, token)
-  }
-
-  private park(order: LaneOrder, frame: LaneFrame): void {
-    const predecessor = frame.place - 1
-    if (order.parked?.has(predecessor)) return this.settleFence(frame.token)
-    order.parked ??= new Map()
-    order.parked.set(predecessor, frame)
-    if (order.releaseTimer !== null) return
-    order.releaseTimer = unrefTimer(setTimeout(() => this.gapTimedOut(order), REORDER_WAIT_MS))
-  }
-
-  /** What the lane waited for isn't coming. `lost` says it may have missed messages, which is what makes Room catch up
-   *  (`deliveries-lost`), and it goes on from the parked frames. */
-  private gapTimedOut(order: LaneOrder): void {
-    this.transition('lost')
-    if (this.state() !== 'lost') return
-    this.transition('ready')
-    this.release(order)
-  }
-
-  /** The parked frames that now follow in order. */
-  private drain(order: LaneOrder): void {
-    const parked = order.parked!
-    for (let next = parked.get(order.last); next !== undefined; next = parked.get(order.last)) {
-      // A consumer may close the lane.
-      if (this.state() !== 'ready') return
-      parked.delete(order.last)
-      this.advance(order, next)
-    }
-    if (parked.size > 0) return
-    clearTimeout(order.releaseTimer!)
-    order.parked = null
-    order.releaseTimer = null
-  }
-
-  /** The wait ended: every parked frame goes out in place order, past what never arrived. */
-  private release(order: LaneOrder): void {
-    clearTimeout(order.releaseTimer!)
-    const parked = [...order.parked!.values()].sort((a, b) => a.place - b.place)
-    order.parked = null
-    order.releaseTimer = null
-    let missed = 0
-    for (const frame of parked) {
-      if (this.state() !== 'ready') break
-      missed += frame.place - order.last - 1
-      this.advance(order, frame)
-    }
-    if (missed > 0) this.reportMissed(missed)
-  }
-
   private forgetFrames(): void {
-    for (const order of this.orders.values()) if (order.releaseTimer !== null) clearTimeout(order.releaseTimer)
-    this.orders.clear()
+    for (const [laneKey, { history }] of this.lanes) this.owner.leaveLane(this.laneName(laneKey), history, this)
+    this.lanes.clear()
     this.early = []
-  }
-
-  private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
-    try {
-      this.receiver.deliver(this.frames.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
-    } catch (error) {
-      // Thrown back into the socket's read, it would reach neither the attempts beside this one nor anyone's handler.
-      console.error(error)
-    } finally {
-      this.settleFence(token)
-    }
   }
 
   private rejectFences(error: unknown): void {

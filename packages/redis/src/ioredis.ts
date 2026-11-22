@@ -10,6 +10,7 @@ export {
   addressOf,
   redisFailure,
   isRefusal,
+  orderRecordRefusal,
 }
 export type { RedisClient, SubscriberSocket }
 
@@ -117,7 +118,8 @@ const WHAT_TO_DO: Record<string, string> = {
 class RedisFailure extends Error {
   /** `NOPERM`, `WRONGPASS`, `ECONNREFUSED` and the like. */
   readonly code: string | undefined
-  /** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role. */
+  /** Redis refused it, by its user's ACL or as a replica, or a key holds what Telefunc can't go on from, which stands
+   *  until an operator changes the ACL, the role or the key. */
   readonly refused: boolean
   constructor(message: string, code: string | undefined, refused: boolean) {
     super(message)
@@ -166,12 +168,26 @@ function redisFailure(error: unknown, redis: RedisClient): unknown {
       false,
     )
   }
+  const order = /^TFORDER (.+?): /.exec(message)
+  if (order !== null) return orderRecordRefusal(order[1]!)
   const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
   return new RedisFailure(
     `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
       (toDo === undefined ? ": Redis's log may say why" : `: ${toDo}`),
     code,
-    false,
+    // A key's value stands until an operator changes it, as a refusal does.
+    code === 'WRONGTYPE',
+  )
+}
+
+/** A record at `key` that commands.ts's scripts can't go on from: another client wrote it, or its next count would pass
+ *  2^53 - 1. It stands until an operator changes the key, as a refusal does. */
+function orderRecordRefusal(key: string): RedisFailure {
+  return new RedisFailure(
+    `Telefunc's Redis backend can't go on from the order record at ${key}: it isn't one Telefunc writes, or its next ` +
+      "count would pass 2^53 - 1; keep Telefunc's prefix to Telefunc",
+    'TFORDER',
+    true,
   )
 }
 
@@ -189,7 +205,8 @@ function connectionCode(error: unknown): string | undefined {
   return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
 }
 
-/** Redis refused it, by its user's ACL or as a replica; `BUSY`, `LOADING` and the like pass. */
+/** Redis refused it, by its user's ACL or as a replica, or a key holds what Telefunc can't go on from; `BUSY`,
+ *  `LOADING` and the like pass. */
 function isRefusal(error: unknown): error is RedisFailure {
   return error instanceof RedisFailure && error.refused
 }

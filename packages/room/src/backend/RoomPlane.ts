@@ -70,9 +70,10 @@ class RoomPlane {
     return result
   }
 
-  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<{ seq: number } | null> {
     const order = await this.driver.readLaneOrder(roomId, inc, lane)
-    if (order !== null) assertDriverOrdering(order)
+    if (order !== null)
+      assert(Number.isSafeInteger(order.seq) && order.seq > 0, 'A backend driver returned an invalid ordering')
     return order
   }
 

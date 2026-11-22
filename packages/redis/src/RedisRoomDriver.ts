@@ -1,6 +1,6 @@
 export { RedisRoomDriver }
 
-import type { BackendReceiver, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
+import type { BackendReceiver, DriverAttempt } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellsExchange,
@@ -47,7 +47,8 @@ import {
   type CommitChannels,
   type FenceTokens,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrdering, type CommitInput } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, type CommitInput } from './commands.js'
+import { decodeLaneOrder, laneWhere, type LaneStart } from './orderRecord.js'
 import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { neverReachedSubscription } from './RedisSubscriptions.js'
@@ -270,6 +271,7 @@ class RedisRoomDriver implements RoomDriver {
     const { prefix } = this.connection
     const { kind } = source.lane
     const fanIn = kind === 'binary-all' || kind === 'binary-track'
+    const { roomId, inc } = source
     return this.connection.subscriptions.subscribe({
       channel: channelKey(prefix, source.roomId, source.inc, this.kit.encodeLaneKey(source.lane)),
       invalidationChannel: incarnationInvalidationChannel(prefix, source.roomId, source.inc),
@@ -279,6 +281,7 @@ class RedisRoomDriver implements RoomDriver {
         text: false,
         lanesEndWithMembers: fanIn || kind === 'inbox' || kind === 'binary',
       },
+      laneChannel: fanIn ? (laneKey) => channelKey(prefix, roomId, inc, laneKey) : null,
       readStarts: () => this.readStarts(source),
       receiver,
       reportMissed: (count) =>
@@ -288,7 +291,7 @@ class RedisRoomDriver implements RoomDriver {
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
    *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
-  private async readStarts(source: RoomSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
+  private async readStarts(source: RoomSubscriptionSource): Promise<Map<string, LaneStart> | null> {
     const { roomId, inc, lane } = source
     if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
     if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
@@ -371,15 +374,18 @@ class RedisRoomDriver implements RoomDriver {
     return accepted
   }
 
-  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<{ seq: number } | null> {
     const laneKey = this.kit.encodeLaneKey(lane)
-    const mark =
+    const record =
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? await this.connection.send((client) =>
-            client.hget(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey),
+            client.hgetBuffer(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey),
           )
-        : await this.connection.send((client) => client.get(orderKey(this.connection.prefix, roomId, inc, laneKey)))
-    return mark === null ? null : parseOrdering(mark)
+        : await this.connection.send((client) =>
+            client.getBuffer(orderKey(this.connection.prefix, roomId, inc, laneKey)),
+          )
+    if (record === null) return null
+    return { seq: decodeLaneOrder(record, laneWhere(roomId, laneKey)).place }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
@@ -466,12 +472,8 @@ class RedisRoomDriver implements RoomDriver {
     return this.connection.run(REDIS_COMMANDS.directoryDue, { limit: this.kit.DIRECTORY_PAGE_SIZE })
   }
 
-  private async memberLaneStarts(
-    roomId: string,
-    inc: string,
-    member: string,
-  ): Promise<Map<string, OrderingInfo> | null> {
-    const starts = new Map<string, OrderingInfo>()
+  private async memberLaneStarts(roomId: string, inc: string, member: string): Promise<Map<string, LaneStart> | null> {
+    const starts = new Map<string, LaneStart>()
     let cursor = '0'
     do {
       const page = await this.connection.run(REDIS_COMMANDS.memberLaneStarts, { roomId, inc, member, cursor })
@@ -485,8 +487,8 @@ class RedisRoomDriver implements RoomDriver {
     return starts
   }
 
-  private async trackLaneStarts(roomId: string, inc: string, track: string): Promise<Map<string, OrderingInfo> | null> {
-    const starts = new Map<string, OrderingInfo>()
+  private async trackLaneStarts(roomId: string, inc: string, track: string): Promise<Map<string, LaneStart> | null> {
+    const starts = new Map<string, LaneStart>()
     let cursor = '0'
     do {
       const page = await this.connection.run(REDIS_COMMANDS.trackLanes, { roomId, inc, track, cursor })

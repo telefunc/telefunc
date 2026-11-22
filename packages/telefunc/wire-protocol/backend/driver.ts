@@ -50,8 +50,8 @@ type SubscriptionDriver<Source> = {
 
 /**
  * What `installBackend()` installs: Broadcast's driver, and the driver of each other plane it serves. An ordering's
- * `seq` is a positive safe integer that grows with every publish on a key, of either kind; its `timestamp` is a
- * non-negative safe integer (ms) that never goes back on a key.
+ * `seq` is a positive safe integer that grows with every publish on a key, of either kind, unless a failover replaced
+ * the key's history; its `timestamp` is a non-negative safe integer (ms).
  */
 type BroadcastDriver = SubscriptionDriver<BroadcastRoute> & {
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. A publish this host makes after
@@ -107,7 +107,9 @@ function servePlane<Key extends PlaneKey>(
 /**
  * Core's end of one attempt. Deliver each source's messages in `seq` order, as they arrive: one that comes before the
  * attempt's first `ready` is kept by core and reaches the consumers right after it, and one after a loss goes out as
- * it arrives. What a receiver throws is a bug the driver reports: it goes on with its other receivers and messages.
+ * it arrives. Where a failover replaced what was delivered, the new history goes out in its own order, its first
+ * message marked `rewound`. What a receiver throws is a bug the driver reports: it goes on with its other receivers and
+ * messages.
  */
 type BackendReceiver = {
   deliver(payload: BackendPayload, ordering: OrderingInfo): void

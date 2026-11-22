@@ -3,7 +3,7 @@ export type { AuthorityChange, AuthoritySyncOptions, AuthoritySyncOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { createDeferred, unrefTimer } from 'telefunc/__internal'
+import { createDeferred, unrefTimer, type OrderingInfo } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomHead } from '../../backend/contract.js'
 import { ROOM_HORIZON_MS, ROOM_META_REPAIR_MS } from '../constants.js'
@@ -111,9 +111,9 @@ class AuthoritySync {
 
   /** A control frame reached this view. One past a seq that didn't opens a hole, which a whole read repairs
    *  `ROOM_META_REPAIR_MS` later unless the missing frame arrives meanwhile. */
-  controlDelivered(seq: number): void {
+  controlDelivered({ seq, rewound }: OrderingInfo): void {
     // A driver delivers a lane in order, so a seq at or below the highest one is a failover's rewind.
-    if (seq <= this.received) this.onControlLaneRewound()
+    if (rewound || seq <= this.received) this.onControlLaneRewound()
     if (seq !== this.received + 1) this.runStart = seq
     this.received = seq
     for (const waiter of this.waiters) if (waiter.seq <= seq) waiter.reached()

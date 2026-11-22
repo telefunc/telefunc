@@ -260,8 +260,8 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   ): Promise<OperationResult<Value>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
-  /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
-  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
+  /** The lane's last commit's seq; null before its first, or once its incarnation or member is gone. */
+  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<{ seq: number } | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
   /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
    *  their count. */

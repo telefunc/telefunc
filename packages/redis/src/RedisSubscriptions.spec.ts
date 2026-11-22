@@ -5,6 +5,7 @@ import type { SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
+import type { LaneStart } from './orderRecord.js'
 
 const TEXT = 'text-channel'
 const BINARY = 'binary-channel'
@@ -12,7 +13,7 @@ const BINARY = 'binary-channel'
  *  has it. */
 const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
 
-type ReadStarts = () => Promise<Map<string, { seq: number; timestamp: number }>>
+type ReadStarts = () => Promise<Map<string, LaneStart>>
 
 function replyError(message: string): Error {
   const error = new Error(message)
@@ -80,6 +81,7 @@ function setup(
       channel,
       invalidationChannel: null,
       frames,
+      laneChannel: frames.fanIn ? (laneKey) => `${channel}:${laneKey}` : null,
       readStarts,
       receiver: {
         deliver(payload) {
@@ -98,14 +100,21 @@ function setup(
 }
 
 /** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
- *  `[seq_hi][seq_lo][ts_hi][ts_lo][payload]`, u32 big-endian. */
-function frameOf(place: number, text: string, { lane, seq = place }: { lane?: string; seq?: number } = {}): Buffer {
-  const header = Buffer.alloc(24)
+ *  `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its predecessor's, and the payload. Its id is
+ *  its place, so a lane's frames name the one before them. */
+function frameOf(
+  place: number,
+  text: string,
+  { lane, seq = place, id = BigInt(place) }: { lane?: string; seq?: number; id?: bigint } = {},
+): Buffer {
+  const header = Buffer.alloc(40)
   header.writeBigUInt64BE(BigInt(place), 0)
   header.writeUInt32BE(Math.floor(seq / 0x1_0000_0000), 8)
   header.writeUInt32BE(seq % 0x1_0000_0000, 12)
   header.writeUInt32BE(0, 16)
   header.writeUInt32BE(1_700_000_000, 20)
+  header.writeBigUInt64BE(id, 24)
+  header.writeBigUInt64BE(BigInt(Math.max(place - 1, 0)), 32)
   const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
   if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
   return Buffer.concat([laneKey, header, Buffer.from(text)])
@@ -152,10 +161,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     const { subscriptions, listen, sends } = setup()
     listen(TEXT)
     await Promise.all(subscriptions.establishingOn([TEXT]))
-    const reads = [
-      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
-      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
-    ]
+    const reads = [createDeferred<Map<string, LaneStart>>(), createDeferred<Map<string, LaneStart>>()]
     let read = 0
     const binary = listen(BINARY, () => reads[read++]!.promise)
 
@@ -202,6 +208,7 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
     ['a place and no ordering header', frameOf(1, '').subarray(0, 12)],
     ['a seq of 0', frameOf(1, 'x', { seq: 0 })],
     ['a place of 0', frameOf(0, 'x', { seq: 1 })],
+    ['an id of 0', frameOf(1, 'x', { id: BigInt(0) })],
   ]
 
   for (const [name, frame] of FOREIGN) {
@@ -239,7 +246,7 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
 
   it('is dropped where it arrives while the subscription is confirmed, which then goes live', async () => {
     spyReports()
-    const starts = createDeferred<Map<string, { seq: number; timestamp: number }>>()
+    const starts = createDeferred<Map<string, LaneStart>>()
     const { listen, publish, delivered } = setup()
     const attempt = listen(TEXT, () => starts.promise)
     await new Promise((resolve) => setImmediate(resolve))
