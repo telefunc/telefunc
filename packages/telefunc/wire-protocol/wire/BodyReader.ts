@@ -102,6 +102,9 @@ class BodyReader {
   private dropped = false
   /** What a file read that waits for the read-off's next chunk awaits. */
   private keptMore: Deferred<void> | null = null
+  private readonly readOffEnd = createDeferred<void>()
+  /** Settles once the read-off has read the body to its end, or its client left: the client's upload is over. */
+  readonly restRead: Promise<void> = this.readOffEnd.promise
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -196,6 +199,7 @@ class BodyReader {
     } finally {
       this.readOffDone = true
       this.wakeKept()
+      this.readOffEnd.resolve()
     }
   }
 

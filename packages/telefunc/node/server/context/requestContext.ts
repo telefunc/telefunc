@@ -7,6 +7,7 @@ import type { AbortError } from '../Abort.js'
 import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { ATTACHABLE_NOW } from '../../../wire-protocol/channel/server/ServerChannel.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -42,6 +43,9 @@ type RequestContext = {
   /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
    *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
+  /** Settles once the call's body has been read to its end, or its client left: a page can attach to a channel the call
+   *  returned only once its browser has sent the whole body. Set by the binary call's reader; at once otherwise. */
+  bodyRead: Promise<void>
   /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
    *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void
@@ -125,6 +129,7 @@ function createRequestContext(request: Request): RequestContext {
       closeCallbacks.push(cb)
     },
     markComplete,
+    bodyRead: ATTACHABLE_NOW,
     trackPending,
   }
 

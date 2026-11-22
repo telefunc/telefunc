@@ -10,7 +10,7 @@ import { encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.
 import { encode } from '../../wire/frame.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const PING_INTERVAL = 1_000
@@ -61,7 +61,7 @@ test.each([
   async (_body, keepsLock) => {
     const mux = getChannelMux()
     const channel = new ServerChannel()
-    mux.registerChannel(channel)
+    mux.registerChannel(channel, ATTACHABLE_NOW)
     const connId = crypto.randomUUID()
     const opening = encodeSseRequest({ connId, streamResponse: true }, [
       encode.reconcile({

@@ -10,7 +10,7 @@ import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const KEEP = 1_000
@@ -71,7 +71,7 @@ test(
     const ends: string[] = []
     x.onClose((err) => void ends.push(err ? err.message : 'clean'))
     const held = await open(reconcile({ sessionId: pageId, open: [{ id: x.id, ix: 0, lastSeq: 0, initial: true }] }, 1))
-    getChannelMux().registerChannel(x)
+    getChannelMux().registerChannel(x, ATTACHABLE_NOW)
     await Promise.race([x.opened, settle(1_000)])
     void x.send('sent while no page read')
     await settle(20)
@@ -100,7 +100,7 @@ test(
     const ends: string[] = []
     x.onClose((err) => void ends.push(err ? err.constructor.name : 'clean'))
     const held = await open(reconcile({ sessionId: pageId, open: [{ id: x.id, ix: 0, lastSeq: 0, initial: true }] }, 1))
-    getChannelMux().registerChannel(x)
+    getChannelMux().registerChannel(x, ATTACHABLE_NOW)
     await Promise.race([x.opened, settle(1_000)])
     await settle(20)
     await held.cancel()

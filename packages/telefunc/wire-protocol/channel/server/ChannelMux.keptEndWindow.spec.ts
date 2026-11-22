@@ -8,7 +8,7 @@ import { CHANNEL_PING_INTERVAL_MS, CHANNEL_RECONNECT_TIMEOUT_MS } from '../../co
 import { encode } from '../../wire/frame.js'
 import { keptEndWindowOf } from '../../wire/pingDeadline.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { endedSession, openWebSocket, reopen } from './serverPage.fixture.js'
 
 /** The time a session's record is kept from the decision, at the default knobs. */
@@ -45,7 +45,7 @@ test('the reopens the end answers raise its highest attempt and write no record:
   const older = await reopen(sessionId, 2)
   // A channel the next reopen names: the end it is given runs the app's callback, which sees the clock pass the instant.
   const named = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(named)
+  getChannelMux().registerChannel(named, ATTACHABLE_NOW)
   const during: string[] = []
   named.onClose(() => {
     vi.advanceTimersByTime(2)

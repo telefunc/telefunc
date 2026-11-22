@@ -11,7 +11,7 @@ import { HEADER } from '../../wire/header.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
 import { SessionRegistry } from './SessionRegistry.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream, openWebSocket, order } from './serverPage.fixture.js'
 
 /** A frame that carries `message`, which a channel's `send` serializes. */
@@ -27,7 +27,7 @@ test.each(['web', 'node'] as const)(
     await loadStreamNodeModuleOnce()
     const mux = getChannelMux()
     const channel = new ServerChannel()
-    mux.registerChannel(channel)
+    mux.registerChannel(channel, ATTACHABLE_NOW)
 
     // The page attaches the channel; the app sends two messages, which the page doesn't confirm.
     const first = await openStream(
@@ -73,7 +73,7 @@ test.each(['web', 'node'] as const)(
 test('over a WebSocket, a reconnect reads the RECONCILED, then the replay, then what the app sent in the gap before the RECONCILED went out, lossy sends too', async () => {
   const mux = getChannelMux()
   const channel = new ServerChannel()
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   const first = openWebSocket({ reads: true })
   await mux.onWireMessage(
     first.wire,
@@ -121,7 +121,7 @@ test('a WebSocket message of two RECONCILEs ends its wire: a page has one RECONC
 test("a BARRIER riding behind a PING in one WebSocket message gets its RECONCILED on the WebSocket it commits, which then carries the channel's frames", async () => {
   const old = openWebSocket({ reads: true })
   const channel = new ServerChannel()
-  old.mux.registerChannel(channel)
+  old.mux.registerChannel(channel, ATTACHABLE_NOW)
   await old.mux.onWireMessage(
     old.wire,
     encode.reconcile({
@@ -147,7 +147,7 @@ test("a BARRIER riding behind a PING in one WebSocket message gets its RECONCILE
 test('a WebSocket message of a RECONCILE and a BARRIER ends its wire: a page has one of them out at a time', async () => {
   const old = openWebSocket({ reads: true })
   const channel = new ServerChannel()
-  old.mux.registerChannel(channel)
+  old.mux.registerChannel(channel, ATTACHABLE_NOW)
   const attach = { id: channel.id, ix: 0, lastSeq: 0 }
   await old.mux.onWireMessage(
     old.wire,

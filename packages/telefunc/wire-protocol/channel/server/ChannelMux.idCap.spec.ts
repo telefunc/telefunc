@@ -8,7 +8,7 @@ import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
@@ -70,7 +70,7 @@ test('a barrier entry naming an id over the bound as JSON writes it ends the pro
   const target = page()
   try {
     const channel = new ServerChannel()
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     await source.send(
       encode.reconcile({
         sessionId: crypto.randomUUID(),

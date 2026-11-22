@@ -4,7 +4,7 @@
 
 import { expect, test } from 'vitest'
 
-import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
@@ -30,7 +30,7 @@ const stalledSender: PeerSender = {
 /** A broadcast of `key` whose page subscribed to its text and reads nothing. */
 function subscribedPage(key: string, lossy: boolean) {
   const broadcast = new ServerBroadcast<string>({ key, lossy })
-  broadcast._registerChannel()
+  broadcast._registerChannel(ATTACHABLE_NOW)
   broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
     want: { version: 1, text: true, binary: false },
   })
@@ -39,12 +39,12 @@ function subscribedPage(key: string, lossy: boolean) {
 
 test("a reliable broadcast near the budget stays open when another channel's text send fits at its real size", async () => {
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
-  broadcast._registerChannel()
+  broadcast._registerChannel(ATTACHABLE_NOW)
   broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
     want: { version: 1, text: true, binary: false },
   })
   const channel = new ServerChannel<never, string>()
-  channel._registerChannel()
+  channel._registerChannel(ATTACHABLE_NOW)
   const filler: MemoryHolder = { heldBytes: 0 }
   try {
     await broadcast.publish('a'.repeat(400_000))
@@ -113,7 +113,7 @@ test("a publish that can't fit under the budget ends its own pages only: another
 test("a send larger than a channel may ever hold is refused, and another page's broadcast near the budget keeps what it holds", async () => {
   const broadcast = subscribedPage(crypto.randomUUID(), false)
   const channel = new ServerChannel<never, string>()
-  channel._registerChannel()
+  channel._registerChannel(ATTACHABLE_NOW)
   const filler: MemoryHolder = { heldBytes: 0 }
   try {
     await broadcast.publish('a'.repeat(400_000))

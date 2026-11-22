@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { expect, test } from 'vitest'
 import { Telefunc } from '../../../serve/node.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { WIRE_VERSION } from '../../constants.js'
 import { ERROR_REASON, decode, encode, isOneFrame, messageFrames, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -19,7 +19,7 @@ async function openPage(id: string) {
   if (address === null || typeof address === 'string') throw new Error('Expected a TCP address')
   const { port } = address
   const channel = new ServerChannel<string, string>({ id })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
 
   const page = new WebSocket(`ws://127.0.0.1:${port}/_telefunc?wire=${WIRE_VERSION}`)
   page.binaryType = 'arraybuffer'

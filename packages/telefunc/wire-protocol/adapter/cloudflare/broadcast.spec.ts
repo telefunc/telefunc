@@ -29,6 +29,7 @@ import { getChannelMux } from '../../channel/server/ChannelMux.js'
 import { Telefunc } from '../../../serve/cloudflare.js'
 import type { BroadcastDeliverRequest } from './broadcast.js'
 import type { CloudflareScale } from './routing.js'
+import { ATTACHABLE_NOW } from '../../channel/server/ServerChannel.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -1062,7 +1063,7 @@ describe('cloudflare broadcast routing', () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
     // As `carryChannel` stamps the broadcast a call returns.
     broadcast._callRequest = call
-    getChannelMux().registerChannel(broadcast)
+    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
     await getChannelMux().applyCallWants(call, [{ channel: broadcast.id, version: 1, text: true, binary: false }])
     expect(broadcast.isClosed).toBe(false)
     expect(kvWrites).toEqual([`put tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`])

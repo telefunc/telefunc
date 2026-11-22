@@ -32,7 +32,7 @@ import { decode } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
-import { ServerChannel } from '../server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../server/ServerChannel.js'
 import { ClientChannel } from './ClientChannel.js'
 
 type Kind = 'open' | 'post' | 'upload'
@@ -270,7 +270,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** A server channel and the page's end of it, on the page's connection `connectionKey`, over `transports`. */
 function pair(connectionKey: string, transports: ('sse' | 'ws')[] = ['sse']) {
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const got: string[] = []
   channel.listen((message) => void got.push(message))
   const page = new ClientChannel<string, string>({

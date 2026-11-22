@@ -11,7 +11,7 @@ import { encodeU32 } from '../../wire/envelope.js'
 import { ERROR_REASON, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
-import { ServerChannel } from '../server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../server/ServerChannel.js'
 import { ClientChannel } from './ClientChannel.js'
 import {
   delay,
@@ -177,7 +177,7 @@ test("an over-limit frame of a channel the server still awaits ends that channel
   await delay(500)
   expect(awaited.pageEnds).toEqual([['ChannelClosedError', told.overLimit]])
   expect([other.ended, otherEnds, other.got]).toEqual([[], [], ['a1']])
-  getChannelMux().registerChannel(awaited.channel)
+  getChannelMux().registerChannel(awaited.channel, ATTACHABLE_NOW)
   await until(() => awaited.serverEnds.length > 0)
   expect(awaited.serverEnds).toEqual([['ChannelClosedError', told.overLimit]])
 })
@@ -193,7 +193,7 @@ test('a held frame the server refuses as its channel registers ends that channel
   // The POST's own answer says the server took the held frame: the channel registers only after it.
   await until(() => world.hooked[0]?.status === 200)
   const opened = opens()
-  getChannelMux().registerChannel(awaited.channel)
+  getChannelMux().registerChannel(awaited.channel, ATTACHABLE_NOW)
   await until(() => awaited.serverEnds.length > 0 && awaited.pageEnds.length > 0)
   await delay(300)
   expect([awaited.serverEnds, awaited.pageEnds]).toEqual([
@@ -503,7 +503,7 @@ test('a session the server ends on a WebSocket ends a channel of it still awaiti
   sends(live.page, 'a1')
   await until(() => live.ended.length > 0)
   await delay(300)
-  getChannelMux().registerChannel(awaited)
+  getChannelMux().registerChannel(awaited, ATTACHABLE_NOW)
   await until(() => serverEnds.length > 0)
   await delay(300)
   expect([pageEnds, serverEnds, world.sockets]).toEqual([sessionEndOnPage, sessionEndOnPage, 1])

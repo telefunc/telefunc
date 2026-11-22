@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/ChannelMux.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
@@ -42,7 +42,7 @@ function createHarness() {
   const channel = new ServerChannel<number, never>({ id: 'A' })
   const received: number[] = []
   channel.listen((value) => received.push(value))
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   return { mux, wire, received }
 }
 
@@ -167,7 +167,7 @@ test('a page that awaits one channel at two indexes of its session has its wire 
       }),
     )
   expect(wire.terminated()).toBe(false)
-  h.mux.registerChannel(new ServerChannel({ id: 'B' }))
+  h.mux.registerChannel(new ServerChannel({ id: 'B' }), ATTACHABLE_NOW)
   expect(wire.terminated()).toBe(true)
 })
 
@@ -178,7 +178,7 @@ test('a bug in handling a frame is reported, and the server goes on handling the
       throw new Error('a bug in handling a frame')
     }
   }
-  h.mux.registerChannel(new ChannelWithABug({ id: 'B' }))
+  h.mux.registerChannel(new ChannelWithABug({ id: 'B' }), ATTACHABLE_NOW)
   const bugs: unknown[] = []
   onBug((err) => bugs.push(err))
   vi.spyOn(console, 'error').mockImplementation(() => {})

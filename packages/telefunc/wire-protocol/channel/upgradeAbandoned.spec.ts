@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { TAG } from '../wire/tags.js'
@@ -113,7 +113,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** A server channel and the page's end of it on its own connection, opened over SSE; the page moves on its own. */
 async function pair() {
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const got: string[] = []
   channel.listen((message) => void got.push(message))
   const serverEnds: string[] = []

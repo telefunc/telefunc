@@ -7,7 +7,7 @@ import { config } from '../../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
@@ -33,7 +33,7 @@ function wire({ throws = false } = {}) {
 
 function channel() {
   const c = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(c)
+  getChannelMux().registerChannel(c, ATTACHABLE_NOW)
   const ends: string[] = []
   c.onClose((err) => void ends.push(err ? err.message : 'clean'))
   return { c, ends }

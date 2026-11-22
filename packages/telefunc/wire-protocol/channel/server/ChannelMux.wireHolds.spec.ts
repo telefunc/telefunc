@@ -11,7 +11,7 @@ import { TAG } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 
 const KEEP = 1_000
 config.channel = { reconnectTimeout: KEEP, connectTtl: 15_000 }
@@ -58,7 +58,7 @@ function wire() {
 
 function channel() {
   const c = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(c)
+  getChannelMux().registerChannel(c, ATTACHABLE_NOW)
   const ends: string[] = []
   c.onClose((err) => void ends.push(err ? err.message : 'clean'))
   return { c, ends }
@@ -192,7 +192,7 @@ test('a RECONCILE whose wire was lost before its turn attaches nothing and leave
     ])
     await first.send(message)
     await next.send(reconcile({ open: [entry(pending.id, 0)] }, 2))
-    getChannelMux().registerChannel(pending)
+    getChannelMux().registerChannel(pending, ATTACHABLE_NOW)
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect({
       firstEnds: first.hows(),
@@ -410,7 +410,7 @@ test('a reopen retires what the old holder awaited: the channel registering late
     const sessionId = first.sessionId()
     await second.send(reconcile({ sessionId, open: [entry(pending.id, 0)] }, 2))
     const firstBefore = first.frames.length
-    getChannelMux().registerChannel(pending)
+    getChannelMux().registerChannel(pending, ATTACHABLE_NOW)
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect({
       onFirst: first.frames.slice(firstBefore).some((frame) => frame[0] === TAG.ATTACH_RESULT),
@@ -460,7 +460,7 @@ test('a page that knows only an id whose session the server dropped reads an end
     await first.send(reconcile({ open: [entry(pending.id, 0)] }, 1))
     const known = first.sessionId()
     first.lose()
-    getChannelMux().registerChannel(pending)
+    getChannelMux().registerChannel(pending, ATTACHABLE_NOW)
     await second.send(reconcile({ sessionId: known, open: [entry(pending.id, 0)] }, 2))
     // The server ends the session on the second wire; the page reads neither its RECONCILED nor its last word.
     await second.send(unreadable)
@@ -488,7 +488,7 @@ test("a channel named in a RECONCILE queued behind its wire's session end ends w
     await queued
     const ends: string[] = []
     waiting.onClose((err) => void ends.push(err ? err.message : 'clean'))
-    getChannelMux().registerChannel(waiting)
+    getChannelMux().registerChannel(waiting, ATTACHABLE_NOW)
     expect([...ends]).toEqual([END_CAUSE.unreadable.error().message])
   } finally {
     holder.leave()
@@ -533,7 +533,7 @@ test("two reopens answered with their session's kept end, both unread, naming on
     await third.send(reconcile({ sessionId, open: [entry(live.c.id, 0), entry(pending.id, 1)] }, 3))
     const ends: string[] = []
     pending.onClose((err) => void ends.push(err ? err.message : 'clean'))
-    getChannelMux().registerChannel(pending)
+    getChannelMux().registerChannel(pending, ATTACHABLE_NOW)
     expect({
       waits: waits.mock.calls.filter(([awaited]) => awaited.channelId === pending.id).length,
       answers: [second.hows(), third.hows()],
@@ -562,7 +562,7 @@ test("an app whose channel's open registers a channel the wire awaits at two ind
   try {
     await holder.send(reconcile({ open: [entry(pending.id, 1)] }, 1))
     const sessionId = holder.sessionId()
-    trigger.c.onOpen(() => getChannelMux().registerChannel(pending))
+    trigger.c.onOpen(() => getChannelMux().registerChannel(pending, ATTACHABLE_NOW))
     // `pending` again at index 2: its registration, as `trigger` opens, attaches it at 1 and then finds it held at 2,
     // a broken page, which ends the session before `after` attaches.
     await holder.send(

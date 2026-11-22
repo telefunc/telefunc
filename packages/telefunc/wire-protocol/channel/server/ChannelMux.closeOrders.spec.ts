@@ -11,7 +11,7 @@ import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream } from './serverPage.fixture.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 2_000 }
@@ -68,7 +68,7 @@ function channel(ix: number) {
   const c = new ServerChannel<string, string>()
   const ends: string[] = []
   c.onClose((err) => void ends.push(err?.name ?? 'clean'))
-  mux.registerChannel(c)
+  mux.registerChannel(c, ATTACHABLE_NOW)
   const entry: ReconcileOpenEntry = { id: c.id, ix, lastSeq: 0, initial: true }
   return { c, ends, entry }
 }

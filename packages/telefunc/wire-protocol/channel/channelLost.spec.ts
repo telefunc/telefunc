@@ -10,7 +10,7 @@ import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { ChannelClosedError, ChannelCloseUnknownError, ChannelPageLeftError } from './channelErrors.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ServerBroadcast } from './server/ServerBroadcast.js'
 import type { IndexedPeer } from './server/IndexedPeer.js'
 import { ClientChannel } from './client/ClientChannel.js'
@@ -63,7 +63,7 @@ afterAll(() => {
 async function pair() {
   Object.assign(upgrades, { refuse: false, otherWireVersion: false })
   const channel = new ServerChannel<unknown, unknown>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<unknown, unknown>({
     channelId: channel.id,
     connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0, connectionKey: crypto.randomUUID() },
@@ -176,12 +176,12 @@ test("an ended broadcast the app keeps lets go of its page's wire once the page 
     peers.push(new WeakRef(peer))
     attach(peer, state)
   }
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const connection = { telefuncUrl, transports: ['ws' as const], idleTimeout: 0, connectionKey: crypto.randomUUID() }
   const page = new ClientBroadcast<string>({ channelId: channel.id, connection })
   // Another channel keeps the page's wire open.
   const other = new ServerChannel<unknown, unknown>()
-  getChannelMux().registerChannel(other)
+  getChannelMux().registerChannel(other, ATTACHABLE_NOW)
   const otherPage = new ClientChannel<unknown, unknown>({ channelId: other.id, connection })
   await Promise.all([channel.opened, page.opened, other.opened, otherPage.opened])
   channel.abort('stop')

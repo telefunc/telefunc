@@ -13,7 +13,7 @@ import { REFUSAL_MEDIA_TYPE } from '../../refusal.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER } from '../../wire/requestKind.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
-import { ServerChannel } from '../server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../server/ServerChannel.js'
 import { ClientChannel } from './ClientChannel.js'
 import {
   delay,
@@ -173,7 +173,7 @@ test.each(transports)(
   async (transport) => {
     const { waiting, wires } = await endLosingLastWord(transport, true)
     if (waiting === null) throw new Error('no awaited channel')
-    getChannelMux().registerChannel(waiting.channel)
+    getChannelMux().registerChannel(waiting.channel, ATTACHABLE_NOW)
     await until(() => waiting.serverEnds.length > 0, 500).catch(() => {})
     expect([waiting.pageEnds, waiting.serverEnds, wires]).toEqual([sessionEnd, sessionEnd, 2])
   },

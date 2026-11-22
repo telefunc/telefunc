@@ -7,7 +7,7 @@ import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { ChannelOverflowError } from './channelErrors.js'
@@ -64,7 +64,7 @@ function ended(err: unknown) {
 test("an abort before the first open, its reason over the server's frame limit, goes without the reason and throws; the open's other channel goes on", async () => {
   const aborted = new ServerChannel<string, string>()
   const other = new ServerChannel<string, string>()
-  for (const channel of [aborted, other]) getChannelMux().registerChannel(channel)
+  for (const channel of [aborted, other]) getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const serverEnds: { channel: string; err: unknown }[] = []
   aborted.onClose((err) => void serverEnds.push({ channel: 'aborted', err: ended(err) }))
   other.onClose((err) => void serverEnds.push({ channel: 'other', err: ended(err) }))

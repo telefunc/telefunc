@@ -8,7 +8,7 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { Abort } from '../../node/server/Abort.js'
 import { isAbort } from '../../shared/Abort.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { encodeErrorPayload } from '../values/server/response/StreamingResponseBody.js'
@@ -79,7 +79,7 @@ async function pageOf(channel: ServerChannel<unknown, unknown>) {
 /** A server channel and the page's end of it, both open. */
 async function pair() {
   const channel = new ServerChannel<unknown, unknown>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   return [channel, await pageOf(channel)] as const
 }
 

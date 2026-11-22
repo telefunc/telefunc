@@ -23,7 +23,7 @@ import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 import { config } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './ChannelMux.js'
 import { END_CAUSE } from '../endCause.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
 
 // The receive backlog's budget, small enough that a row passes it in a few hundred frames.
@@ -54,7 +54,7 @@ function bodyOf(...chunks: Uint8Array[]): ReadableStream<Uint8Array> {
 /** A page's event stream, opened with a RECONCILE that attaches one channel at index 0. */
 async function openWire() {
   const channel = new ServerChannel()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const connId = crypto.randomUUID()
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [
@@ -248,7 +248,7 @@ test("a channel the server ends for a frame over the limit is told by the event 
 
 test("a receive backlog past what the server holds for the page's connection ends its session: each channel ends with `ChannelOverflowError`, told by the event stream's last event, and the POST is answered `retry`", async () => {
   const attached = new ServerChannel()
-  getChannelMux().registerChannel(attached)
+  getChannelMux().registerChannel(attached, ATTACHABLE_NOW)
   const ends: [string, string][] = []
   attached.onClose((err) => void ends.push(err === null ? ['clean', ''] : [err.name, err.message]))
   // The second channel isn't registered: the server holds what the page sends it until it is.

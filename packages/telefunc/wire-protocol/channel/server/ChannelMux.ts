@@ -215,10 +215,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── ServerChannel registry ──────────────────────────────────────────
 
-  /** Callers must not invoke `channel._registerChannel()` directly. */
-  registerChannel(channel: ServerChannel<any, any>): void {
+  /** Callers must not invoke `channel._registerChannel()` directly. `attachable`: settles once a page can attach, as a
+   *  browser can only once it has sent the call's whole body; the channel's connect window counts from then
+   *  (`ATTACHABLE_NOW` where nothing is on its way). */
+  registerChannel(channel: ServerChannel<any, any>, attachable: Promise<void>): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
-    channel._registerChannel(this)
+    channel._registerChannel(attachable, this)
     this.channels.set(channel.id, channel)
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)

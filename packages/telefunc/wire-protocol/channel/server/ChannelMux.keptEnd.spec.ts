@@ -9,7 +9,7 @@ import { decode, encode } from '../../wire/frame.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openWebSocket } from './serverPage.fixture.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
@@ -28,7 +28,7 @@ const channelWords = (frames: Uint8Array[], ix: number) =>
 
 function channel() {
   const c = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(c)
+  getChannelMux().registerChannel(c, ATTACHABLE_NOW)
   const ends: string[] = []
   c.onClose((err) => void ends.push(err ? err.name : 'clean'))
   return { c, ends }

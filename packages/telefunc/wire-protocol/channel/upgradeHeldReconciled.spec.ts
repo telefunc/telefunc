@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -164,7 +164,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** A server channel that echoes, and the page's end of it on its own connection; the page upgrades on its own. */
 async function pair() {
   const channel = new ServerChannel<string, string>({ ack: true })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   channel.listen((message) => `echo ${message}`)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,

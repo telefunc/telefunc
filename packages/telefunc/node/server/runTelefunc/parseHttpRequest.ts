@@ -197,6 +197,8 @@ async function readBody(
     const reader = new BodyReader(source, clientLeft)
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    // A page attaches to a channel the call returns once its upload is over: the body read off, or its client gone.
+    runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(request.signal)])
     runContext.requestContext.onAnswered(() => {
       reader.keepRest(queueMemory())
       // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
@@ -383,4 +385,10 @@ function logParseError(errMsg: string, runContext: { logMalformedRequests: boole
     errMsg = `Malformed request in development. ${errMsg} This is unexpected since, in development, all requests are expected to originate from the Telefunc Client and should therefore be properly structured.`
   }
   console.error(getProjectError(errMsg))
+}
+
+/** Settles once `signal` aborts. */
+function aborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
 }

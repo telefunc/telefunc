@@ -10,7 +10,7 @@ import { createDeferred } from '../../../utils/createDeferred.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
@@ -82,7 +82,7 @@ test("the record the server keeps of the older of two closed event streams for o
   const channel = new ServerChannel()
   const ends: string[] = []
   channel.onClose((error) => void ends.push(error?.name ?? 'clean'))
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   /** An event stream of the session under `connId`, read up to its RECONCILED. */
   const reconciled = async (attempt: number) => {
     const answer = await post(

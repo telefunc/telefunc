@@ -22,6 +22,7 @@ import { BodyReader } from '../wire/BodyReader.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createDeferred } from '../../utils/createDeferred.js'
+import { ATTACHABLE_NOW } from './server/ServerChannel.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -109,7 +110,7 @@ async function errorSentToPage(
     const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
     // As `carryChannel` stamps the broadcast a call returns.
     broadcast._callRequest = call
-    getChannelMux().registerChannel(broadcast)
+    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
     const frames: Uint8Array<ArrayBuffer>[] = []
     const sender: PeerSender = {
       send: (frame) => frames.push(new Uint8Array(frame)),

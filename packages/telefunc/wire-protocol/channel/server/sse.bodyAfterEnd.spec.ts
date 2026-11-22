@@ -16,7 +16,7 @@ import { encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { encode } from '../../wire/frame.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const PING_INTERVAL = 1_000
@@ -77,7 +77,7 @@ function textFrame(value: string, seq: number): Uint8Array<ArrayBuffer> {
 async function session(through: 'web' | 'node') {
   const mux = getChannelMux()
   const channel = new ServerChannel()
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   const got: unknown[] = []
   channel.listen((message) => void got.push(message))
   const connId = crypto.randomUUID()

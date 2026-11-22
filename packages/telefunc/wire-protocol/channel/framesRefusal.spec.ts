@@ -15,7 +15,7 @@ import { SEQ_OFFSET, readU16, readU32 } from '../wire/header.js'
 import { TAG } from '../wire/tags.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 
 serverConfig.channel = { transports: ['sse'] }
 
@@ -115,7 +115,7 @@ async function until(done: () => boolean, ms = 3_500): Promise<void> {
 /** A server channel and the page's end of it, on the page's connection `connectionKey`. */
 function pair(connectionKey: string) {
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const got: string[] = []
   channel.listen((message) => void got.push(message))
   const serverEnd: Error[] = []

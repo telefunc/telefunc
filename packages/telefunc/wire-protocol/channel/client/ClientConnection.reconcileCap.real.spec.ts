@@ -14,6 +14,7 @@ import { ServerBroadcast } from '../server/ServerBroadcast.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
 import { getWireUrl } from './getSessionUrl.js'
 import { framesStart, pair, useRealServer, world } from './realServer.fixture.js'
+import { ATTACHABLE_NOW } from '../server/ServerChannel.js'
 
 useRealServer(['sse', 'ws'])
 
@@ -100,7 +101,7 @@ test("the cap counts each key a real page's RECONCILE entry carries, a broadcast
   ]
   const connectionKey = crypto.randomUUID()
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
-  getChannelMux().registerChannel(broadcast)
+  getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
   const transports: ('sse' | 'ws')[] = ['sse']
   const connection = { telefuncUrl: world.telefuncUrl, transports, idleTimeout: 0, connectionKey }
   const page = new ClientBroadcast<string>({ channelId: broadcast.id, connection })

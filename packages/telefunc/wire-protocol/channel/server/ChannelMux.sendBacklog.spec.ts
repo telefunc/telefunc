@@ -10,7 +10,7 @@ import { decode, encode } from '../../wire/frame.js'
 import { SEQ_OFFSET, readU32 } from '../../wire/header.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream, openWebSocket, order } from './serverPage.fixture.js'
 import { handleSseChannelRequest } from './sse.js'
 
@@ -80,7 +80,7 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
 test("over SSE, a reconnect whose replay passes the backlog base is not ended by the limit: the replay is its channel's", async () => {
   const mux = getChannelMux()
   const channel = new ServerChannel()
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   const first = await openStream(
     'web',
     encode.reconcile({

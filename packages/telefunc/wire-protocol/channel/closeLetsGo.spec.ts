@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
@@ -31,7 +31,7 @@ afterAll(() => {
 /** A server channel and the page's end of it, over `transport`, on the page's one connection for it. */
 function pair(transport: 'sse' | 'ws') {
   const channel = new ServerChannel<string, string>({ ack: true })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
     ack: true,

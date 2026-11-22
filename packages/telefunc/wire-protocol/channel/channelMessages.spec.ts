@@ -4,7 +4,7 @@ import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
@@ -30,7 +30,7 @@ afterAll(() => {
 /** A server channel and the page's end of it, over `transport`, both open. */
 async function pair(transport: 'sse' | 'ws') {
   const channel = new ServerChannel<string, string>({ ack: true })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
     ack: true,
@@ -82,7 +82,7 @@ for (const transport of ['sse', 'ws'] as const) {
       ] as const) {
         test(`${end} while the app still holds it, reaches no ${kind} message it yielded or queued`, async () => {
           const channel = new ServerChannel<{ i: number }, { i: number }>({ ack: true })
-          getChannelMux().registerChannel(channel)
+          getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
           const page = new ClientChannel<{ i: number }, { i: number }>({
             channelId: channel.id,
             ack: true,

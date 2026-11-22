@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
 import { handleSseChannelRequest } from './sse.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { WIRE_VERSION } from '../../constants.js'
 import { END_CAUSE } from '../endCause.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
@@ -18,7 +18,7 @@ const unreadable = new Uint8Array([0x0f, 0, 0])
 
 test("a frame of no channel the server cannot read is answered `retry`, and ends its channels with the connection's sentence, told by the event stream's last event", async () => {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const connId = crypto.randomUUID()
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [

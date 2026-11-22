@@ -6,7 +6,7 @@ import { config } from '../../../node/server/serverConfig.js'
 import { decode, encode } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream } from './serverPage.fixture.js'
 
 const KEEP = 1_000
@@ -17,7 +17,7 @@ const isReconciled = (frame: Uint8Array) => frame[0] === TAG.RECONCILED
 /** A channel the server holds, and how it ended. */
 function channel() {
   const c = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(c)
+  getChannelMux().registerChannel(c, ATTACHABLE_NOW)
   const ends: string[] = []
   c.onClose((err) => void ends.push(err ? err.constructor.name : 'clean'))
   return { c, ends }

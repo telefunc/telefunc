@@ -1,4 +1,4 @@
-export { Channel, ServerChannel }
+export { ATTACHABLE_NOW, Channel, ServerChannel }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -112,6 +112,9 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
 /** A `send(data, { lossy: true })` to an attached page, text or a copy of its bytes once held; `held` is what it holds
  *  while it waits. */
 type LossySend = { data: EntryData; held: number }
+
+/** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
+const ATTACHABLE_NOW: Promise<void> = Promise.resolve()
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -542,8 +545,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
-   *  `ChannelMux.registerChannel`; external code should call that instead. */
-  _registerChannel(mux?: ChannelMux): void {
+   *  `ChannelMux.registerChannel`; external code should call that instead. `attachable`: settles once a page can
+   *  attach, from when the channel's connect window counts. */
+  _registerChannel(attachable: Promise<void>, mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
@@ -559,15 +563,22 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       (held) => this.refuseSend(held),
     )
     if (this._phase === 'ended') return // the mux lets an ended channel go
-    this.ttlTimer = unrefTimer(
-      setTimeout(() => {
-        this.ttlTimer = null
-        this.shutdown(
-          new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
-          { pageGone: true },
-        )
-      }, getChannelConfig().connectTtl),
-    )
+    const startTtl = () => {
+      this.ttlTimer = unrefTimer(
+        setTimeout(() => {
+          this.ttlTimer = null
+          this.shutdown(
+            new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
+            { pageGone: true },
+          )
+        }, getChannelConfig().connectTtl),
+      )
+    }
+    if (attachable === ATTACHABLE_NOW) return startTtl()
+    // A page that attached meanwhile, or a channel that ended, leaves no wait for a page to time.
+    void attachable.then(() => {
+      if (this.peer === null && this.reconnectTimer === null && this._phase !== 'ended') startTtl()
+    })
   }
 
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;

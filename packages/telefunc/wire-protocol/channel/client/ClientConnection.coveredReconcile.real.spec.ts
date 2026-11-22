@@ -7,7 +7,7 @@ import { decodeU32 } from '../../wire/envelope.js'
 import { decode, encode, isOneFrame, lengthBytes, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from '../server/ChannelMux.js'
-import { ServerChannel } from '../server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../server/ServerChannel.js'
 import { ClientChannel } from './ClientChannel.js'
 import { delay, pair, rewriting, until, useRealServer, world } from './realServer.fixture.js'
 
@@ -70,7 +70,7 @@ test("a WebSocket message whose frames behind the page's RECONCILE for a new cha
   added.onClose((err) => void serverEnds.push(err ? err.message : 'clean'))
   try {
     await until(() => live.ended.length > 0 && addedPage.ended.length > 0)
-    getChannelMux().registerChannel(added)
+    getChannelMux().registerChannel(added, ATTACHABLE_NOW)
     await delay(20)
     expect({
       page: [live.ended.map((err) => err.message.includes(budget)), addedPage.ended.map((end) => end.includes(budget))],
@@ -112,7 +112,7 @@ test("an SSE reopen answered with its session's kept end names a channel opened 
     if (wire !== undefined) getChannelMux().endFault(wire, { scope: 'session', cause: 'receiveBudget' })
     first.cut()
     await until(() => live.ended.length > 0 && addedPage.ended.length > 0)
-    getChannelMux().registerChannel(added)
+    getChannelMux().registerChannel(added, ATTACHABLE_NOW)
     await delay(20)
     expect({
       wire: wire !== undefined,

@@ -13,7 +13,7 @@ import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const KEEP = 1_000
@@ -91,7 +91,7 @@ test(
     const x = new ServerChannel<string, string>()
     const ends: string[] = []
     x.onClose((err) => void ends.push(err ? err.constructor.name : 'clean'))
-    getChannelMux().registerChannel(x)
+    getChannelMux().registerChannel(x, ATTACHABLE_NOW)
     const older = await heldOlderAfterRetired(x, sessionId)
     void x.send('sent after the older body').catch(() => {})
     await settle(20)
@@ -127,7 +127,7 @@ test(
     const x = new ServerChannel<string, string>()
     const ends: string[] = []
     x.onClose((err) => void ends.push(err ? err.constructor.name : 'clean'))
-    getChannelMux().registerChannel(x)
+    getChannelMux().registerChannel(x, ATTACHABLE_NOW)
     const older = await heldOlderAfterRetired(x, sessionId)
     const reconciledOnOlder = [...older.reconciled]
     // The page gave the older request up long before; its stream goes as the page's abort reaches the server.

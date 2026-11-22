@@ -28,7 +28,7 @@ import { getChannelMux } from './ChannelMux.js'
 import { admit, hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 // The least it may be, the credit window a channel starts with: a test can bring one channel to hold the most it may. The
@@ -98,7 +98,7 @@ function releaseWhenDone(channels: ServerChannel[]): void {
 async function overSse(channels: ServerChannel[]) {
   releaseWhenDone(channels)
   const mux = getChannelMux()
-  for (const channel of channels) mux.registerChannel(channel)
+  for (const channel of channels) mux.registerChannel(channel, ATTACHABLE_NOW)
   const want = { version: 1, text: true, binary: false }
   const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, want }))
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
@@ -204,7 +204,7 @@ function overWebSocket(channels: ServerChannel[], requests: Request[] = []) {
     return peer
   }
   const peers = channels.map((channel, index) => {
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     return attach(channel, index, 0, requests[index])
   })
   return {
@@ -617,7 +617,7 @@ async function muxWebSocket(channels: ServerChannel[], request: Request) {
     },
     request,
   )
-  for (const channel of channels) mux.registerChannel(channel)
+  for (const channel of channels) mux.registerChannel(channel, ATTACHABLE_NOW)
   const want = { version: 1, text: true, binary: true }
   const open = channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true as const, want }))
   await mux.onWireMessage(wire, encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open }))
@@ -805,7 +805,7 @@ test('on SSE, an acknowledged send made before a response carried its channel re
   const release = leaveRoom(0)
   try {
     // Admitted again with all this server's channels, the send cuts the subscriber, whose onClose aborts the channel.
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     await new Promise((resolve) => setTimeout(resolve))
     expect(rejectedWith).toBeInstanceOf(Abort)
   } finally {
@@ -1553,7 +1553,7 @@ test("a subscriber its server shed to nothing for another object's publish, its 
   // The page comes back behind another channel's large frame: the replay of p1 waits for the wire.
   const blocker = new ServerChannel()
   const back = overWebSocket([])
-  blocker._registerChannel()
+  blocker._registerChannel(ATTACHABLE_NOW)
   back.attach(blocker, 1)
   void blocker.send('b1' + 'x'.repeat(600_000))
   await vi.advanceTimersByTimeAsync(0)

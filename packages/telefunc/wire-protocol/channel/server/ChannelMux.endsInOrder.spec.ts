@@ -11,7 +11,7 @@ import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { END_CAUSE } from '../endCause.js'
 import { getChannelMux, type ServerTransport } from './ChannelMux.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
@@ -64,7 +64,7 @@ function webSocketWire() {
 test("a channel's end queued on the event stream when the session ends goes ahead of the stream's END", async () => {
   const mux = getChannelMux()
   const channel = new ServerChannel()
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   // The stream isn't read: what the server sends waits for it.
   const { connId, events } = await sseWire(channel)
   await channel.opened
@@ -80,7 +80,7 @@ test("a channel's end queued on the event stream when the session ends goes ahea
 test("a channel's end held behind a RECONCILED owed on a WebSocket when the session ends goes to the socket ahead of its close", async () => {
   const mux = getChannelMux()
   const channel = new ServerChannel()
-  mux.registerChannel(channel)
+  mux.registerChannel(channel, ATTACHABLE_NOW)
   const { wire, handed } = webSocketWire()
   // The RECONCILE is taken and its RECONCILED owed: what the wire sends meanwhile is held behind it.
   await mux.dispatchWireMessage(

@@ -11,7 +11,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../wire/
 import { ClientChannel } from './client/ClientChannel.js'
 import { getWireUrl } from './client/getSessionUrl.js'
 import { getChannelMux } from './server/ChannelMux.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'] }
 
@@ -69,7 +69,7 @@ test('an SSE request without its `x-telefunc-request` header is refused `route`,
 test("behind a proxy that drops `x-telefunc-request`, a page with `['sse', 'ws']` moves to a WebSocket, and its message arrives", async () => {
   globalThis.fetch = strippingFetch
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const got: string[] = []
   channel.listen((message) => void got.push(message))
   const page = new ClientChannel<string, string>({
