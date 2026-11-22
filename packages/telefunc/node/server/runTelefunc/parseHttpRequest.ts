@@ -229,10 +229,11 @@ async function readBody(
  *  bounds the read. A failure that is the app's own error is a bug; a client that left ends it quietly. */
 async function readOffBody(reader: BodyReader, signal: AbortSignal): Promise<void> {
   // A client that leaves ends the call (`signal`) in the same event in which its body fails: the read of the body under
-  // way settles first, so that the file reads end with that failure. A call that answered has no failure coming.
+  // way settles first, so that the file reads end with that failure, or, with none under way, as the client's. A call
+  // that answered has no failure coming.
   if (signal.aborted) await reader.readSettled()
   try {
-    await reader.discardRest()
+    await reader.discardRest(signal.aborted ? 'client' : 'server')
   } catch (err: unknown) {
     handleTelefunctionBug(err)
   }
@@ -244,7 +245,7 @@ async function readText(request: Request, clientLeft: ClientLeft): Promise<strin
   try {
     return await request.text()
   } catch (err) {
-    if (clientLeft(err)) throw new StreamTruncatedError({ cause: err })
+    if (clientLeft(err)) throw new StreamTruncatedError('client', { cause: err })
     throw err
   }
 }

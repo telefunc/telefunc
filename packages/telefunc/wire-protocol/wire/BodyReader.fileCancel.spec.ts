@@ -5,7 +5,7 @@
 
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
-import { BodyReader } from './BodyReader.js'
+import { BodyReader, StreamTruncatedError } from './BodyReader.js'
 
 type Kind = 'node' | 'web'
 type Outcome = { state: 'pending' } | { state: 'done'; value: string } | { state: 'failed'; error: string }
@@ -78,7 +78,10 @@ async function textOf(reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer
 }
 
 const settled = (promise: Promise<unknown>) => track(promise.then(() => 'settled'))
-const TRUNCATED = 'The client disconnected before the end of the request body'
+/** What a truncated read throws, by who stopped the body. */
+const CLIENT_LEFT = new StreamTruncatedError('client').message
+const BODY_ENDED = new StreamTruncatedError('body').message
+const ANSWERED = new StreamTruncatedError('server').message
 const A = 'a'.repeat(10)
 const B = 'b'.repeat(10)
 const C = 'c'.repeat(10)
@@ -216,7 +219,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { cancel: cancel.now, next: next.now }
     },
-    { cancel: { state: 'done', value: 'settled' }, next: { state: 'failed', error: TRUNCATED } },
+    { cancel: { state: 'done', value: 'settled' }, next: { state: 'failed', error: BODY_ENDED } },
   ],
   [
     '8. file 0 cancelled mid-file, then its client leaves: file 1 reads a truncation',
@@ -228,7 +231,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { cancel: cancel.now, next: next.now }
     },
-    { cancel: { state: 'done', value: 'settled' }, next: { state: 'failed', error: TRUNCATED } },
+    { cancel: { state: 'done', value: 'settled' }, next: { state: 'failed', error: CLIENT_LEFT } },
   ],
   [
     "9. file 0 cancelled mid-file, then the body fails as the app's own error: file 1 reads that error",
@@ -312,7 +315,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { second: second.now, third: third.now }
     },
-    { second: { state: 'failed', error: TRUNCATED }, third: { state: 'failed', error: TRUNCATED } },
+    { second: { state: 'failed', error: BODY_ENDED }, third: { state: 'failed', error: BODY_ENDED } },
   ],
   [
     "14. a read of file 1 whose pass of file 0 fails as the app's own error: it reads that error, and so does file 2",
@@ -339,7 +342,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       source.push('aaaa')
       const first = track(text(file(0)))
       await settle()
-      const readOff = settled(reader.discardRest())
+      const readOff = settled(reader.discardRest('server'))
       await settle()
       const next = track(text(file(1)))
       await settle()
@@ -350,8 +353,8 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       return { first: first.now, next: next.now, readOffBeforeTheEnd: before, readOff: readOff.now }
     },
     {
-      first: { state: 'failed', error: `after "aaaa": ${TRUNCATED}` },
-      next: { state: 'failed', error: TRUNCATED },
+      first: { state: 'failed', error: `after "aaaa": ${ANSWERED}` },
+      next: { state: 'failed', error: ANSWERED },
       readOffBeforeTheEnd: { state: 'pending' },
       readOff: { state: 'done', value: 'settled' },
     },
@@ -515,7 +518,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       source.push('aaaa')
       await settle()
-      const readOff = settled(reader.discardRest())
+      const readOff = settled(reader.discardRest('server'))
       await settle()
       source.push('aa')
       await settle()
@@ -524,7 +527,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { second: second.now, readOff: readOff.now }
     },
-    { second: { state: 'failed', error: TRUNCATED }, readOff: { state: 'done', value: 'settled' } },
+    { second: { state: 'failed', error: ANSWERED }, readOff: { state: 'done', value: 'settled' } },
   ],
   [
     '22. a file asked for after the body was let go of: it reads a truncation',
@@ -535,7 +538,7 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { first: first.now }
     },
-    { first: { state: 'failed', error: TRUNCATED } },
+    { first: { state: 'failed', error: ANSWERED } },
   ],
   [
     'R6. file 2 read while file 1 passes file 0, then the body ends short: both read a truncation',
@@ -550,7 +553,22 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       await settle()
       return { second: second.now, third: third.now }
     },
-    { second: { state: 'failed', error: TRUNCATED }, third: { state: 'failed', error: TRUNCATED } },
+    { second: { state: 'failed', error: BODY_ENDED }, third: { state: 'failed', error: BODY_ENDED } },
+  ],
+  [
+    "R13. the request ends through its client's abort between two reads of file 0: the next read reads the client's truncation",
+    async (kind) => {
+      const { source, reader, file } = await setup(kind)
+      const first = file(0).getReader()
+      source.push('aaaa')
+      const got = track(first.read().then(({ value }) => String.fromCharCode(...(value ?? []))))
+      await settle()
+      settled(reader.discardRest('client'))
+      const next = track(textOf(first))
+      await settle()
+      return { got: got.now, next: next.now }
+    },
+    { got: { state: 'done', value: 'aaaa' }, next: { state: 'failed', error: CLIENT_LEFT } },
   ],
 ]
 

@@ -344,7 +344,7 @@ test.each(vias)(
     expect(await answered).toBe(200)
     await settle()
     expect({ readEnded: readEnded.now, printed, bugs }).toEqual({
-      readEnded: `failed: ${new StreamTruncatedError().message}`,
+      readEnded: `failed: ${new StreamTruncatedError('server').message}`,
       printed: [],
       bugs: [],
     })

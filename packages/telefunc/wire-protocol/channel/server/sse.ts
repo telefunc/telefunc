@@ -381,7 +381,7 @@ class SseServerTransport {
   private async readUpload(wire: SseWire, reader: BodyReader): Promise<void> {
     try {
       while (true) {
-        if (wire.closed) return await reader.discardRest()
+        if (wire.closed) return await reader.discardRest('server')
         const raw = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
         if (!raw) return
         if (!wire.closed) this.dispatchAndReport(wire, raw)
@@ -441,7 +441,7 @@ class SseServerTransport {
       const fault = faultOf(err)
       if (fault !== null) {
         this.mux.endFault(wire, fault)
-        await reader.discardRest()
+        await reader.discardRest('server')
       } else if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
     } finally {
       wire.bodies.delete(reader)
@@ -499,7 +499,7 @@ class SseServerTransport {
     onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
   ): Promise<void> {
     while (true) {
-      if (wire.closed) return reader.discardRest()
+      if (wire.closed) return reader.discardRest('server')
       const raw = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
       if (!raw) return
       if (wire.closed) continue

@@ -30,11 +30,22 @@ class OversizeFrameError extends Error {
   }
 }
 
-/** The request body stopped short: mid-frame, or its client left mid-read. Typed so error sinks
- *  discriminate an expected client truncation from a real server bug by class, not message text. */
+/** Who stopped the request body short: its client, which left (also where a read failed and nothing says why, which a
+ *  Web runtime's body does as its client leaves); the body itself, which ended mid-frame; or the server, which answered
+ *  or let it go before reading it to its end. */
+type StoppedBy = 'client' | 'body' | 'server'
+
+const STOPPED_BY: Record<StoppedBy, string> = {
+  client: 'The client disconnected before the end of the request body',
+  body: 'The request body ended before its end',
+  server: 'The server answered before reading the request body to its end',
+}
+
+/** The request body stopped short. Typed so error sinks discriminate an expected truncation from a real server bug by
+ *  class, not message text; the message says who stopped it. */
 class StreamTruncatedError extends Error {
-  constructor(options?: ErrorOptions) {
-    super('The client disconnected before the end of the request body', options)
+  constructor(by: StoppedBy, options?: ErrorOptions) {
+    super(STOPPED_BY[by], options)
   }
 }
 
@@ -71,8 +82,9 @@ class BodyReader {
   /** What the reads that wait for the position await: a file's end, a pull letting go of the position, a cancel. */
   private fileEnd: Deferred<void> | null = null
   private stop: Stop | null = null
-  /** Whether the file reads ended: the request's end, or the body let go of. */
-  private filesEnded = false
+  /** Who ended the file reads: the client, whose request ended through its abort, or the server, which answered or let
+   *  the body go. */
+  private filesEndedBy: 'client' | 'server' | null = null
   /** The source's read under way, and whether the rest of the body is being read off: then it alone reads the source. */
   private reading: Promise<IteratorResult<Uint8Array<ArrayBuffer>>> | null = null
   private readingOff = false
@@ -118,7 +130,7 @@ class BodyReader {
     this.stop ??= { why: 'letGo' }
     this.onChunk = undefined
     this.source.letGo()
-    this.endFiles()
+    this.endFiles('server')
   }
 
   /** Read one frame: [u32 big-endian length][bytes], or null where the body ends before its first byte. A frame over
@@ -133,9 +145,10 @@ class BodyReader {
 
   /** Ends the file reads, then reads the rest of the body and drops it, a chunk at a time, to its end or its client's
    *  leaving. A read of the body under way finishes first, and every read but this one ends as at the body's end. A body
-   *  whose reads stopped already has no rest: an app's error that stopped them went to the read it failed. */
-  async discardRest(): Promise<void> {
-    this.endFiles()
+   *  whose reads stopped already has no rest: an app's error that stopped them went to the read it failed. `endedBy`: who
+   *  ended the request, as the file reads say it where nothing stopped the body. */
+  async discardRest(endedBy: 'client' | 'server'): Promise<void> {
+    this.endFiles(endedBy)
     this.readingOff = true
     // Its own pull, awaiting it since it began, has taken its outcome by then.
     if (this.reading !== null) await this.reading.catch(() => {})
@@ -168,7 +181,7 @@ class BodyReader {
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const file = new FileRead(index, this.pullFile, this.cancelFile)
     this.files.set(index, file)
-    if (this.filesEnded) file.fail(this.stopped())
+    if (this.filesEndedBy !== null) file.fail(this.stopped())
     return file.stream
   }
 
@@ -223,7 +236,7 @@ class BodyReader {
   /** Waits until `file`'s read holds the position at its own index, passing every earlier file that nobody holds. */
   private async takePosition(file: FileRead): Promise<void> {
     for (;;) {
-      if (this.filesEnded) throw this.stopped()
+      if (this.filesEndedBy !== null) throw this.stopped()
       assertUsage(
         file.index >= this.next,
         `File argument ${file.index} has already been consumed (currently at ${this.next}). File arguments must be read in order.`,
@@ -280,8 +293,8 @@ class BodyReader {
 
   /** Errors every open file stream, and every one asked for later, with the stop's own error; the reads that wait wake and
    *  throw it. A file's pull under way finishes its read of the body, and drops it. */
-  private endFiles(): void {
-    this.filesEnded = true
+  private endFiles(by: 'client' | 'server'): void {
+    this.filesEndedBy ??= by
     for (const file of this.files.values()) file.fail(this.stopped())
     this.wake()
   }
@@ -345,9 +358,13 @@ class BodyReader {
     return this.stop?.why === 'app' ? this.stop.error : this.truncation()
   }
 
-  /** The body stopped short, with the runtime's error as the cause where a read failed. */
+  /** The body stopped short, said by who stopped it, with the runtime's error as the cause where a read failed. With no
+   *  stop, who ended the file reads stopped it. */
   truncation() {
-    return new StreamTruncatedError(this.stop && 'error' in this.stop ? { cause: this.stop.error } : undefined)
+    const stop = this.stop
+    if (stop === null) return new StreamTruncatedError(this.filesEndedBy ?? 'server')
+    if (!('error' in stop)) return new StreamTruncatedError(stop.why === 'letGo' ? 'server' : 'body')
+    return new StreamTruncatedError(stop.why === 'app' ? 'body' : 'client', { cause: stop.error })
   }
 
   /** Take up to `max` bytes from the internal buffer, or null if empty. */
