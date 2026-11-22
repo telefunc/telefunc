@@ -6,12 +6,10 @@ import { LazyBlob } from '../../LazyFile.js'
 
 const blobReviver: ReviverType<BlobRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_BLOB,
-  // Blobs are fully consumed during request parsing — no ongoing resource to clean up.
+  // The blob's bytes are the request body's, read as its stream is read: nothing of the blob's own to close.
   revive: (metadata, context) => {
-    context.registerFile(metadata.index, metadata.size)
-    const lazyBlob = new LazyBlob(metadata.size, metadata.type, () =>
-      context.consumeFile(metadata.index, metadata.size),
-    )
+    const getStream = context.registerFile(metadata.index, metadata.size)
+    const lazyBlob = new LazyBlob(metadata.size, metadata.type, getStream)
     return { value: lazyBlob, close() {}, abort() {} }
   },
 }

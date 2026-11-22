@@ -159,8 +159,8 @@ type ClientReviverContext = {
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
-  registerFile(index: number, size: number): void
-  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>>
+  /** Registers a file of the call's body, and returns the getter of its stream. */
+  registerFile(index: number, size: number): () => ReadableStream<Uint8Array<ArrayBuffer>>
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean

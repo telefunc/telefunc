@@ -120,18 +120,20 @@ class BodyReader {
     while (chunk !== null) chunk = await this.pullChunk()
   }
 
-  /** Register a file's size (called during deserialization). */
-  registerFile(index: number, size: number) {
+  /** Registers a file's size, as the call's metadata declares it, while the call is revived, and returns the getter of
+   *  the file's stream. */
+  registerFile(index: number, size: number): () => ReadableStream<Uint8Array<ArrayBuffer>> {
     this.fileSizes.set(index, size)
+    return () => this.fileStream(index, size)
   }
 
   /**
-   * Consume file at given index — returns a `ReadableStream` of exactly `size` bytes.
+   * The file at `index` — a `ReadableStream` of exactly `size` bytes.
    *
    * Queued: concurrent calls are serialized via `start`/`pull` waiting on `queue`.
    * Out-of-order access skips earlier files (their bytes are read and discarded).
    */
-  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>> {
+  private fileStream(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const queuePrevious = this.queue
     let remaining = size
     const { promise: done, resolve: resolveDone } = createDeferred()

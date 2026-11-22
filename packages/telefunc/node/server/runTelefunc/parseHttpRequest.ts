@@ -97,10 +97,9 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   const body = await readBody(request, readable, clientLeft, requestKind, runContext)
   if (body.isMalformedRequest) return body
-  const { text, registerFile, consumeFile } = body
+  const { text, registerFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
-    consumeFile,
     createChannel,
     receiveStream: ({ channelId }) =>
       ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
@@ -185,7 +184,6 @@ async function readBody(
       isMalformedRequest: false
       text: string
       registerFile: ServerReviverContext['registerFile']
-      consumeFile: ServerReviverContext['consumeFile']
     }
   | { isMalformedRequest: true }
 > {
@@ -209,14 +207,12 @@ async function readBody(
       isMalformedRequest: false,
       text: new TextDecoder().decode(metadata),
       registerFile: (i, s) => reader.registerFile(i, s),
-      consumeFile: (i, s) => reader.consumeFile(i, s),
     }
   }
   return {
     isMalformedRequest: false,
     text: await readText(request, clientLeft),
-    registerFile: () => {},
-    consumeFile: () =>
+    registerFile: () => () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({
         start(controller) {
           controller.error(new Error('No binary frame'))
