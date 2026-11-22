@@ -173,7 +173,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
- *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read. A
+ *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read,
+ *  and so is one whose body ends before its envelope is complete. A
  *  binary request's body is read off to its end once the call is done (`readOffBody`). */
 async function readBody(
   request: Request,
@@ -191,18 +192,16 @@ async function readBody(
 > {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
-    // A Web `Request` sent without a body has `body === null`, which no Telefunc client sends; a Node one, an empty
-    // stream, which ends before its metadata.
-    if (!source) {
-      logParseError('The binary request has no body.', runContext)
-      return { isMalformedRequest: true }
-    }
+    if (!source) return refuseEndedEnvelope(runContext)
     const reader = new BodyReader(source, clientLeft)
     runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
-    const metadata = await reader.readFrame(CALL_METADATA_MAX_BYTES).catch((err: unknown): 'oversize' => {
-      if (err instanceof OversizeFrameError) return 'oversize'
-      throw err
-    })
+    const metadata = await reader
+      .readFrame(CALL_METADATA_MAX_BYTES)
+      .catch((err: unknown): 'oversize' | StreamTruncatedError => {
+        if (err instanceof OversizeFrameError) return 'oversize'
+        if (err instanceof StreamTruncatedError) return err
+        throw err
+      })
     if (metadata === 'oversize') {
       logParseError(
         `The binary request declares more metadata than the server reads (over ${CALL_METADATA_MAX_BYTES} bytes).`,
@@ -210,10 +209,15 @@ async function readBody(
       )
       return { isMalformedRequest: true }
     }
-    if (metadata === null) throw reader.truncation()
+    const envelope = metadata ?? reader.truncation()
+    if (envelope instanceof StreamTruncatedError) {
+      // A client that left, or a read nothing explains: the call's truncation.
+      if (envelope.by !== 'body') throw envelope
+      return refuseEndedEnvelope(runContext)
+    }
     return {
       isMalformedRequest: false,
-      text: new TextDecoder().decode(metadata),
+      text: new TextDecoder().decode(envelope),
       registerFile: (i, s) => reader.registerFile(i, s),
     }
   }
@@ -227,6 +231,13 @@ async function readBody(
         },
       }),
   }
+}
+
+/** A binary request whose body ends before its envelope is complete: no body (a Web `Request`'s `null`), an empty one, or
+ *  one whose own end cuts its metadata. No Telefunc client sends one, so it is malformed. */
+function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true } {
+  logParseError('The binary request ends before its envelope is complete.', runContext)
+  return { isMalformedRequest: true }
 }
 
 /** Ends the call's file reads, then reads the rest of its body and drops it: a connection the client keeps alive carries

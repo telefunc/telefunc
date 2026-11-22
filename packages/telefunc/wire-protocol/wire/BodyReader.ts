@@ -45,8 +45,10 @@ const STOPPED_BY: Record<StoppedBy, string> = {
 /** The request body stopped short. Typed so error sinks discriminate an expected truncation from a real server bug by
  *  class, not message text; the message says who stopped it. */
 class StreamTruncatedError extends Error {
+  readonly by: StoppedBy
   constructor(by: StoppedBy, options?: ErrorOptions) {
     super(STOPPED_BY[by], options)
+    this.by = by
   }
 }
 

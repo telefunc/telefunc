@@ -281,4 +281,15 @@ function testFileUpload() {
     const read = await post('txt', JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }))
     expect(read.text).toContain('failed: The server answered before reading the request body to its end')
   })
+
+  // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing); Node's adapters have
+  // their rows in packages/telefunc/serve/node.uploadBody.spec.ts.
+  if (serverRuntime() !== 'node')
+    test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
+      const statuses: number[] = []
+      for (const body of ['', new Uint8Array([0, 0]), new Uint8Array([0, 0, 3, 232, 123])]) {
+        statuses.push((await post('bin', body)).status)
+      }
+      expect(statuses).deep.equal([400, 400, 400])
+    })
 }

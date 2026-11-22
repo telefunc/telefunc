@@ -480,7 +480,45 @@ test('a binary call without a body is refused as malformed: answered 400, with n
   // In development a malformed request is printed as such, as every refused call is (`logParseError`).
   expect({ status: response?.status, printed, bugs }).toEqual({
     status: 400,
-    printed: [expect.stringContaining('The binary request has no body.')],
+    printed: [expect.stringContaining('The binary request ends before its envelope is complete.')],
+    bugs: [],
+  })
+})
+
+/** A binary call's body that ends in its metadata, which declares 1000 bytes: its whole body, as its client sent it. */
+const endedInMetadata = concat(u32(1000), encoder.encode('{"file":'))
+
+test.each(vias)(
+  'a binary call whose body ends before its envelope is complete is refused as malformed: answered 400, with no bug (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const answers: number[] = []
+    for (const body of [new Uint8Array(0), u32(1000).subarray(0, 2), endedInMetadata]) {
+      const { socket, answered } = await sendWhole(body, via)
+      answers.push(await answered)
+      socket.destroy()
+    }
+    const refusal = expect.stringContaining('The binary request ends before its envelope is complete.')
+    expect({ answers, printed, bugs }).toEqual({
+      answers: [400, 400, 400],
+      printed: [refusal, refusal, refusal],
+      bugs: [],
+    })
+  },
+)
+
+test('a binary call whose Fetch Request has an empty body is refused as malformed: answered 400, with no bug', async () => {
+  const { printed, bugs } = recordErrors()
+  const init: RequestInit & { duplex: 'half' } = {
+    method: 'POST',
+    headers: { 'x-telefunc-request': kinds.binary },
+    body: new Uint8Array(0),
+    duplex: 'half',
+  }
+  const response = await telefunc.serve({ request: new Request(`http://127.0.0.1${telefuncPath}`, init) })
+  expect({ status: response?.status, printed, bugs }).toEqual({
+    status: 400,
+    printed: [expect.stringContaining('The binary request ends before its envelope is complete.')],
     bugs: [],
   })
 })
