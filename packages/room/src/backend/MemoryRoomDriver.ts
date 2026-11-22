@@ -222,13 +222,15 @@ function applyCells(
   mutations: readonly CellMutation[],
   counts: readonly CellCount[],
 ): Map<string, CellCounter> {
-  const version = String(++incarnation.version)
-  for (const mutation of mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
+  // A revision only for what is written: an operation that writes nothing writes no revision, as on Redis.
+  let version: string | undefined
+  const written = () => (version ??= String(++incarnation.version))
+  for (const mutation of mutations) setCell(incarnation, mutation.key, mutation.bytes, written())
   const counters = new Map<string, CellCounter>()
   for (const count of counts) {
     const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
     if (counted === null) continue
-    if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
+    if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), written())
     counters.set(count.key, counted.counter)
   }
   return counters
