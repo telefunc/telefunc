@@ -373,7 +373,7 @@ class SseServerTransport {
     this.sendNow(wire, encode.streamRequestOpenAck())
     // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
     await wire.ready
-    return this.answerAfterBody(wire, reader, () => this.readUpload(wire, reader))
+    return this.answerAfterBody(wire, reader, this.readUpload(wire, reader))
   }
 
   /** Dispatches the upload's frames as they come, to the body's end; after its wire's end, what the page writes is read
@@ -382,26 +382,12 @@ class SseServerTransport {
     try {
       while (true) {
         if (wire.closed) return await reader.discardRest()
-        const raw = await this.readFrame(wire, reader)
+        const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
         if (!raw) return
         if (!wire.closed) this.dispatchAndReport(wire, raw)
       }
     } finally {
       await this.settlePendingDispatches(wire)
-    }
-  }
-
-  /** The body's next frame, or null at its end. A frame over the limit is `wire`'s fault, whatever wire its connId
-   *  names by then: the mux decides what it ends, and the rest of the body is read off. */
-  private async readFrame(wire: SseWire, reader: BodyReader): Promise<Uint8Array<ArrayBuffer> | null> {
-    try {
-      return await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
-    } catch (err) {
-      const fault = faultOf(err)
-      if (fault === null) throw err
-      this.mux.endFault(wire, fault)
-      await reader.discardRest()
-      return null
     }
   }
 
@@ -426,30 +412,37 @@ class SseServerTransport {
     if (!wire) return refuse(REFUSED.noWire)
     reader.onChunk = () => this.mux.onWireBytes(wire)
     if (!(await this.waitReady(wire))) return refuse(REFUSED.notReady)
-    return this.answerAfterBody(wire, reader, () => {
-      const drain = this.drain(wire, reader, (outcome) => {
-        if (shouldSendReconciled(outcome, wire)) this.mux.sendReconciled(outcome)
-      })
-      wire.pendingDispatches.add(drain)
-      return drain.finally(() => wire.pendingDispatches.delete(drain))
+    const drain = this.drain(wire, reader, (outcome) => {
+      if (shouldSendReconciled(outcome, wire)) this.mux.sendReconciled(outcome)
     })
+    wire.pendingDispatches.add(drain)
+    try {
+      return await this.answerAfterBody(wire, reader, drain)
+    } finally {
+      wire.pendingDispatches.delete(drain)
+    }
   }
 
   /** What a request whose frames `read` reads from `reader` on `wire` is answered once the page ended its body, or the
    *  server let go of it one ping deadline after the wire's end (`endStream`): `retry` where its wire ended meanwhile,
    *  so the page reconnects, and its reopen reads the end the server kept; also where the body was cut in the middle of
    *  a frame the server was reading as the wire ended. A cut on a wire still open is `handleRequest`'s, the same
-   *  `retry`. */
+   *  `retry`. A frame over the limit is `wire`'s fault, whatever wire its connId names by then: the mux decides what it
+   *  ends, and the rest of the body is read off, as after any end. */
   private async answerAfterBody(
     wire: SseWire,
     reader: BodyReader,
-    read: () => Promise<void>,
+    read: Promise<void>,
   ): Promise<SseChannelHttpResponse> {
     wire.bodies.add(reader)
     try {
-      await read()
+      await read
     } catch (err) {
-      if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
+      const fault = faultOf(err)
+      if (fault !== null) {
+        this.mux.endFault(wire, fault)
+        await reader.discardRest()
+      } else if (!(err instanceof StreamTruncatedError) || !wire.closed) throw err
     } finally {
       wire.bodies.delete(reader)
     }
@@ -468,9 +461,12 @@ class SseServerTransport {
       })
     } catch (err) {
       // The body ended mid-frame; this promise is fire-and-forget, so a rethrow would be unhandled.
-      // A truncation is the client hanging up (channels keep their grace).
+      // A truncation is the client hanging up (channels keep their grace); an over-limit frame is the wire's fault, as
+      // on any other request.
       reportDispatchBug(err)
-      this.onWireGone(wire, 'transient')
+      const fault = faultOf(err)
+      if (fault !== null) this.mux.endFault(wire, fault)
+      else this.onWireGone(wire, 'transient')
     } finally {
       wire.bodies.delete(reader)
       // Every path releases the gate here — the parked POSTs then see whatever state we left.
@@ -504,7 +500,7 @@ class SseServerTransport {
   ): Promise<void> {
     while (true) {
       if (wire.closed) return reader.discardRest()
-      const raw = await this.readFrame(wire, reader)
+      const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES, HEADER)
       if (!raw) return
       if (wire.closed) continue
       const outcome = await this.mux.dispatchWireMessage(wire, raw)
