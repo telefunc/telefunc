@@ -202,7 +202,9 @@ function testWire(isDev: boolean) {
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
       await new Promise((resolve) => (ws.onopen = resolve))
-      let sessionId: string | undefined
+      // The page makes its session's id and names it from its first RECONCILE on; the server's RECONCILED names it back.
+      let sessionId: string = crypto.randomUUID()
+      let reconciledOnce = false
       // Takes the first answer to the RECONCILE in flight.
       let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
       const answered = (answer: 'reconciled' | 'closed') => {
@@ -216,6 +218,7 @@ function testWire(isDev: boolean) {
         const reconciled = frames.find((frame) => frame[0] === TAG.RECONCILED)
         if (reconciled === undefined) return
         sessionId = JSON.parse(new TextDecoder().decode(reconciled.subarray(7))).sessionId
+        reconciledOnce = true
         answered('reconciled')
       }
       // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
@@ -225,7 +228,7 @@ function testWire(isDev: boolean) {
           if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
           settle = resolve
           // The first, on a wire that holds no session yet, numbers its attempt, as the page's does.
-          const attempt = sessionId === undefined ? { attempt: 1 } : {}
+          const attempt = reconciledOnce ? {} : { attempt: 1 }
           const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...attempt, ...reconcile }))
           // A RECONCILE: its tag, then index 0 and seq 0 in the 7-byte header.
           const frame = new Uint8Array(7 + payload.byteLength)
