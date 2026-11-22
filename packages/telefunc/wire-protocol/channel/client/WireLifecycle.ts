@@ -102,13 +102,17 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private attemptStartedAt: number | null = null
   /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
   private allowanceTimer: ReturnType<typeof setTimeout> | null = null
+  /** The attempt under way: the backoff its end waits, drawn as it starts; when it is cut unanswered (null: it runs to
+   *  the deadline, or was answered); and whether the server answered it. */
+  private attempt: { nextDelay: number; cutAt: number | null; answered: boolean } | null = null
   /** When the attempt under way started, till the server answered it. */
   private allowanceFrom = 0
   /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
   private answeredMs: number | null = null
   private cuts = 0
-  /** How long the last wire took from its start to its RECONCILED: the room an attempt needs before the deadline. */
-  private handshakeMs = 0
+  /** How long the last wire took from its socket's or request's start to its RECONCILED: the room an attempt needs
+   *  before the deadline. */
+  private handshakeMs: number | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -169,13 +173,17 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
    *  the channels end instead. */
   private startWire(): void {
     const now = performance.now()
-    const { deadline } = this.recoveryFrom()
-    if (now >= deadline) return this.onRecoveryDeadline()
+    const recovery = this.recoveryFrom()
+    if (now >= recovery.deadline) return this.onRecoveryDeadline()
     this.attemptStartedAt = now
     this.allowanceFrom = now
     this.clearAllowance()
-    const allowance = attemptAllowance(this.answeredMs, this.cuts, deadline - now)
-    this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
+    const nextDelay = reconnectDelay(recovery.attempt)
+    // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
+    const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
+    const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
+    this.attempt = { nextDelay, cutAt: room > 0 ? now + allowance : null, answered: false }
+    if (room > 0) this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
     this.transport.start()
   }
 
@@ -190,7 +198,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
   private attemptAnswered(): void {
-    if (this.allowanceTimer === null) return
+    if (this.attempt === null || this.attempt.answered) return
+    this.attempt.answered = true
+    this.attempt.cutAt = null
     this.clearAllowance()
     this.answeredMs = performance.now() - this.allowanceFrom
     this.cuts = 0
@@ -448,6 +458,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
     this.attemptAnswered()
+    this.attempt = null
     this.endRecovery()
     if (this.attemptStartedAt !== null) {
       this.handshakeMs = performance.now() - this.attemptStartedAt
@@ -607,10 +618,22 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       return
     }
     recovery.attempt = attempt + 1
-    // An attempt reconciles a handshake after it starts; one that couldn't before the deadline doesn't start, and the
-    // deadline ends the channels.
-    const delay = reconnectDelay(attempt)
-    this.enterReconnecting(performance.now() + delay + this.handshakeMs < recovery.deadline ? delay : null)
+    // An attempt that couldn't reconcile before the deadline doesn't start, and the deadline ends the channels. A loss
+    // counts no later than its cut was due, which a late timer passed.
+    const delay = this.attempt?.nextDelay ?? reconnectDelay(attempt)
+    const at = Math.min(performance.now(), this.attempt?.cutAt ?? Infinity)
+    this.attempt = null
+    this.enterReconnecting(at <= this.latestEnd(delay, recovery.deadline, this.handshakeMs ?? 0) ? delay : null)
+  }
+
+  /** The latest moment an attempt can end and the next, `delay` later, still reconcile by `deadline` if it takes
+   *  `needMs`: where a loss still starts the next attempt, and where an attempt is cut. Both pass the last handshake:
+   *  this boundary decides which successor is admitted, and one exactly as slow as the last open arrives at the
+   *  deadline's own instant, too late; only a faster one is in time. With none measured, starting an attempt costs
+   *  nothing alive and needs nothing, while a cut costs the attempt it cuts and leaves the next at least what any
+   *  attempt is given. */
+  private latestEnd(delay: number, deadline: number, needMs: number): number {
+    return deadline - delay - needMs
   }
 
   /** The recovery under way, or one from now: the server holds the page's channels until its ping deadline noticed
@@ -743,11 +766,11 @@ function reconnectDelay(attempt: number): number {
 }
 
 /** How long an attempt may go unanswered before it is cut: three times as long as the last attempt the server answered
- *  took, and never under the minimum, a first connect too; growing with each attempt cut since; never past half of
- *  `leftMs`, the recovery's time left, so another attempt fits after a cut. */
-function attemptAllowance(answeredMs: number | null, cuts: number, leftMs: number): number {
-  const allowance = Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * (answeredMs ?? 0))
-  return Math.min(allowance * ATTEMPT_ALLOWANCE_GROWTH ** cuts, leftMs / 2)
+ *  took, and never under the minimum, a first connect too; growing with each attempt cut since. */
+function attemptAllowance(answeredMs: number | null, cuts: number): number {
+  return (
+    Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * (answeredMs ?? 0)) * ATTEMPT_ALLOWANCE_GROWTH ** cuts
+  )
 }
 
 // ── Transport registry ──
