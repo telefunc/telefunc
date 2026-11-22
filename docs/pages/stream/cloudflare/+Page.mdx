@@ -104,11 +104,9 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-Telefunc routes every request of a client to its Durable Object, by the session token the client sends with each request.
-
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses. Without the token, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels.
 
 </Warning>
 
