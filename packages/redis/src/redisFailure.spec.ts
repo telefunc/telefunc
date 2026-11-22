@@ -339,6 +339,53 @@ describe('a Cluster command ioredis gave up once the Cluster used its redirectio
   })
 })
 
+describe('a Cluster command ioredis gave up on a reply that is no redirection, as the backend reports it', () => {
+  // At an app's `maxRedirections: 0`, ioredis gives up a command on its first reply, whatever it is, and wraps it.
+  const gaveUp = (last: string) => new Error(`Too many Cluster redirections. Last error: ${String(reply(last))}`)
+  const told = (error: unknown, writes: boolean) => {
+    const failure = redisFailure(error, cluster, writes)
+    return failure instanceof Error && 'code' in failure && 'outcome' in failure
+      ? { code: failure.code, outcome: failure.outcome, message: failure.message, refusal: isRefusal(failure) }
+      : failure
+  }
+  it.each([
+    "READONLY You can't write against a read only replica.",
+    "READONLY You can't write against a read only replica. script: bd6f3018b28bbdb36260f19d3c44afed740db987, on @user_script:1.",
+    "ERR Error running script (call to f_bd6f3018b28bbdb36260f19d3c44afed740db987): @user_script:1: @user_script: 1: -READONLY You can't write against a read only replica.",
+    "NOPERM this user has no permissions to run the 'evalsha' command",
+    'TFNOTRUN WRONGTYPE tf:0:room:{r}:head',
+    'WRONGTYPE Operation against a key holding the wrong kind of value',
+    "OOM command not allowed when used memory > 'maxmemory'.",
+    'CLUSTERDOWN The cluster is down',
+  ])('%s is told as the reply on its own', (last) => {
+    for (const writes of [true, false]) expect(told(gaveUp(last), writes)).toEqual(told(reply(last), writes))
+  })
+  it("a MOVED that ended the command at no redirection is told as the Cluster's redirection", () => {
+    expect(redisFailure(gaveUp('MOVED 3739 172.17.0.6:6379'), cluster, true)).toMatchObject({
+      code: 'unavailable',
+      outcome: 'not-run',
+      message: expect.stringMatching(/ redirected a command of Telefunc's Redis backend \(MOVED\) /),
+    })
+  })
+  it('a last error that is no reply is told as before: Redis unreachable, and the command may have run', () => {
+    const closed = new Error('Too many Cluster redirections. Last error: Error: Connection is closed.')
+    expect(redisFailure(closed, cluster, true)).toMatchObject({
+      code: 'unreachable',
+      outcome: 'may-have-run',
+      message: "Telefunc's Redis backend can't reach Redis at 127.0.0.1:7001, 127.0.0.1:7002",
+    })
+  })
+  it("a replica's READONLY names the Cluster's replica, and the command didn't run", () => {
+    expect(redisFailure(gaveUp("READONLY You can't write against a read only replica."), cluster, true)).toMatchObject({
+      code: 'unavailable',
+      outcome: 'not-run',
+      message: expect.stringMatching(
+        /^A replica of the Redis Cluster at 127\.0\.0\.1:7001, 127\.0\.0\.1:7002 refused a write/,
+      ),
+    })
+  })
+})
+
 describe("a Cluster's connect that failed on its nodes, as the backend reports it", () => {
   const refusedLogin = () => reply('WRONGPASS invalid username-password pair or user is disabled.')
   const timedOut = () => new Error('timeout')

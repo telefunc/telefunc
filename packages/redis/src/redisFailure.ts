@@ -10,7 +10,7 @@ import {
   isCluster,
   isReplyError,
   isUnsent,
-  clusterRedirection,
+  lastClusterReply,
   type RedisClient,
 } from './ioredis.js'
 
@@ -82,6 +82,9 @@ const CODES: Readonly<Record<string, { code: Code; notRun: boolean; toDo?: strin
 /** How Redis 5 and 6 and Dragonfly wrap the reply to a call a script makes; such a reply proves nothing about running. */
 const IN_SCRIPT = /^ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?-?/
 
+/** A Cluster's redirection, which ioredis follows until its redirections run out. */
+const REDIRECTION = /^(MOVED|ASK|TRYAGAIN) /
+
 /** A write script's guard's refusal before its first write (`refuseLua`, commands.ts), by its word: WRONGTYPE for a
  *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
 const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
@@ -103,7 +106,12 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
   }
   const where = addressOf(redis)
   const outcome = (proof: boolean): BackendError['outcome'] => (!writes || proof ? 'not-run' : 'may-have-run')
-  const redirection = clusterRedirection(error)
+  // A Cluster command ioredis gave up is told by the reply that ended it, as if that reply had come on its own: every
+  // try before it was a redirection, MOVED, ASK, TRYAGAIN or CLUSTERDOWN, which ran nothing, as ioredis tries a command
+  // again on those only and counts its redirections down before it reads a reply (ioredis 5.10.1,
+  // built/cluster/index.js:550-560), so at an app's `maxRedirections: 0` the first reply, whatever it is, ends it.
+  const last = lastClusterReply(error)
+  const redirection = last === undefined ? undefined : REDIRECTION.exec(last)?.[1]
   if (redirection !== undefined) {
     // The reply says the node doesn't serve the slot now, not why: a reshard and a failover both answer it.
     return new BackendError({
@@ -115,7 +123,8 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
         "the command's slot",
     })
   }
-  if (!isReplyError(error)) {
+  const message = last ?? (isReplyError(error) ? error.message : undefined)
+  if (message === undefined) {
     const code = connectionCode(error)
     return new BackendError({
       code: 'unreachable',
@@ -123,7 +132,6 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
       message: `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
     })
   }
-  const { message } = error
   const guarded = GUARD_REFUSAL.exec(message)
   if (guarded !== null) {
     // In Telefunc's own words, as for every reply: the reply's text names the key.

@@ -14,7 +14,7 @@ export {
   addressOf,
   isReplyError,
   isUnsent,
-  clusterRedirection,
+  lastClusterReply,
 }
 export type { RedisClient, SubscriberSocket, RawCommand }
 
@@ -151,16 +151,19 @@ function isUnsent(error: unknown): boolean {
   return error instanceof Error && UNSENT.test(error.message)
 }
 
-/** ioredis's rejection of a Cluster command once its redirections ran out, with the last reply: a node answers MOVED,
- *  ASK or TRYAGAIN before the command runs, for a slot it doesn't serve (after a reshard or a failover) or one that
- *  moves. */
-const REDIRECTED = /^Too many Cluster redirections\. Last error: ReplyError: (MOVED|ASK|TRYAGAIN) /
+/** ioredis's rejection of a Cluster command once its redirections ran out, holding the reply that ended it. ioredis
+ *  counts the app's `maxRedirections` down on every reply that fails a try, before it reads the reply, so at 0 the
+ *  first reply ends the command, whatever it is (ioredis 5.10.1, `Cluster.handleError()`). */
+const GAVE_UP = /^Too many Cluster redirections\. Last error: ReplyError: /
 
-/** The last reply's code where ioredis gave up a Cluster command that the Cluster kept redirecting. No try of it ran:
- *  ioredis tries a command again only on a redirection or a reply of the Cluster's state, as the backend's command
- *  client never retries a closed connection (`retryDelayOnFailover: 0`, `createCommandClient()`). */
-function clusterRedirection(error: unknown): string | undefined {
-  return error instanceof Error ? REDIRECTED.exec(error.message)?.[1] : undefined
+/** The reply that ended a Cluster command ioredis gave up once its redirections ran out, as Redis worded it. Every try
+ *  before it was redirected, so it didn't run: ioredis tries a command again only on MOVED, ASK, TRYAGAIN and
+ *  CLUSTERDOWN, each answered before the command runs, as the backend's command client never retries a closed
+ *  connection (`retryDelayOnFailover: 0`, `createCommandClient()`). So the last reply tells what the command did. */
+function lastClusterReply(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined
+  const gaveUp = GAVE_UP.exec(error.message)
+  return gaveUp === null ? undefined : error.message.slice(gaveUp[0].length)
 }
 
 /** An error Redis replied with, as ioredis gives it: by its name, as an app may load another copy of the errors' class. */
@@ -189,7 +192,7 @@ function createCommandClient(redis: RedisClient): RedisClient {
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
-        // A closed connection fails its command (`clusterRedirection()` counts on it).
+        // A closed connection fails its command (`lastClusterReply()` counts on it).
         retryDelayOnFailover: 0,
         enableOfflineQueue: false,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a

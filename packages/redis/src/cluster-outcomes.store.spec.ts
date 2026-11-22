@@ -66,5 +66,21 @@ describe.runIf(runs)("a Cluster's reply that ended a command", () => {
         message: `The Redis Cluster at ${where} redirected a command of Telefunc's Redis backend (MOVED) more times than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves the command's slot`,
       })
     }, 120_000)
+
+    it(`${store.name}: a replica's READONLY is told as the replica's refusal`, async () => {
+      const { nodes, where } = await following(store)
+      // The app's connections to the primary end, and ioredis sends the next write to the replica, which it set to
+      // READONLY mode (redis/ioredis#2274): the replica's refusal is the command's first reply, which ends it.
+      await nodes.primary.admin.call('CLIENT', 'KILL', 'USER', 'telefunc')
+      // A command sent before ioredis saw its connection close fails on it: the first read that gets past the store
+      // was sent after, as the write then is.
+      await reaches(`the ${store.name} Cluster`)
+      expect(await publishing('readonly')).toMatchObject({
+        name: 'BackendError',
+        code: 'unavailable',
+        outcome: 'not-run',
+        message: `A replica of the Redis Cluster at ${where} refused a write of Telefunc's Redis backend (READONLY), as ioredis sent it there while it held no connection to the slot's primary: a later call reaches the primary once ioredis reads the Cluster's slots again`,
+      })
+    }, 120_000)
   }
 })
