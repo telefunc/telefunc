@@ -101,7 +101,8 @@ async function session(through: 'web' | 'node') {
   const wire = new WeakRef(opened)
   const end = async () => {
     const ending = encodeSseRequest({ connId }, [encode.attachResult(999, null)])
-    await (through === 'web' ? post(ending) : fetchPost(ending).then((answer) => answer.text()))
+    if (through === 'web') await post(ending)
+    else await (await fetchPost(ending)).text()
     return performance.now()
   }
   return { connId, got, wire, end }
@@ -141,10 +142,11 @@ test.each([
     const endedAt = await end()
     ended = true
     const answered = await Promise.race([
-      answer.then(({ statusCode, contentType }) => {
+      (async () => {
+        const { statusCode, contentType } = await answer
         const after = performance.now() - endedAt
         return { statusCode, contentType, onTime: after >= DEADLINE - 100 && after < DEADLINE * 1.5 }
-      }),
+      })(),
       new Promise<null>((resolve) => setTimeout(resolve, DEADLINE * 2, null)),
     ])
     const pullsAnswered = pulls
