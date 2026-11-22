@@ -181,7 +181,7 @@ class ChannelMux implements UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
-  private readonly sessions = new SessionRegistry()
+  private readonly sessions = new SessionRegistry({ keepMs: () => this.options.reconnectTimeout })
   private readonly wires = new Map<unknown, WireEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
@@ -587,16 +587,16 @@ class ChannelMux implements UpgradeStagesOwner {
     if (fault.scope === 'channel' && channelEnded) {
       return this.closeWire(entry, { how: 'transient', refusal: frameRefusal(fault.cause, fault.ix) })
     }
-    this.endSessionOn(entry, session.id, fault.scope === 'session' ? fault.cause : 'unreadable')
+    this.endSessionOn(entry, session.id, fault.scope === 'session' ? fault.cause : 'unreadable', session.high)
   }
 
   /** The session `sessionId` ends for `cause` on `entry`'s wire, which closes for good with it as its last word: its
    *  channels end as the wire closes (`detachHandle`); those it awaits, as they register; and its page, should it miss
-   *  the wire's last word, at its reopen. */
-  private endSessionOn(entry: WireEntry, sessionId: string, cause: SessionCause): void {
+   *  the wire's last word, at its reopen. `high`: the page's attempt the end answers, which its record keeps. */
+  private endSessionOn(entry: WireEntry, sessionId: string, cause: SessionCause, high: number): void {
     entry.sender.close('first')
     entry.state.awaited.refuseAll(cause)
-    this.sessions.keepEnd(sessionId, cause, this.options.reconnectTimeout)
+    this.sessions.keepEnd(sessionId, cause, high)
     this.closeWire(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
@@ -649,21 +649,32 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
-      // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or awaited,
-      // and so does each channel it names.
-      const ended = this.sessions.endOf(frame.payload.sessionId)
-      if (ended !== undefined) {
-        this.refuseNamed(frame.payload.open, entry, ended)
-        this.endSessionOn(entry, frame.payload.sessionId, ended)
-        return null
+      const ctrl = frame.payload
+      // An open its wire can't send is refused before anything kept is answered or any channel it names is touched.
+      this.admitReconcile(entry, ctrl)
+      const kept = this.sessions.keptOf(ctrl.sessionId)
+      if (kept !== undefined) {
+        // An attempt not above the highest the record holds is older than one the server answered: it takes nothing.
+        if (ctrl.attempt === undefined || ctrl.attempt <= kept.high) {
+          this.endFault(entry.wire, { scope: 'loss' })
+          return null
+        }
+        // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or
+        // awaited, and so does each channel it names.
+        if (kept.end !== 'retired') {
+          this.refuseNamed(ctrl.open, entry, kept.end)
+          this.endSessionOn(entry, ctrl.sessionId, kept.end, ctrl.attempt)
+          return null
+        }
+        // A newer attempt of a session that retired takes it again.
+        this.sessions.revive(ctrl.sessionId)
       }
-      this.admitReconcile(entry, frame.payload)
-      if (this.isStale(entry, frame.payload)) {
+      if (this.isStale(entry, ctrl)) {
         this.endFault(entry.wire, { scope: 'loss' })
         return null
       }
-      this.claimSessionForReconcile(frame.payload, entry)
-      return this.reconcile(entry, frame.payload)
+      this.claimSessionForReconcile(ctrl, entry)
+      return this.reconcile(entry, ctrl)
     }
     const session = entry.holds
     assertProtocol(session, 'frame on a wire that holds no session')

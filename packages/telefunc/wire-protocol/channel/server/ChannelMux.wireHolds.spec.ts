@@ -667,3 +667,102 @@ test("a PREPARE over the staged byte budget is refused before it replaces its se
     source.leave()
   }
 })
+
+// The order a page's attempts arrive in, against what the server has of its session: the live session, or the record
+// it keeps of one that retired (emptied with no wire holding it) or that it ended, each holding the highest attempt
+// that took it. Each arrival is a wire whose first RECONCILE names the session with its attempt: it takes the session
+// (`took`), goes as a loss (`transient`), or is answered with the session's end.
+
+/** Each attempt in order, on a wire of its own, and what it came to as it was answered. */
+async function arrivals(sessionId: string, attempts: number[]) {
+  const wires: ReturnType<typeof wire>[] = []
+  const came: string[] = []
+  for (const attempt of attempts) {
+    const arriving = wire()
+    wires.push(arriving)
+    await arriving.send(reconcile({ sessionId, open: [] }, attempt))
+    came.push(arriving.tags().includes(TAG.RECONCILED) ? 'took' : (arriving.hows()[0] ?? 'nothing'))
+  }
+  return {
+    came,
+    leave: () => {
+      for (const each of wires) each.leave()
+    },
+  }
+}
+
+/** A session attempt 1 took with nothing in it, as the server has it once `how` happened to it. */
+async function sessionThat(how: 'lives' | 'retired' | 'ended') {
+  const a = channel()
+  const holder = wire()
+  await holder.send(reconcile({ open: how === 'ended' ? [entry(a.c.id, 0)] : [] }, 1))
+  const sessionId = holder.sessionId() ?? ''
+  if (how === 'retired') holder.lose()
+  if (how === 'ended') await holder.send(bad)
+  return { sessionId, holder }
+}
+
+test.each([
+  ['lives', [1, 3, 2], ['transient', 'took', 'transient']],
+  ['lives', [2, 1, 3], ['took', 'transient', 'took']],
+  ['retired', [1, 3, 2], ['transient', 'took', 'transient']],
+  ['retired', [2, 1, 3], ['took', 'transient', 'took']],
+  ['ended', [1, 3, 2], ['transient', 'unreadable', 'transient']],
+  ['ended', [2, 1, 3], ['unreadable', 'transient', 'unreadable']],
+] as const)(
+  'attempts arriving against a session that %s, in the order %j, come to %j: one not above the highest the server has takes nothing',
+  async (how, attempts, came) => {
+    const { sessionId, holder } = await sessionThat(how)
+    const arrived = await arrivals(sessionId, [...attempts])
+    try {
+      expect(arrived.came).toEqual(came)
+    } finally {
+      arrived.leave()
+      holder.leave()
+    }
+  },
+)
+
+test('a session that retires again after a newer attempt took it back keeps that attempt as its highest: an older one read after takes nothing', async () => {
+  const { sessionId, holder } = await sessionThat('retired')
+  const newer = wire()
+  try {
+    await newer.send(reconcile({ sessionId, open: [] }, 3))
+    newer.lose()
+    const arrived = await arrivals(sessionId, [2])
+    arrived.leave()
+    expect({ newer: newer.tags().includes(TAG.RECONCILED), older: arrived.came }).toEqual({
+      newer: true,
+      older: ['transient'],
+    })
+  } finally {
+    newer.leave()
+    holder.leave()
+  }
+})
+
+test("a first RECONCILE without its attempt naming a session whose end is kept goes as a loss: it is given no end, and the channel it names isn't touched", async () => {
+  const { sessionId, holder } = await sessionThat('ended')
+  const y = channel()
+  const unnumbered = wire()
+  try {
+    await unnumbered.send(encode.reconcile({ sessionId, open: [entry(y.c.id, 0)] }))
+    expect({ how: unnumbered.hows(), yEnds: [...y.ends] }).toEqual({ how: ['transient'], yEnds: [] })
+  } finally {
+    unnumbered.leave()
+    holder.leave()
+    y.c.abort()
+  }
+})
+
+test('a first RECONCILE that names no session, as a page of 0.3.1 sends it, goes as a loss', async () => {
+  const first = wire()
+  try {
+    const frame: unknown = Reflect.apply(encode.reconcile, encode, [{ open: [] }])
+    if (!(frame instanceof Uint8Array)) throw new Error('no frame')
+    await first.send(Uint8Array.from(frame))
+    expect([first.hows(), first.tags().includes(TAG.RECONCILED)]).toEqual([['transient'], false])
+  } finally {
+    first.leave()
+  }
+})

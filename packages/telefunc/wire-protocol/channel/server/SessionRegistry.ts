@@ -21,30 +21,55 @@ type Session = {
   high: number
 }
 
-/** What the server keeps of a session it ended, under its id: why it ended. */
-type KeptEnd = { readonly cause: SessionCause; readonly timer: ReturnType<typeof setTimeout> }
+/** What the server keeps of a session that left the registry, under its id: why the server ended it, or `retired`
+ *  where it emptied with no wire holding it or its page left; and the highest attempt of its page's that took it or
+ *  that its end answered, which an attempt read later must be above to take anything. */
+type KeptEnd = {
+  readonly end: SessionCause | 'retired'
+  readonly high: number
+  readonly timer: ReturnType<typeof setTimeout>
+}
+
+type SessionRegistryOptions = {
+  /** How long a session's record is kept from the time it is kept. */
+  keepMs: () => number
+}
 
 /** Each session by id, and the sessions each channel is in: a frame finds its channel by session and index, and an
  *  ending channel leaves every session in O(its sessions). Every change writes both maps. A session is stored while a
- *  wire holds it or it has a channel. The end of a session the server ended is kept under its id for as long as its
- *  page may come back: a page that missed its wire's last word reopens naming its session, and is answered with the
- *  same end. */
+ *  wire holds it or it has a channel. One that leaves is kept under its id as a record, for as long as its page may
+ *  come back: a page that missed its wire's last word reopens naming its session, and is answered with the same end;
+ *  an older attempt of the page's, read after a newer one, takes nothing. */
 class SessionRegistry {
   private readonly bySession = new Map<string, Session>()
   private readonly byChannel = new Map<string, Map<string, number>>()
   private readonly kept = new Map<string, KeptEnd>()
+  private readonly keepMs: () => number
 
-  /** Keeps the end of the session `sessionId` for `waitMs` from now, also where one is kept under that id already. */
-  keepEnd(sessionId: string, cause: SessionCause, waitMs: number): void {
-    const kept = this.kept.get(sessionId)
-    if (kept) clearTimeout(kept.timer)
-    const timer = unrefTimer(setTimeout(() => this.kept.delete(sessionId), waitMs))
-    this.kept.set(sessionId, { cause, timer })
+  constructor({ keepMs }: SessionRegistryOptions) {
+    this.keepMs = keepMs
   }
 
-  /** The cause the session `sessionId` ended with, while its end is kept. */
-  endOf(sessionId: string): SessionCause | undefined {
-    return this.kept.get(sessionId)?.cause
+  /** Keeps `end` under `sessionId`, with `high` or the record's own if higher, for `keepMs` from now, also where a
+   *  record is kept under that id already. */
+  keepEnd(sessionId: string, end: KeptEnd['end'], high: number): void {
+    const kept = this.kept.get(sessionId)
+    if (kept) clearTimeout(kept.timer)
+    const timer = unrefTimer(setTimeout(() => this.kept.delete(sessionId), this.keepMs()))
+    this.kept.set(sessionId, { end, high: Math.max(high, kept?.high ?? 0), timer })
+  }
+
+  /** The record kept under `sessionId`, while it is kept. */
+  keptOf(sessionId: string): Pick<KeptEnd, 'end' | 'high'> | undefined {
+    return this.kept.get(sessionId)
+  }
+
+  /** A newer attempt of the page's takes the retired session `sessionId` again: its record goes. */
+  revive(sessionId: string): void {
+    const kept = this.kept.get(sessionId)
+    if (kept === undefined) return
+    clearTimeout(kept.timer)
+    this.kept.delete(sessionId)
   }
 
   get(sessionId: string): Session | undefined {
@@ -116,7 +141,7 @@ class SessionRegistry {
 
   /** Takes the session out, its holder releasing it, and returns its channels, for the caller to detach. */
   removeSession(session: Session): Map<number, ChannelHandle> {
-    if (this.bySession.get(session.id) === session) this.bySession.delete(session.id)
+    if (this.bySession.get(session.id) === session) this.leave(session)
     if (session.holder !== null) session.holder.holds = null
     session.holder = null
     const channels = new Map(session.channels)
@@ -147,7 +172,13 @@ class SessionRegistry {
 
   private dropIfEmpty(session: Session): void {
     if (session.channels.size === 0 && session.holder === null && this.bySession.get(session.id) === session) {
-      this.bySession.delete(session.id)
+      this.leave(session)
     }
+  }
+
+  /** The session leaves the registry. Unless the server ended it, whose end is kept already, it is kept as retired. */
+  private leave(session: Session): void {
+    this.bySession.delete(session.id)
+    if (!this.kept.has(session.id)) this.keepEnd(session.id, 'retired', session.high)
   }
 }
