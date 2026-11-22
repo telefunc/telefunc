@@ -56,8 +56,9 @@ type SseWire = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Ends the read of its open's body: once the wire is closed, nothing reads what that body still brings. */
-  stopOpenRead: () => void
+  /** Settles as the wire closes: nothing reads what its requests' bodies still bring after that. */
+  readsStop: Promise<void>
+  stopReads: () => void
   /** Dispatches in flight for this wire. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
@@ -336,8 +337,8 @@ class SseServerTransport {
     const events = new EventStream({ useNodeStream, onCancel })
 
     const { promise: ready, resolve: resolveReady } = createDeferred()
-    const { promise: openReadStops, resolve: stopOpenRead } = createDeferred()
-    reader.stopWhen(openReadStops)
+    const { promise: readsStop, resolve: stopReads } = createDeferred()
+    reader.stopWhen(readsStop)
     const wire: SseWire = {
       connId,
       events,
@@ -346,7 +347,8 @@ class SseServerTransport {
       sessionId: null,
       ready,
       resolveReady,
-      stopOpenRead,
+      readsStop,
+      stopReads,
       pendingDispatches: new Set(),
     }
     this.mux.onWireOpen(wire, this.transport, request)
@@ -371,6 +373,7 @@ class SseServerTransport {
     const wire = await this.resolveWire(connId)
     if (!wire) return badRequest()
     reader.onChunk = () => this.mux.onWireBytes(wire)
+    reader.stopWhen(wire.readsStop)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
@@ -385,6 +388,9 @@ class SseServerTransport {
         if (!raw || wire.closed) break
         this.dispatchAndReport(wire, raw)
       }
+    } catch (err) {
+      // The wire's end stops the read, in the middle of a frame too.
+      if (!wire.closed || !(err instanceof StreamTruncatedError)) throw err
     } finally {
       await this.settlePendingDispatches(wire)
     }
@@ -558,7 +564,7 @@ class SseServerTransport {
     this.rememberClosed(wire)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
-    wire.stopOpenRead()
+    wire.stopReads()
     this.mux.onWireClosed(wire, how)
     wire.events.close({ flush: wire.rejected, last: wire.rejected ? encode.rejected() : undefined })
   }

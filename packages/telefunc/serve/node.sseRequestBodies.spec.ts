@@ -6,14 +6,14 @@ import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
-import { WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../wire-protocol/constants.js'
+import { STATUS_CODE_REJECTED, WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../wire-protocol/constants.js'
 import { encode } from '../wire-protocol/wire/frame.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 
-// The request that opens a page's SSE wire carries the page's first frames in its body, read for as long as the wire
-// lives. Once the wire is closed, nothing reads what the body still brings: past what Node buffers, the server reads no
-// more of it, and lets its socket go at its keep-alive timeout, through Node's own request and through a Fetch `Request`
-// built from it alike.
+// The requests of a page's SSE wire carry the page's frames in their bodies: the one that opens the wire, and the
+// stream-request upload. Once the wire is closed, nothing reads what a body still brings: past what Node buffers, the
+// server reads no more of it, and lets its socket go at its keep-alive timeout, through Node's own request and through a
+// Fetch `Request` built from it alike.
 
 config.channel = { pingInterval: 1000 }
 const telefunc = new Telefunc()
@@ -177,4 +177,104 @@ for (const via of Object.keys(servers) as Via[]) {
       }
     },
   )
+}
+
+/** A wire for `connId` whose open's body was its RECONCILE alone, once the server answered it. */
+async function openedWire(via: Via, connId: string): Promise<{ socket: Socket; text: () => string }> {
+  const reconcile = prefixed(encode.reconcile({ open: [] }))
+  const open = post(via, connId, 'streamResponse', metadata(connId, 'streamResponse').length + reconcile.length)
+  open.socket.write(reconcile)
+  while (!open.text().includes('data: ')) await sleep(10)
+  return open
+}
+
+const UPLOADS = { 'stream-request': 'streamRequest' }
+
+for (const via of Object.keys(servers) as Via[]) {
+  for (const [uploadName, kind] of Object.entries(UPLOADS)) {
+    test(
+      `after the page's close POST, nothing reads its ${uploadName} body any more, and its socket goes (${via})`,
+      { timeout: 20_000 },
+      async () => {
+        const connId = crypto.randomUUID()
+        const open = await openedWire(via, connId)
+        const upload = post(via, connId, kind, 1_000_000_000, `${connId}-up`)
+        // A frame the page goes on sending: it declares the largest a frame may be.
+        upload.socket.write(u32(WIRE_MAX_RAW_FRAME_BYTES))
+        const piece = new Uint8Array(16384).fill(120)
+        const trickle = setInterval(() => void upload.socket.write(piece), 100)
+        try {
+          await sleep(500)
+          await closes["the page's close POST"](via, connId)
+          while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
+          // What Node buffers for a request nobody reads, 64 KiB and as much again for a Fetch `Request`'s body, fills in
+          // under a second.
+          await sleep(2500)
+          const req = requests.get(`${connId}-up`)
+          const readAt = req?.socket.bytesRead ?? 0
+          await sleep(2000)
+          expect({ readSince: (req?.socket.bytesRead ?? 0) - readAt, released: req?.socket.destroyed }).toEqual({
+            readSince: 0,
+            released: true,
+          })
+        } finally {
+          clearInterval(trickle)
+          open.socket.destroy()
+          upload.socket.destroy()
+        }
+      },
+    )
+
+    test(
+      `once the ping deadline ends a wire whose ${uploadName} went silent mid-frame, the server lets that frame's bytes go (${via})`,
+      { timeout: 20_000 },
+      async () => {
+        const connId = crypto.randomUUID()
+        const open = await openedWire(via, connId)
+        const upload = post(via, connId, kind, 1_000_000_000, `${connId}-up`)
+        upload.socket.write(u32(WIRE_MAX_RAW_FRAME_BYTES))
+        // Part of the frame, and then nothing.
+        upload.socket.write(new Uint8Array(PART).fill(120))
+        try {
+          while ((requests.get(`${connId}-up`)?.socket.bytesRead ?? 0) < PART) await sleep(10)
+          const before = await heldBytes()
+          while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
+          expect(before - (await heldBytes())).toBeGreaterThan(PART * 0.9)
+        } finally {
+          open.socket.destroy()
+          upload.socket.destroy()
+        }
+      },
+    )
+
+    test(
+      `a ${uploadName} the server stopped reading mid-frame, as it refused the wire, answers that it refused it (${via})`,
+      { timeout: 20_000 },
+      async () => {
+        const connId = crypto.randomUUID()
+        const open = await openedWire(via, connId)
+        const upload = post(via, connId, kind, 1_000_000_000, `${connId}-up`)
+        upload.socket.write(u32(WIRE_MAX_RAW_FRAME_BYTES))
+        upload.socket.write(new Uint8Array(16384).fill(120))
+        try {
+          await sleep(500)
+          // A frame past the largest a frame may be: the server refuses the wire.
+          const oversize = u32(WIRE_MAX_RAW_FRAME_BYTES + 1)
+          post(
+            via,
+            connId,
+            'batch',
+            metadata(connId, 'batch').length + oversize.length,
+            `${connId}-batch`,
+          ).socket.write(oversize)
+          while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
+          await sleep(1000)
+          expect(upload.text().split('\r\n')[0]).toBe(`HTTP/1.1 ${STATUS_CODE_REJECTED} Unprocessable Entity`)
+        } finally {
+          open.socket.destroy()
+          upload.socket.destroy()
+        }
+      },
+    )
+  }
 }
