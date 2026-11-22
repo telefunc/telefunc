@@ -4,6 +4,8 @@ export type { ChannelHandle, Session }
 import type { ServerChannel } from './ServerChannel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import type { WireEntry } from './ChannelMux.js'
+import type { SessionCause } from '../endCause.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
 
 /** A channel as one session holds it: its index there and the peer it sends through. */
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
@@ -19,12 +21,31 @@ type Session = {
   high: number
 }
 
+/** What the server keeps of a session it ended, under its id: why it ended. */
+type KeptEnd = { readonly cause: SessionCause; readonly timer: ReturnType<typeof setTimeout> }
+
 /** Each session by id, and the sessions each channel is in: a frame finds its channel by session and index, and an
  *  ending channel leaves every session in O(its sessions). Every change writes both maps. A session is stored while a
- *  wire holds it or it has a channel. */
+ *  wire holds it or it has a channel. The end of a session the server ended is kept under its id for as long as its
+ *  page may come back: a page that missed its wire's last word reopens naming its session, and is answered with the
+ *  same end. */
 class SessionRegistry {
   private readonly bySession = new Map<string, Session>()
   private readonly byChannel = new Map<string, Map<string, number>>()
+  private readonly kept = new Map<string, KeptEnd>()
+
+  /** Keeps the end of the session `sessionId` for `waitMs` from now, also where one is kept under that id already. */
+  keepEnd(sessionId: string, cause: SessionCause, waitMs: number): void {
+    const kept = this.kept.get(sessionId)
+    if (kept) clearTimeout(kept.timer)
+    const timer = unrefTimer(setTimeout(() => this.kept.delete(sessionId), waitMs))
+    this.kept.set(sessionId, { cause, timer })
+  }
+
+  /** The cause the session `sessionId` ended with, while its end is kept. */
+  endOf(sessionId: string): SessionCause | undefined {
+    return this.kept.get(sessionId)?.cause
+  }
 
   get(sessionId: string): Session | undefined {
     return this.bySession.get(sessionId)
