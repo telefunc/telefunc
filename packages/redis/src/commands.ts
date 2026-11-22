@@ -93,14 +93,14 @@ end
 `
 
 // The ordering frame orderingFrame.ts reads: four u32 big-endian words, the commit's id and its lane predecessor's,
-// then the payload.
+// then the payload. What goes before it is built into the same string, as each concatenation copies the payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
   local hi = math.floor(n / 4294967296)
   return struct.pack('>I4I4', hi, n - hi * 4294967296)
 end
-local function tf_ordering_frame(seq, ts, id, prev, payload)
-  return tf_u64(seq) .. tf_u64(ts) .. id .. prev .. payload
+local function tf_ordering_frame(before, seq, ts, id, prev, payload)
+  return before .. tf_u64(seq) .. tf_u64(ts) .. id .. prev .. payload
 end
 `
 
@@ -167,7 +167,7 @@ else
 end
 tf_allowed('PUBLISH', KEYS[2], '')
 redis.call('SET', KEYS[1], struct.pack('<dddc8c8', seq, text, binary, text_id, binary_id))
-redis.call('PUBLISH', KEYS[2], tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[3], prev, ARGV[1]))
+redis.call('PUBLISH', KEYS[2], tf_ordering_frame(tf_u64(place), seq, ts, ARGV[3], prev, ARGV[1]))
 return {seq, ts}
 `
 
@@ -584,7 +584,7 @@ if not raw and ${A.laneKind} == 'binary' then
   redis.call('SADD', ${K.trackLanes}, ${A.laneKey})
   redis.call('SADD', incarnation_keys_key, ${K.trackLanes})
 end
-local frame = tf_ordering_frame(seq, now, ${A.id}, prev, ${A.payload})
+local frame = tf_ordering_frame('', seq, now, ${A.id}, prev, ${A.payload})
 if ${A.retain} == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
