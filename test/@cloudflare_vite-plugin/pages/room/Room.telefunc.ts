@@ -18,6 +18,10 @@ export {
   onThrowingListener,
   onJoinClosing,
   onJoinRefused,
+  onReplyOutcome,
+  onRemovalOutcome,
+  onJoinOutcome,
+  onMetaUpdateOutcome,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
@@ -232,4 +236,70 @@ async function onJoinRefused() {
   const members = (await Room.get(roomId)).count
   await Room.close(roomId)
   return { ...outcome, members }
+}
+
+// The calls the size tests make, each with one value of `length` characters in a new room. A Durable Object's SQLite
+// storage refuses a row over 8 MiB and 34 bytes; the tests find each call's longest value and run it one longer.
+
+/** What `call` told its caller: resolved, or the name of the error it rejected with. */
+const outcomeOf = (call: Promise<unknown>) =>
+  call.then(
+    () => 'resolved',
+    (error: unknown) => (error instanceof Error ? error.name : 'not an Error'),
+  )
+
+async function inNewRoom<T>(run: (room: Room, id: string) => Promise<T>) {
+  const id = `row-limit:${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  try {
+    return await run(room, id)
+  } finally {
+    await Room.close(id)
+  }
+}
+
+/** What the sender of an acknowledged DM whose answer has `length` characters was told by the time a later small DM to
+ *  the same member had its answer. */
+async function onReplyOutcome(length: number) {
+  return inNewRoom(async (room) => {
+    const sender = await room.join()
+    const recipient = await room.join()
+    recipient.listen((data) => (data === 'large' ? 'v'.repeat(length) : 'small'))
+    let told = 'not told'
+    void outcomeOf(sender.send(recipient.id, 'large', { ack: true })).then((outcome) => (told = outcome))
+    await sender.send(recipient.id, 'small', { ack: true })
+    return { told }
+  })
+}
+
+/** A removal by identity, with a reason of `length` characters, of a visible tab and a hidden one: what it told, and
+ *  the visible tabs the store holds after it. */
+async function onRemovalOutcome(length: number) {
+  return inNewRoom(async (room, id) => {
+    await room.join({ identity: 'u1' })
+    await room.join({ identity: 'u1', hidden: true })
+    const told = await outcomeOf(Room.removeParticipant(id, { identity: 'u1', reason: 'r'.repeat(length) }))
+    return { told, visible: (await Room.getParticipants(id)).length }
+  })
+}
+
+/** A join with an identity of 1,000 characters and a meta value of `length`: what it told, the participants it left,
+ *  and what the next join is told. */
+async function onJoinOutcome(length: number) {
+  return inNewRoom(async (room, id) => {
+    const told = await outcomeOf(room.join({ identity: 'i'.repeat(1000), meta: { m: 'm'.repeat(length) } }))
+    const participants = (await Room.getParticipants(id)).length
+    return { told, participants, nextJoin: await outcomeOf(room.join({ identity: 'small' })) }
+  })
+}
+
+/** A `Room.updateMeta()` of a key of 1,000 characters and a value of `length`: what it told, the meta's keys after it,
+ *  and what the next update is told. */
+async function onMetaUpdateOutcome(length: number) {
+  return inNewRoom(async (_room, id) => {
+    await Room.setMeta(id, { seed: 's' })
+    const told = await outcomeOf(Room.updateMeta(id, { ['k'.repeat(1000)]: 'v'.repeat(length) }))
+    const keys = Object.keys((await Room.get(id)).meta)
+    return { told, keys, nextUpdate: await outcomeOf(Room.updateMeta(id, { n: '1' })) }
+  })
 }

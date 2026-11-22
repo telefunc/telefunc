@@ -677,6 +677,37 @@ function testRoomStorage() {
     expect(await clickRoomCard(page, 'throwing-listener')).deep.equal({ thrower: 2, healthy: 2 })
   })
 
+  test("Room: an acknowledged DM whose answer is over the store's row limit tells its sender ChannelOverflowError", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('reply-outcome')).deep.equal({ told: 'ChannelOverflowError' })
+  })
+
+  test("Room: a removal whose leave is over the store's row limit is refused with ChannelOverflowError, and the visible tab stays", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('removal-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      visible: 1,
+    })
+  })
+
+  test("Room: a join over the store's row limit is refused with ChannelOverflowError, and the next join goes through", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('join-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      participants: 0,
+      nextJoin: 'resolved',
+    })
+  })
+
+  test("Room: a meta update over the store's row limit is refused with ChannelOverflowError, and the next update goes through", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('meta-update-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      keys: ['seed'],
+      nextUpdate: 'resolved',
+    })
+  })
+
   test('Room: its meta keeps the key order its writes gave it', async () => {
     await openRoomPage()
     expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({
@@ -691,6 +722,29 @@ function testRoomStorage() {
       ],
     })
   })
+}
+
+/** A Durable Object's SQLite storage refuses a row over 8 MiB and 34 bytes. */
+const ROW_LIMIT_BYTES = 8 * 1024 * 1024 + 34
+
+/** What the size card `card` tells of its call with a value of `length` characters. */
+async function outcomeAt(card: string, length: number) {
+  await page.fill('#room-length', String(length))
+  return await clickRoomCard(page, card)
+}
+
+/** What `card`'s call tells one character over the longest value it takes, found by bisection between 4 KiB under the
+ *  row limit and the limit, one call per try. */
+async function overRowLimit(card: string) {
+  let low = ROW_LIMIT_BYTES - 4096
+  let high = ROW_LIMIT_BYTES
+  expect((await outcomeAt(card, low)).told).toBe('resolved')
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2)
+    if ((await outcomeAt(card, middle)).told === 'resolved') low = middle
+    else high = middle
+  }
+  return await outcomeAt(card, low + 1)
 }
 
 async function openRoomPage() {

@@ -28,6 +28,7 @@ import type {
 import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo } from 'telefunc/__internal'
 import {
   CLOUDFLARE_BUCKETS,
+  ChannelOverflowError,
   LEASE_CALL_DEADLINE_MS,
   currentCloudflareHostKey,
   currentCloudflareMember,
@@ -67,7 +68,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
-    return this.stub(roomId).compareExchangeHead(expected, next, { roomId, bucket: this.bucketHere() })
+    return rowLimited(this.stub(roomId).compareExchangeHead(expected, next, { roomId, bucket: this.bucketHere() }))
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
@@ -89,7 +90,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   async compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
-    return this.stub(roomId).compareExchangeCells(inc, exchange)
+    return rowLimited(this.stub(roomId).compareExchangeCells(inc, exchange))
   }
 
   async commitLane(
@@ -100,14 +101,20 @@ class CloudflareRoomDriver implements RoomDriver {
     const commit = (stub: CloudflareRoomAuthorityStub) => stub.commitLane(roomId, inc, lane, payload, opts)
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentRoomSessionSubscriptions(this)
-    const wire = await (session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
+    const wire = await rowLimited(session ? session.callAuthority(roomId, commit) : commit(this.stub(roomId)))
     return wire.kind === 'accepted' ? acceptedCommit(lane, wire) : wire
   }
 
-  /** Checks no length. A commit on its own keeps no row of its payload, or payload chunks of up to 1.5 MB where it is
-   *  retained, but a cell, and an operation's commit while it waits in its handoff row, is one value in the authority's
-   *  SQLite storage, which refuses a value over its limit with `SQLITE_TOOBIG` inside the write's transaction. */
-  assertCommittable(): void {}
+  /** Refuses a payload that the rows its two callers store it in would hold over the authority's SQLite row limit: a
+   *  DM reply's cell, and a leave's handoff row and expiring cell. A commit on its own keeps no row of its payload, or
+   *  payload chunks of up to 1.5 MB where it is retained. Any other row over the limit is refused inside its write's
+   *  transaction (`rowLimited()`). */
+  assertCommittable(_lane: LaneId, payload: Uint8Array): void {
+    if (payload.byteLength <= CLOUDFLARE_PAYLOAD_MAX_BYTES) return
+    throw new ChannelOverflowError(
+      `Telefunc's Cloudflare backend takes a Room value of ${CLOUDFLARE_PAYLOAD_MAX_BYTES} bytes at most, and this one has ${payload.byteLength}`,
+    )
+  }
 
   /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. An
    *  operation that waits for this session's inbox of a member carries the inbox's exact route instead, which the
@@ -128,14 +135,13 @@ class CloudflareRoomDriver implements RoomDriver {
         : session?.attemptOf(roomId, inc, { kind: 'inbox', member: options.inbox.member })
     let wire: OperationWire
     if (session !== null && inbox !== undefined) {
-      wire = await session.runCarrying(inbox, request, {
-        deadline: Date.now() + LEASE_CALL_DEADLINE_MS,
-        wanted: options?.wanted,
-      })
+      wire = await rowLimited(
+        session.runCarrying(inbox, request, { deadline: Date.now() + LEASE_CALL_DEADLINE_MS, wanted: options?.wanted }),
+      )
     } else {
       await beforeOperation(options)
       const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, request)
-      wire = await (session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
+      wire = await rowLimited(session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
     }
     // A later write of this session's on the member's inbox, as the removal that rolls a failed join back, came first.
     if (wire.kind === 'overtaken') throw new Error(`Cloudflare Room operation '${request.name}' was overtaken`)
@@ -198,6 +204,30 @@ class CloudflareRoomDriver implements RoomDriver {
   /** The bucket of the session this call runs in, else `locationFallback`: a cron or queue handler has none. */
   private bucketHere(): string {
     return currentCloudflareMember()?.bucket ?? this.locationFallback
+  }
+}
+
+/** The row limit of a Durable Object's SQLite storage, workerd's `MAX_ROW_LENGTH`
+ *  (https://github.com/cloudflare/workerd/blob/v1.20261110.1/src/workerd/util/sqlite.h#L78): the length of a row's
+ *  whole record, its header and every column. */
+const CLOUDFLARE_ROW_MAX_BYTES = 8 * 1024 * 1024 + 34
+/** The most a row `assertCommittable()` guards holds besides its payload, as SQLite records it: a DM reply's cell, of
+ *  a 9-byte header, the incarnation (a UUID, 36 bytes), its key (`ack:<member>:<ack>`, two UUIDs, 77 bytes) and its
+ *  version (8 bytes at most). A leave's handoff row holds 77 bytes besides its record, and its expiring cell 98 besides
+ *  the leave's cause, which the record holds. */
+const CLOUDFLARE_ROW_BESIDES_PAYLOAD_MAX_BYTES = 130
+const CLOUDFLARE_PAYLOAD_MAX_BYTES = CLOUDFLARE_ROW_MAX_BYTES - CLOUDFLARE_ROW_BESIDES_PAYLOAD_MAX_BYTES
+
+/** `call`, with the authority's refusal of a row over the limit as `ChannelOverflowError`: its transaction rolled
+ *  back, so the call wrote nothing. */
+async function rowLimited<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call
+  } catch (error) {
+    if (!(error instanceof Error && error.message.endsWith(': SQLITE_TOOBIG'))) throw error
+    throw new ChannelOverflowError(
+      `Telefunc's Cloudflare backend takes a stored row of ${CLOUDFLARE_ROW_MAX_BYTES} bytes at most, with its key, and this call's is longer`,
+    )
   }
 }
 
