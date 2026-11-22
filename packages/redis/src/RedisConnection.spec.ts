@@ -371,6 +371,27 @@ describe("a write script's refusal before its first write", () => {
   })
 })
 
+describe("the cells exchange's size refusal", () => {
+  it.each(['TFOVERFLOW 1 script: 06f79f6ab4, on @user_script:553.', 'TFOVERFLOW 1'])(
+    "TFOVERFLOW at the start of the reply, as in %j: the error the record's commit throws",
+    (message) => {
+      const told = redisFailure(replyError(message), client(), true)
+      expect(told).toMatchObject({
+        name: 'ChannelOverflowError',
+        message: "Telefunc's Redis backend takes a message of 29360128 bytes at most, and this one has 29360129",
+      })
+      expect(told).not.toHaveProperty('outcome')
+    },
+  )
+
+  it.each(['ERR user_script:1: TFOVERFLOW 1 script: 06f79f6ab4, on @user_script:1.', 'TFOVERFLOW1', 'TFOVERFLOW x'])(
+    'TFOVERFLOW anywhere else, as in %j: it may have run',
+    (message) => {
+      expect(redisFailure(replyError(message), client(), true)).toMatchObject({ outcome: 'may-have-run' })
+    },
+  )
+})
+
 /** A port that takes connections and never answers: a Cluster's startup node there never gets its slots. */
 async function silentNode(): Promise<{ port: number; server: Server }> {
   const server = createServer(() => {})

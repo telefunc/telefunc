@@ -1,5 +1,6 @@
 export { BackendCall }
 
+import { isChannelOverflowError } from '../channel/channelErrors.js'
 import { BackendError } from './BackendError.js'
 
 /** One public call of several steps against the backend's store: a failure says the call may have run once a write of
@@ -60,7 +61,7 @@ class BackendCall {
       this.wrote = true
       return result
     } catch (error) {
-      if (!(error instanceof BackendError) || error.outcome !== 'not-run') this.wrote = true
+      if (!unwritten(error)) this.wrote = true
       throw error
     } finally {
       this.writing--
@@ -83,4 +84,12 @@ class BackendCall {
     if (!this.wrote) return error
     return new BackendError({ code: error.code, outcome: 'may-have-run', message: error.message })
   }
+}
+
+/** A write step that failed with a proof that it wrote nothing: a `not-run` `BackendError`, or a size refusal, which a
+ *  store makes before its step's first write. Redis refuses a commit's payload before it sends the commit, a commit
+ *  waiting for a new subscription before its turn, and a cells exchange's record count in its checks, before its first
+ *  write; the in-memory and Cloudflare stores refuse no size. */
+function unwritten(error: unknown): boolean {
+  return (error instanceof BackendError && error.outcome === 'not-run') || isChannelOverflowError(error)
 }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { BackendCall } from './BackendCall.js'
 import { BackendError } from './BackendError.js'
 
@@ -68,6 +69,15 @@ describe('BackendCall', () => {
   it("keeps 'not-run' after a write of the call that was itself refused before running", async () => {
     const failure = await BackendCall.run(async (call) => {
       await call.write(failingWith(notRun())).catch(() => {})
+      return failingWith(notRun())()
+    }).catch((error: unknown) => error)
+
+    expect(outcomeOf(failure)).toBe('not-run')
+  })
+
+  it("keeps 'not-run' after a write of the call that a size refusal ended, which a store makes before writing", async () => {
+    const failure = await BackendCall.run(async (call) => {
+      await call.write(failingWith(new ChannelOverflowError('over the size the store commits'))).catch(() => {})
       return failingWith(notRun())()
     }).catch((error: unknown) => error)
 

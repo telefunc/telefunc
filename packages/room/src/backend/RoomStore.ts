@@ -166,6 +166,12 @@ function malformedCount({ mutations, counts = [] }: CellsExchange): string | nul
     if (counts.findIndex((other) => other.key === key) < i) return `cells exchange: ${key} is counted twice`
     if (mutations.some((mutation) => mutation.key === key)) return `cells exchange: ${key} is both counted and written`
   }
+  for (const count of counts) {
+    if (!('completes' in count)) continue
+    const { bytes } = count.completes
+    if (!Number.isSafeInteger(bytes) || bytes < 0)
+      return `cells exchange: ${count.key} completes a record of ${bytes} bytes`
+  }
   return null
 }
 

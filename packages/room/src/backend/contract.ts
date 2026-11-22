@@ -3,6 +3,7 @@ export type {
   CellMutation,
   CellExpectation,
   CellCount,
+  RecordCount,
   CellCounter,
   CellsExchange,
   CellsExchangeResult,
@@ -148,8 +149,14 @@ type CellCounter = { value: number; changedAt: number }
 /** Adds `delta` to a counter cell. An absent counter stays absent, unless `create` makes it at `delta`. */
 type CellCount = { key: string; delta: number; create?: true }
 
+/** A count whose new value completes a record its caller commits on `completes.lane` once the exchange committed: the
+ *  record is `completes.bytes` long besides the value's decimal digits. It creates its counter when absent, so the
+ *  exchange always gives the value. A store whose commit on that lane would refuse the completed record refuses the
+ *  exchange, before its first write, with the error that commit would throw. */
+type RecordCount = { key: string; delta: number; create: true; completes: { lane: LaneId; bytes: number } }
+
 /** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
-type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
+type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: (CellCount | RecordCount)[] }
 
 /** A committed exchange returns each counted counter as it left it. */
 type CellsExchangeResult =
