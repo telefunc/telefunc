@@ -322,9 +322,10 @@ class BodyReader {
    *  why, or once the rest of the body is being read off. A read that fails as the app's own error throws it, and so does
    *  every pull after it. */
   private async pullChunk() {
-    // The read-off reads the source alone, as one read of it at a time holds (`ReadableChunks.next()` asserts it). No row
-    // sees this line: without it, a pass under way reads on beside the read-off, and on a Node body meets that assert,
-    // on a Web body takes a chunk the read-off would drop; either way into a file that has already failed.
+    // The read-off reads the source alone, as one read of it at a time holds (`ReadableChunks.next()` asserts it). A pass
+    // under way when the read-off starts reaches this line, but no row sees what it prevents: without it, that pass reads
+    // on beside the read-off, and on a Node body meets the assert (probed: it fires, and its error goes into a file that
+    // has already failed), on a Web body takes a chunk the read-off would drop.
     if (this.readingOff) return null
     return this.readChunk()
   }
@@ -465,7 +466,8 @@ const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
 
 /** A Node `Readable`'s chunks: what `read()` gives at each `'readable'`, to `'end'`, or failing at `'error'` or at a
  *  close before the end. It listens from its construction on, so the stream asks its source for data before the first
- *  read; and one read waits at a time, as its one caller, the reader's `pullChunk`, awaits each before the next. Unlike
+ *  read; and one read waits at a time, as its one caller, the reader's `readChunk`, awaits each before the next, and the
+ *  read-off and a file's pull reach it in turn (`pullChunk` reads nothing while the read-off runs). Unlike
  *  Node's own iterator, it can be let go of with a read under way (`letGo`): Node's ends a read under way only by
  *  destroying the stream. */
 class ReadableChunks implements ChunkSource {
