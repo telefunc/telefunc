@@ -115,6 +115,6 @@ for (const transport of ['sse', 'ws'] as const) {
     await expect.poll(() => heldOpen(page), { timeout: 10_000 }).toEqual({ open: [], pageHideListeners: 0 })
     expect(serverOutcome).toBe(null)
     const reconnect = (await page.attempts()).filter(({ at }) => at >= droppedAt).map(({ what }) => what)
-    expect(reconnect).toEqual(transport === 'sse' ? ['POST', 'POST'] : ['WebSocket'])
+    expect(reconnect).toEqual(transport === 'sse' ? ['POST', 'POST', 'POST keepalive'] : ['WebSocket'])
   })
 }

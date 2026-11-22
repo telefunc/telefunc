@@ -138,12 +138,17 @@ class SseTransport implements UpgradeSource {
   /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
+    this.postClose()
+    // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened says it closes for good.
+    this.abandonActiveTransport()
+  }
+
+  /** Tells the server the wire closes for good. */
+  private postClose(): void {
     // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
     void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
       () => {},
     )
-    // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened says it closes for good.
-    this.abandonActiveTransport()
   }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
@@ -739,6 +744,8 @@ class SseTransport implements UpgradeSource {
     this.takeOutbox()
     this.folded = null
     this.closeStreamRequest()
+    // A wire still on as its connection ends closes for good, as a WebSocket's does with `WS_CLOSE_PAGE_LEFT`.
+    if (this.transportAbort) this.postClose()
     this.transportAbort?.abort()
     this.transportAbort = null
     this.closeAbandonedTransport()
