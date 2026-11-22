@@ -659,6 +659,7 @@ class ChannelMux implements UpgradeStagesOwner {
         this.endSessionOn(entry, frame.payload.sessionId, ended)
         return null
       }
+      this.admitReconcile(entry, frame.payload)
       if (this.isStale(entry, frame.payload)) {
         this.endFault(entry.wire, { scope: 'loss' })
         return null
@@ -709,11 +710,24 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
+  /** Refuses a RECONCILE its wire can't send, before anything of a session is made, claimed or handed over: a refused
+   *  wire leaves nothing behind. */
+  private admitReconcile(entry: WireEntry, ctrl: ReconcilePayload): void {
+    const held = entry.holds
+    // A page has one session, and names it on every wire: a wire that holds one speaks for that one alone.
+    assertProtocol(held === null || ctrl.sessionId === held.id, "RECONCILE names another session than its wire's")
+    // The page names what changed only on the wire that holds its session: elsewhere it can't know what the server holds.
+    assertProtocol(ctrl.released === undefined || held !== null, 'RECONCILE released on another wire')
+    assertProtocol(
+      held !== null || ctrl.attempt !== undefined,
+      'RECONCILE without its attempt on a wire that holds no session',
+    )
+  }
+
   /** Whether a RECONCILE on a wire that doesn't hold the session comes from an older attempt of the page's than the one
    *  that took the session: read after it, it takes nothing, claims no stage, and its wire goes as a loss. */
   private isStale(entry: WireEntry, ctrl: ReconcilePayload): boolean {
-    if (entry.holds !== null) return false
-    assertProtocol(ctrl.attempt !== undefined, 'RECONCILE without its attempt on a wire that holds no session')
+    if (entry.holds !== null || ctrl.attempt === undefined) return false
     const named = this.sessions.get(ctrl.sessionId)
     return named !== undefined && ctrl.attempt <= named.high
   }
@@ -855,8 +869,6 @@ class ChannelMux implements UpgradeStagesOwner {
     const { state } = entry
     this.resetPingTimer(entry)
     const held = entry.holds
-    // A page has one session, and names it on every wire: a wire that holds one speaks for that one alone.
-    assertProtocol(held === null || ctrl.sessionId === held.id, "RECONCILE names another session than its wire's")
     // The session keeps its id for its life. One the server has no record of starts under the id the page named, which
     // the page made: its end is then kept under that id from its first wire on.
     const session = held ?? this.sessions.get(ctrl.sessionId) ?? this.sessions.create(ctrl.sessionId)
@@ -864,8 +876,6 @@ class ChannelMux implements UpgradeStagesOwner {
     // holds it, and a barrier's old wire read up to its FIN, still deliver them.
     const replay = !isBarrier && session.holder !== entry
     const { released } = ctrl
-    // The page names what changed only on the wire that holds its session: elsewhere it can't know what the server holds.
-    assertProtocol(released === undefined || held !== null, 'RECONCILE released on another wire')
     // The wire that held the session holds nothing from now on: what it reads later is a loss of its own, and the
     // channels it awaited attach where the new holder's RECONCILE names them.
     const previous = this.sessions.handOver(session, entry, ctrl.attempt ?? session.high)

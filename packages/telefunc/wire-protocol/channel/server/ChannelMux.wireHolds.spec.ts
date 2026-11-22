@@ -579,3 +579,91 @@ test("an app whose channel's open registers a channel the wire awaits at two ind
     pending.abort()
   }
 })
+
+// A refused open leaves nothing: everything a wire's first RECONCILE, or a PREPARE, can be refused for is checked before
+// a session is made, claimed or handed over, or a stage is staged or replaced.
+
+test('a first RECONCILE that carries `released` goes as a loss and leaves no session under the id it names: a PREPARE naming that id goes as a loss too', async () => {
+  const opener = wire()
+  const probe = wire()
+  const sessionId = crypto.randomUUID()
+  try {
+    await opener.send(encode.reconcile({ sessionId, attempt: 1, open: [], released: [] }))
+    await probe.send(prepare({ sessionId, upgradeId: 'up' }, 2))
+    expect({
+      opener: opener.hows(),
+      probe: probe.hows(),
+      ready: probe.tags().includes(TAG.READY),
+    }).toEqual({ opener: ['transient'], probe: ['transient'], ready: false })
+  } finally {
+    opener.leave()
+    probe.leave()
+  }
+})
+
+test("a RECONCILE naming another session than its wire's is refused before that session's stage is claimed: its staged probe stays, and its BARRIER commits", async () => {
+  const a = channel()
+  const source = wire()
+  const target = wire()
+  const other = wire()
+  const open = [entry(a.c.id, 0)]
+  try {
+    await source.send(reconcile({ open }, 1))
+    const sessionId = source.sessionId() ?? ''
+    await target.send(prepare({ sessionId, upgradeId: 'up' }, 2))
+    await other.send(reconcile({ open: [] }, 1))
+    await other.send(reconcile({ sessionId, open: [] }, 2))
+    await source.send(encode.barrier({ sessionId, upgradeId: 'up', open }))
+    expect({
+      other: other.hows(),
+      target: target.hows(),
+      targetId: target.sessionId() === sessionId,
+      aEnds: [...a.ends],
+    }).toEqual({ other: ['unreadable'], target: [], targetId: true, aEnds: [] })
+  } finally {
+    other.leave()
+    source.leave()
+    target.leave()
+  }
+})
+
+test("a PREPARE over the staged byte budget is refused before it replaces its session's older stage, which stays and commits", async () => {
+  // Frames of about 1.5 MB, each under the control frame cap: 44 of them fit the budget, a 45th doesn't.
+  const pad = 'x'.repeat(1_500_000)
+  const padded = (sessionId: string, upgradeId: string, attempt: number) => {
+    const payload = { sessionId, upgradeId, attempt, pad }
+    return encode.prepare(payload)
+  }
+  const others = Array.from({ length: 44 }, () => ({ holder: wire(), probe: wire() }))
+  const a = channel()
+  const source = wire()
+  const older = wire()
+  const newer = wire()
+  const open = [entry(a.c.id, 0)]
+  try {
+    for (const { holder, probe } of others) {
+      await holder.send(reconcile({ open: [] }, 1))
+      await probe.send(padded(holder.sessionId() ?? '', 'filler', 2))
+    }
+    await source.send(reconcile({ open }, 1))
+    const sessionId = source.sessionId() ?? ''
+    await older.send(prepare({ sessionId, upgradeId: 'older' }, 2))
+    await newer.send(padded(sessionId, 'newer', 3))
+    await source.send(encode.barrier({ sessionId, upgradeId: 'older', open }))
+    expect({
+      fillersStaged: others.every(({ probe }) => probe.tags().includes(TAG.READY) && probe.ends.length === 0),
+      newer: newer.hows(),
+      older: older.hows(),
+      olderId: older.sessionId() === sessionId,
+      aEnds: [...a.ends],
+    }).toEqual({ fillersStaged: true, newer: ['transient'], older: [], olderId: true, aEnds: [] })
+  } finally {
+    for (const { holder, probe } of others) {
+      probe.leave()
+      holder.leave()
+    }
+    newer.leave()
+    older.leave()
+    source.leave()
+  }
+})

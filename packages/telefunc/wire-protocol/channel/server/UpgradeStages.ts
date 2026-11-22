@@ -54,14 +54,18 @@ class UpgradeStages {
    *  A page stages one attempt at a time, so a newer PREPARE replaces what an earlier attempt left staged. */
   stage(probe: Wire, payload: PreparePayload, bytes: number): boolean {
     const staged = this.byPrevSession.get(payload.sessionId)
+    const replaced = staged === undefined ? undefined : this.byProbe.get(staged)
     if (staged !== undefined) {
-      const stage = this.byProbe.get(staged)
-      assertProtocol(stage?.phase === 'staged', 'session already committing')
-      if (payload.attempt <= stage.attempt) return false
-      this.abandon(staged)
+      assertProtocol(replaced?.phase === 'staged', 'session already committing')
+      if (payload.attempt <= replaced.attempt) return false
     }
-    assertProtocol(this.byProbe.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
-    assertProtocol(this.stagedBytes + bytes <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
+    // The budgets count the stage this one replaces as gone, and are checked before it goes: a PREPARE they refuse
+    // leaves it staged.
+    const replacedRecords = replaced === undefined ? 0 : 1
+    assertProtocol(this.byProbe.size - replacedRecords < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
+    const replacedBytes = replaced?.bytes ?? 0
+    assertProtocol(this.stagedBytes - replacedBytes + bytes <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
+    if (staged !== undefined) this.abandon(staged)
 
     const timer = unrefTimer(setTimeout(() => this.abandon(probe), UPGRADE_STAGE_TTL_MS))
     this.byProbe.set(probe, {
