@@ -10,7 +10,7 @@ import {
   isCluster,
   isReplyError,
   isUnsent,
-  slotRedirection,
+  clusterRedirection,
   type RedisClient,
 } from './ioredis.js'
 
@@ -103,14 +103,16 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
   }
   const where = addressOf(redis)
   const outcome = (proof: boolean): BackendError['outcome'] => (!writes || proof ? 'not-run' : 'may-have-run')
-  const redirection = slotRedirection(error)
+  const redirection = clusterRedirection(error)
   if (redirection !== undefined) {
+    // The reply says the node doesn't serve the slot now, not why: a reshard and a failover both answer it.
     return new BackendError({
       code: 'unavailable',
       outcome: 'not-run',
       message:
-        `The Redis Cluster at ${where} kept redirecting a command of Telefunc's Redis backend while a slot moved ` +
-        `(${redirection}), so it didn't run: a later call may succeed once the slot has moved`,
+        `The Redis Cluster at ${where} redirected a command of Telefunc's Redis backend (${redirection}) more times ` +
+        "than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves " +
+        "the command's slot",
     })
   }
   if (!isReplyError(error)) {

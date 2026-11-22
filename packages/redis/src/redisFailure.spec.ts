@@ -319,7 +319,7 @@ describe("a replica's READONLY on a Cluster, as the backend reports it", () => {
   })
 })
 
-describe('a Cluster command ioredis gave up once a moving slot used its redirections, as the backend reports it', () => {
+describe('a Cluster command ioredis gave up once the Cluster used its redirections, as the backend reports it', () => {
   it.each([
     ['TRYAGAIN', 'TRYAGAIN Multiple keys request during rehashing of slot'],
     ['ASK', 'ASK 657 172.17.0.4:6379'],
@@ -333,7 +333,7 @@ describe('a Cluster command ioredis gave up once a moving slot used its redirect
         name: 'BackendError',
         code: 'unavailable',
         outcome: 'not-run',
-        message: `The Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 kept redirecting a command of Telefunc's Redis backend while a slot moved (${word}), so it didn't run: a later call may succeed once the slot has moved`,
+        message: `The Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 redirected a command of Telefunc's Redis backend (${word}) more times than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves the command's slot`,
       })
     }
   })

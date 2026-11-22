@@ -14,7 +14,7 @@ export {
   addressOf,
   isReplyError,
   isUnsent,
-  slotRedirection,
+  clusterRedirection,
 }
 export type { RedisClient, SubscriberSocket, RawCommand }
 
@@ -151,14 +151,15 @@ function isUnsent(error: unknown): boolean {
   return error instanceof Error && UNSENT.test(error.message)
 }
 
-/** ioredis's rejection of a Cluster command once its redirections ran out, with the last reply: a slot that moves
- *  answers MOVED, ASK or TRYAGAIN, each before the command runs. */
+/** ioredis's rejection of a Cluster command once its redirections ran out, with the last reply: a node answers MOVED,
+ *  ASK or TRYAGAIN before the command runs, for a slot it doesn't serve (after a reshard or a failover) or one that
+ *  moves. */
 const REDIRECTED = /^Too many Cluster redirections\. Last error: ReplyError: (MOVED|ASK|TRYAGAIN) /
 
-/** The last reply's code where ioredis gave up a Cluster command that a moving slot kept redirecting. No try of it
- *  ran: ioredis tries a command again only on a redirection or a reply of the Cluster's state, as the backend's
- *  command client never retries a closed connection (`retryDelayOnFailover: 0`, `createCommandClient()`). */
-function slotRedirection(error: unknown): string | undefined {
+/** The last reply's code where ioredis gave up a Cluster command that the Cluster kept redirecting. No try of it ran:
+ *  ioredis tries a command again only on a redirection or a reply of the Cluster's state, as the backend's command
+ *  client never retries a closed connection (`retryDelayOnFailover: 0`, `createCommandClient()`). */
+function clusterRedirection(error: unknown): string | undefined {
   return error instanceof Error ? REDIRECTED.exec(error.message)?.[1] : undefined
 }
 
@@ -188,7 +189,7 @@ function createCommandClient(redis: RedisClient): RedisClient {
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
-        // A closed connection fails its command (`slotRedirection()` counts on it).
+        // A closed connection fails its command (`clusterRedirection()` counts on it).
         retryDelayOnFailover: 0,
         enableOfflineQueue: false,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
