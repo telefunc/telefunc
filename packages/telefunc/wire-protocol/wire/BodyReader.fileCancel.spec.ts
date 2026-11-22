@@ -333,6 +333,30 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
     },
   ],
   [
+    "15. the request ends while the body stays open, file 0's read waiting: it reads a truncation, and so does file 1; the body is read off to its end",
+    async (kind) => {
+      const { source, reader, file } = await setup(kind)
+      source.push('aaaa')
+      const first = track(text(file(0)))
+      await settle()
+      const readOff = settled(reader.discardRest())
+      await settle()
+      const next = track(text(file(1)))
+      await settle()
+      const before = readOff.now
+      source.push('aaaaaa' + B + C)
+      source.end()
+      await settle()
+      return { first: first.now, next: next.now, readOffBeforeTheEnd: before, readOff: readOff.now }
+    },
+    {
+      first: { state: 'failed', error: `after "aaaa": ${TRUNCATED}` },
+      next: { state: 'failed', error: TRUNCATED },
+      readOffBeforeTheEnd: { state: 'pending' },
+      readOff: { state: 'done', value: 'settled' },
+    },
+  ],
+  [
     '16. files 0 and 1 cancelled in one turn: file 2 reads its own bytes',
     async (kind) => {
       const { source, file } = await setup(kind)
@@ -482,6 +506,36 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       return { got: got.now, next: next.now }
     },
     { got: { state: 'done', value: 'aaaa' }, next: { state: 'done', value: B } },
+  ],
+  [
+    "21. the request ends while file 1's read passes file 0, part of the way: the pass reads no more, and the body is read off to its end",
+    async (kind) => {
+      const { source, reader, file } = await setup(kind)
+      const second = track(text(file(1)))
+      await settle()
+      source.push('aaaa')
+      await settle()
+      const readOff = settled(reader.discardRest())
+      await settle()
+      source.push('aa')
+      await settle()
+      source.push('aaaa' + B + C)
+      source.end()
+      await settle()
+      return { second: second.now, readOff: readOff.now }
+    },
+    { second: { state: 'failed', error: TRUNCATED }, readOff: { state: 'done', value: 'settled' } },
+  ],
+  [
+    '22. a file asked for after the body was let go of: it reads a truncation',
+    async (kind) => {
+      const { reader, file } = await setup(kind)
+      reader.letGo()
+      const first = track(text(file(0)))
+      await settle()
+      return { first: first.now }
+    },
+    { first: { state: 'failed', error: TRUNCATED } },
   ],
   [
     'R6. file 2 read while file 1 passes file 0, then the body ends short: both read a truncation',

@@ -21,3 +21,18 @@ export async function readsBoth(first, second) {
   await first.text().catch(() => {})
   return (await second.text()).length
 }
+
+/** Answers without reading its `Blob`. */
+export async function ignoresBlob() {
+  return 'ignored'
+}
+
+/** Starts reading its `Blob` and answers without waiting for it: tells the spec how that read ended. */
+export async function startsReadingBlob(blob) {
+  blob.text().then(
+    (text) => process.emit('requestBody.telefunc:readEnded', `read ${text.length} bytes`),
+    (err) => process.emit('requestBody.telefunc:readEnded', `failed: ${err.message}`),
+  )
+  process.emit('requestBody.telefunc:read')
+  return 'started'
+}

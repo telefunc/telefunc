@@ -28,6 +28,7 @@ import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from 
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
+import { handleTelefunctionBug } from './validateTelefunctionError.js'
 
 type RunContext = {
   request: Request
@@ -172,7 +173,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
- *  whose metadata declares more than any client can send is malformed, refused before any of its metadata is read. */
+ *  whose metadata declares more than any client can send is malformed, refused before any of its metadata is read. A
+ *  binary request's body is read off to its end once the call is done (`readOffBody`). */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
@@ -191,6 +193,7 @@ async function readBody(
     const source = readable ?? request.body
     assert(source)
     const reader = new BodyReader(source, clientLeft)
+    runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
     const metadata = await reader.readFrame(CALL_METADATA_MAX_BYTES).catch((err: unknown): 'oversize' => {
       if (err instanceof OversizeFrameError) return 'oversize'
       throw err
@@ -218,6 +221,20 @@ async function readBody(
           controller.error(new Error('No binary frame'))
         },
       }),
+  }
+}
+
+/** Ends the call's file reads, then reads the rest of its body and drops it: a connection the client keeps alive carries
+ *  its next request only after this one's body (Node's HTTP server parses it from there). The host's own request timeout
+ *  bounds the read. A failure that is the app's own error is a bug; a client that left ends it quietly. */
+async function readOffBody(reader: BodyReader, signal: AbortSignal): Promise<void> {
+  // A client that leaves ends the call (`signal`) in the same event in which its body fails: the read of the body under
+  // way settles first, so that the file reads end with that failure. A call that answered has no failure coming.
+  if (signal.aborted) await reader.readSettled()
+  try {
+    await reader.discardRest()
+  } catch (err: unknown) {
+    handleTelefunctionBug(err)
   }
 }
 

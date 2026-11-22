@@ -68,6 +68,17 @@ const twoBlobsStart = concat(
   ),
   encoder.encode('x'.repeat(10)),
 )
+/** A binary call to `startsReadingBlob` up to the first bytes of its `Blob`. */
+const readStartedStart = concat(
+  frame(
+    JSON.stringify({
+      file,
+      name: 'startsReadingBlob',
+      args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size: FILE_SIZE, type: '' })}`],
+    }),
+  ),
+  encoder.encode('x'.repeat(10)),
+)
 /** A binary call's body cut in its metadata, which declares 1000 bytes. */
 const binaryMetadataStart = concat(u32(1000), encoder.encode('{"file":'))
 /** An SSE upload that opens its wire, then the first bytes of a frame that declares 100. */
@@ -318,6 +329,26 @@ test.each(vias)(
     // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
     await new Promise((resolve) => setTimeout(resolve, 500))
     expect(printed).toEqual([])
+  },
+)
+
+test.each(vias)(
+  'a telefunction that starts reading its Blob and answers, its client still sending: that read fails with a truncation once the call is answered, and nothing is printed (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const readEnded: { now: string } = { now: 'pending' }
+    const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+    process.on('requestBody.telefunc:readEnded', onReadEnded)
+    onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+    const { socket, answered } = await startUpload('binary', readStartedStart, via)
+    expect(await answered).toBe(200)
+    await settle()
+    expect({ readEnded: readEnded.now, printed, bugs }).toEqual({
+      readEnded: `failed: ${new StreamTruncatedError().message}`,
+      printed: [],
+      bugs: [],
+    })
+    socket.destroy()
   },
 )
 

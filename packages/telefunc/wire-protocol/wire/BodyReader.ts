@@ -71,6 +71,11 @@ class BodyReader {
   /** What the reads that wait for the position await: a file's end, a pull letting go of the position, a cancel. */
   private fileEnd: Deferred<void> | null = null
   private stop: Stop | null = null
+  /** Whether the file reads ended: the request's end, or the body let go of. */
+  private filesEnded = false
+  /** The source's read under way, and whether the rest of the body is being read off: then it alone reads the source. */
+  private reading: Promise<IteratorResult<Uint8Array<ArrayBuffer>>> | null = null
+  private readingOff = false
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -113,8 +118,7 @@ class BodyReader {
     this.stop ??= { why: 'letGo' }
     this.onChunk = undefined
     this.source.letGo()
-    for (const file of this.files.values()) file.fail(this.truncation())
-    this.wake()
+    this.endFiles()
   }
 
   /** Read one frame: [u32 big-endian length][bytes], or null where the body ends before its first byte. A frame over
@@ -127,11 +131,23 @@ class BodyReader {
     return this.readExact(length)
   }
 
-  /** Reads the rest of the body and drops it, a chunk at a time, to its end or its client's leaving. */
+  /** Ends the file reads, then reads the rest of the body and drops it, a chunk at a time, to its end or its client's
+   *  leaving. A read of the body under way finishes first, and every read but this one ends as at the body's end. A body
+   *  whose reads stopped already has no rest: an app's error that stopped them went to the read it failed. */
   async discardRest(): Promise<void> {
+    this.endFiles()
+    this.readingOff = true
+    // Its own pull, awaiting it since it began, has taken its outcome by then.
+    if (this.reading !== null) await this.reading.catch(() => {})
+    if (this.stop) return
     this.buffer = EMPTY
-    let chunk = await this.pullChunk()
-    while (chunk !== null) chunk = await this.pullChunk()
+    let chunk = await this.readChunk()
+    while (chunk !== null) chunk = await this.readChunk()
+  }
+
+  /** Settles once the source's read under way, if any, has settled, and its reader has taken its outcome. */
+  async readSettled(): Promise<void> {
+    if (this.reading !== null) await this.reading.catch(() => {})
   }
 
   /** Registers a file's size, as the call's metadata declares it, while the call is revived, and returns the getter of
@@ -152,6 +168,7 @@ class BodyReader {
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const file = new FileRead(index, this.pullFile, this.cancelFile)
     this.files.set(index, file)
+    if (this.filesEnded) file.fail(this.stopped())
     return file.stream
   }
 
@@ -206,7 +223,7 @@ class BodyReader {
   /** Waits until `file`'s read holds the position at its own index, passing every earlier file that nobody holds. */
   private async takePosition(file: FileRead): Promise<void> {
     for (;;) {
-      if (this.stop?.why === 'letGo') throw this.truncation()
+      if (this.filesEnded) throw this.stopped()
       assertUsage(
         file.index >= this.next,
         `File argument ${file.index} has already been consumed (currently at ${this.next}). File arguments must be read in order.`,
@@ -261,6 +278,14 @@ class BodyReader {
     this.left = undefined
   }
 
+  /** Errors every open file stream, and every one asked for later, with the stop's own error; the reads that wait wake and
+   *  throw it. A file's pull under way finishes its read of the body, and drops it. */
+  private endFiles(): void {
+    this.filesEnded = true
+    for (const file of this.files.values()) file.fail(this.stopped())
+    this.wake()
+  }
+
   /** Lets go of the position, and wakes the reads that wait for it. */
   private release(): void {
     this.holder = null
@@ -278,14 +303,25 @@ class BodyReader {
   // ── Primitives ──
 
   /** Pull one chunk from the underlying source, or null once it ended or its client left, or failed where nothing says
-   *  why. A read that fails as the app's own error throws it, and so does every pull after it. */
+   *  why, or once the rest of the body is being read off. A read that fails as the app's own error throws it, and so does
+   *  every pull after it. */
   private async pullChunk() {
+    // The read-off reads the source alone, as one read of it at a time holds (`ReadableChunks.next()` asserts it). No row
+    // sees this line: without it, a pass under way reads on beside the read-off, and on a Node body meets that assert,
+    // on a Web body takes a chunk the read-off would drop; either way into a file that has already failed.
+    if (this.readingOff) return null
+    return this.readChunk()
+  }
+
+  /** One chunk of the source, as `pullChunk` says. */
+  private async readChunk() {
     if (this.stop) {
       if (this.stop.why === 'app') throw this.stop.error
       return null
     }
+    this.reading = this.source.next()
     try {
-      const { value, done } = await this.source.next()
+      const { value, done } = await this.reading
       if (done) {
         this.stop ??= { why: 'ended' }
         return null
@@ -299,7 +335,14 @@ class BodyReader {
       this.stop = { why: clientLeft === null ? 'unknown' : clientLeft ? 'clientLeft' : 'app', error }
       if (this.stop.why === 'app') throw error
       return null
+    } finally {
+      this.reading = null
     }
+  }
+
+  /** What a read after the reader's stop throws: the app's own error, as the read it failed threw, or a truncation. */
+  private stopped(): unknown {
+    return this.stop?.why === 'app' ? this.stop.error : this.truncation()
   }
 
   /** The body stopped short, with the runtime's error as the cause where a read failed. */
