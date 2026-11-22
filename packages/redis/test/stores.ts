@@ -190,14 +190,28 @@ function endReached(): void {
   removeStores()
 }
 
-/** Every key under Telefunc's prefix and what it holds, a hash's fields in order. */
+/** Every key under Telefunc's prefix and what it holds as the store's bytes, a hash's fields in their bytes' order. */
 async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
   const keys = (await admin.keys('tf:*')).sort()
   const held = async (key: string) =>
-    (await admin.type(key)) === 'hash'
-      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      : await admin.dumpBuffer(key)
+    (await admin.type(key)) === 'hash' ? hashFields(admin, key) : admin.dumpBuffer(key)
   return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
+}
+
+/** The hash's fields and values as raw bytes, which text would decode alike where a byte isn't UTF-8 on its own. */
+async function hashFields(admin: Redis, key: string): Promise<[field: Buffer, value: Buffer][]> {
+  // `hgetallBuffer` decodes the fields, so HGETALL's reply is read as it came: field, value, field, value.
+  const reply = await admin.callBuffer('HGETALL', key)
+  if (!Array.isArray(reply)) throw new Error(`HGETALL ${key} answered ${String(reply)}`)
+  const parts: unknown[] = reply
+  const pairs: [Buffer, Buffer][] = []
+  for (let i = 0; i < parts.length; i += 2) {
+    const [field, value] = [parts[i], parts[i + 1]]
+    if (!Buffer.isBuffer(field) || !Buffer.isBuffer(value))
+      throw new Error(`HGETALL ${key} answered a part that isn't bytes`)
+    pairs.push([field, value])
+  }
+  return pairs.sort(([a], [b]) => Buffer.compare(a, b))
 }
 
 /** The keys whose value differs between two snapshots, one taken before and one after. */
