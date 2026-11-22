@@ -291,9 +291,11 @@ class BodyReader {
 
 const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
 
-/** A Node `Readable`'s chunks, read as Node's own async iterator reads them: what `read()` gives at each `'readable'`, to
- *  `'end'`, or failing at `'error'` or at a close before the end. Unlike that iterator, it can be let go of with a read
- *  under way (`letGo`): Node's ends a read under way only by destroying the stream. */
+/** A Node `Readable`'s chunks: what `read()` gives at each `'readable'`, to `'end'`, or failing at `'error'` or at a
+ *  close before the end. It listens from its construction on, so the stream asks its source for data before the first
+ *  read; and one read waits at a time: a read asked while one waits takes its place, and that one never settles. Unlike
+ *  Node's own iterator, it can be let go of with a read under way (`letGo`): Node's ends a read under way only by
+ *  destroying the stream. */
 class ReadableChunks implements AsyncIterator<Uint8Array<ArrayBuffer>> {
   private readonly stream: Readable
   private waiting: {

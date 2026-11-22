@@ -589,10 +589,10 @@ class SseServerTransport {
   /** The wire's stream ends, and the server keeps the session it held for the page's close POST (`held`). `refused`:
    *  the end the server decided and told the channels, which the stream sends as its last event after what it holds.
    *  The bodies the server reads for the wire are read off for one ping deadline at most: a page that lives ends each by
-   *  then, as it reads the end or takes the wire for lost. Past it, the server lets go of each, which answers its request
-   *  `retry`, and reads it no further: the host ends the connection in its own time. It cancels none, since cancelling a
-   *  body can close the connection under the answer, and reads none on, since that never ends for a sender that writes
-   *  on. */
+   *  then, as it reads the end or takes the wire for lost. Past it, the server lets go of each and reads it no further,
+   *  which answers each data POST `retry` (the event stream's own POST was answered at its open): the host ends the
+   *  connection in its own time. It cancels none, since cancelling a body can close the connection under the answer,
+   *  and reads none on, since that never ends for a sender that writes on. */
   private endStream(wire: SseWire, refused: Refusal | null, held: SessionHold | null): void {
     if (wire.closed) return
     wire.closed = true
