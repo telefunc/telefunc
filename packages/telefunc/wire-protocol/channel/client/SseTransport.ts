@@ -426,6 +426,8 @@ class SseTransport implements UpgradeSource {
       if (this.transportAbort === abortController) {
         this.closeStreamRequest()
         this.transportAbort = null
+        // Also where it ended while its upload still waited for an acknowledgement: no open is under way any more.
+        this.connecting = false
         // Its batch POST still in flight settles now rather than hold the next wire's outbox.
         abortController.abort()
       }
