@@ -1,6 +1,7 @@
-// A request that found its wire just before the wire ended, and whose body the server starts reading only after the end:
-// it is answered `retry` one ping deadline after the end, as every body the server reads for a wire that ended. Through
-// the SSE handler with a Web body, the event stream cancelled at each microtask turn of the request's start.
+// A request that found its wire just before the wire ended, and whose body the server starts reading only after the
+// end: it is answered `retry` by one ping deadline after the end, as every body the server reads for a wire that ended:
+// at once where it finds the wire already closed, else when the server lets go of its body. Through the SSE handler
+// with a Web body, the event stream cancelled at each microtask turn of the request's start.
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
@@ -29,7 +30,7 @@ test.each([
   ['the streaming upload', true],
   ['a batch POST whose body streams', false],
 ] as const)(
-  "%s whose wire ends at any microtask turn of the request's start is answered `retry` one ping deadline after the end",
+  "%s whose wire ends at any microtask turn of the request's start is answered `retry` by one ping deadline after the end",
   async (_request, streamRequest) => {
     const unanswered: number[] = []
     for (let turns = 0; turns < 24; turns++) {

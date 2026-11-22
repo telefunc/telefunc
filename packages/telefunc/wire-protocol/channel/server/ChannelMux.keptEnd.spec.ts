@@ -1,6 +1,7 @@
 // What a session's kept end gives a page that missed its last word, on the real mux: every channel whose own end the
-// page has not read ends with the session's cause, and the server's channel keeps its own. The kept end is a cause
-// alone. The page names its session from its first wire on, and numbers each wire it opens.
+// page has not read ends with the session's cause, and the server's channel keeps its own. Of a kept end the page reads
+// the cause alone; the server's record holds also the attempt it was decided at and the instant it leaves at. The page
+// names its session from its first wire on, and numbers each wire it opens.
 
 import { expect, test } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
