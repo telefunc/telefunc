@@ -1,5 +1,5 @@
-// A session's end the server keeps, on the real Node server and raw WebSockets: from the time it decided, for its page's
-// whole recovery, which runs past `reconnectTimeout`. A page that misses the reopen's last word too reads the cause at
+// A session's end the server keeps, on the real Node server and raw WebSockets: for a fixed time from its decision, which
+// covers the recovery of a page that notices the loss at once and runs past `reconnectTimeout`. A page that misses the reopen's last word too reads the cause at
 // its next.
 import { createServer } from 'node:http'
 import { afterAll, beforeAll, expect, test } from 'vitest'

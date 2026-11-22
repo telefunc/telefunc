@@ -29,9 +29,11 @@ function reconnectWindowOf(pingIntervalMs: number, reconnectTimeoutMs: number, t
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(pingIntervalMs, transport) + reconnectTimeoutMs)
 }
 
-/** How long the server keeps what it knows of a session that left it, from the time it decided: its page notices the
- *  loss within a ping deadline, tries for a ping deadline and `reconnectTimeoutMs` from then, and its last attempt's
- *  RECONCILE has `RECONCILE_TIMEOUT_MS` to arrive. Each knob is the larger of the server's and its default, which a page
+/** How long the server keeps what it knows of a session that left it: a fixed time from its decision. It covers a page
+ *  that notices the loss within a ping deadline of the decision, tries for a ping deadline and `reconnectTimeoutMs`
+ *  from then, and whose last attempt's RECONCILE has `RECONCILE_TIMEOUT_MS` to arrive. A page that notices later, its
+ *  old wire still delivering after the decision, may reopen past it and is answered as for a session the server
+ *  doesn't have. Each knob is the larger of the server's and its default, which a page
  *  that never read a RECONCILED runs on; the ping deadline is SSE's, the longer. Not clamped: it is added to an instant,
  *  which `DeadlineTimer` waits for however far off. */
 function keptEndWindowOf(pingIntervalMs: number, reconnectTimeoutMs: number): number {
