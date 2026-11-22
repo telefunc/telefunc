@@ -36,3 +36,9 @@ export async function startsReadingBlob(blob) {
   process.emit('requestBody.telefunc:read')
   return 'started'
 }
+
+/** Answers without reading its `Blob`, which it hands the spec to read once the call is done. */
+export async function keepsBlob(blob) {
+  process.emit('requestBody.telefunc:kept', blob)
+  return 'kept'
+}

@@ -21,6 +21,8 @@ export {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
+  onKeepFile,
+  onReadKeptFile,
 }
 
 const onUploadFile = async (file: File, description: string) => {
@@ -235,4 +237,22 @@ const onUploadProps = async (file: File) => {
 // Files sent but never read on the server — should not hang or error
 const onUploadIgnored = async (_file1: File, _file2: File) => {
   return { ok: true }
+}
+
+// A File kept past its call, read by a later call: the rows that call these send the calls themselves (e2e-test.ts).
+let kept: File | undefined
+
+/** Answers without reading its File, which `onReadKeptFile` reads once this call is done. */
+const onKeepFile = async (file: File) => {
+  kept = file
+  return 'kept'
+}
+
+/** How the read of the File `onKeepFile` kept ends. */
+const onReadKeptFile = async () => {
+  if (!kept) return 'nothing kept'
+  return kept.text().then(
+    (text) => `read ${text.length} bytes`,
+    (err: unknown) => `failed: ${err instanceof Error ? err.message : String(err)}`,
+  )
 }

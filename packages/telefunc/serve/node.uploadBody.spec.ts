@@ -79,6 +79,17 @@ const readStartedStart = concat(
   ),
   encoder.encode('x'.repeat(10)),
 )
+/** The whole body of a binary call to `keepsBlob`. */
+const keepsBlobBody = concat(
+  frame(
+    JSON.stringify({
+      file,
+      name: 'keepsBlob',
+      args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size: FILE_SIZE, type: '' })}`],
+    }),
+  ),
+  encoder.encode('x'.repeat(FILE_SIZE)),
+)
 /** A binary call's body cut in its metadata, which declares 1000 bytes. */
 const binaryMetadataStart = concat(u32(1000), encoder.encode('{"file":'))
 /** An SSE upload that opens its wire, then the first bytes of a frame that declares 100. */
@@ -180,6 +191,24 @@ async function startUpload(kind: keyof typeof kinds, start: Uint8Array, via: key
   const { req, res } = await arrived
   await vi.waitFor(() => expect(req.readableDidRead).toBe(true))
   return { socket, req, res, answered }
+}
+
+/** A binary call whose whole body is `body`, on a socket of its own: the status it is answered with. */
+async function sendWhole(body: Uint8Array, via: keyof typeof servers) {
+  const port = ports.get(via)
+  if (port === undefined) throw new Error('no server')
+  const socket = connect(port, '127.0.0.1')
+  socket.on('error', () => {})
+  const answered = new Promise<number>((resolve) => {
+    socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ', 2)[1])))
+  })
+  socket.resume()
+  await once(socket, 'connect')
+  socket.write(
+    `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${body.length}\r\n\r\n`,
+  )
+  socket.write(body)
+  return { socket, answered }
 }
 
 /** A Fetch request of `kind` whose body gives `start`, then fails with `error` once `when` resolves. */
@@ -352,8 +381,31 @@ test.each(vias)(
   },
 )
 
-// The most metadata a client can send: 536,870,888 UTF-16 code units, V8's longest string, of at most 3 UTF-8 bytes each.
-// A binary call that declares more is malformed, refused once its length is read, before any of its metadata.
+test.each(vias)(
+  "a Blob its telefunction keeps and reads once the call is answered and its body read off to the end: the read fails with the server's truncation (Telefunc given a %s)",
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const kept = new Promise<Blob>((resolve) => process.once('requestBody.telefunc:kept', resolve))
+    const { socket, answered } = await sendWhole(keepsBlobBody, via)
+    expect(await answered).toBe(200)
+    // The read-off has read the body to its end.
+    await settle()
+    const read = await (await kept).text().then(
+      (text) => `read ${text.length} bytes`,
+      (err: unknown) => `failed: ${err instanceof Error ? err.message : String(err)}`,
+    )
+    expect({ read, printed, bugs }).toEqual({
+      read: `failed: ${new StreamTruncatedError('server').message}`,
+      printed: [],
+      bugs: [],
+    })
+    socket.destroy()
+  },
+)
+
+// The most metadata the server reads (`CALL_METADATA_MAX_BYTES`): 536,870,888 UTF-16 code units, V8's longest string, of
+// at most 3 UTF-8 bytes each. A binary call that declares more is malformed, refused once its length is read, before any
+// of its metadata.
 const METADATA_BOUND = 1_610_612_664
 
 /** A Fetch request of a binary call whose body gives `start` and stays open until `end()`. */
@@ -387,7 +439,7 @@ async function statusOnceSettled(serving: Promise<Response | undefined>) {
   return outcome.now
 }
 
-test('a binary call whose metadata declares more than any client can send is answered 400 before its metadata is sent (Telefunc given a Node request)', async () => {
+test('a binary call whose metadata declares more than the server reads is answered 400 before its metadata is sent (Telefunc given a Node request)', async () => {
   const { printed } = recordErrors()
   // Once the server has read the length, what it answered once the event loop ran dry, on its own side of the socket.
   const { socket, res } = await startUpload('binary', u32(METADATA_BOUND + 1))
@@ -395,20 +447,20 @@ test('a binary call whose metadata declares more than any client can send is ans
   expect(res.headersSent ? res.statusCode : 'pending').toBe(400)
   socket.destroy()
   await closed(socket)
-  expect(printed).toEqual([expect.stringContaining('more metadata than any client can send')])
+  expect(printed).toEqual([expect.stringContaining('more metadata than the server reads')])
 })
 
-test('a binary call whose metadata declares more than any client can send is answered 400 before its metadata is sent (Telefunc given a Fetch Request)', async () => {
+test('a binary call whose metadata declares more than the server reads is answered 400 before its metadata is sent (Telefunc given a Fetch Request)', async () => {
   const { printed } = recordErrors()
   const { request, end } = openRequest(u32(METADATA_BOUND + 1))
   const serving = telefunc.serve({ request })
   expect(await statusOnceSettled(serving)).toBe(400)
   end()
   await serving
-  expect(printed).toEqual([expect.stringContaining('more metadata than any client can send')])
+  expect(printed).toEqual([expect.stringContaining('more metadata than the server reads')])
 })
 
-test('a binary call whose metadata declares the most a client can send waits for its metadata (Telefunc given a Fetch Request)', async () => {
+test('a binary call whose metadata declares the most the server reads waits for its metadata (Telefunc given a Fetch Request)', async () => {
   recordErrors()
   const { request, end } = openRequest(u32(METADATA_BOUND))
   const serving = telefunc.serve({ request })

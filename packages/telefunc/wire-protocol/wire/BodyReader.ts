@@ -10,7 +10,8 @@ import { ProtocolViolationError } from './protocolViolation.js'
 const EMPTY = new Uint8Array(0)
 
 /** What the reader reads the body through: a Web body's reader, or a Node body's chunks (`ReadableChunks`). `letGo`
- *  hands the body back to its owner unread, and does nothing more where called again. */
+ *  reads no more of the body, and does nothing more where called again: it hands the body back to its owner unread, or
+ *  cancels it where the runtime keeps the reader's lock (workerd). */
 type ChunkSource = {
   next(): Promise<IteratorResult<Uint8Array<ArrayBuffer>>>
   letGo(): void
@@ -120,10 +121,10 @@ class BodyReader {
     }
   }
 
-  /** Reads no more of the body and hands it back to its owner, neither cancelled nor read: the read under way and every
-   *  one after it end as at the body's end, and every open file stream errors at once, with a truncation. A Web body's
-   *  lock is released; a Node body keeps only this reader's error listener, which reads nothing and takes an error it
-   *  emits later. */
+  /** Reads no more of the body: the read under way and every one after it end as at the body's end, and every open file
+   *  stream errors at once, with a truncation. A Web body's lock is released, handing it back to its owner unread, or,
+   *  where the runtime keeps the lock (workerd), the body is cancelled; a Node body is handed back with only this
+   *  reader's error listener, which reads nothing and takes an error it emits later. */
   letGo(): void {
     if (this.stop?.why === 'letGo') return
     // A stop already there stays: a read after it ends as it did.
@@ -359,10 +360,11 @@ class BodyReader {
   }
 
   /** The body stopped short, said by who stopped it, with the runtime's error as the cause where a read failed. With no
-   *  stop, who ended the file reads stopped it. */
+   *  stop, or at the end the read-off reached once the file reads ended, who ended them stopped it. */
   truncation() {
     const stop = this.stop
-    if (stop === null) return new StreamTruncatedError(this.filesEndedBy ?? 'server')
+    if (stop === null || (stop.why === 'ended' && this.filesEndedBy !== null))
+      return new StreamTruncatedError(this.filesEndedBy ?? 'server')
     if (!('error' in stop)) return new StreamTruncatedError(stop.why === 'letGo' ? 'server' : 'body')
     return new StreamTruncatedError(stop.why === 'app' ? 'body' : 'client', { cause: stop.error })
   }

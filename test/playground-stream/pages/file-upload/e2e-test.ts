@@ -1,7 +1,37 @@
 export { testFileUpload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, serverRuntime } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+
+// Calls sent as the Telefunc client sends a binary call (`x-telefunc-request: bin`, then
+// `[u32 metadata length][metadata][the files' bytes]`), for what no page does: a File read after its call.
+const telefuncFile = '/pages/file-upload/FileUpload.telefunc.ts'
+const encoder = new TextEncoder()
+
+/** A binary call to `name` with one File of `size` bytes. */
+function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
+  const metadata = encoder.encode(
+    JSON.stringify({
+      file: telefuncFile,
+      name,
+      args: [`!TelefuncFile:${JSON.stringify({ index: 0, size, name: 'kept.txt', type: '', lastModified: 0 })}`],
+    }),
+  )
+  const body = new Uint8Array(4 + metadata.length + size)
+  new DataView(body.buffer).setUint32(0, metadata.length)
+  body.set(metadata, 4)
+  body.fill(120, 4 + metadata.length)
+  return body
+}
+
+async function post(kind: 'bin' | 'txt', body: BodyInit) {
+  const response = await fetch(`${getServerUrl()}/_telefunc`, {
+    method: 'POST',
+    headers: { 'x-telefunc-request': kind },
+    body,
+  })
+  return { status: response.status, text: await response.text() }
+}
 
 function testFileUpload() {
   test('file upload: single file + text arg', async () => {
@@ -242,5 +272,13 @@ function testFileUpload() {
       const result = await getResult('#upload-result')
       expect(result).deep.equal({ ok: true })
     })
+  })
+
+  test("file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end fails with the server's truncation", async () => {
+    expect((await post('bin', binaryCall('onKeepFile', 1000))).status).toBe(200)
+    // The whole body came with the call, so the read-off that follows its answer has read it to the end.
+    await sleep(500)
+    const read = await post('txt', JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }))
+    expect(read.text).toContain('failed: The server answered before reading the request body to its end')
   })
 }

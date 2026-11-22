@@ -175,9 +175,10 @@ export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
-/** Largest metadata of a binary call the server will read: the most a client can encode, as the client encodes the call
- *  from one string, a V8 string holds at most 536,870,888 UTF-16 code units, and each takes at most 3 bytes of UTF-8. A
- *  V8 server can't decode more into one string either. */
+/** Largest metadata of a binary call the server will read: the most a V8 server can decode into one string, which holds
+ *  at most 536,870,888 UTF-16 code units, each at most 3 bytes of UTF-8. A V8 client (Chrome, Node, Deno) can't encode
+ *  more either; a JSC one (Safari, Bun), whose strings hold 2,147,483,647, can, but no real call carries that much
+ *  metadata: its files go in the body's binary frames. */
 export const CALL_METADATA_MAX_BYTES = 536_870_888 * 3
 /** An event is encoded and goes to its stream a slice of its frame at a time, so nothing holds it whole. A multiple of 3,
  *  as base64 of such a slice joins the next one's. */

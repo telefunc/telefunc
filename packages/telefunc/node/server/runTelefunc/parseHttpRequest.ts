@@ -173,7 +173,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
- *  whose metadata declares more than any client can send is malformed, refused before any of its metadata is read. A
+ *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read. A
  *  binary request's body is read off to its end once the call is done (`readOffBody`). */
 async function readBody(
   request: Request,
@@ -205,7 +205,7 @@ async function readBody(
     })
     if (metadata === 'oversize') {
       logParseError(
-        `The binary request declares more metadata than any client can send (over ${CALL_METADATA_MAX_BYTES} bytes).`,
+        `The binary request declares more metadata than the server reads (over ${CALL_METADATA_MAX_BYTES} bytes).`,
         runContext,
       )
       return { isMalformedRequest: true }
@@ -230,8 +230,10 @@ async function readBody(
 }
 
 /** Ends the call's file reads, then reads the rest of its body and drops it: a connection the client keeps alive carries
- *  its next request only after this one's body (Node's HTTP server parses it from there). The host's own request timeout
- *  bounds the read. A failure that is the app's own error is a bug; a client that left ends it quietly. */
+ *  its next request only after this one's body (Node's HTTP server parses it from there). On Node, the server's
+ *  `requestTimeout` bounds the read; Bun and Deno let a client that trickles its body hold the connection as long as it
+ *  sends, as they do without Telefunc. A failure that is the app's own error is a bug; a client that left ends it
+ *  quietly. */
 async function readOffBody(reader: BodyReader, signal: AbortSignal): Promise<void> {
   // A client that leaves ends the call (`signal`) in the same event in which its body fails: the read of the body under
   // way settles first, so that the file reads end with that failure, or, with none under way, as the client's. A call
