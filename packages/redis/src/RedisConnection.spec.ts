@@ -419,3 +419,11 @@ describe("a Cluster's deployment, which installRedis() keys its backend by", () 
     expect(deploymentOf(cluster(7001))).not.toBe(deploymentOf(first))
   })
 })
+
+describe('a key prefix', () => {
+  it('that is not a well-formed string is refused at install, saying so; one with a `}`, a `:` or a space is not', () => {
+    const at = (prefix: string) => () => new RedisConnection({ redis: client(), prefix })
+    expect(at('tf:\ud800')).toThrow('installRedis(): the prefix must be a well-formed string')
+    for (const prefix of ['}app:', 'a}b:', 'my app ']) expect(at(prefix)).not.toThrow()
+  })
+})

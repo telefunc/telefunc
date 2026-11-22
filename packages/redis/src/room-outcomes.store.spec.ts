@@ -127,7 +127,7 @@ describe.runIf(runs)('Room.list() whose read the store refuses', () => {
       )
       const cleaned = {
         keys: (await lapsedKeys()).length,
-        listed: await admin.zscore('tf:0:room-dir:{tf:0:dir}:index', lapsed),
+        listed: await admin.zscore('tf:0:room-dir:{tf%3A0%3Adir}:index', lapsed),
       }
       admin.disconnect()
 
@@ -156,7 +156,7 @@ describe.runIf(runs)('Room.list() whose read the store refuses', () => {
       // Read once the call settled, which it does only after every step it started: the cleanup is done by then.
       const cleaned = {
         keys: (await lapsedKeys()).length,
-        listed: await admin.zscore('tf:0:room-dir:{tf:0:dir}:index', lapsed),
+        listed: await admin.zscore('tf:0:room-dir:{tf%3A0%3Adir}:index', lapsed),
       }
       admin.disconnect()
 
