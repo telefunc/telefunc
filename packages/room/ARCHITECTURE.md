@@ -118,12 +118,15 @@ and returns the refusal its result type names (`conflict`, `stale-incarnation` o
   claims are such cells, so the store, not Room, judges when one lapsed.
 - `directoryPut()` writes one room's entry, with its tag and when it is due. `directoryDelete()` deletes it if it is
   still listed under `incTag`. On Cloudflare a room's authority writes its entry with the head's exchange instead, as
-  its head lists it, and the two send it to its region's directory.
+  its head lists it, and the two send it to its region's directory. In memory the heads are the listing: a room is
+  listed while its live head names an incarnation, and the two only schedule its due check, never one of a tag
+  another live head names.
 
 The other calls are each atomic only on their own. A cell read, and each page of `readCellPages()`, is taken at once,
 but nothing holds between two of them. `subscribe()` delivers each lane's commits in seq order from when it confirms;
 a frame retained before that is read with `readRetained()`. `dropIncarnation()` returns quietly for an incarnation
-already dropped, because a close, a create and the directory's due check can each drop one that was left over. An
+already dropped, because a close, a create and the directory's due check can each drop one that was left over. In
+memory the head's exchange ends the incarnation it stops naming, and a drop leaves what a live head names. An
 inbox or control commit's `delivery`, its handoff to the subscriptions, settles after the step, outside it.
 
 **Redis's operation packet.** `OPERATION_LUA` (`redis/src/commands.ts`) takes a number of KEYS and ARGV that depends on

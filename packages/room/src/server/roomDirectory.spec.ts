@@ -72,6 +72,11 @@ async function openHead(driver: MemoryRoomDriver, id: string, ttlMs?: number, re
   return { inc, rev: result.head.rev }
 }
 
+/** The listing a create writes once its head is open, for a room without hold timeouts. */
+async function listOpened(driver: MemoryRoomDriver, id: string, { inc }: { inc: string }): Promise<void> {
+  await driver.directoryPut(id, inc, Infinity, 0)
+}
+
 /** A close at the store alone: the closing lease, the closed frame, the closed tombstone. With `sameTurn`, the
  *  tombstone is written in the turn the frame is accepted, before the frame is delivered. */
 async function closeHead(
@@ -118,6 +123,17 @@ async function turns(): Promise<void> {
   for (let turn = 0; turn < 3; turn++) await new Promise((resolve) => setImmediate(resolve))
 }
 
+/** Starts a sweep, past the pacing a sweep before it left (one per heartbeat interval), under faked `performance`: a
+ *  heartbeat at a time until `started()` says it read its due rooms. */
+async function startSweep(started: () => boolean): Promise<void> {
+  for (let tries = 0; !started() && tries < 100; tries++) {
+    sweepLapsedRoomsSoon()
+    await turns()
+    if (!started()) vi.advanceTimersByTime(ROOM_HEARTBEAT_INTERVAL_MS)
+  }
+  if (!started()) throw new Error('no sweep started')
+}
+
 /** A ready subscription to `lane` of incarnation `inc`, and what it saw since, in order: each frame's seq, then its
  *  states. */
 async function readyLane(driver: MemoryRoomDriver, id: string, inc: string, lane: LaneId) {
@@ -150,7 +166,196 @@ function timerCalls() {
   }
 }
 
+/** Pauses `Room.create(id)`'s exchange of the head until `release` opens. */
+function pauseCreates(id: string) {
+  const exchange = MemoryRoomDriver.prototype.compareExchangeHead
+  const paused = deferred()
+  const release = deferred()
+  vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeHead').mockImplementation(async function (
+    this: MemoryRoomDriver,
+    roomId,
+    expected,
+    next,
+  ) {
+    if (roomId === id && expected.form === 'absent') {
+      paused.open()
+      await release.done
+    }
+    return await exchange.call(this, roomId, expected, next)
+  })
+  return { paused, release }
+}
+
 describe("the memory store's listing", () => {
+  it('lists a room created while a `Room.list()` read its listing, after both', async () => {
+    const id = fresh('list-race')
+    const read = MemoryRoomDriver.prototype.readHead
+    const create = pauseCreates(id)
+    const created = deferred()
+    const listRead = deferred()
+    let pauseList = false
+    vi.spyOn(MemoryRoomDriver.prototype, 'readHead').mockImplementation(async function (
+      this: MemoryRoomDriver,
+      roomId,
+    ) {
+      const head = await read.call(this, roomId)
+      if (roomId === id && pauseList) {
+        // The list read the head before the create committed it, and acts on that read after the create resolved.
+        pauseList = false
+        listRead.open()
+        await created.done
+      }
+      return head
+    })
+    // The create has read no head and pauses before its exchange.
+    const creating = Room.create(id, noHold)
+    await create.paused.done
+    pauseList = true
+    const listing = Room.list({ prefix: id })
+    await Promise.race([listRead.done, listing])
+    create.release.open()
+    await creating
+    created.open()
+    await listing
+    vi.restoreAllMocks()
+    const listed = (await Room.list({ prefix: id })).map((room) => room.id)
+    expect({ listed, getFinds: (await Room.get(id)).id }).toEqual({ listed: [id], getFinds: id })
+  })
+
+  it('names the winner of two creates, as the loser of their head exchange rejects', async () => {
+    const id = fresh('two-creates')
+    const put = MemoryRoomDriver.prototype.directoryPut
+    const firstPut = deferred()
+    const releaseFirst = deferred()
+    let held = false
+    vi.spyOn(MemoryRoomDriver.prototype, 'directoryPut').mockImplementation(async function (
+      this: MemoryRoomDriver,
+      roomId,
+      incTag,
+      checkAt,
+      minDelayMs,
+    ) {
+      if (roomId === id && !held) {
+        held = true
+        firstPut.open()
+        await releaseFirst.done
+      }
+      return await put.call(this, roomId, incTag, checkAt, minDelayMs)
+    })
+    // A reads no head and no listing, then pauses before it lists its proposed incarnation.
+    const first = settled(Room.create(id, noHold))
+    await firstPut.done
+    const second = await settled(Room.create(id, noHold))
+    releaseFirst.open()
+    const loser = await first
+    vi.restoreAllMocks()
+    const winner = await currentInc(id)
+    expect({ second, loser, listed: await getRoomPlane().direct.reads.directoryGet(id) }).toEqual({
+      second: 'resolved',
+      loser: `Room already exists: ${id}`,
+      listed: winner,
+    })
+  })
+
+  it('names only the winner of two timed creates that a list ran between, and only its check is due', async () => {
+    const id = fresh('creates-and-list')
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const timed = { emptyTimeout: 60_000, departureTimeout: 60_000 }
+    const create = pauseCreates(id)
+    const first = settled(Room.create(id, timed))
+    await create.paused.done
+    const second = settled(Room.create(id, timed))
+    // Both have written their checks and wait at their exchange.
+    await new Promise((resolve) => setImmediate(resolve))
+    const between = (await Room.list({ prefix: id })).map((room) => room.id)
+    create.release.open()
+    const outcomes = [await first, await second].sort()
+    vi.restoreAllMocks()
+    const winner = await currentInc(id)
+    const listed = (await Room.list({ prefix: id })).map((room) => room.id)
+    vi.setSystemTime(Date.now() + ROOM_LEASE_TTL_MS + 1_000)
+    const due = (await getRoomPlane().direct.reads.directoryDue()).filter((entry) => entry.roomId === id)
+    expect({ between, outcomes, listed, due }).toEqual({
+      between: [],
+      outcomes: [`Room already exists: ${id}`, 'resolved'],
+      listed: [id],
+      due: [{ roomId: id, incTag: winner }],
+    })
+  })
+
+  it('pages past rooms that lapse before it reads and between its pages, each page full of live ids', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const prefix = fresh('lapsing-pages')
+    const ids = Array.from({ length: DIRECTORY_PAGE_SIZE + 5 }, (_, at) => `${prefix}:${String(at).padStart(4, '0')}`)
+    // Two rooms in the first page's range lapse in 5 s, the last two in 10 s, the others never.
+    const early = new Set([ids[10], ids[11]])
+    const late = new Set([ids[DIRECTORY_PAGE_SIZE + 3], ids[DIRECTORY_PAGE_SIZE + 4]])
+    for (const id of ids) {
+      await listOpened(
+        driver,
+        id,
+        await openHead(driver, id, early.has(id) ? 5_000 : late.has(id) ? 10_000 : undefined),
+      )
+    }
+    // A first list builds the index; each lapse then comes with no timer run.
+    await driver.directoryList(prefix)
+    vi.setSystemTime(Date.now() + 6_000)
+    const first = await driver.directoryList(`${prefix}:`)
+    vi.setSystemTime(Date.now() + 5_000)
+    // A get that comes first past a lapse finds it too.
+    const lateGet = await driver.directoryGet(ids[DIRECTORY_PAGE_SIZE + 3] ?? '')
+    const second = await driver.directoryList(`${prefix}:`, first.cursor)
+    const live = ids.filter((id) => !early.has(id) && !late.has(id))
+    expect({
+      first: first.entries.map((entry) => entry.roomId),
+      cursor: first.cursor,
+      second: second.entries.map((entry) => entry.roomId),
+      more: second.cursor,
+      lapsedGet: await driver.directoryGet(`${prefix}:0010`),
+      lateGet,
+    }).toEqual({
+      first: live.slice(0, DIRECTORY_PAGE_SIZE),
+      cursor: live[DIRECTORY_PAGE_SIZE - 1],
+      second: live.slice(DIRECTORY_PAGE_SIZE),
+      more: undefined,
+      lapsedGet: undefined,
+      lateGet: undefined,
+    })
+  })
+
+  it('pages in code point order, not UTF-16 order', async () => {
+    const driver = new MemoryRoomDriver()
+    const prefix = fresh('code-points')
+    // U+FF61 sorts before U+1F600 by code point; its UTF-16 unit 0xFF61 sorts after 0xD83D.
+    const ids = [`${prefix}:a\u{1F600}`, `${prefix}:a\u{FF61}`]
+    for (const id of ids) await listOpened(driver, id, await openHead(driver, id))
+    const page = await driver.directoryList(`${prefix}:`)
+    expect(page.entries.map((entry) => entry.roomId)).toEqual([`${prefix}:a\u{FF61}`, `${prefix}:a\u{1F600}`])
+  })
+
+  it("keeps a successor listed through the repair a list makes from its page's earlier read", async () => {
+    const driver = new MemoryRoomDriver()
+    const id = fresh('stale-page')
+    const first = await openHead(driver, id)
+    await listOpened(driver, id, first)
+    const page = await driver.directoryList(id)
+    await closeHead(driver, id, first)
+    const tombstone = await driver.readHead(id)
+    if (tombstone === null) throw new Error(`room ${id} has no tombstone`)
+    const second = await openHead(driver, id, undefined, tombstone.rev)
+    await listOpened(driver, id, second)
+    // The core's repair from its page's entry: drop the listed incarnation, re-list or delete under its tag.
+    await driver.dropIncarnation(id, first.inc)
+    await driver.directoryPut(id, first.inc, 0, ROOM_LEASE_TTL_MS)
+    await driver.directoryDelete(id, first.inc)
+    expect({
+      listedFirst: page.entries.map((entry) => entry.incTag),
+      get: await driver.directoryGet(id),
+      listed: (await driver.directoryList(id)).entries.map((entry) => entry.incTag),
+      data: (await driver.readLaneOrder(id, second.inc, SEMANTIC))?.seq,
+    }).toEqual({ listedFirst: [first.inc], get: second.inc, listed: [second.inc], data: 1 })
+  })
   it('pages rooms in code point order under a prefix, past a room closed between two pages', async () => {
     const prefix = fresh('paged')
     const ids = Array.from({ length: DIRECTORY_PAGE_SIZE + 3 }, (_, at) => `${prefix}:${String(at).padStart(4, '0')}`)
@@ -179,7 +384,8 @@ describe("an ended room's data", () => {
     expect({
       state: (await getRoomPlane().direct.reads.readHead(id))?.state,
       data: await holdsData(id, inc),
-    }).toEqual({ state: 'closed', data: false })
+      listed: await getRoomPlane().direct.reads.directoryGet(id),
+    }).toEqual({ state: 'closed', data: false, listed: undefined })
   })
 
   it('of an earlier incarnation goes in the turn the head names a new one', async () => {
@@ -271,7 +477,7 @@ describe('a closing head whose closer stopped', () => {
       if (entries.length === 0) ended.open()
       return entries
     })
-    sweepLapsedRoomsSoon()
+    await startSweep(() => sweepReads.length > 0)
     await ended.done
     vi.restoreAllMocks()
     const [visited = [], afterVisit = []] = sweepReads
@@ -604,5 +810,192 @@ describe("a lapsed incarnation's lanes", () => {
     await vi.advanceTimersByTimeAsync(10_000)
     for (let turn = 0; turn < 50 && handle.holdsTail(); turn++) await turns()
     expect({ tailed, afterLapse: handle.holdsTail() }).toEqual({ tailed: true, afterLapse: false })
+  })
+})
+
+describe("a room's due check", () => {
+  it('of a timed create whose opening reply was refused is set by its head, which lists it', async () => {
+    const id = fresh('reply-refused')
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const exchange = MemoryRoomDriver.prototype.compareExchangeHead
+    vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeHead').mockImplementation(async function (
+      this: MemoryRoomDriver,
+      roomId,
+      expected,
+      next,
+    ) {
+      const result = await exchange.call(this, roomId, expected, next)
+      if (roomId === id && expected.form === 'absent') throw new Error('the reply was refused')
+      return result
+    })
+    const created = await settled(Room.create(id, { emptyTimeout: 60_000, departureTimeout: 60_000 }))
+    vi.restoreAllMocks()
+    const { reads } = getRoomPlane().direct
+    const listed = await reads.directoryGet(id)
+    const inc = await currentInc(id)
+    vi.setSystemTime(Date.now() + ROOM_LEASE_TTL_MS + 1_000)
+    const due = (await reads.directoryDue()).filter((entry) => entry.roomId === id)
+    expect({ created, listed: listed === inc, due }).toEqual({
+      created: 'the reply was refused',
+      listed: true,
+      due: [{ roomId: id, incTag: inc }],
+    })
+  })
+
+  for (const sweep of ['before', 'across'] as const) {
+    it(`of a timed create stays, though a sweep deletes its pre-put ${sweep} its opening turn, and its reply and its close's commit are refused`, async () => {
+      const id = fresh(`swept-${sweep}`)
+      vi.useFakeTimers({ toFake: ['Date', 'performance'] })
+      const exchange = MemoryRoomDriver.prototype.compareExchangeHead
+      const atExchange = deferred()
+      const releaseExchange = deferred()
+      vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeHead').mockImplementation(async function (
+        this: MemoryRoomDriver,
+        roomId,
+        expected,
+        next,
+      ) {
+        if (roomId !== id || expected.form !== 'absent') return await exchange.call(this, roomId, expected, next)
+        atExchange.open()
+        await releaseExchange.done
+        await exchange.call(this, roomId, expected, next)
+        throw new Error('the reply was refused')
+      })
+      const drop = MemoryRoomDriver.prototype.dropIncarnation
+      const atDrop = deferred()
+      let dropping = false
+      const releaseDrop = deferred()
+      vi.spyOn(MemoryRoomDriver.prototype, 'dropIncarnation').mockImplementation(async function (
+        this: MemoryRoomDriver,
+        roomId,
+        inc,
+      ) {
+        if (roomId === id && sweep === 'across') {
+          dropping = true
+          atDrop.open()
+          await releaseDrop.done
+        }
+        return await drop.call(this, roomId, inc)
+      })
+      const commit = MemoryRoomDriver.prototype.commitLane
+      vi.spyOn(MemoryRoomDriver.prototype, 'commitLane').mockImplementation(async function (
+        this: MemoryRoomDriver,
+        target,
+        payload,
+        opts,
+      ) {
+        if (target.roomId === id && target.lane.kind === 'control') throw new Error('refused before dispatch')
+        return await commit.call(this, target, payload, opts)
+      })
+      // The sweep's due reads, bounded: from its third on it is told nothing is due.
+      const due = MemoryRoomDriver.prototype.directoryDue
+      let dueReads = 0
+      const swept = deferred()
+      vi.spyOn(MemoryRoomDriver.prototype, 'directoryDue').mockImplementation(async function (this: MemoryRoomDriver) {
+        if (++dueReads > 2) {
+          swept.open()
+          return []
+        }
+        const entries = await due.call(this)
+        if (entries.length === 0) swept.open()
+        return entries
+      })
+      const created = settled(Room.create(id, { emptyTimeout: 60_000, departureTimeout: 60_000 }))
+      await atExchange.done
+      // A lease on, the sweep finds the pre-put with no head and repairs it: drop, then delete.
+      vi.advanceTimersByTime(ROOM_LEASE_TTL_MS + 1_000)
+      await startSweep(() => dueReads > 0)
+      if (sweep === 'across') {
+        await Promise.race([atDrop.done, swept.done])
+        if (!dropping) throw new Error('the sweep repaired nothing')
+        releaseExchange.open()
+        await created
+        releaseDrop.open()
+      }
+      await swept.done
+      releaseExchange.open()
+      const reply = await created
+      const closed = await settled(Room.close(id))
+      vi.restoreAllMocks()
+      const { reads } = getRoomPlane().direct
+      const state = (await reads.readHead(id))?.state
+      vi.advanceTimersByTime(70_000)
+      expect({
+        reply,
+        closed: closed !== 'resolved',
+        state,
+        due: (await reads.directoryDue()).some((entry) => entry.roomId === id),
+      }).toEqual({ reply: 'the reply was refused', closed: true, state: 'closing', due: true })
+    })
+  }
+
+  it('handed out goes with the head that ends before the sweep reads it, and leaves no node', async () => {
+    const driver = new MemoryRoomDriver()
+    const id = fresh('due-then-closed')
+    const opened = await openHead(driver, id)
+    await driver.directoryPut(id, opened.inc, 0, 0)
+    const handed = await driver.directoryDue()
+    await closeHead(driver, id, opened)
+    expect({
+      handed: handed.map((entry) => entry.roomId),
+      after: (await driver.directoryDue()).map((entry) => entry.roomId),
+      nodes: driver['dueChecks'].size,
+    }).toEqual({ handed: [id], after: [], nodes: 0 })
+  })
+
+  it('moves only by a put of the tag its live head names, however late the put', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('late-puts')
+    const opened = await openHead(driver, id, 10_000)
+    const openLapse = Date.now() + 10_000
+    // The closing turn keeps the check; a put that holds the open head's lapse moves it, and it stays finite.
+    const closing = await driver.compareExchangeHead(
+      id,
+      { form: 'rev', rev: opened.rev },
+      {
+        head: {
+          rev: crypto.randomUUID(),
+          currentInc: opened.inc,
+          state: 'closing',
+          config: CONFIG,
+          closeLease: { id: 'lease', durationMs: ROOM_CLOSE_LEASE_MS },
+        },
+      },
+    )
+    if (closing.kind !== 'committed') throw new Error(`room ${id} didn't start closing`)
+    await driver.directoryPut(id, opened.inc, openLapse, ROOM_HEARTBEAT_INTERVAL_MS)
+    vi.setSystemTime(Date.now() + ROOM_HEARTBEAT_INTERVAL_MS + 1_000)
+    const whileClosing = (await driver.directoryDue()).map((entry) => entry.incTag)
+    await driver.compareExchangeHead(
+      id,
+      { form: 'finalize', rev: closing.head.rev, lease: 'lease' },
+      {
+        head: { rev: crypto.randomUUID(), currentInc: null, state: 'closed', config: CONFIG },
+        ttlMs: ROOM_TOMBSTONE_TTL_MS,
+      },
+    )
+    const tombstone = await driver.readHead(id)
+    if (tombstone === null) throw new Error(`room ${id} has no tombstone`)
+    const afterClose = { get: await driver.directoryGet(id), nodes: driver['dueChecks'].size }
+    const successor = await openHead(driver, id, undefined, tombstone.rev)
+    await driver.directoryPut(id, successor.inc, Date.now() + 1_000, 0)
+    // Late puts of the ended tag: neither its check nor its listing comes back, and the successor's check stays.
+    await driver.directoryPut(id, opened.inc, Infinity, 0)
+    await driver.directoryPut(id, opened.inc, 0, 0)
+    vi.setSystemTime(Date.now() + 2_000)
+    expect({
+      whileClosing,
+      afterClose,
+      get: await driver.directoryGet(id),
+      due: (await driver.directoryDue()).map((entry) => entry.incTag),
+      nodes: driver['dueChecks'].size,
+    }).toEqual({
+      whileClosing: [opened.inc],
+      afterClose: { get: undefined, nodes: 0 },
+      get: successor.inc,
+      due: [successor.inc],
+      nodes: 1,
+    })
   })
 })

@@ -96,11 +96,16 @@ type Incarnation = {
 /** A room's one lapse timer, and when it fires: at its head's lapse, or a timer's range before it. */
 type LapseTimer = { firesAt: number; timer: ReturnType<typeof setTimeout> }
 
-type RoomRecord = { head: StoredHead | null; incarnations: Map<string, Incarnation>; lapse: LapseTimer | null }
+/** When room `roomId` is due under `incTag`, and where it is in the due heap (-1: not in it). */
+type DueCheck = { at: number; roomId: string; incTag: string; place: number }
 
-type DirectoryEntry = { incTag: string; checkAt: number }
-/** A directory entry's check, current while its entry is still due at `at`. */
-type DirectoryCheck = { at: number; roomId: string }
+type RoomRecord = {
+  head: StoredHead | null
+  incarnations: Map<string, Incarnation>
+  lapse: LapseTimer | null
+  /** Its due checks by tag: the tag its head names, or, while it names none, those of the creates waiting for it. */
+  due: Map<string, DueCheck>
+}
 
 /** About 10 ms of commits. */
 const COMMITS_BETWEEN_TURNS = 1024
@@ -307,12 +312,11 @@ class EndedAttempt extends DriverAttempt {
 
 class MemoryRoomDriver implements RoomDriver {
   private readonly rooms = new Map<string, RoomRecord>()
-  private readonly directory = new Map<string, DirectoryEntry>()
-  /** The directory's room ids in code point order, so a page reads only its own ids. The first list sorts them, and
-   *  each list merges in the puts and deletes since the one before: a server that never lists pays nothing per put. */
+  /** The ids of the rooms whose head names an incarnation, which are the listing, in code point order, so a page reads
+   *  only its own ids. The first list sorts them, and each list merges in the head turns since the one before: a
+   *  server that never lists pays nothing per head turn. */
   private sortedIds: SortedIds | null = null
-  /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
-  private readonly directoryChecks: DirectoryCheck[] = []
+  private readonly dueChecks = new DueChecks()
   private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -335,7 +339,9 @@ class MemoryRoomDriver implements RoomDriver {
   private storeHead(roomId: string, room: RoomRecord, next: HeadNext): StoredHead {
     const materialized = materializeHead(next, Date.now())
     const stored = { ...materialized, config: copyBytes(materialized.config) }
+    const named = room.head?.currentInc ?? null
     room.head = stored
+    this.followHead(roomId, room, named)
     for (const inc of [...room.incarnations.keys()]) if (inc !== stored.currentInc) this.endIncarnation(room, inc)
     if (stored.currentInc !== null) {
       const incarnation = this.incarnation(room, stored.currentInc)
@@ -556,54 +562,90 @@ class MemoryRoomDriver implements RoomDriver {
     this.endIncarnation(room, inc)
   }
 
+  /** The heads are the listing, so this only schedules: the check of the tag the head names, or, while it names
+   *  none, of a create's tag, which the next head turn keeps if it names it. */
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    if (!this.directory.has(roomId)) this.sortedIds?.add(roomId)
-    this.directory.set(roomId, { incTag, checkAt: at })
-    if (at !== Infinity) pushCheck(this.directoryChecks, { at, roomId })
+    const named = this.liveHead(roomId, this.rooms.get(roomId))?.currentInc ?? null
+    if (named !== null && named !== incTag) return
+    const room = at === Infinity ? this.rooms.get(roomId) : this.roomFor(roomId)
+    if (room === undefined) return
+    if (at === Infinity) this.unschedule(roomId, room, incTag)
+    else this.schedule(room, roomId, incTag, at)
   }
 
+  /** Only a check no live head names: a repair acting on an earlier read can't unschedule what a head took since. */
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    if (this.directory.get(roomId)?.incTag !== incTag) return
-    this.directory.delete(roomId)
-    this.sortedIds?.delete(roomId)
+    const room = this.rooms.get(roomId)
+    if (room === undefined || this.liveHead(roomId, room)?.currentInc === incTag) return
+    this.unschedule(roomId, room, incTag)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return this.directory.get(roomId)?.incTag
+    return this.liveHead(roomId, this.rooms.get(roomId))?.currentInc ?? undefined
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     // The ids under `prefix` sit together in code point order; a page starts past the cursor.
     const from = cursor !== undefined && compareCodePoints(cursor, prefix) > 0 ? cursor : prefix
     const entries: DirectoryPage['entries'] = []
-    this.sortedIds ??= new SortedIds(this.directory.keys())
+    const now = Date.now()
+    this.sortedIds ??= new SortedIds(this.listedIds())
     for (const roomId of this.sortedIds.from(from)) {
       if (!roomId.startsWith(prefix)) break
       if (roomId === cursor) continue
+      // A lapsed head goes here, before it counts toward the page.
+      const incTag = this.liveHead(roomId, this.rooms.get(roomId), now)?.currentInc ?? null
+      if (incTag === null) continue
       if (entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: entries.at(-1)!.roomId }
-      entries.push({ roomId, incTag: this.directory.get(roomId)!.incTag })
+      entries.push({ roomId, incTag })
     }
     return { entries }
   }
 
+  /** Still due until put again, or retired with the tag its head stops naming. */
   async directoryDue(): Promise<DirectoryPage['entries']> {
-    const now = Date.now()
-    // A put twice at the same time scheduled two checks, both current.
-    const due = new Map<string, DirectoryCheck>()
-    while (due.size < DIRECTORY_PAGE_SIZE && this.directoryChecks.length > 0 && this.directoryChecks[0]!.at <= now) {
-      const check = popCheck(this.directoryChecks)
-      if (this.directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
-    }
-    // Still due until put again or deleted.
-    for (const check of due.values()) pushCheck(this.directoryChecks, check)
-    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: this.directory.get(roomId)!.incTag }))
+    return this.dueChecks.due(Date.now(), DIRECTORY_PAGE_SIZE).map(({ roomId, incTag }) => ({ roomId, incTag }))
   }
 
   // ── internals ──
 
   private roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map(), lapse: null }))
+    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map(), lapse: null, due: new Map() }))
+  }
+
+  private *listedIds(): Generator<string> {
+    for (const [roomId, room] of this.rooms) if ((room.head?.currentInc ?? null) !== null) yield roomId
+  }
+
+  /** The listing and the due checks follow the head, in its turn. It is listed while it names an incarnation, whose
+   *  check stays while every other goes; the turn that first names it schedules its first check from the head's own
+   *  lapse, or the create's put if that is sooner. */
+  private followHead(roomId: string, room: RoomRecord, before: string | null): void {
+    const named = room.head?.currentInc ?? null
+    if (before === null && named !== null) this.sortedIds?.add(roomId)
+    if (before !== null && named === null) this.sortedIds?.delete(roomId)
+    for (const tag of [...room.due.keys()]) if (tag !== named) this.unschedule(roomId, room, tag)
+    const lapse = room.head?.expiresAt ?? null
+    if (named === null || named === before || lapse === null) return
+    this.schedule(room, roomId, named, Math.min(room.due.get(named)?.at ?? Infinity, lapse))
+  }
+
+  private schedule(room: RoomRecord, roomId: string, incTag: string, at: number): void {
+    this.dueChecks.set(
+      getOrCreate(room.due, incTag, () => ({ at, roomId, incTag, place: -1 })),
+      at,
+    )
+  }
+
+  /** A record left with nothing goes too: a create's check that no head took. */
+  private unschedule(roomId: string, room: RoomRecord, incTag: string): void {
+    const check = room.due.get(incTag)
+    if (check === undefined) return
+    room.due.delete(incTag)
+    this.dueChecks.remove(check)
+    const empty = room.head === null && room.due.size === 0 && room.incarnations.size === 0
+    if (empty && this.rooms.get(roomId) === room) this.rooms.delete(roomId)
   }
 
   /** What incarnation `inc` stored, as a read sees it: none once its room's head lapsed. Closing tails and history
@@ -646,6 +688,8 @@ class MemoryRoomDriver implements RoomDriver {
 
   /** The room's head lapsed: the head goes with every incarnation it held, in this turn, for good. */
   private collect(roomId: string, room: RoomRecord): void {
+    if ((room.head?.currentInc ?? null) !== null) this.sortedIds?.delete(roomId)
+    for (const tag of [...room.due.keys()]) this.unschedule(roomId, room, tag)
     for (const inc of [...room.incarnations.keys()]) this.endIncarnation(room, inc)
     if (room.lapse !== null) clearTimeout(room.lapse.timer)
     room.lapse = null
@@ -668,40 +712,88 @@ class MemoryRoomDriver implements RoomDriver {
 
   /** A head the store's clock finds lapsed is collected here, before its timer, and reads as absent from then on,
    *  which is what reopens an absence epoch. */
-  private liveHead(roomId: string, room: RoomRecord | undefined): StoredHead | null {
+  private liveHead(roomId: string, room: RoomRecord | undefined, now?: number): StoredHead | null {
     const head = room?.head ?? null
-    if (room === undefined || head === null || !isExpired(head, Date.now())) return head
+    if (room === undefined || head === null || !isExpired(head, now ?? Date.now())) return head
     this.collect(roomId, room)
     return null
   }
 }
 
-function pushCheck(checks: DirectoryCheck[], check: DirectoryCheck): void {
-  let at = checks.push(check) - 1
-  while (at > 0) {
-    const parent = (at - 1) >> 1
-    if (checks[parent]!.at <= check.at) break
-    checks[at] = checks[parent]!
-    at = parent
-  }
-  checks[at] = check
-}
+/** The due checks in a min-heap by `at`. Each knows its place, so a put moves it and a retire removes it: every node
+ *  is a live check. */
+class DueChecks {
+  private readonly heap: DueCheck[] = []
 
-function popCheck(checks: DirectoryCheck[]): DirectoryCheck {
-  const top = checks[0]!
-  const last = checks.pop()!
-  if (checks.length === 0) return top
-  let at = 0
-  for (;;) {
-    let child = 2 * at + 1
-    if (child >= checks.length) break
-    if (child + 1 < checks.length && checks[child + 1]!.at < checks[child]!.at) child++
-    if (checks[child]!.at >= last.at) break
-    checks[at] = checks[child]!
-    at = child
+  get size(): number {
+    return this.heap.length
   }
-  checks[at] = last
-  return top
+
+  /** Adds `check` at `at`, or moves it there. */
+  set(check: DueCheck, at: number): void {
+    check.at = at
+    if (check.place === -1) this.place(check, this.heap.length)
+    this.up(check.place)
+    this.down(check.place)
+  }
+
+  remove(check: DueCheck): void {
+    const at = check.place
+    if (at === -1) return
+    check.place = -1
+    const last = this.heap.pop()
+    if (last === undefined || last === check) return
+    this.place(last, at)
+    this.up(at)
+    this.down(at)
+  }
+
+  /** Up to `limit` checks due at `now`, earliest first, which stay due. */
+  due(now: number, limit: number): DueCheck[] {
+    const taken: DueCheck[] = []
+    for (let top = this.heap[0]; top !== undefined && top.at <= now && taken.length < limit; top = this.heap[0]) {
+      this.remove(top)
+      taken.push(top)
+    }
+    for (const check of taken) this.set(check, check.at)
+    return taken
+  }
+
+  private place(check: DueCheck, at: number): void {
+    this.heap[at] = check
+    check.place = at
+  }
+
+  private up(from: number): void {
+    const check = this.heap[from]
+    if (check === undefined) return
+    let at = from
+    while (at > 0) {
+      const parentAt = (at - 1) >> 1
+      const parent = this.heap[parentAt]
+      if (parent === undefined || parent.at <= check.at) break
+      this.place(parent, at)
+      at = parentAt
+    }
+    this.place(check, at)
+  }
+
+  private down(from: number): void {
+    const check = this.heap[from]
+    if (check === undefined) return
+    let at = from
+    for (;;) {
+      const leftAt = 2 * at + 1
+      const left = this.heap[leftAt]
+      if (left === undefined) break
+      const right = this.heap[leftAt + 1]
+      const [child, childAt] = right !== undefined && right.at < left.at ? [right, leftAt + 1] : [left, leftAt]
+      if (child.at >= check.at) break
+      this.place(child, at)
+      at = childAt
+    }
+    this.place(check, at)
+  }
 }
 
 function unindex(index: Map<string, Set<string>>, of: string, key: string): void {

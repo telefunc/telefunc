@@ -326,12 +326,19 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
    *  their count. */
   listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]>
+  /** Drops what incarnation `inc` left, which its caller read as one no head names. The memory store, whose head's
+   *  exchange ends the incarnation it stops naming, drops nothing its live head names. */
   dropIncarnation(roomId: string, inc: string): Promise<void>
   /** Lists `roomId` under `incTag`, due at `checkAt` (authority ms) and no sooner than `minDelayMs` from the
-   *  authority's now; an entry due at Infinity is never due. */
+   *  authority's now; an entry due at Infinity is never due. Where the heads are the listing (memory), it only
+   *  schedules the check: of the tag the live head names, or, while it names none, of a tag the next head exchange
+   *  keeps if it names it. */
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void>
+  /** Deletes the entry listed under `incTag`; where the heads are the listing, the check of a tag no live head
+   *  names. */
   directoryDelete(roomId: string, incTag: string): Promise<void>
-  /** The tag `roomId` is listed under, if it is listed. */
+  /** The tag `roomId` is listed under, if it is listed; where the heads are the listing, its live head's
+   *  incarnation. */
   directoryGet(roomId: string): Promise<string | undefined>
   directoryList(prefix: string, cursor?: string): Promise<DirectoryPage>
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
