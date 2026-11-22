@@ -163,15 +163,15 @@ class BodyReader {
     try {
       const left = this.leftOfNext()
       if (left === 0) return this.fileDone(file)
-      let chunk = this.takeBuffered(left)
-      if (chunk === null) {
+      let bytes = this.buffer
+      if (bytes.length === 0) {
         const pulled = await this.pullChunk()
         // Let go of while the read was under way: `letGo` errored the stream, and what came after is dropped.
         if (this.stop?.why === 'letGo') return
         if (pulled === null) throw this.truncation()
-        chunk = pulled.length <= left ? pulled : pulled.subarray(0, left)
-        if (pulled.length > left) this.buffer = pulled.subarray(left)
+        bytes = pulled
       }
+      const chunk = this.handOut(bytes, left)
       this.left = left - chunk.length
       // Cancelled while the read was under way: the bytes it took are read, and dropped.
       if (!file.over) file.enqueue(chunk)
@@ -183,6 +183,19 @@ class BodyReader {
       this.holder = null
       this.wake()
     }
+  }
+
+  /** The first `left` bytes of `bytes`, for the file, and the rest kept to be read. The rest is the reader's own copy:
+   *  a file's bytes may be handed on with their buffer transferred (`postMessage(chunk, [chunk.buffer])`), which would
+   *  detach every other view of that buffer. Only a chunk that spans a file's end is copied, its part after the end. */
+  private handOut(bytes: Uint8Array<ArrayBuffer>, left: number): Uint8Array<ArrayBuffer> {
+    if (bytes.length <= left) {
+      this.buffer = EMPTY
+      return bytes
+    }
+    // A copy: on a Node `Buffer`, `slice` is a view of the same buffer.
+    this.buffer = new Uint8Array(bytes.subarray(left))
+    return bytes.subarray(0, left)
   }
 
   private readonly cancelFile = (file: FileRead): void => {
