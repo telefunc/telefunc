@@ -600,11 +600,13 @@ class SseServerTransport {
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
     wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))
-    if (wire.bodies.size === 0) return
+    // Also with no body under read: a request that found the wire just before its end may yet start reading one. The
+    // timer holds the bodies alone, not the closed wire.
+    const { bodies } = wire
     const readOff = pingDeadline(this.mux.pingInterval, CHANNEL_TRANSPORT.SSE)
     unrefTimer(
       setTimeout(() => {
-        for (const body of wire.bodies) body.letGo()
+        for (const body of bodies) body.letGo()
       }, readOff),
     )
   }
