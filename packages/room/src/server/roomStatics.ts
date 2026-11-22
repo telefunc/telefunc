@@ -1,10 +1,10 @@
 export { roomStatics }
 export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 
-import { assertUsage } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
-import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE, type LaneId, type RoomHead } from '../backend/contract.js'
 import type { RoomStore } from '../backend/RoomStore.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -39,7 +39,7 @@ import type {
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
 import { allSettledOrThrow, eachInFlight } from './store/inFlight.js'
-import { assertLeavesCommittable, evictMember } from './store/members.js'
+import { evictMember, leaveCommits } from './store/members.js'
 import {
   reapAndCountPresence,
   reapAndReadMembersById,
@@ -49,7 +49,10 @@ import {
 import {
   SEMANTIC_LANE,
   acceptedOrThrow,
+  commitFitsBeforeWriting,
   commitLane,
+  type CommitFitsBeforeWriting,
+  type CommitsOf,
   configFromHead,
   inboxOf,
   openConfig,
@@ -342,19 +345,21 @@ function ownParticipantRef(target: unknown): ParticipantRef {
   return { identity }
 }
 
-/** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of. */
+/** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of. The call's
+ *  `checkBeforeWriting` runs on the members it reads, before it writes (`reapAndReadMembersById`). */
 async function resolveParticipantRef(
   store: RoomStore,
   incarnation: RoomIncarnation,
   target: ParticipantRef,
+  checkBeforeWriting: CommitFitsBeforeWriting,
 ): Promise<MemberSnapshot[]> {
   const ref = ownParticipantRef(target)
   if ('id' in ref) {
-    const members = await reapAndReadMembersById(store, incarnation, [ref.id])
+    const members = await reapAndReadMembersById(store, incarnation, [ref.id], checkBeforeWriting)
     if (members.length === 0) throw participantGoneError(ref.id)
     return members
   }
-  return await reapAndResolveIdentity(store, incarnation, ref.identity)
+  return await reapAndResolveIdentity(store, incarnation, ref.identity, checkBeforeWriting)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
@@ -371,9 +376,9 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
       if ('id' in ref) throw roomNotFoundError(id)
       return
     }
-    const members = await resolveParticipantRef(store, incarnation, ref)
     // No tab goes while another tab's leave would be refused for its size.
-    assertLeavesCommittable(store, members, cause)
+    const leavesFit = commitFitsBeforeWriting(store, { commits: (members) => leaveCommits(members, cause) })
+    const members = await resolveParticipantRef(store, incarnation, ref, leavesFit)
     // Each eviction goes on after another failed, so the failure is told once every one settled.
     await eachInFlight(members, (member) => evictMember(store, incarnation, member.id, cause))
   })
@@ -422,12 +427,14 @@ async function sendToParticipant(
   // One account of the call's writes: the reap that finding the participant may do, and the sends.
   return await getRoomPlane().call(async (store) => {
     const incarnation = await requireRoom(store, id)
-    const members = await resolveParticipantRef(store, incarnation, target)
-    if ('id' in target) return deliveredOrThrow(id, await sendDm(store, id, incarnation.inc, target.id, message))
+    const dms = new DmEnvelopes(message)
+    const members = await resolveParticipantRef(store, incarnation, target, commitFitsBeforeWriting(store, dms))
+    if ('id' in target)
+      return deliveredOrThrow(id, await sendDm(store, id, incarnation.inc, target.id, dms.of(target.id)))
     const receipts: RoomSendReceipt[] = []
     // Each send goes on after another failed, so the failure is told once every one settled.
     await eachInFlight(members, async (member) => {
-      const commit = await sendDm(store, id, incarnation.inc, member.id, message)
+      const commit = await sendDm(store, id, incarnation.inc, member.id, dms.of(member.id))
       // A tab that left since the user's tabs were read is skipped: the others still get the message.
       if (commit.kind !== 'gone') receipts.push(deliveredOrThrow(id, commit))
     })
@@ -435,16 +442,44 @@ async function sendToParticipant(
   })
 }
 
+/** Each member's DM of `message`. The size check is given the first member's, which that member commits. Every other
+ *  member's is encoded at its own commit, as its envelope differs only in the member id, which has one length: the
+ *  length is asserted, so the check covers it. */
+class DmEnvelopes implements CommitsOf {
+  private checked: { member: string; envelope: Uint8Array } | null = null
+
+  constructor(private readonly message: unknown) {}
+
+  commits(members: readonly MemberSnapshot[]): { lane: LaneId; payload: Uint8Array }[] {
+    const [first] = members
+    if (first === undefined) return []
+    this.checked ??= { member: first.id, envelope: this.encode(first.id) }
+    return [{ lane: { kind: 'inbox', member: this.checked.member }, payload: this.checked.envelope }]
+  }
+
+  of(member: string): Uint8Array {
+    const { checked } = this
+    assert(checked !== null)
+    if (member === checked.member) return checked.envelope
+    const envelope = this.encode(member)
+    assert(envelope.byteLength === checked.envelope.byteLength)
+    return envelope
+  }
+
+  private encode(member: string): Uint8Array {
+    return encodeRoomRecord({ __r: 'dm', to: member, from: '', fromMeta: null, data: this.message })
+  }
+}
+
 async function sendDm(
   store: RoomStore,
   id: string,
   inc: string,
   member: string,
-  message: unknown,
+  envelope: Uint8Array,
 ): Promise<LaneCommit> {
-  const envelope = { __r: 'dm', to: member, from: '', fromMeta: null, data: message } as const
   const requiredCellKeys = [memberCellKey(member)]
-  return await commitLane(store, inboxOf(id, inc, member), encodeRoomRecord(envelope), { requiredCellKeys })
+  return await commitLane(store, inboxOf(id, inc, member), envelope, { requiredCellKeys })
 }
 
 /** The delivered message's receipt; a member that left, a closed room or a lost handoff throws. */

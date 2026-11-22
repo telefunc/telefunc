@@ -3,6 +3,7 @@ export {
   DEMAND_LANE,
   SEMANTIC_LANE,
   acceptedOrThrow,
+  commitFitsBeforeWriting,
   commitLane,
   controlLane,
   inboxOf,
@@ -20,7 +21,7 @@ export {
   publishedBytes,
   withinRoomHorizon,
 }
-export type { LaneCommit }
+export type { CommitFitsBeforeWriting, CommitsOf, LaneCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -35,7 +36,7 @@ import type {
   RoomHead,
   StaleIncarnation,
 } from '../../backend/contract.js'
-import { hasRoomTag } from '../../shared/protocol.js'
+import { hasRoomTag, type MemberSnapshot } from '../../shared/protocol.js'
 import { decodeBinaryFrame } from '../../shared/binary.js'
 import type { RoomConfigRecord, RoomDemandPage, RoomIncarnation } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
@@ -132,6 +133,26 @@ async function commitLane(
   if (result.kind === 'stale-incarnation' || result.delivery === undefined) return result
   const lost = await handoffLost(target.roomId, result.delivery)
   return lost !== null && target.lane.kind === 'inbox' ? { ...result, lost } : result
+}
+
+/** The commits a call would make to `members`, as their size goes. */
+type CommitsOf = { commits(members: readonly MemberSnapshot[]): readonly { lane: LaneId; payload: Uint8Array }[] }
+
+/** A call's check that its commits fit, for a lookup to run on the members it read before it writes: each lane and
+ *  payload `call.commits()` gives for them must be committable, or `check()` throws the refusal the commit would meet. */
+class CommitFitsBeforeWriting {
+  constructor(
+    private readonly store: RoomStore,
+    private readonly call: CommitsOf,
+  ) {}
+
+  check(members: readonly MemberSnapshot[]): void {
+    for (const { lane, payload } of this.call.commits(members)) this.store.assertCommittable(lane, payload)
+  }
+}
+
+function commitFitsBeforeWriting(store: RoomStore, call: CommitsOf): CommitFitsBeforeWriting {
+  return new CommitFitsBeforeWriting(store, call)
 }
 
 /** The accepted commit; a member that left or an ended incarnation throws. */

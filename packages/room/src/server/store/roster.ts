@@ -10,7 +10,7 @@ import { eachInFlight } from './inFlight.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { leaveCauseFromWire, type WireLeaveCause } from '../../shared/protocol.js'
-import { decodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord, type CommitFitsBeforeWriting } from '../lanes/lanes.js'
 import {
   LEASE_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
@@ -64,17 +64,24 @@ function* memberRecords(cells: ReadonlyMap<string, Uint8Array>): Generator<reado
   for (const [key, raw] of cells) yield [memberIdOfCellKey(key), raw]
 }
 
-/** Read again after a lapsed lease's members were removed. */
+/** Read again after a lapsed lease's members were removed. `checkBeforeWriting` runs on each read's members before
+ *  what follows it: on the first read's before the reap, the lookup's first write, so a call its own commit would
+ *  refuse writes nothing; on the reread's before the call's own commits to them. */
 async function reapAndReadMembersById(
   store: RoomStore,
   room: RoomIncarnation,
   ids: string[],
+  checkBeforeWriting?: CommitFitsBeforeWriting,
 ): Promise<MemberSnapshot[]> {
   const [leases, members] = await Promise.all([
     readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX),
     readMembersById(store, room, ids),
   ])
-  return (await reapLeases(store, room, leases)) ? await readMembersById(store, room, ids) : members
+  checkBeforeWriting?.check(members)
+  if (!(await reapLeases(store, room, leases))) return members
+  const reread = await readMembersById(store, room, ids)
+  checkBeforeWriting?.check(reread)
+  return reread
 }
 
 async function readMembersById(store: RoomStore, room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
@@ -142,15 +149,17 @@ async function countPresence(store: RoomStore, room: RoomIncarnation): Promise<n
   return count
 }
 
+/** Its tabs, as `reapAndReadMembersById` reads them, with `checkBeforeWriting` run as it runs it. */
 async function reapAndResolveIdentity(
   store: RoomStore,
   room: RoomIncarnation,
   identity: string,
+  checkBeforeWriting?: CommitFitsBeforeWriting,
 ): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
   const markers = await readPrefix(store, room.id, room.inc, prefix)
   const ids = Array.from(markers.keys(), (key) => key.slice(prefix.length))
-  const members = await reapAndReadMembersById(store, room, ids)
+  const members = await reapAndReadMembersById(store, room, ids, checkBeforeWriting)
   // A member and its identity marker are written and removed in one compare-exchange.
   assert(members.every((member) => member.identity === identity))
   return members

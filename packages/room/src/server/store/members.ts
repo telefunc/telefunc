@@ -1,6 +1,6 @@
-export { JOIN, LEAVE, joinMember, evictMember, assertLeavesCommittable }
+export { JOIN, LEAVE, joinMember, evictMember, leaveCommits }
 
-import type { OperationOptions, RoomOperation } from '../../backend/contract.js'
+import type { LaneId, OperationOptions, RoomOperation } from '../../backend/contract.js'
 import { OPERATION_COMMIT_LANE } from '../../backend/operation.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
@@ -92,14 +92,17 @@ function leaveRecord(id: string, cause: WireLeaveCause, hidden: boolean): Uint8A
   return encodeRoomRecord(leave)
 }
 
-/** Throws the size refusal any of `members`' leave events would meet, before one of them is committed. A leave event's
- *  length depends only on its cause and on `hidden`, as member ids have one length: one record per visibility. */
-function assertLeavesCommittable(store: RoomStore, members: readonly MemberSnapshot[], cause: LeaveCause): void {
+/** The leave events `members`' removal commits, as their size goes. A leave event's length depends only on its cause
+ *  and on `hidden`, as member ids have one length: one record per visibility. */
+function leaveCommits(members: readonly MemberSnapshot[], cause: LeaveCause): { lane: LaneId; payload: Uint8Array }[] {
   const wire = leaveCauseToWire(cause)
+  const commits: { lane: LaneId; payload: Uint8Array }[] = []
   for (const hidden of [false, true]) {
     const member = members.find((each) => (each.hidden === true) === hidden)
-    if (member !== undefined) store.assertCommittable(OPERATION_COMMIT_LANE, leaveRecord(member.id, wire, hidden))
+    if (member !== undefined)
+      commits.push({ lane: OPERATION_COMMIT_LANE, payload: leaveRecord(member.id, wire, hidden) })
   }
+  return commits
 }
 
 const identityTextEncoder = new TextEncoder()
