@@ -180,8 +180,7 @@ class BodyReader {
       file.over = true
       throw error
     } finally {
-      this.holder = null
-      this.wake()
+      this.release()
     }
   }
 
@@ -245,7 +244,7 @@ class BodyReader {
       this.next++
       this.left = undefined
     } finally {
-      this.holder = null
+      this.release()
     }
   }
 
@@ -260,6 +259,12 @@ class BodyReader {
     file.close()
     this.next++
     this.left = undefined
+  }
+
+  /** Lets go of the position, and wakes the reads that wait for it. */
+  private release(): void {
+    this.holder = null
+    this.wake()
   }
 
   /** Wakes the reads that wait for the position. */

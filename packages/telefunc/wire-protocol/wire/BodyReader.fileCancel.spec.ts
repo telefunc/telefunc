@@ -483,6 +483,21 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
     },
     { got: { state: 'done', value: 'aaaa' }, next: { state: 'done', value: B } },
   ],
+  [
+    'R6. file 2 read while file 1 passes file 0, then the body ends short: both read a truncation',
+    async (kind) => {
+      const { source, file } = await setup(kind)
+      const second = track(text(file(1)))
+      await settle()
+      const third = track(text(file(2)))
+      await settle()
+      source.push('aaaa')
+      source.end()
+      await settle()
+      return { second: second.now, third: third.now }
+    },
+    { second: { state: 'failed', error: TRUNCATED }, third: { state: 'failed', error: TRUNCATED } },
+  ],
 ]
 
 for (const kind of ['node', 'web'] as const) {
