@@ -104,9 +104,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
-
-That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
+Telefunc routes every request of a client to its Durable Object, by the session token the client sends with each request.
 
 <Warning>
 
@@ -220,7 +218,7 @@ See also: <Link href="/Telefunc" />.
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-The Durable Object can hibernate once all channels are closed and no clients remain connected. A client that disconnected keeps its channels open for `reconnectTimeout`, so lower it to hibernate sooner.
+The Durable Object can hibernate once all channels are closed and no clients remain connected. To hibernate sooner, lower `reconnectTimeout`: a disconnected client then has less time to reconnect.
 
 ```ts
 import { config } from 'telefunc'

@@ -14,14 +14,13 @@ config.channel = {
   reconnectTimeout: 60_000,  // Hold channels open after disconnect (ms)
   pingInterval: 5_000,       // Client ping interval (ms)
   connectTtl: 15_000,        // Wait for client to connect to new channel (ms)
-  maxMemory: '4g',           // What all channels together may hold for their clients (bytes, or a size)
   allowedOrigins: [],        // Origins of other sites' pages that may open a WebSocket
 }
 ```
 
 > This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
-> `maxMemory` defaults to a quarter of the memory the process may use (`'4g'` on a 16 GB machine), and to 64 MiB on Cloudflare.
+> `config.channel.maxMemory` is what all channels together may hold for their clients, in bytes or as a size such as `'512m'`. It defaults to a quarter of the memory the process may use, and to 64 MiB on Cloudflare.
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
