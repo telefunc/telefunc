@@ -455,13 +455,9 @@ class ReadableChunks implements ChunkSource {
   } | null = null
   private ended: boolean
   private failed: { error: unknown } | null = null
-  /** Whether the stream's owner had paused it, read before this reader's `'readable'` listener holds it out of flowing
-   *  mode, which `isPaused()` reports from then on too. */
-  private readonly pausedByOwner: boolean
 
   constructor(stream: Readable) {
     this.stream = stream
-    this.pausedByOwner = stream.isPaused()
     this.ended = stream.readableEnded
     if (stream.errored) this.failed = { error: stream.errored }
     else if (stream.destroyed && !this.ended) this.failed = { error: prematureClose() }
@@ -481,16 +477,12 @@ class ReadableChunks implements ChunkSource {
   }
 
   /** Ends the read under way as at the stream's end, and takes off the listeners that read the stream, so that its
-   *  owner reads it as before (`'readable'` holds it out of flowing mode): flowing, or paused where its owner paused it,
-   *  until the owner resumes it. Its error listener stays, reading nothing: an error the stream emits later reaches it,
-   *  not the process. */
+   *  owner reads it as before (`'readable'` holds it out of flowing mode). Its error listener stays, reading nothing: an
+   *  error the stream emits later reaches it, not the process. */
   letGo(): void {
     this.stream.off('end', this.end)
     this.stream.off('close', this.close)
-    // Taking off the last `'readable'` listener resumes a stream that has a `'data'` listener, also one its owner paused:
-    // that one keeps the listener, which reads nothing any more, until the owner resumes it.
-    if (this.pausedByOwner) this.stream.once('resume', () => this.stream.off('readable', this.wake))
-    else this.stream.off('readable', this.wake)
+    this.stream.off('readable', this.wake)
     this.settle(DONE)
   }
 
