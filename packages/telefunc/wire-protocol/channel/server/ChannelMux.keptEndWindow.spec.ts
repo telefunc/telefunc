@@ -76,9 +76,11 @@ test('records leaving at 100 a second are freed by one timer, each visited once 
       }
     }
   }
+  // The rows before have left theirs, and their timers are done: what is pending now is no record's.
+  await vi.advanceTimersByTimeAsync(WINDOW)
   const kept: unknown = Reflect.get(sessions, 'kept')
-  if (!(kept instanceof Map)) throw new Error('no records')
-  // The rows before leave theirs, in their order.
+  if (!(kept instanceof Map) || kept.size > 0) throw new Error('records left')
+  const idle = vi.getTimerCount()
   Reflect.set(sessions, 'kept', new CountedMap(kept))
   const departures = async (count: number) => {
     for (let i = 0; i < count; i++) {
@@ -94,13 +96,13 @@ test('records leaving at 100 a second are freed by one timer, each visited once 
   if (!(counted instanceof Map)) throw new Error('no records')
   const heldBefore = counted.size
   visits = 0
-  const timersBefore = vi.getTimerCount()
+  const timersFilled = vi.getTimerCount() - idle
   await departures(1_000)
-  const timers = vi.getTimerCount()
+  const timers = vi.getTimerCount() - idle
   const freed = heldBefore + 1_000 - counted.size
-  expect({ freed: freed >= 990, visitsPerFreed: visits / freed <= 2, timers: timers - timersBefore <= 1 }).toEqual({
+  expect({ freed: freed >= 990, visitsPerFreed: visits / freed <= 2, timers: [timersFilled, timers] }).toEqual({
     freed: true,
     visitsPerFreed: true,
-    timers: true,
+    timers: [1, 1],
   })
 })
