@@ -63,6 +63,8 @@ class LaneHistory {
   private unseenReported = false
   /** A resume followed a start below `last`: the next delivery is a rewind. */
   private rewindPending = false
+  /** The tip is a start a resume followed after a report, whose own commit the lane never delivered. */
+  private tipOwed = false
   private readonly ring: Entry[] = []
   /** The ring's oldest entry, once it is full. */
   private oldest = 0
@@ -138,8 +140,8 @@ class LaneHistory {
 
   private decide(frame: LaneFrame, passedBefore: number): void {
     const { place, id, prev, via } = frame
-    // copy
-    if (id === this.tip) return via.dropped(frame)
+    // copy, or the owed start's own commit
+    if (id === this.tip) return this.tipOwed ? this.deliver(frame, this.branch) : via.dropped(frame)
     // next
     if (place === this.last + 1 && prev === this.tip) return this.deliver(frame, this.branch)
     // copy
@@ -190,6 +192,7 @@ class LaneHistory {
   private follow({ place, id }: LaneStart, prev: bigint | null, branch: number): void {
     this.last = place
     this.tip = id
+    this.tipOwed = false
     this.branch = branch
     if (this.ring.length < RING_SIZE) {
       this.ring.push({ place, id, prev, branch })
@@ -255,6 +258,7 @@ class LaneHistory {
       this.report(route)
       if (start.place < this.last) this.rewindPending = true
       this.follow(start, null, ++this.branches)
+      this.tipOwed = start.id !== NO_ID
     }
     for (const frame of rest) this.offer(frame, passed(frame))
   }
