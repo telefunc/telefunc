@@ -1,18 +1,25 @@
-// A DM's acknowledged reply from a server recipient, over the size the store commits, on the oldest and the newest
-// Redis and Valkey Telefunc supports: a path where a refused size could leave a Room call's own effect half applied.
-// The stored reply and the frame are the same bytes, the small overflow in the reply's place, and the sender is told
-// that, by the frame, or by the stored reply once its wait times out with the frame lost. A timeout read before the
-// reply is stored stays a timeout. A reply whose value changes between reads is stored as the frame carries it, and one
-// that throws at a read after its first encode is stored and sent as that encode took it. A reply, a listener's failure
-// and an overflow whose frame was lost are settled from the store by the next frame in the sender's inbox, which shows
-// the skip. A timeout's read that finds nothing doesn't settle the sender ahead of a frame that settles it first. A
-// sender removed, or a room closed, before the reply is stored is told that, with no reply left stored. A reply changed
-// after its encode is stored, sent and told as encoded. The DM's own send failing after its reply settled the wait is
-// what the sender is told.
+// Two paths where a refused size could leave a Room call's own effect half applied, on the oldest and the newest Redis
+// and Valkey Telefunc supports.
+// - A DM's acknowledged reply from a server recipient, over the size the store commits: the stored reply and the frame
+//   are the same bytes, the small overflow in the reply's place, and the sender is told that, by the frame, or by the
+//   stored reply once its wait times out with the frame lost. A timeout read before the reply is stored stays a
+//   timeout. A reply whose value changes between reads is stored as the frame carries it, and one that throws at a
+//   read after its first encode is stored and sent as that encode took it. A reply, a listener's failure and an overflow
+//   whose frame was lost are settled from the store by the next frame in the sender's inbox, which shows the skip. A
+//   timeout's read that finds nothing doesn't settle the sender ahead of a frame that settles it first. A sender removed,
+//   or a room closed, before the reply is stored is told that, with no reply left stored. A reply changed after its
+//   encode is stored, sent and told as encoded. The DM's own send failing after its reply settled the wait is what the
+//   sender is told.
+// - A removal by identity of a visible and a hidden tab, whose reason puts only the hidden tab's leave over the size:
+//   no tab goes, and nothing in the store changes. Its arguments are read once, before its first await: a reason the
+//   caller changes afterwards isn't the one committed, a reason that can't be serialized is refused when no tab
+//   matches too, and the ref is read once. The size is checked as of the removal's read of the tabs: a tab that left,
+//   or a room that closed, after that read doesn't change the refusal.
 import { setTimeout as sleep } from 'node:timers/promises'
+import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { Room } from '@telefunc/room'
+import { Room, type LeaveCause } from '@telefunc/room'
 import {
   getRoomPlane,
   type CommitOptions,
@@ -25,6 +32,20 @@ import {
 import { forwarder, removeStores, runs, STORES, startStore, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
+
+async function snapshot(admin: Redis): Promise<Map<string, unknown>> {
+  const keys = (await admin.keys('tf:*')).sort()
+  const held = async (key: string) =>
+    (await admin.type(key)) === 'hash'
+      ? Object.entries(await admin.hgetall(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      : await admin.dumpBuffer(key)
+  return new Map(await Promise.all(keys.map(async (key) => [key, await held(key)] as const)))
+}
+
+function changedKeys(before: Map<string, unknown>, after: Map<string, unknown>): string[] {
+  const keys = new Set([...before.keys(), ...after.keys()])
+  return [...keys].filter((key) => !isDeepStrictEqual(before.get(key), after.get(key))).sort()
+}
 
 let proxy: Awaited<ReturnType<typeof forwarder>> | undefined
 let app: Redis | undefined
@@ -499,6 +520,155 @@ describe.runIf(runs)("a DM's acknowledged reply from a server recipient, over th
         frame: 'committed',
         beforeTimeout: true,
         sender: { resolved: { data: 'small' } },
+      })
+    }, 180_000)
+  }
+})
+
+function leaveRecordBytes(id: string, reason: string, hidden: boolean): number {
+  const leave: Record<string, unknown> = { __r: 'leave', id, cause: 'removed', reason }
+  if (hidden) leave.hidden = true
+  return Buffer.byteLength(JSON.stringify(leave))
+}
+
+/** A removal by identity of a visible and a hidden tab in a new room, whose reason puts only the hidden tab's leave over
+ *  the size; `meanwhile` runs once the removal's lookup read both tabs and their meta, before its last read returns. What the removal was told,
+ *  and which tabs' member cells the store still holds. */
+async function removedMeanwhile(
+  admin: Redis,
+  id: string,
+  meanwhile: (tabs: { visible: string; hidden: string }) => Promise<unknown>,
+) {
+  await Room.create(id)
+  const visible = await Room.join(id, { identity: 'u1' })
+  const hidden = await Room.join(id, { identity: 'u1', hidden: true })
+  const reason = 'r'.repeat(CEILING - leaveRecordBytes(visible.id, '', false))
+  const values = await valuesKey(admin, id)
+  const { reads } = getRoomPlane().direct
+  const pages = reads.readCellPages.bind(reads)
+  // The lookup's last reads are each tab's meta pages: once both ended, `meanwhile` runs, then the lookup returns.
+  const metaRead = new Set<string>()
+  let ran = false
+  vi.spyOn(reads, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+    yield* pages(roomId, inc, prefix)
+    const tab = [visible.id, hidden.id].find((tabId) => prefix.endsWith(`${tabId}:`))
+    if (tab === undefined) return
+    metaRead.add(tab)
+    if (!ran && metaRead.size === 2) {
+      ran = true
+      await meanwhile({ visible: visible.id, hidden: hidden.id })
+    }
+  })
+  const refused = await Room.removeParticipant(id, { identity: 'u1', reason }).then(
+    () => 'resolved',
+    (error: unknown) => told(error),
+  )
+  // Room.getParticipants() lists no hidden tab, so each tab's member cell is read from the store.
+  const kept = {
+    visible: (await admin.hexists(values, `m:${visible.id}`)) === 1,
+    hidden: (await admin.hexists(values, `m:${hidden.id}`)) === 1,
+  }
+  return { ran, refused, kept }
+}
+
+describe.runIf(runs)('a removal by identity of a visible and a hidden tab', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: over the size for the hidden one only: no tab goes, and the store doesn't change`, async () => {
+      const admin = await reached(store)
+      const id = `tabs-${i}`
+      await Room.create(id)
+      const visible = await Room.join(id, { identity: 'u1' })
+      const hidden = await Room.join(id, { identity: 'u1', hidden: true })
+      const reason = 'r'.repeat(CEILING - leaveRecordBytes(visible.id, '', false))
+      const sizes = {
+        visible: leaveRecordBytes(visible.id, reason, false) - CEILING,
+        hidden: leaveRecordBytes(hidden.id, reason, true) - CEILING,
+      }
+      const before = await snapshot(admin)
+      const refused = await Room.removeParticipant(id, { identity: 'u1', reason }).then(
+        () => 'resolved',
+        (error: unknown) => told(error),
+      )
+      const after = await snapshot(admin)
+      // Room.getParticipants() lists no hidden tab, so each tab's member cell is read from the store.
+      const values = await valuesKey(admin, id)
+      const kept = {
+        visible: (await admin.hexists(values, `m:${visible.id}`)) === 1,
+        hidden: (await admin.hexists(values, `m:${hidden.id}`)) === 1,
+      }
+      const changed = changedKeys(before, after)
+      console.log(JSON.stringify({ store: store.name, sizes, refused, kept, changed }))
+      admin.disconnect()
+
+      expect({ sizes, refused, kept, changed }).toEqual({
+        sizes: { visible: 0, hidden: 14 },
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
+        kept: { visible: true, hidden: true },
+        changed: [],
+      })
+    }, 180_000)
+
+    it(`${store.name}: its arguments are read once, before its first await`, async () => {
+      const admin = await reached(store)
+      const id = `tabs-args-${i}`
+      const room = await Room.create(id)
+      await Room.join(id, { identity: 'u1' })
+      const causes: LeaveCause[] = []
+      room.onLeave((_member, cause) => void causes.push(cause))
+      // The reason changed while the call awaits its first read.
+      const target = { identity: 'u1', reason: 'at the call' }
+      const removed = Room.removeParticipant(id, target)
+      target.reason = 'changed after'
+      await removed
+      await until(async () => causes.length > 0, 10_000)
+      // A reason that can't be serialized, where no tab matches.
+      const unserializable = await Room.removeParticipant(id, { identity: 'nobody', reason: () => {} }).then(
+        () => 'resolved',
+        () => 'refused',
+      )
+      // The ref, read through a getter.
+      let refReads = 0
+      const counted = {
+        get identity() {
+          refReads++
+          return 'nobody'
+        },
+      }
+      await Room.removeParticipant(id, counted)
+      console.log(JSON.stringify({ store: store.name, causes, unserializable, refReads }))
+      admin.disconnect()
+
+      expect({ causes, unserializable, refReads }).toEqual({
+        causes: [{ type: 'removed', reason: 'at the call' }],
+        unserializable: 'refused',
+        refReads: 1,
+      })
+    }, 180_000)
+
+    it(`${store.name}: the hidden tab gone after the removal read it: refused as of that read, and the visible tab stays`, async () => {
+      const admin = await reached(store)
+      const result = await removedMeanwhile(admin, `tabs-gone-${i}`, ({ hidden }) =>
+        Room.removeParticipant(`tabs-gone-${i}`, { id: hidden }),
+      )
+      console.log(JSON.stringify({ store: store.name, ...result }))
+      admin.disconnect()
+
+      expect(result).toEqual({
+        ran: true,
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
+        kept: { visible: true, hidden: false },
+      })
+    }, 180_000)
+
+    it(`${store.name}: the room closed after the removal read the tabs: refused as of that read`, async () => {
+      const admin = await reached(store)
+      const result = await removedMeanwhile(admin, `tabs-closed-${i}`, () => Room.close(`tabs-closed-${i}`))
+      console.log(JSON.stringify({ store: store.name, ...result }))
+      admin.disconnect()
+
+      expect({ ran: result.ran, refused: result.refused }).toEqual({
+        ran: true,
+        refused: { name: 'ChannelOverflowError', outcome: 'none' },
       })
     }, 180_000)
   }

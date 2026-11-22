@@ -39,7 +39,7 @@ import type {
 import { memberCellKey } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
 import { allSettledOrThrow, eachInFlight } from './store/inFlight.js'
-import { evictMember } from './store/members.js'
+import { assertLeavesCommittable, evictMember } from './store/members.js'
 import {
   reapAndCountPresence,
   reapAndReadMembersById,
@@ -329,38 +329,50 @@ async function closeRoom(id: string): Promise<void> {
   if (closed !== null) cancelClose(id, closed)
 }
 
+/** `target` checked and copied: `{ id }` when it has an `id`, else `{ identity }`. */
+function ownParticipantRef(target: unknown): ParticipantRef {
+  assertUsage(isObject(target), 'The participant ref should be { id } or { identity }')
+  if ('id' in target) {
+    const { id } = target
+    assertUsage(typeof id === 'string' && id.length > 0, 'The participant { id } should be a non-empty string')
+    return { id }
+  }
+  const { identity } = target
+  assertParticipantIdentity(identity, 'The participant ref { identity }')
+  return { identity }
+}
+
 /** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of. */
 async function resolveParticipantRef(
   store: RoomStore,
   incarnation: RoomIncarnation,
   target: ParticipantRef,
 ): Promise<MemberSnapshot[]> {
-  assertUsage(isObject(target), 'The participant ref should be { id } or { identity }')
-  if ('id' in target) {
-    assertUsage(
-      typeof target.id === 'string' && target.id.length > 0,
-      'The participant { id } should be a non-empty string',
-    )
-    const members = await reapAndReadMembersById(store, incarnation, [target.id])
-    if (members.length === 0) throw participantGoneError(target.id)
+  const ref = ownParticipantRef(target)
+  if ('id' in ref) {
+    const members = await reapAndReadMembersById(store, incarnation, [ref.id])
+    if (members.length === 0) throw participantGoneError(ref.id)
     return members
   }
-  assertParticipantIdentity(target.identity, 'The participant ref { identity }')
-  return await reapAndResolveIdentity(store, incarnation, target.identity)
+  return await reapAndResolveIdentity(store, incarnation, ref.identity)
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
+  // Read once, before the first await: what the caller changes later changes nothing, and an argument that can't be
+  // taken is refused whatever the room holds.
+  const ref = ownParticipantRef(target)
+  const cause = removedCause(target.reason === undefined ? undefined : ownMessage(target.reason))
   // One account of the call's writes: the reap that finding the participant may do, and the evictions.
   await getRoomPlane().call(async (store) => {
     const incarnation = await findRoom(store, id)
     if (incarnation === null) {
       // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
-      if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
-      assertParticipantIdentity(target.identity, 'The participant ref { identity }')
+      if ('id' in ref) throw roomNotFoundError(id)
       return
     }
-    const members = await resolveParticipantRef(store, incarnation, target)
-    const cause = removedCause(target.reason)
+    const members = await resolveParticipantRef(store, incarnation, ref)
+    // No tab goes while another tab's leave would be refused for its size.
+    assertLeavesCommittable(store, members, cause)
     // Each eviction goes on after another failed, so the failure is told once every one settled.
     await eachInFlight(members, (member) => evictMember(store, incarnation, member.id, cause))
   })

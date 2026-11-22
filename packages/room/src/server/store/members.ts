@@ -1,9 +1,15 @@
-export { JOIN, LEAVE, joinMember, evictMember }
+export { JOIN, LEAVE, joinMember, evictMember, assertLeavesCommittable }
 
 import type { OperationOptions, RoomOperation } from '../../backend/contract.js'
+import { OPERATION_COMMIT_LANE } from '../../backend/operation.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { isOpenIncarnation } from '../../backend/semantics.js'
-import { leaveCauseToWire, type RoomCtrlEnvelope, type WireLeaveCause } from '../../shared/protocol.js'
+import {
+  leaveCauseToWire,
+  type MemberSnapshot,
+  type RoomCtrlEnvelope,
+  type WireLeaveCause,
+} from '../../shared/protocol.js'
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
@@ -74,11 +80,26 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     tx.dropPrefix(memberMetaCellPrefix(id))
     tx.dropPrefix(dmReplyCellPrefix(id))
     tx.dropMemberLanes(id)
-    const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id, ...cause }
-    if (record.hidden) leave.hidden = true
-    tx.commit(encodeRoomRecord(leave))
+    tx.commit(leaveRecord(id, cause, record.hidden === true))
     return { hidden: record.hidden === true }
   },
+}
+
+/** The leave event LEAVE commits for member `id`. */
+function leaveRecord(id: string, cause: WireLeaveCause, hidden: boolean): Uint8Array {
+  const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id, ...cause }
+  if (hidden) leave.hidden = true
+  return encodeRoomRecord(leave)
+}
+
+/** Throws the size refusal any of `members`' leave events would meet, before one of them is committed. A leave event's
+ *  length depends only on its cause and on `hidden`, as member ids have one length: one record per visibility. */
+function assertLeavesCommittable(store: RoomStore, members: readonly MemberSnapshot[], cause: LeaveCause): void {
+  const wire = leaveCauseToWire(cause)
+  for (const hidden of [false, true]) {
+    const member = members.find((each) => (each.hidden === true) === hidden)
+    if (member !== undefined) store.assertCommittable(OPERATION_COMMIT_LANE, leaveRecord(member.id, wire, hidden))
+  }
 }
 
 const identityTextEncoder = new TextEncoder()
