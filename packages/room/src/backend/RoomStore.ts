@@ -172,6 +172,11 @@ function malformedCount({ mutations, counts = [] }: CellsExchange): string | nul
 /** Every head write is checked here; drivers only compare-exchange. */
 function assertHeadNextWellFormed(next: HeadNext): void {
   const { head, ttlMs } = next
+  // Every driver stores the revision as it is given, so it can't repeat under the room's id.
+  assert(
+    typeof head.rev === 'string' && head.rev !== '',
+    'head exchange: the next head must name the revision its caller minted',
+  )
   if (head.state === 'closing') {
     assert(head.closeLease !== undefined, 'head exchange: a head entering closing must carry a close lease')
     const { durationMs } = head.closeLease

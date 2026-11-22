@@ -307,7 +307,7 @@ end
 // HEAD EXCHANGE: compares by form, then stores the next head, and counts a create's cells in its incarnation.
 //   KEYS: [1]=head, and with counts [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions of the next
 //         head's incarnation
-//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?} [3..]=per counted
+//   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{rev,state,inc?,config,lease?,ttlMs?} [3..]=per counted
 //         cell its key, delta and create ('1' or '')
 const CELL_HOLDS = ['string', 'string', 'set', 'zset', 'hash', 'hash'] as const
 const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
@@ -335,10 +335,9 @@ if not matches then
   return '{"tag":"conflict","current":null}'
 end
 
--- The count lapses with a tombstone; salted with authority time, a rev still never repeats.
-local n = (cur and cur.n or 0) + 1
-${integerLua('n', `head_key .. "'s next count"`)}
-local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. n, n = n, state = nx.state, config = nx.config }
+-- The rev the exchange's caller minted for this write, a random id: no later head under the id has it, whatever the
+-- clock does.
+local stored = { rev = nx.rev, state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
 if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
@@ -1581,7 +1580,6 @@ const REDIS_COMMANDS = {
 /** A head as the scripts store it: JSON, config base64, lease deadline minted from Redis TIME. */
 type ScriptHead = {
   rev: string
-  n: number
   state: 'open' | 'closing' | 'closed'
   config: string
   inc?: string
@@ -1601,9 +1599,14 @@ function toPublicHead(stored: ScriptHead): RoomHead {
   return head
 }
 
+/** The next head as the script reads it, with the revision its caller minted. */
 function encodeNext(next: HeadNext): string {
   const { head, ttlMs } = next
-  const payload: Record<string, unknown> = { state: head.state, config: toBuffer(head.config).toString('base64') }
+  const payload: Record<string, unknown> = {
+    rev: head.rev,
+    state: head.state,
+    config: toBuffer(head.config).toString('base64'),
+  }
   if (head.currentInc !== null) payload.inc = head.currentInc
   if (head.closeLease !== undefined) payload.lease = { id: head.closeLease.id, durationMs: head.closeLease.durationMs }
   if (ttlMs !== undefined) payload.ttlMs = ttlMs

@@ -41,6 +41,7 @@ async function acquireClosingLease(store: RoomStore, roomId: string, current: Ro
     { form: current.state === 'open' ? 'rev' : 'takeover', rev: current.rev },
     {
       head: {
+        rev: crypto.randomUUID(),
         currentInc: current.currentInc,
         state: 'closing',
         config: current.config,
@@ -63,7 +64,7 @@ async function finishClose(store: RoomStore, roomId: string, closing: RoomHead):
     roomId,
     { form: 'finalize', rev: closing.rev, lease: lease.id },
     {
-      head: { currentInc: null, state: 'closed', config: closing.config },
+      head: { rev: crypto.randomUUID(), currentInc: null, state: 'closed', config: closing.config },
       ttlMs: ROOM_TOMBSTONE_TTL_MS,
     },
   )

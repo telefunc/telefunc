@@ -20,7 +20,7 @@ async function heldRoom() {
   await plane.direct.compareExchangeHead(
     room.id,
     { form: 'absent' },
-    { head: { currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
+    { head: { rev: crypto.randomUUID(), currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
   )
   const lease = new RoomLease()
   await holdViews(plane.direct, room, lease, ['page'])

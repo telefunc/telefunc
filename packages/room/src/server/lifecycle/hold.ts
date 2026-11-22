@@ -138,7 +138,7 @@ async function extendLapse(
     const result = await direct.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
-      { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },
+      { head: { rev: crypto.randomUUID(), currentInc: inc, state: 'open', config: head.config }, ttlMs },
     )
     return result.kind === 'conflict' ? EXCHANGE_CONFLICT : undefined
   })

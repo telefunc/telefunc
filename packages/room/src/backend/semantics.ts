@@ -24,8 +24,8 @@ type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 
 /** The exchange's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and
  *  never supplied by a caller. */
-function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
-  const { currentInc, state, config, closeLease } = next.head
+function materializeHead(next: HeadNext, now: number): StoredHead {
+  const { rev, currentInc, state, config, closeLease } = next.head
   const { ttlMs } = next
   const stored: StoredHead = { rev, currentInc, state, config, expiresAt: ttlMs === undefined ? null : now + ttlMs }
   if (closeLease !== undefined) stored.closeLease = { id: closeLease.id, until: now + closeLease.durationMs }

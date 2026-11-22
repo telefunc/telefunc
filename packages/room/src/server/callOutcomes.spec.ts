@@ -29,7 +29,12 @@ async function storedRoom(): Promise<string> {
     id,
     { form: 'absent' },
     {
-      head: { currentInc: inc, state: 'open', config: encodeRoomRecord({ meta: {}, inc, hold }) },
+      head: {
+        rev: crypto.randomUUID(),
+        currentInc: inc,
+        state: 'open',
+        config: encodeRoomRecord({ meta: {}, inc, hold }),
+      },
       ...newRoomHold(hold),
     },
   )

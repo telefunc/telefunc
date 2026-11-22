@@ -259,7 +259,7 @@ function compareExchangeHead(
 }
 
 function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
-  const head = materializeHead(next, now, crypto.randomUUID())
+  const head = materializeHead(next, now)
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) ' +
       'VALUES (1, ?, ?, ?, ?, ?, ?, ?)',

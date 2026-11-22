@@ -82,6 +82,7 @@ type EveryTrackLane = { kind: 'binary-all'; member: string }
 type EveryMemberLane = { kind: 'binary-track'; track: string }
 
 type RoomHead = {
+  /** The `rev` of the exchange that wrote this head, which the exchange's caller minted. Compared for equality only. */
   rev: string
   currentInc: string | null
   state: 'open' | 'closing' | 'closed'
@@ -105,6 +106,10 @@ type HeadExpectation =
 
 type HeadNext = {
   head: {
+    /** A random id minted for this attempt, which the store keeps as the head's `rev`: never repeating under the
+     *  room's id, it lets an exchange that expects a head meet that head and no later one, whatever the store's clock
+     *  does. */
+    rev: string
     currentInc: string | null
     state: RoomHead['state']
     config: Uint8Array

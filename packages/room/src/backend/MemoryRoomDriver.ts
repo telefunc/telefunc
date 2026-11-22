@@ -277,7 +277,6 @@ class MemoryRoomDriver implements RoomDriver {
   private sortedIds: SortedIds | null = null
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
-  private revSeq = 0
   private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -297,7 +296,7 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   private storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, Date.now(), `rev-${++this.revSeq}`)
+    const materialized = materializeHead(next, Date.now())
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) {

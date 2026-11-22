@@ -74,7 +74,7 @@ function replacing(current: RoomHead | null): HeadExpectation {
 }
 
 function openHead(created: RoomConfigRecord): HeadNext['head'] {
-  return { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) }
+  return { rev: crypto.randomUUID(), currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) }
 }
 
 /** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */

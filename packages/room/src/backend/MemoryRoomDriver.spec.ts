@@ -20,7 +20,7 @@ it('hands each frame to the receiver after one that throws, and reports each thr
   await driver.compareExchangeHead(
     roomId,
     { form: 'absent' },
-    { head: { currentInc: inc, state: 'open', config: new Uint8Array() } },
+    { head: { rev: crypto.randomUUID(), currentInc: inc, state: 'open', config: new Uint8Array() } },
   )
   const source: RoomSubscriptionSource = { roomId, inc, lane: { kind: 'semantic' } }
   const thrower: number[] = []
@@ -52,7 +52,7 @@ it('leaves the revision as it was for an operation that writes nothing, as Redis
   await driver.compareExchangeHead(
     roomId,
     { form: 'absent' },
-    { head: { currentInc: inc, state: 'open', config: new Uint8Array() } },
+    { head: { rev: crypto.randomUUID(), currentInc: inc, state: 'open', config: new Uint8Array() } },
   )
   const writing = (key: string) => ({
     name: 'write',
