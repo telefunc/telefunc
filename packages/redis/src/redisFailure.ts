@@ -83,7 +83,10 @@ const CODES: Readonly<Record<string, { code: Code; notRun: boolean; toDo?: strin
 const IN_SCRIPT = /^ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?-?/
 
 /** A Cluster's redirection, which ioredis follows until its redirections run out. */
-const REDIRECTION = /^(MOVED|ASK|TRYAGAIN) /
+const REDIRECTION = /^(MOVED|ASK) /
+/** A node's answer while the command's slot is busy, which names no other node: ioredis tries again until its
+ *  redirections run out. */
+const BUSY_SLOT = /^TRYAGAIN /
 
 /** A write script's guard's refusal before its first write (`refuseLua`, commands.ts), by its word: WRONGTYPE for a
  *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
@@ -121,6 +124,13 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
         `The Redis Cluster at ${where} redirected a command of Telefunc's Redis backend (${redirection}) more times ` +
         "than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves " +
         "the command's slot",
+    })
+  }
+  if (last !== undefined && BUSY_SLOT.test(last)) {
+    return new BackendError({
+      code: 'unavailable',
+      outcome: 'not-run',
+      message: `The Redis Cluster at ${where} answered a command of Telefunc's Redis backend with TRYAGAIN more times than ioredis tries again, as the command's slot was busy, so it didn't run: a later call may succeed`,
     })
   }
   const message = last ?? (isReplyError(error) ? error.message : undefined)

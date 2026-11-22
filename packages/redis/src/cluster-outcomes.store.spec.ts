@@ -1,5 +1,5 @@
 // What the backend tells of a Cluster's reply that ended a command, on a Cluster of the oldest and the newest Redis and
-// Valkey Telefunc supports, a primary and its replica, through an app client that follows no redirection
+// Valkey Telefunc supports, a primary, its replica and a spare primary, through an app client that follows no redirection
 // (`maxRedirections: 0`), as a user of `+@all`.
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster } from 'ioredis'
@@ -11,7 +11,7 @@ import { forwarder, removeStores, runs, STORES, type Store } from '../test/store
 import { installRedis } from './index.js'
 
 let app: Cluster | undefined
-let via: [Forwarder, Forwarder] | undefined
+let via: Forwarder[] | undefined
 afterAll(() => {
   app?.disconnect()
   for (const proxy of via ?? []) proxy.close()
@@ -21,7 +21,7 @@ afterAll(() => {
 /** A new Cluster whose nodes have a user of `+@all`, and the backend installed on a client of that user that follows no
  *  redirection, once it reaches the Cluster. */
 async function following(store: Store): Promise<{ nodes: Nodes; where: string }> {
-  const proxies = (via ??= [await forwarder(), await forwarder()])
+  const proxies = (via ??= [await forwarder(), await forwarder(), await forwarder()])
   app?.disconnect()
   removeStores()
   const nodes = await startCluster(store, proxies)
@@ -64,6 +64,28 @@ describe.runIf(runs)("a Cluster's reply that ended a command", () => {
         code: 'unavailable',
         outcome: 'not-run',
         message: `The Redis Cluster at ${where} redirected a command of Telefunc's Redis backend (MOVED) more times than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves the command's slot`,
+      })
+    }, 120_000)
+
+    it(`${store.name}: the slot owner's answer to a publish while the slot migrates is told by its code`, async () => {
+      const { nodes, where } = await following(store)
+      const { primary, spare } = nodes
+      if (spare === undefined) throw new Error('the Cluster has no spare')
+      // The first publish stores the key's sequence; the second names it and the key's channel, which no publish stores.
+      expect(await publishing('migrating')).toBe('published')
+      const slot = String(await primary.admin.call('CLUSTER', 'KEYSLOT', '{migrating}'))
+      const [primaryId, spareId] = await Promise.all([primary, spare].map(({ admin }) => admin.call('CLUSTER', 'MYID')))
+      await spare.admin.call('CLUSTER', 'SETSLOT', slot, 'IMPORTING', String(primaryId))
+      await primary.admin.call('CLUSTER', 'SETSLOT', slot, 'MIGRATING', String(spareId))
+      // With one of the command's keys stored and one not, the owner answers TRYAGAIN, and Redis 7.0's ASK.
+      expect(await publishing('migrating')).toMatchObject({
+        name: 'BackendError',
+        code: 'unavailable',
+        outcome: 'not-run',
+        message:
+          store.name !== 'Redis 7.0.0'
+            ? `The Redis Cluster at ${where} answered a command of Telefunc's Redis backend with TRYAGAIN more times than ioredis tries again, as the command's slot was busy, so it didn't run: a later call may succeed`
+            : `The Redis Cluster at ${where} redirected a command of Telefunc's Redis backend (ASK) more times than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves the command's slot`,
       })
     }, 120_000)
 

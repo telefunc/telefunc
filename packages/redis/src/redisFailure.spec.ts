@@ -321,7 +321,6 @@ describe("a replica's READONLY on a Cluster, as the backend reports it", () => {
 
 describe('a Cluster command ioredis gave up once the Cluster used its redirections, as the backend reports it', () => {
   it.each([
-    ['TRYAGAIN', 'TRYAGAIN Multiple keys request during rehashing of slot'],
     ['ASK', 'ASK 657 172.17.0.4:6379'],
     ['MOVED', 'MOVED 657 172.17.0.4:6379'],
   ])("its last reply %s: unavailable, and it didn't run", (word, last) => {
@@ -334,6 +333,23 @@ describe('a Cluster command ioredis gave up once the Cluster used its redirectio
         code: 'unavailable',
         outcome: 'not-run',
         message: `The Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 redirected a command of Telefunc's Redis backend (${word}) more times than ioredis follows, so it didn't run: a later call may succeed once ioredis reaches the node that serves the command's slot`,
+      })
+    }
+  })
+})
+
+describe('a Cluster command ioredis gave up on TRYAGAIN, as the backend reports it', () => {
+  it("unavailable, and it didn't run: its slot was busy, with no node to reach instead", () => {
+    const last = 'TRYAGAIN Multiple keys request during rehashing of slot'
+    const failure = (writes: boolean) =>
+      redisFailure(new Error(`Too many Cluster redirections. Last error: ${String(reply(last))}`), cluster, writes)
+    for (const writes of [true, false]) {
+      expect(failure(writes)).toMatchObject({
+        name: 'BackendError',
+        code: 'unavailable',
+        outcome: 'not-run',
+        message:
+          "The Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 answered a command of Telefunc's Redis backend with TRYAGAIN more times than ioredis tries again, as the command's slot was busy, so it didn't run: a later call may succeed",
       })
     }
   })
