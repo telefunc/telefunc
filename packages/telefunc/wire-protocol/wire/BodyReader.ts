@@ -46,7 +46,8 @@ class StreamTruncatedError extends Error {
  */
 class BodyReader {
   private source: AsyncIterator<Uint8Array<ArrayBuffer>>
-  /** Hands the source back to its owner unread (`letGo`): a Web body's lock released, a Node body's listeners off. */
+  /** Hands the source back to its owner unread (`letGo`): a Web body's lock released, a Node body's read under way
+   *  ended. */
   private readonly releaseSource: () => void
   private released = false
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
@@ -87,7 +88,8 @@ class BodyReader {
   }
 
   /** Reads no more of the body and hands it back to its owner, neither cancelled nor read: the read under way and every
-   *  one after it end as at the body's end, and nothing of this reader is left on the source. */
+   *  one after it end as at the body's end. A Web body's lock is released; a Node body keeps this reader's listeners,
+   *  which read nothing and take what it emits later. */
   letGo(): void {
     if (this.released) return
     this.released = true
@@ -324,12 +326,9 @@ class ReadableChunks implements AsyncIterator<Uint8Array<ArrayBuffer>> {
     return new Promise((resolve, reject) => (this.waiting = { resolve, reject }))
   }
 
-  /** Ends the read under way as at the stream's end and takes this reader's listeners off the stream. */
+  /** Ends the read under way as at the stream's end. The listeners stay on the stream, reading nothing: what it emits
+   *  later reaches them, not the process. */
   letGo(): void {
-    this.stream.off('readable', this.wake)
-    this.stream.off('end', this.end)
-    this.stream.off('error', this.fail)
-    this.stream.off('close', this.close)
     this.settle(DONE)
   }
 
