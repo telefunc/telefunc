@@ -4,7 +4,15 @@ export { redisFailure, isRefusal, isLoginRefusal }
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
-import { addressOf, ClusterNodesFailed, isCluster, isReplyError, isUnsent, type RedisClient } from './ioredis.js'
+import {
+  addressOf,
+  ClusterNodesFailed,
+  isCluster,
+  isReplyError,
+  isUnsent,
+  slotRedirection,
+  type RedisClient,
+} from './ioredis.js'
 
 type Code = BackendError['code']
 
@@ -95,6 +103,16 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
   }
   const where = addressOf(redis)
   const outcome = (proof: boolean): BackendError['outcome'] => (!writes || proof ? 'not-run' : 'may-have-run')
+  const redirection = slotRedirection(error)
+  if (redirection !== undefined) {
+    return new BackendError({
+      code: 'unavailable',
+      outcome: 'not-run',
+      message:
+        `The Redis Cluster at ${where} kept redirecting a command of Telefunc's Redis backend while a slot moved ` +
+        `(${redirection}), so it didn't run: a later call may succeed once the slot has moved`,
+    })
+  }
   if (!isReplyError(error)) {
     const code = connectionCode(error)
     return new BackendError({

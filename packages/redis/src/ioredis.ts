@@ -1,6 +1,6 @@
 // The client library's facts: the command client and subscriber socket the backend builds from an app's client, a
 // client's deployment and address, which raw commands write by ioredis's own command table, its wording for a command
-// it never wrote. What a store's reply means is redisFailure.ts's.
+// it never wrote or redirected until it gave up. What a store's reply means is redisFailure.ts's.
 export {
   createCommandClient,
   createSubscriberSocket,
@@ -14,6 +14,7 @@ export {
   addressOf,
   isReplyError,
   isUnsent,
+  slotRedirection,
 }
 export type { RedisClient, SubscriberSocket, RawCommand }
 
@@ -150,6 +151,17 @@ function isUnsent(error: unknown): boolean {
   return error instanceof Error && UNSENT.test(error.message)
 }
 
+/** ioredis's rejection of a Cluster command once its redirections ran out, with the last reply: a slot that moves
+ *  answers MOVED, ASK or TRYAGAIN, each before the command runs. */
+const REDIRECTED = /^Too many Cluster redirections\. Last error: ReplyError: (MOVED|ASK|TRYAGAIN) /
+
+/** The last reply's code where ioredis gave up a Cluster command that a moving slot kept redirecting. No try of it
+ *  ran: ioredis tries a command again only on a redirection or a reply of the Cluster's state, as the backend's
+ *  command client never retries a closed connection (`retryDelayOnFailover: 0`, `createCommandClient()`). */
+function slotRedirection(error: unknown): string | undefined {
+  return error instanceof Error ? REDIRECTED.exec(error.message)?.[1] : undefined
+}
+
 /** An error Redis replied with, as ioredis gives it: by its name, as an app may load another copy of the errors' class. */
 function isReplyError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'ReplyError'
@@ -176,6 +188,7 @@ function createCommandClient(redis: RedisClient): RedisClient {
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
+        // A closed connection fails its command (`slotRedirection()` counts on it).
         retryDelayOnFailover: 0,
         enableOfflineQueue: false,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a

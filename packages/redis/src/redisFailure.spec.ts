@@ -319,6 +319,26 @@ describe("a replica's READONLY on a Cluster, as the backend reports it", () => {
   })
 })
 
+describe('a Cluster command ioredis gave up once a moving slot used its redirections, as the backend reports it', () => {
+  it.each([
+    ['TRYAGAIN', 'TRYAGAIN Multiple keys request during rehashing of slot'],
+    ['ASK', 'ASK 657 172.17.0.4:6379'],
+    ['MOVED', 'MOVED 657 172.17.0.4:6379'],
+  ])("its last reply %s: unavailable, and it didn't run", (word, last) => {
+    // As ioredis words it: its own error, holding the last reply's.
+    const failure = (writes: boolean) =>
+      redisFailure(new Error(`Too many Cluster redirections. Last error: ${String(reply(last))}`), cluster, writes)
+    for (const writes of [true, false]) {
+      expect(failure(writes)).toMatchObject({
+        name: 'BackendError',
+        code: 'unavailable',
+        outcome: 'not-run',
+        message: `The Redis Cluster at 127.0.0.1:7001, 127.0.0.1:7002 kept redirecting a command of Telefunc's Redis backend while a slot moved (${word}), so it didn't run: a later call may succeed once the slot has moved`,
+      })
+    }
+  })
+})
+
 describe("a Cluster's connect that failed on its nodes, as the backend reports it", () => {
   const refusedLogin = () => reply('WRONGPASS invalid username-password pair or user is disabled.')
   const timedOut = () => new Error('timeout')

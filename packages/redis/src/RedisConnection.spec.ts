@@ -406,6 +406,17 @@ describe("a Cluster's subscriber socket, opened before the Cluster is ready", ()
   }
 })
 
+describe("the backend's Cluster client", () => {
+  it("never retries a command whose connection closed, so a command ioredis redirected until it gave up didn't run", () => {
+    const cluster = new Cluster([{ host: '127.0.0.1', port: 7001 }], { lazyConnect: true, retryDelayOnFailover: 100 })
+    clients.push(cluster)
+    const connection = new RedisConnection({ redis: cluster, prefix: 'tf:' })
+    connection.holdFor(cluster)
+    clients.push(connection.client)
+    expect(connection.client.options).toMatchObject({ retryDelayOnFailover: 0 })
+  })
+})
+
 describe("a Cluster's deployment, which installRedis() keys its backend by", () => {
   it('a Cluster of the same startup nodes is the same deployment; one of other nodes is another', () => {
     const cluster = (port: number) => {
