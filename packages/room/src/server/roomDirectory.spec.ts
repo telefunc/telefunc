@@ -5,8 +5,15 @@ import { getRoomPlane } from '../backend/plane.js'
 import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
 import { DIRECTORY_PAGE_SIZE, type DirectoryPage, type HeadNext, type LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
-import { ROOM_CLOSE_LEASE_MS, ROOM_LEASE_TTL_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
-import { configFromHead } from './lanes/lanes.js'
+import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
+import {
+  ROOM_CLOSE_LEASE_MS,
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_LEASE_TTL_MS,
+  ROOM_TOMBSTONE_TTL_MS,
+} from './constants.js'
+import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
+import { ServerRoom, handleOf } from './room.js'
 import { sweepLapsedRoomsSoon } from './store/directory.js'
 
 afterEach(() => {
@@ -106,6 +113,11 @@ async function closeHead(
   return { delivery: frame.delivery }
 }
 
+/** What the store's turns queued so far has run: its deliveries and its lanes' ends. */
+async function turns(): Promise<void> {
+  for (let turn = 0; turn < 3; turn++) await new Promise((resolve) => setImmediate(resolve))
+}
+
 /** A ready subscription to `lane` of incarnation `inc`, and what it saw since, in order: each frame's seq, then its
  *  states. */
 async function readyLane(driver: MemoryRoomDriver, id: string, inc: string, lane: LaneId) {
@@ -113,9 +125,29 @@ async function readyLane(driver: MemoryRoomDriver, id: string, inc: string, lane
   const receiver: BackendReceiver = { deliver: (_payload, info) => void seen.push(`frame ${info.seq}`) }
   const attempt: DriverAttempt = driver.subscribe({ roomId: id, inc, lane }, receiver)
   attempt.onStateChange((state) => void seen.push(state))
-  await expect.poll(() => attempt.state()).toBe('ready')
+  await turns()
+  if (attempt.state() !== 'ready') throw new Error(`the lane of ${id} isn't ready`)
   seen.length = 0
   return { attempt, seen }
+}
+
+/** The timers armed and cleared from here on, under the faked store clock. */
+function timerCalls() {
+  const armed = vi.spyOn(globalThis, 'setTimeout')
+  const cleared = vi.spyOn(globalThis, 'clearTimeout')
+  return {
+    /** Each armed timer's delay, in order. */
+    delays: () => armed.mock.calls.map((call) => call[1]),
+    cleared: () => cleared.mock.calls.length,
+    /** Runs the `at`th armed timer's callback now, by hand, as a host that runs it late or early would. */
+    runArmed(at: number) {
+      const callback = armed.mock.calls[at]?.[0]
+      if (typeof callback !== 'function') throw new Error(`no timer ${at} was armed`)
+      callback()
+    },
+    handle: (at: number) => armed.mock.results[at]?.value,
+    clearedHandles: () => cleared.mock.calls.map((call) => call[0]),
+  }
 }
 
 describe("the memory store's listing", () => {
@@ -270,5 +302,307 @@ describe('a closing head whose closer stopped', () => {
       endedInc: inc,
       data: false,
     })
+  })
+})
+
+describe("a head's lapse", () => {
+  it('removes the room with its data on its timer, with no read', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('timer-first')
+    const timers = timerCalls()
+    const opened = await openHead(driver, id, 10_000)
+    const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+    await vi.advanceTimersByTimeAsync(9_999)
+    const before = attempt.state()
+    await vi.advanceTimersByTimeAsync(1)
+    await turns()
+    expect({ delays: timers.delays(), before, after: attempt.state() }).toEqual({
+      delays: [10_000],
+      before: 'ready',
+      after: 'closed',
+    })
+  })
+
+  it('removes the room at the first read past it, for good, and its timer then does nothing', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('read-first')
+    const timers = timerCalls()
+    const opened = await openHead(driver, id, 10_000)
+    const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+    // The host's clock steps forward; no timer runs.
+    vi.setSystemTime(Date.now() + 11_000)
+    const read = await driver.readHead(id)
+    await turns()
+    const lane = attempt.state()
+    timers.runArmed(0)
+    // And back: what the store saw lapse stays gone.
+    vi.setSystemTime(Date.now() - 6_000)
+    expect({
+      read,
+      lane,
+      armedAfter: timers.delays(),
+      head: await driver.readHead(id),
+      data: await driver.readLaneOrder(id, opened.inc, SEMANTIC),
+    }).toEqual({ read: null, lane: 'closed', armedAfter: [10_000], head: null, data: null })
+  })
+
+  it('leaves nothing to a history read that comes first past it', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('history-first')
+    const opened = await openHead(driver, id, 10_000)
+    await driver.commitLane({ roomId: id, inc: opened.inc, lane: SEMANTIC }, new Uint8Array([2]), { retain: true })
+    vi.setSystemTime(Date.now() + 11_000)
+    expect({
+      order: await driver.readLaneOrder(id, opened.inc, SEMANTIC),
+      retained: await driver.readRetained(id, opened.inc, SEMANTIC),
+      listed: await driver.listRetained(id, opened.inc),
+    }).toEqual({ order: null, retained: null, listed: [] })
+  })
+
+  it('removes the room when its timer runs after a forward step of the clock, before its own delay', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('stepped-timer')
+    const timers = timerCalls()
+    const opened = await openHead(driver, id, 60_000)
+    const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+    vi.setSystemTime(Date.now() + 61_000)
+    timers.runArmed(0)
+    await turns()
+    expect({ lane: attempt.state(), data: await driver.readLaneOrder(id, opened.inc, SEMANTIC) }).toEqual({
+      lane: 'closed',
+      data: null,
+    })
+  })
+
+  it('keeps the room when its timer runs after a backward step, and goes at the lapse', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('stepped-back')
+    const timers = timerCalls()
+    const opened = await openHead(driver, id, 10_000)
+    const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+    vi.setSystemTime(Date.now() - 5_000)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await turns()
+    const atTimer = { lane: attempt.state(), delays: timers.delays() }
+    await vi.advanceTimersByTimeAsync(5_000)
+    await turns()
+    expect({ atTimer, atLapse: attempt.state() }).toEqual({
+      atTimer: { lane: 'ready', delays: [10_000, 5_000] },
+      atLapse: 'closed',
+    })
+  })
+
+  it('is pushed out by a renewal that makes no timer call, and the timer re-arms for the rest', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('renewed')
+    const timers = timerCalls()
+    const opened = await openHead(driver, id, 10_000)
+    const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+    await vi.advanceTimersByTimeAsync(8_000)
+    const renewed = await driver.compareExchangeHead(
+      id,
+      { form: 'rev', rev: opened.rev },
+      { head: { rev: crypto.randomUUID(), currentInc: opened.inc, state: 'open', config: CONFIG }, ttlMs: 10_000 },
+    )
+    const byRenewal = { armed: timers.delays().length, cleared: timers.cleared() }
+    await vi.advanceTimersByTimeAsync(2_000)
+    await turns()
+    const atOldLapse = attempt.state()
+    await vi.advanceTimersByTimeAsync(8_000)
+    await turns()
+    expect({
+      renewed: renewed.kind,
+      byRenewal,
+      atOldLapse,
+      delays: timers.delays(),
+      atNewLapse: attempt.state(),
+    }).toEqual({
+      renewed: 'committed',
+      byRenewal: { armed: 1, cleared: 0 },
+      atOldLapse: 'ready',
+      delays: [10_000, 8_000],
+      atNewLapse: 'closed',
+    })
+  })
+
+  it('of a replaced head, run by hand, leaves its successor at an equal deadline to its own', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('equal-deadline')
+    const timers = timerCalls()
+    const first = await openHead(driver, id, 10_000)
+    const second = await openHead(driver, id, 10_000, first.rev)
+    const { attempt } = await readyLane(driver, id, second.inc, SEMANTIC)
+    const byReplacement = { armed: timers.delays().length, cleared: timers.cleared() }
+    await vi.advanceTimersByTimeAsync(5_000)
+    timers.runArmed(0)
+    await turns()
+    const early = {
+      lane: attempt.state(),
+      data: (await driver.readLaneOrder(id, second.inc, SEMANTIC))?.seq,
+      delays: timers.delays(),
+    }
+    await vi.advanceTimersByTimeAsync(5_000)
+    await turns()
+    expect({ byReplacement, early, atDeadline: attempt.state() }).toEqual({
+      byReplacement: { armed: 1, cleared: 0 },
+      early: { lane: 'ready', data: 1, delays: [10_000, 5_000] },
+      atDeadline: 'closed',
+    })
+  })
+
+  it('of a head replaced by one lapsing sooner, run by hand, arms nothing', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('earlier-deadline')
+    const timers = timerCalls()
+    const first = await openHead(driver, id, 60_000)
+    const second = await openHead(driver, id, 10_000, first.rev)
+    const { attempt } = await readyLane(driver, id, second.inc, SEMANTIC)
+    const byReplacement = { delays: timers.delays(), cleared: timers.clearedHandles() }
+    timers.runArmed(0)
+    const afterOld = { delays: timers.delays().length, lane: attempt.state() }
+    await vi.advanceTimersByTimeAsync(10_000)
+    await turns()
+    expect({ byReplacement, afterOld, atDeadline: attempt.state() }).toEqual({
+      byReplacement: { delays: [60_000, 10_000], cleared: [timers.handle(0)] },
+      afterOld: { delays: 2, lane: 'ready' },
+      atDeadline: 'closed',
+    })
+  })
+
+  it("past one timer's range arms that range, then the rest, and goes at the lapse, not before", async () => {
+    useStoreClock()
+    const warnings: string[] = []
+    const onWarning = (warning: Error) => warnings.push(warning.name)
+    process.on('warning', onWarning)
+    try {
+      const driver = new MemoryRoomDriver()
+      const id = fresh('long-lapse')
+      const timers = timerCalls()
+      const opened = await openHead(driver, id, TIMER_DELAY_MAX_MS + 5_000)
+      const { attempt } = await readyLane(driver, id, opened.inc, SEMANTIC)
+      await vi.advanceTimersByTimeAsync(TIMER_DELAY_MAX_MS)
+      await turns()
+      const atRange = attempt.state()
+      await vi.advanceTimersByTimeAsync(5_000)
+      await turns()
+      expect({ delays: timers.delays(), atRange, atLapse: attempt.state(), warnings }).toEqual({
+        delays: [TIMER_DELAY_MAX_MS, 5_000],
+        atRange: 'ready',
+        atLapse: 'closed',
+        warnings: [],
+      })
+    } finally {
+      process.off('warning', onWarning)
+    }
+  })
+
+  it('arms, re-arms or clears the timer only as the lapse appears, moves earlier or goes', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('phases')
+    const timers = timerCalls()
+    let { inc, rev } = await openHead(driver, id, 3_605_000)
+    const calls: { armed: (number | undefined)[]; cleared: number }[] = []
+    const exchange = async (ttlMs: number | undefined) => {
+      const armed = timers.delays().length
+      const cleared = timers.cleared()
+      const next: HeadNext = { head: { rev: crypto.randomUUID(), currentInc: inc, state: 'open', config: CONFIG } }
+      if (ttlMs !== undefined) next.ttlMs = ttlMs
+      const result = await driver.compareExchangeHead(id, { form: 'rev', rev }, next)
+      if (result.kind !== 'committed') throw new Error(`the head of ${id} was not written`)
+      rev = result.head.rev
+      calls.push({ armed: timers.delays().slice(armed), cleared: timers.cleared() - cleared })
+    }
+    // A first join under a one-second departure timeout: the held horizon is sooner than the empty one.
+    await exchange(ROOM_LEASE_TTL_MS + 1_000 + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    // An infinite departure timeout once joined: no lapse.
+    await exchange(undefined)
+    // A finite one again, with none armed.
+    await exchange(181_000)
+    // The same phase, pushed out.
+    await exchange(200_000)
+    expect(calls).toEqual([
+      { armed: [181_000], cleared: 1 },
+      { armed: [], cleared: 1 },
+      { armed: [181_000], cleared: 0 },
+      { armed: [], cleared: 0 },
+    ])
+  })
+
+  it('of a room a participant first joins under a short departure timeout moves its timer earlier', async () => {
+    useStoreClock()
+    const timers = timerCalls()
+    const id = fresh('first-join')
+    const room = await Room.create(id, { emptyTimeout: 3_600_000, departureTimeout: 1_000 })
+    const emptyLapse = timers.delays().indexOf(3_605_000)
+    await room.join({ meta: {} })
+    const heldHorizon = ROOM_LEASE_TTL_MS + 1_000 + 2 * ROOM_HEARTBEAT_INTERVAL_MS
+    for (let turn = 0; turn < 50 && !timers.delays().includes(heldHorizon); turn++) await turns()
+    expect({
+      emptyArmed: emptyLapse !== -1,
+      heldArmed: timers.delays().includes(heldHorizon),
+      emptyCleared: timers.clearedHandles().includes(timers.handle(emptyLapse)),
+    }).toEqual({ emptyArmed: true, heldArmed: true, emptyCleared: true })
+    await Room.close(id)
+  })
+})
+
+describe("a lapsed incarnation's lanes", () => {
+  it('end after what was accepted on them, which is delivered with its delivery settled', async () => {
+    useStoreClock()
+    const driver = new MemoryRoomDriver()
+    const id = fresh('lapsed-lane')
+    const opened = await openHead(driver, id, 10_000)
+    const { seen } = await readyLane(driver, id, opened.inc, CONTROL)
+    const committing = driver.commitLane({ roomId: id, inc: opened.inc, lane: CONTROL }, new Uint8Array([3]))
+    // In the same turn: past the lapse, and read.
+    vi.setSystemTime(Date.now() + 11_000)
+    const read = driver.readHead(id)
+    const accepted = await committing
+    if (accepted.kind !== 'accepted') throw new Error('the commit before the lapse was refused')
+    await accepted.delivery
+    await turns()
+    const after = await driver.commitLane({ roomId: id, inc: opened.inc, lane: CONTROL }, new Uint8Array([4]))
+    expect({ read: await read, seen, after: after.kind }).toEqual({
+      read: null,
+      seen: ['frame 1', 'closed'],
+      after: 'stale-incarnation',
+    })
+  })
+
+  it("end a tail-only view's, which is torn down", async () => {
+    useStoreClock()
+    const id = fresh('tail-only')
+    const { direct } = getRoomPlane()
+    const inc = crypto.randomUUID()
+    const result = await direct.compareExchangeHead(
+      id,
+      { form: 'absent' },
+      {
+        head: {
+          rev: crypto.randomUUID(),
+          currentInc: inc,
+          state: 'open',
+          config: encodeRoomRecord({ meta: {}, inc, hold: null }),
+        },
+        ttlMs: 10_000,
+      },
+    )
+    if (result.kind !== 'committed') throw new Error(`the head of ${id} was not written`)
+    const room = await Room.get(id, { tail: true })
+    if (!(room instanceof ServerRoom)) throw new Error('Room.get() gave no server room')
+    const handle = handleOf(room)
+    const tailed = handle.holdsTail()
+    await vi.advanceTimersByTimeAsync(10_000)
+    for (let turn = 0; turn < 50 && handle.holdsTail(); turn++) await turns()
+    expect({ tailed, afterLapse: handle.holdsTail() }).toEqual({ tailed: true, afterLapse: false })
   })
 })

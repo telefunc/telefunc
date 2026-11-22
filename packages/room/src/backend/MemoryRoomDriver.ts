@@ -59,6 +59,7 @@ import {
   unrefTimer,
 } from 'telefunc/__internal'
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
+import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
 import { MemoryCommitQueue, type MemoryAttempt } from './MemoryCommitQueue.js'
 
 type Expiring = { expiresAt: number | null }
@@ -92,7 +93,10 @@ type Incarnation = {
   attempts: Set<MemoryAttempt>
 }
 
-type RoomRecord = { head: StoredHead | null; incarnations: Map<string, Incarnation> }
+/** A room's one lapse timer, and when it fires: at its head's lapse, or a timer's range before it. */
+type LapseTimer = { firesAt: number; timer: ReturnType<typeof setTimeout> }
+
+type RoomRecord = { head: StoredHead | null; incarnations: Map<string, Incarnation>; lapse: LapseTimer | null }
 
 type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
@@ -312,12 +316,12 @@ class MemoryRoomDriver implements RoomDriver {
   private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
-    const head = this.liveHead(this.rooms.get(roomId))
+    const head = this.liveHead(roomId, this.rooms.get(roomId))
     return head === null ? null : publicHead(head, copyBytes(head.config))
   }
 
   async compareExchangeHead(roomId: string, expected: HeadExpectation, next: HeadNext): Promise<HeadExchangeResult> {
-    const current = this.liveHead(this.rooms.get(roomId))
+    const current = this.liveHead(roomId, this.rooms.get(roomId))
     if (!headExpectationHolds(expected, current, Date.now())) {
       const currentView = current === null ? null : publicHead(current, copyBytes(current.config))
       return { kind: 'conflict', current: currentView }
@@ -333,11 +337,11 @@ class MemoryRoomDriver implements RoomDriver {
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     for (const inc of [...room.incarnations.keys()]) if (inc !== stored.currentInc) this.endIncarnation(room, inc)
-    if (stored.currentInc === null) this.releaseWhenLapsed(roomId, room)
-    else {
+    if (stored.currentInc !== null) {
       const incarnation = this.incarnation(room, stored.currentInc)
       if (next.counts !== undefined) applyCells(incarnation, [], next.counts)
     }
+    this.scheduleLapse(roomId, room)
     return stored
   }
 
@@ -368,7 +372,7 @@ class MemoryRoomDriver implements RoomDriver {
   /** Closing tails may read; only writes require an open head. */
   private readableIncarnation(roomId: string, inc: string): Incarnation | null {
     const room = this.rooms.get(roomId)
-    const head = this.liveHead(room)
+    const head = this.liveHead(roomId, room)
     if (room === undefined || head === null || head.currentInc !== inc) return null
     return this.incarnation(room, inc)
   }
@@ -387,7 +391,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   async compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
     const room = this.rooms.get(roomId)
-    const head = this.liveHead(room)
+    const head = this.liveHead(roomId, room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)
     if (exchange.expect.some(({ key, version }) => (incarnation.cells.get(key)?.version ?? null) !== version))
@@ -405,7 +409,7 @@ class MemoryRoomDriver implements RoomDriver {
   ): Promise<OperationResult<Value>> {
     await beforeOperation(options)
     const room = this.rooms.get(roomId)
-    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return { kind: 'stale-incarnation' }
+    if (room === undefined || !isOpenIncarnation(this.liveHead(roomId, room), inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)
     const now = Date.now()
     const { value, writes } = recordOperation(operation, args, {
@@ -440,7 +444,7 @@ class MemoryRoomDriver implements RoomDriver {
     opts?: CommitOptions,
   ): Promise<CommitResult> {
     const room = this.rooms.get(roomId)
-    const head = this.liveHead(room)
+    const head = this.liveHead(roomId, room)
     const now = Date.now()
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, now)) {
       return { kind: 'stale-incarnation' }
@@ -503,7 +507,7 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
+    const incarnation = this.storedIncarnation(roomId, inc)
     const order =
       lane.kind === 'inbox' || lane.kind === 'binary' ? incarnation?.memberOrders.get(lane.member) : incarnation?.order
     const mark = order?.get(encodeLaneKey(lane))
@@ -511,13 +515,13 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const entry = this.rooms.get(roomId)?.incarnations.get(inc)?.retained.get(encodeLaneKey(lane))
+    const entry = this.storedIncarnation(roomId, inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
-    const incarnation = this.rooms.get(roomId)?.incarnations.get(inc)
+    const incarnation = this.storedIncarnation(roomId, inc)
     if (incarnation === undefined) return []
     if (of === undefined) return Array.from(incarnation.retained.values(), (entry) => copyLane(entry.lane))
     const keys = 'member' in of ? incarnation.retainedOf.get(of.member) : incarnation.retainedOfTrack.get(of.track)
@@ -526,7 +530,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
-    if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return new EndedAttempt()
+    if (room === undefined || !isOpenIncarnation(this.liveHead(roomId, room), inc)) return new EndedAttempt()
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
     const incarnation = this.incarnation(room, inc)
     let subscribers: Subscribers
@@ -548,9 +552,8 @@ class MemoryRoomDriver implements RoomDriver {
   /** Drops nothing a live head names: that incarnation ends in the turn its head stops naming it. */
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
     const room = this.rooms.get(roomId)
-    if (room === undefined || this.liveHead(room)?.currentInc === inc) return
+    if (room === undefined || this.liveHead(roomId, room)?.currentInc === inc) return
     this.endIncarnation(room, inc)
-    this.releaseWhenLapsed(roomId, room)
   }
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
@@ -600,19 +603,54 @@ class MemoryRoomDriver implements RoomDriver {
   // ── internals ──
 
   private roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map() }))
+    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map(), lapse: null }))
   }
 
-  /** A room with no incarnation left is forgotten once its tombstone lapses (this backend's revs are never reused). */
-  private releaseWhenLapsed(roomId: string, room: RoomRecord): void {
-    if (this.rooms.get(roomId) !== room || room.incarnations.size > 0) return
-    const head = this.liveHead(room)
-    if (head === null) {
-      this.rooms.delete(roomId)
-      return
+  /** What incarnation `inc` stored, as a read sees it: none once its room's head lapsed. Closing tails and history
+   *  reads may read an incarnation the head no longer names. */
+  private storedIncarnation(roomId: string, inc: string): Incarnation | undefined {
+    const room = this.rooms.get(roomId)
+    this.liveHead(roomId, room)
+    return room?.incarnations.get(inc)
+  }
+
+  /** One timer per room, firing at its head's lapse: armed when a lapse appears or moves earlier than it fires,
+   *  cleared when the lapse goes. A lapse pushed out keeps it; it re-arms when it fires. */
+  private scheduleLapse(roomId: string, room: RoomRecord): void {
+    const at = room.head?.expiresAt ?? null
+    if (at !== null && room.lapse !== null && room.lapse.firesAt <= at) return
+    if (room.lapse !== null) clearTimeout(room.lapse.timer)
+    room.lapse = null
+    if (at !== null) this.armLapse(roomId, room, at)
+  }
+
+  /** At most a timer's range ahead, so a lapse past it fires early and re-arms for the rest. */
+  private armLapse(roomId: string, room: RoomRecord, at: number): void {
+    const delay = Math.min(Math.max(at - Date.now(), 0), TIMER_DELAY_MAX_MS)
+    const lapse: LapseTimer = {
+      firesAt: Date.now() + delay,
+      timer: unrefTimer(setTimeout(() => this.lapseFired(roomId, room, lapse), delay)),
     }
-    if (head.expiresAt === null) return
-    unrefTimer(setTimeout(() => this.releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
+    room.lapse = lapse
+  }
+
+  /** Only the room's armed timer acts, and only on the head's lapse as the store's clock has it now. */
+  private lapseFired(roomId: string, room: RoomRecord, lapse: LapseTimer): void {
+    if (room.lapse !== lapse || this.rooms.get(roomId) !== room) return
+    room.lapse = null
+    const at = room.head?.expiresAt ?? null
+    if (at === null) return
+    if (at > Date.now()) return this.armLapse(roomId, room, at)
+    this.collect(roomId, room)
+  }
+
+  /** The room's head lapsed: the head goes with every incarnation it held, in this turn, for good. */
+  private collect(roomId: string, room: RoomRecord): void {
+    for (const inc of [...room.incarnations.keys()]) this.endIncarnation(room, inc)
+    if (room.lapse !== null) clearTimeout(room.lapse.timer)
+    room.lapse = null
+    room.head = null
+    if (this.rooms.get(roomId) === room) this.rooms.delete(roomId)
   }
 
   /** Its data goes now, and its lanes end once what was committed on them is delivered. */
@@ -628,10 +666,13 @@ class MemoryRoomDriver implements RoomDriver {
     return getOrCreate(room.incarnations, inc, newIncarnation)
   }
 
-  /** Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch. */
-  private liveHead(room: RoomRecord | undefined): StoredHead | null {
+  /** A head the store's clock finds lapsed is collected here, before its timer, and reads as absent from then on,
+   *  which is what reopens an absence epoch. */
+  private liveHead(roomId: string, room: RoomRecord | undefined): StoredHead | null {
     const head = room?.head ?? null
-    return head === null || isExpired(head, Date.now()) ? null : head
+    if (room === undefined || head === null || !isExpired(head, Date.now())) return head
+    this.collect(roomId, room)
+    return null
   }
 }
 
