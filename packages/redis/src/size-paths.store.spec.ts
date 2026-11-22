@@ -8,8 +8,8 @@
 //   whose frame was lost are settled from the store by the next frame in the sender's inbox, which shows the skip. A
 //   timeout's read that finds nothing doesn't settle the sender ahead of a frame that settles it first. A sender removed,
 //   or a room closed, before the reply is stored is told that, with no reply left stored. A reply changed after its
-//   encode is stored, sent and told as encoded. The DM's own send failing after its reply settled the wait is what the
-//   sender is told.
+//   encode is stored, sent and told as encoded. The DM's own send failing after its reply's frame was committed is what
+//   the sender is told, not the reply.
 // - A removal by identity of a visible and a hidden tab, whose reason puts only the hidden tab's leave over the size:
 //   no tab goes, and nothing in the store changes. Its arguments are read once, before its first await: a reason the
 //   caller changes afterwards isn't the one committed, a reason that can't be serialized is refused when no tab
@@ -113,7 +113,7 @@ type Schedule = {
   store?: 'at once' | 'after the timeout' | 'during the timeout read'
   /** Runs as the recipient starts storing its reply, its encode done. */
   beforeStore?: (room: { id: string; sender: string }) => Promise<unknown> | void
-  /** The DM's own send fails once its reply settled the sender's wait. */
+  /** The DM's own send fails once its reply's frame was committed. */
   sendFails?: boolean
 }
 
@@ -174,7 +174,7 @@ async function acknowledged(
       const committed = await driverCommit.call(this, target, payload, opts)
       if (target.lane.kind !== 'inbox' || target.lane.member !== alice.id || committed.kind !== 'accepted')
         return committed
-      // Fails once the reply's frame settled the sender's wait.
+      // Fails once the reply's frame was committed.
       await carried.promise
       await sleep(200)
       throw new Error('Test: the send fails after its reply')
@@ -446,7 +446,7 @@ describe.runIf(runs)("a DM's acknowledged reply from a server recipient, over th
       })
     }, 180_000)
 
-    it(`${store.name}: the DM's own send failing after its reply settled the wait: the sender is told the send's failure`, async () => {
+    it(`${store.name}: the DM's own send failing after its reply's frame was committed: the sender is told the send's failure, not the reply`, async () => {
       const admin = await reached(store)
       const { frame, sender, left } = await acknowledged(admin, `reply-send-fails-${i}`, () => 'small', {
         frame: 'held',
