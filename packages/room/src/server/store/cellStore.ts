@@ -1,7 +1,7 @@
 export { readPrefix, readPrefixAt, readOpenCells, deleteCells }
-export type { CellsAt }
+export type { CellsAt, Kept }
 
-import type { CellsRead } from '../../backend/contract.js'
+import type { CellsBeside, CellsRead } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
@@ -18,20 +18,33 @@ async function readPrefix(
   return (await readPrefixAt(store, roomId, inc, prefix)).cells
 }
 
-/** Cells read, and the authority time of the last page's read. */
-type CellsAt = { cells: Map<string, Uint8Array>; now: number }
+/** Cells read, the authority time of the last page's read, and the keys of the cells a `Kept` left out. */
+type CellsAt = { cells: Map<string, Uint8Array>; now: number; left: string[] }
 
-async function readPrefixAt(store: RoomStore, roomId: string, inc: string, prefix: string): Promise<CellsAt> {
+/** A read's `beside`, and which of a read's cells to keep, judged by the read they came in. */
+type Kept = { beside: CellsBeside; keeps(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean }
+
+async function readPrefixAt(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  prefix: string,
+  kept?: Kept,
+): Promise<CellsAt> {
   const cells = new Map<string, Uint8Array>()
+  const left: string[] = []
   let now = 0
   const slice = new Slice()
-  for await (const page of store.reads.readCellPages(roomId, inc, prefix)) {
+  for await (const page of store.reads.readCellPages(roomId, inc, prefix, kept?.beside)) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
-    for (const [key, raw] of page.cells) cells.set(key, raw)
+    for (const [key, raw] of page.cells) {
+      if (kept === undefined || kept.keeps(page, key)) cells.set(key, raw)
+      else left.push(key)
+    }
     now = page.now
     if (slice.over) await slice.next()
   }
-  return { cells, now }
+  return { cells, now, left }
 }
 
 async function readOpenCells(
@@ -39,8 +52,9 @@ async function readOpenCells(
   roomId: string,
   inc: string,
   keys: string[],
+  beside?: CellsBeside,
 ): Promise<Extract<CellsRead, { kind: 'read' }>> {
-  const read = await store.reads.readCells(roomId, inc, { keys })
+  const read = await store.reads.readCells(roomId, inc, beside === undefined ? { keys } : { keys, beside })
   if (read.kind === 'stale-incarnation') throw roomClosedError(roomId)
   return read
 }

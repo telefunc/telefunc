@@ -256,9 +256,9 @@ describe.runIf(runs)(
   },
 )
 
-describe.runIf(runs)('Room.send() by identity where the lookup reaps one of its two tabs', () => {
+describe.runIf(runs)('Room.send() by identity of a tab that hosts and one on a lapsed lease', () => {
   for (const [i, store] of STORES.entries()) {
-    it(`${store.name}: checks one tab's message, before and after the reap, and delivers to the tab that is left (the store reads tabs in id order, so either tab may be the checked one: sizeBeforeWrite.spec.ts pins the reaped one)`, async () => {
+    it(`${store.name}: checks the tab that hosts, as the tab on the lapsed lease hosts no one, before and after the reap, and delivers to it`, async () => {
       const admin = await reached(store)
       const id = `send-checked-reaped-${i}`
       await Room.create(id)
@@ -282,14 +282,13 @@ describe.runIf(runs)('Room.send() by identity where the lookup reaps one of its 
       await left.leave()
       admin.disconnect()
 
-      // The check runs on the first read and on the reread after the reap, each time on the message it was first given.
-      expect({
-        checks: checked.length,
-        oneTab: checked.every((member) => member === checked[0]),
-        ofTheTabs: [first, left.id].includes(checked[0] ?? ''),
-        delivered: receipts.length,
-        listed,
-      }).toEqual({ checks: 2, oneTab: true, ofTheTabs: true, delivered: 1, listed: [left.id] })
+      // A tab on a lapsed lease hosts no one, so the lookup leaves it out: the check runs on the first read and on the
+      // reread after the reap, each time on the tab that hosts.
+      expect({ checked, delivered: receipts.length, listed }).toEqual({
+        checked: [left.id, left.id],
+        delivered: 1,
+        listed: [left.id],
+      })
     }, 60_000)
   }
 })

@@ -254,7 +254,7 @@ for (const over of [0, 1]) {
   })
 }
 
-it('Room.send() by identity whose checked first tab, in join order as the memory store reads them, is reaped by the lookup delivers to the tab that is left', async () => {
+it('Room.send() by identity whose first tab, in join order as the memory store reads them, is on a lapsed lease checks the tab that hosts, and delivers to it', async () => {
   const id = `send-checked-reaped-${crypto.randomUUID()}`
   await Room.create(id)
   const first = await joinedElsewhere(id, 'u1')
@@ -268,10 +268,10 @@ it('Room.send() by identity whose checked first tab, in join order as the memory
   vi.restoreAllMocks()
   const listed = (await Room.getParticipants(id)).map((each) => each.id)
 
-  // The check runs on the first read and on the reread after the reap, each time on the message it was first given,
-  // of the reaped tab: every tab's has its length.
+  // A tab on a lapsed lease hosts no one, so the lookup leaves it out: the check runs on the first read and on the reread
+  // after the reap, each time on the tab that hosts.
   expect({ checked, delivered: receipts.length, listed }).toEqual({
-    checked: [first.member, first.member],
+    checked: [left.id, left.id],
     delivered: 1,
     listed: [left.id],
   })

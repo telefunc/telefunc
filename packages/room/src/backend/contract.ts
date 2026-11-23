@@ -8,6 +8,7 @@ export type {
   CellsExchange,
   CellsExchangeResult,
   CellSelector,
+  CellsBeside,
   CellsRead,
   ExpiringCell,
   ExpiringCellsRead,
@@ -137,12 +138,24 @@ type CommitKept = 'delivered' | 'stored'
 /** `bytes: null` deletes the cell. */
 type CellMutation = { key: string; bytes: Uint8Array | null }
 
-type CellSelector = { keys: string[] } | { prefix: string }
+/** For each cell under `of` it returns, a read also reads the cell `reference` + that key past `of` and, where that cell
+ *  is there, the cell `target` + its bytes, in the same turn: a reference the driver follows without decoding a cell. */
+type CellsBeside = { of: string; reference: string; target: string }
+
+type CellSelector = ({ keys: string[] } | { prefix: string }) & { beside?: CellsBeside }
 
 /** The cells found, each with its version, and the authority time of the read; or the incarnation is no longer the
  *  head's. A write gives each cell it writes a version that cell never had in its incarnation. */
 type CellsRead =
-  | { kind: 'read'; cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number }
+  | {
+      kind: 'read'
+      cells: Map<string, Uint8Array>
+      versions: Map<string, string>
+      now: number
+      /** With `beside`: by the key of each cell under `of` whose reference is there, the cell it names, `null` where
+       *  that cell is absent. */
+      beside?: Map<string, Uint8Array | null>
+    }
   | StaleIncarnation
 
 /** A cell still at the version read; `null`: still absent. */
@@ -260,7 +273,7 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  - A key written during the read, and kept, comes if the order puts it after every key returned before the write.
    *    Any other key written or removed during the read may or may not come.
    *  - A `stale-incarnation` page is the last. */
-  readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
+  readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncIterable<CellsRead>
   /** With `record`, the control record the caller commits once the exchange has committed (`ControlRecord`). */
   compareExchangeCells(
     roomId: string,

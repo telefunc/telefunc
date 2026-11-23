@@ -5,8 +5,9 @@ import type { MemberSnapshot } from '../../shared/protocol.js'
 import type { RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
-import { readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
+import { readOpenCells, readPrefix, readPrefixAt, type Kept } from './cellStore.js'
 import { eachInFlight } from './inFlight.js'
+import type { CellsRead } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { leaveCauseFromWire, type WireLeaveCause } from '../../shared/protocol.js'
@@ -14,16 +15,30 @@ import { decodeRoomRecord, type CommitFitsBeforeWriting } from '../lanes/lanes.j
 import {
   LEASE_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
+  MEMBER_LEASE_BESIDE,
   departingCellKey,
   identityCellPrefix,
   memberCellKey,
   memberIdOfCellKey,
 } from './cells.js'
-import { reapLeases } from './lease.js'
+import { leaseCanHost, reapLeases } from './lease.js'
 
-// The room's members as read from its cells, each read after reaping the lapsed leases it found.
+// The room's members as read from its cells, each read after reaping the lapsed leases it found. A member counts only
+// while it hosts: the lease it joined under, read beside its record in the same turn, can host.
 
-type Roster = { members: MemberSnapshot[] }
+/** The members that host, and the ids of those a read left out as their lease can't: their removal is under way. */
+type Roster = { members: MemberSnapshot[]; leaving: ReadonlySet<string> }
+
+/** Whether the member whose record is `key` in `read` hosts: the lease read beside it can host. A member with no lease
+ *  reference was written by a server from before members had one; it is read as it is, and once that server stopped,
+ *  its lease lapses within `ROOM_LEASE_TTL_MS` and the next read's reap ends it. */
+function hosts(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean {
+  const lease = read.beside?.get(key)
+  if (lease === undefined) return true
+  return lease !== null && leaseCanHost(key, lease, read.now)
+}
+
+const HOSTED_MEMBERS: Kept = { beside: MEMBER_LEASE_BESIDE, keeps: hosts }
 
 /** Live members, read again after a lapsed lease's were removed. */
 async function reapAndReadRoster(store: RoomStore, room: RoomIncarnation): Promise<Roster> {
@@ -35,11 +50,11 @@ async function reapAndReadRoster(store: RoomStore, room: RoomIncarnation): Promi
 }
 
 async function readRoster(store: RoomStore, room: RoomIncarnation): Promise<Roster> {
-  const cells = await readPrefix(store, room.id, room.inc, MEMBER_CELL_PREFIX)
+  const { cells, left } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   // After the member read: each member's cells are as new as its record or newer, so the updates after the record's
   // seq bring a view to them.
   const metaCells = await readMembersMetaCells(room, cells)
-  return { members: await liveMembers(memberRecords(cells), metaCells) }
+  return { members: await liveMembers(memberRecords(cells), metaCells), leaving: new Set(left.map(memberIdOfCellKey)) }
 }
 
 /** Why each of `ids` left, for those whose departing record the backend hasn't expired yet. Read after the members, a
@@ -85,11 +100,13 @@ async function reapAndReadMembersById(
 }
 
 async function readMembersById(store: RoomStore, room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  const { cells } = await readOpenCells(store, room.id, room.inc, ids.map(memberCellKey))
+  const read = await readOpenCells(store, room.id, room.inc, ids.map(memberCellKey), MEMBER_LEASE_BESIDE)
+  const { cells } = read
   const metaCells = new Map<string, MemberMetaCells>()
   const entries = ids.flatMap((id) => {
-    const raw = cells.get(memberCellKey(id))
-    return raw === undefined ? [] : [[id, raw] as const]
+    const key = memberCellKey(id)
+    const raw = cells.get(key)
+    return raw === undefined || !hosts(read, key) ? [] : [[id, raw] as const]
   })
   await eachInFlight(entries, async ([id]) => {
     metaCells.set(id, (await readMembersMetaCells(room, cells, id)).get(id) ?? [])
@@ -139,9 +156,9 @@ async function reapAndCountPresence(store: RoomStore, room: RoomIncarnation): Pr
   return (await reapLeases(store, room, leases)) ? await countPresence(store, room) : count
 }
 
-/** The members not hidden, from their records alone: a count reads no meta. */
+/** The members that host and aren't hidden, from their records alone: a count reads no meta. */
 async function countPresence(store: RoomStore, room: RoomIncarnation): Promise<number> {
-  const cells = await readPrefix(store, room.id, room.inc, MEMBER_CELL_PREFIX)
+  const { cells } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   let count = 0
   for (const raw of cells.values()) {
     if (!decodeRoomRecord<RoomMemberRecord>(raw).hidden) count++

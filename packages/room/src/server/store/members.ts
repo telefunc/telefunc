@@ -25,6 +25,7 @@ import {
   leaseCellKey,
   leaseMemberCellKey,
   memberCellKey,
+  memberLeaseCellKey,
   memberMetaCellPrefix,
 } from './cells.js'
 import { leaseHosting, runHosted, type LeaseState, type RoomLease } from './lease.js'
@@ -52,7 +53,8 @@ const JOIN: RoomOperation<JoinArgs, 'joined' | 'lease-lost'> = {
       key: memberCellKey(id),
       bytes: encodeRoomRecord({ ...record, session: lease.id } satisfies RoomMemberRecord),
     })
-    tx.write({ key: leaseMemberCellKey(lease.id, id), bytes: identityTextEncoder.encode(record.identity ?? '') })
+    tx.write({ key: leaseMemberCellKey(lease.id, id), bytes: cellTextEncoder.encode(record.identity ?? '') })
+    tx.write({ key: memberLeaseCellKey(id), bytes: cellTextEncoder.encode(lease.id) })
     for (const mutation of memberMetaMutations(id, meta)) tx.write(mutation)
     if (record.identity !== undefined) tx.write({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
     for (const count of holdDelta(record.hidden ? null : hold, 1, { joining: true }).counts) tx.count(count)
@@ -76,6 +78,7 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     tx.write({ key: memberKey, bytes: null })
     tx.writeExpiring({ key: departingCellKey(id), bytes: encodeRoomRecord(cause), ttlMs: ROOM_DEPARTING_RECORD_MS })
     tx.write({ key: leaseMemberCellKey(record.session, id), bytes: null })
+    tx.write({ key: memberLeaseCellKey(id), bytes: null })
     if (record.identity !== undefined) tx.write({ key: identityCellKey(record.identity, id), bytes: null })
     for (const count of holdDelta(record.hidden ? null : hold, -1).counts) tx.count(count)
     tx.dropPrefix(memberMetaCellPrefix(id))
@@ -106,7 +109,7 @@ function leaveCommits(members: readonly MemberSnapshot[], cause: LeaveCause): Si
   return commits
 }
 
-const identityTextEncoder = new TextEncoder()
+const cellTextEncoder = new TextEncoder()
 
 /** Joins a member under the lease, once its inbox delivers (`options.inbox`). */
 async function joinMember(

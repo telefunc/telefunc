@@ -21,6 +21,7 @@ import type {
   RoomHead,
   RoomOperation,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitOptions,
   ExpiringCellsRead,
@@ -95,7 +96,12 @@ class RedisRoomDriver implements RoomDriver {
     return this.connection.run(REDIS_COMMANDS.readCells, { roomId, inc, sel })
   }
 
-  async *readCellPages(roomId: string, inc: string, cellPrefix: string): AsyncGenerator<CellsRead> {
+  async *readCellPages(
+    roomId: string,
+    inc: string,
+    cellPrefix: string,
+    beside?: CellsBeside,
+  ): AsyncGenerator<CellsRead> {
     let after: string | undefined
     do {
       const page = await this.connection.run(REDIS_COMMANDS.readCellPage, {
@@ -104,6 +110,7 @@ class RedisRoomDriver implements RoomDriver {
         cellPrefix,
         after,
         pageSize: this.kit.CELL_PAGE_SIZE,
+        beside,
       })
       yield page
       if (page.kind === 'stale-incarnation') return

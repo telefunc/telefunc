@@ -35,7 +35,7 @@ class RoomPlane {
       readHead: (roomId) => driver.readHead(roomId),
       readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
       readExpiringCells: (roomId, inc, keys) => driver.readExpiringCells(roomId, inc, keys),
-      readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
+      readCellPages: (roomId, inc, prefix, beside) => driver.readCellPages(roomId, inc, prefix, beside),
       listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
       directoryGet: (roomId) => driver.directoryGet(roomId),
       directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),

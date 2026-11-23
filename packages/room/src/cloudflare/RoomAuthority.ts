@@ -15,6 +15,7 @@ import type {
   RoomHead,
   StaleCommit,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitOptions,
   RetainedFrame,
@@ -183,8 +184,8 @@ class RoomAuthority {
     return readExpiringCells(this.sql(), inc, keys, Date.now())
   }
 
-  async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
-    return readCellPage(this.sql(), inc, prefix, cursor, Date.now())
+  async readCellPage(inc: string, prefix: string, cursor?: string, beside?: CellsBeside): Promise<CellPage> {
+    return readCellPage(this.sql(), inc, prefix, cursor, Date.now(), beside)
   }
 
   async compareExchangeCells(inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {

@@ -15,6 +15,7 @@ import { ChannelOverflowError, publishedData } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellSelector,
+  CellsBeside,
   CellsExchange,
   CellsExchangeResult,
   ControlRecord,
@@ -380,17 +381,35 @@ return '{"head":' .. cjson.encode(head) .. '}'
 // Reads the named cells, or every cell under a prefix, each with its version, while the head still names the
 // incarnation (closing tails may read), after the authority time of the read. A missing cell is left out.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
-//   ARGV: [1]=inc [2]='keys' then the cell keys, or 'prefix' then the prefix
+//   ARGV: [1]=inc [2..4]=the read's beside (of, reference, target; of '' for none) [5]='keys' then the cell keys, or
+//   'prefix' then the prefix
 // No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
-// Appends each of keys[first..] that has a value, with its value and version, to reply.
+// Appends each of keys[first..] that has a value, with its value and version, to reply. With beside, each such cell
+// also gets what its reference names: 'none' where the cell has none (as does every cell outside of), else 'cell' and
+// the named cell's value, or 'gone' where that cell is absent, so a reply's tag ends ':beside'.
 const CELLS_REPLY_LUA = `
-local function tf_cells_reply(reply, keys, first)
+local function tf_cells_reply(reply, keys, first, of, reference, target)
+  if of ~= '' then reply[1] = reply[1] .. ':beside' end
   for i = first, #keys do
     local value = redis.call('HGET', KEYS[3], keys[i])
     if value then
       reply[#reply + 1] = keys[i]
       reply[#reply + 1] = value
       reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
+      if of ~= '' then
+        local named = false
+        if string.sub(keys[i], 1, #of) == of then
+          named = redis.call('HGET', KEYS[3], reference .. string.sub(keys[i], #of + 1))
+        end
+        if not named then
+          reply[#reply + 1] = 'none'
+          reply[#reply + 1] = ''
+        else
+          local cell = redis.call('HGET', KEYS[3], target .. named)
+          reply[#reply + 1] = cell and 'cell' or 'gone'
+          reply[#reply + 1] = cell or ''
+        end
+      end
     end
   end
   return reply
@@ -401,11 +420,11 @@ const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
-local keys, first = ARGV, 3
-if ARGV[2] == 'prefix' then
-  keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
+local keys, first = ARGV, 6
+if ARGV[5] == 'prefix' then
+  keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[6], '(' .. ARGV[6] .. '\\255'), 1
 end
-return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
+return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first, ARGV[2], ARGV[3], ARGV[4])
 `
 
 // The expiring cells of the keys that Redis hasn't expired yet, after the head names the incarnation.
@@ -429,7 +448,7 @@ return reply
 // previous page's last key) to past the prefix ARGV[3], after the authority time of the read. A full page is tagged
 // 'more', with its last key after the time.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
-//   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size
+//   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size [5..7]=the read's beside, as for READ_CELLS_LUA
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
@@ -437,8 +456,8 @@ if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
 local time = string.format('%.0f', now)
-if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1) end
-return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
+if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, ARGV[5], ARGV[6], ARGV[7]) end
+return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, ARGV[5], ARGV[6], ARGV[7])
 `
 
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
@@ -1272,11 +1291,12 @@ const REDIS_COMMANDS = {
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
+      argv: [inc, ...besideArgv(sel.beside), ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
     }),
     parse: (reply): CellsRead => {
       const [tag, now, ...found] = reply as Buffer[]
-      return tag!.toString() === 'stale-incarnation' ? { kind: 'stale-incarnation' } : parseCells(now!, found)
+      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      return parseCells(now!, found, tag!.toString().endsWith(':beside'))
     },
   }),
   readExpiringCells: command({
@@ -1305,7 +1325,14 @@ const REDIS_COMMANDS = {
     binaryReply: true,
     invoke: (
       prefix,
-      { roomId, inc, cellPrefix, after, pageSize }: RoomInc & { cellPrefix: string; after?: string; pageSize: number },
+      {
+        roomId,
+        inc,
+        cellPrefix,
+        after,
+        pageSize,
+        beside,
+      }: RoomInc & { cellPrefix: string; after?: string; pageSize: number; beside?: CellsBeside },
     ) => ({
       keys: [
         headKey(prefix, roomId),
@@ -1313,13 +1340,20 @@ const REDIS_COMMANDS = {
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(pageSize)],
+      argv: [
+        inc,
+        after === undefined ? `[${cellPrefix}` : `(${after}`,
+        cellPrefix,
+        String(pageSize),
+        ...besideArgv(beside),
+      ],
     }),
     parse: (reply): CellsRead & { after?: string } => {
       const [tag, now, ...found] = reply as Buffer[]
-      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
-      if (tag!.toString() === 'cells') return parseCells(now!, found)
-      return { ...parseCells(now!, found.slice(1)), after: found[0]!.toString() }
+      const [kind, withBeside] = tag!.toString().split(':')
+      if (kind === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      if (kind === 'cells') return parseCells(now!, found, withBeside !== undefined)
+      return { ...parseCells(now!, found.slice(1), withBeside !== undefined), after: found[0]!.toString() }
     },
   }),
   laneStart: command({
@@ -1639,15 +1673,27 @@ function encodeNext(next: HeadNext): string {
 }
 
 /** The read's time, then key, value and version triples. */
-function parseCells(now: Buffer, found: Buffer[]): Extract<CellsRead, { kind: 'read' }> {
+/** A read's cells; with `withBeside`, each followed by what its reference names (`CELLS_REPLY_LUA`). */
+function parseCells(now: Buffer, found: Buffer[], withBeside: boolean): Extract<CellsRead, { kind: 'read' }> {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
-  for (let i = 0; i < found.length; i += 3) {
+  const beside = new Map<string, Uint8Array | null>()
+  for (let i = 0; i < found.length; i += withBeside ? 5 : 3) {
     const key = found[i]!.toString()
     cells.set(key, Uint8Array.from(found[i + 1]!))
     versions.set(key, found[i + 2]!.toString())
+    if (!withBeside) continue
+    const named = found[i + 3]!.toString()
+    if (named !== 'none') beside.set(key, named === 'cell' ? Uint8Array.from(found[i + 4]!) : null)
   }
-  return { kind: 'read', cells, versions, now: Number(now.toString()) }
+  const read: Extract<CellsRead, { kind: 'read' }> = { kind: 'read', cells, versions, now: Number(now.toString()) }
+  if (withBeside) read.beside = beside
+  return read
+}
+
+/** A read's beside as its script's arguments: `of` empty for none. */
+function besideArgv(beside: CellsBeside | undefined): string[] {
+  return beside === undefined ? ['', '', ''] : [beside.of, beside.reference, beside.target]
 }
 
 /** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */

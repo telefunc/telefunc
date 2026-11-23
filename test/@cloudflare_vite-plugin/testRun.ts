@@ -695,6 +695,19 @@ function testRoomStorage() {
     expect(await outcomeAt('send-outcome', ROW_LIMIT_BYTES)).deep.equal({ told: 'resolved' })
   })
 
+  test('Room: a read of cells reads the cell each reference names beside its cell, by key and on every page of a prefix read', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'beside-read')).deep.equal({
+      written: 'committed',
+      byKey: { 'tm:a': 'lease one', 'tm:b': null },
+      pages: true,
+      without: 0,
+      fillers: 1024,
+      others: { 'tm:a': 'lease one', 'tm:b': null },
+      plain: 'none',
+    })
+  })
+
   test("Room: a join over the store's row limit is refused with ChannelOverflowError, and the next join goes through", async () => {
     await openRoomPage()
     expect(await overRowLimit('join-outcome')).deep.equal({

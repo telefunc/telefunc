@@ -26,6 +26,7 @@ import {
   onJoinOutcome,
   onMetaUpdateOutcome,
   onSendOutcome,
+  onBesideRead,
 } from './Room.telefunc'
 
 type Channels = Awaited<ReturnType<typeof onOrderChannels>>
@@ -108,6 +109,7 @@ function Page() {
       {card('join-outcome', () => onJoinOutcome(Number(length.current?.value)))}
       {card('meta-update-outcome', () => onMetaUpdateOutcome(Number(length.current?.value)))}
       {card('send-outcome', () => onSendOutcome(Number(length.current?.value)))}
+      {card('beside-read', () => onBesideRead())}
     </div>
   )
 }

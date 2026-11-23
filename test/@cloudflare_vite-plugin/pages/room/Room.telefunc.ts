@@ -23,10 +23,12 @@ export {
   onJoinOutcome,
   onMetaUpdateOutcome,
   onSendOutcome,
+  onBesideRead,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
+import { getRoomPlane, type CellsBeside, type CellsRead } from '@telefunc/room/backend'
 import { inboxRegistrations } from './inboxRegistrations'
 
 async function onRoomRoundTrip() {
@@ -311,5 +313,62 @@ async function onSendOutcome(length: number) {
   return inNewRoom(async (room, id) => {
     const recipient = await room.join()
     return { told: await outcomeOf(Room.send(id, { id: recipient.id }, 'v'.repeat(length))) }
+  })
+}
+
+const BESIDE: CellsBeside = { of: 'tm:', reference: 'tml:', target: 'tl:' }
+
+/** A cell per filler member, each referencing lease `L1`: with the three below, a prefix read takes two pages. */
+const FILLERS = Array.from({ length: 1024 }, (_, i) => `tm:f${String(i).padStart(4, '0')}`)
+
+/** `tm:a` references a lease that is there, `tm:b` one that isn't, `tm:c` none; `tx:a` isn't under `of`. */
+const BESIDE_CELLS: Record<string, string> = {
+  'tm:a': 'A',
+  'tml:a': 'L1',
+  'tl:L1': 'lease one',
+  'tm:b': 'B',
+  'tml:b': 'L2',
+  'tm:c': 'C',
+  'tx:a': 'X',
+  ...Object.fromEntries(
+    FILLERS.flatMap((key) => [
+      [key, 'F'],
+      [`tml:${key.slice(3)}`, 'L1'],
+    ]),
+  ),
+}
+
+function besideText(read: CellsRead): Record<string, string | null> | 'none' {
+  if (read.kind !== 'read' || read.beside === undefined) return 'none'
+  const decoder = new TextDecoder()
+  return Object.fromEntries([...read.beside].map(([key, bytes]) => [key, bytes && decoder.decode(bytes)]))
+}
+
+/** What the store reads beside a room's cells: by key, on each page of a prefix read, and without `beside`. */
+async function onBesideRead() {
+  return inNewRoom(async (_room, id) => {
+    const { direct } = getRoomPlane()
+    const inc = (await direct.reads.readHead(id))?.currentInc
+    if (typeof inc !== 'string') throw new Error(`room ${id} has no incarnation`)
+    const encoder = new TextEncoder()
+    const mutations = Object.entries(BESIDE_CELLS).map(([key, text]) => ({ key, bytes: encoder.encode(text) }))
+    const written = (await direct.compareExchangeCells(id, inc, { expect: [], mutations })).kind
+    const keys = ['tm:a', 'tm:b', 'tm:c', 'tx:a', 'tm:absent']
+    const byKey = besideText(await direct.reads.readCells(id, inc, { keys, beside: BESIDE }))
+    const pages: (Record<string, string | null> | 'none')[] = []
+    for await (const page of direct.reads.readCellPages(id, inc, 'tm:', BESIDE)) pages.push(besideText(page))
+    const read: Record<string, string | null> = Object.assign({}, ...pages)
+    const fillers = FILLERS.filter((key) => read[key] === 'lease one').length
+    const others = Object.fromEntries(Object.entries(read).filter(([key]) => !FILLERS.includes(key)))
+    const plain = besideText(await direct.reads.readCells(id, inc, { keys }))
+    return {
+      written,
+      byKey,
+      pages: pages.length > 1,
+      without: pages.filter((page) => page === 'none').length,
+      fillers,
+      others,
+      plain,
+    }
   })
 }

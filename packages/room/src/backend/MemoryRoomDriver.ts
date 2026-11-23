@@ -20,6 +20,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitAccepted,
   CommitOptions,
@@ -181,16 +182,26 @@ function takePage(keys: Iterator<string>, seen: Set<string>): string[] {
   return page
 }
 
-function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number): CellsRead {
+const referenceDecoder = new TextDecoder()
+
+function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number, beside?: CellsBeside): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
+  const besides = beside === undefined ? undefined : new Map<string, Uint8Array | null>()
   for (const key of keys) {
     const cell = incarnation.cells.get(key)
     if (cell === undefined) continue
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
+    if (beside === undefined || besides === undefined || !key.startsWith(beside.of)) continue
+    const reference = incarnation.cells.get(beside.reference + key.slice(beside.of.length))
+    if (reference === undefined) continue
+    const target = incarnation.cells.get(beside.target + referenceDecoder.decode(reference.bytes))
+    besides.set(key, target === undefined ? null : copyBytes(target.bytes))
   }
-  return { kind: 'read', cells, versions, now }
+  return besides === undefined
+    ? { kind: 'read', cells, versions, now }
+    : { kind: 'read', cells, versions, now, beside: besides }
 }
 
 function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null, version: string): void {
@@ -310,11 +321,12 @@ class MemoryRoomDriver implements RoomDriver {
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const incarnation = this.readableIncarnation(roomId, inc)
     if (incarnation === null) return { kind: 'stale-incarnation' }
-    return cellsRead(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
+    const keys = 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix)
+    return cellsRead(incarnation, keys, Date.now(), sel.beside)
   }
 
   /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
-  async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
+  async *readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncGenerator<CellsRead> {
     let keys: Generator<string> | null = null
     const seen = new Set<string>()
     let page: string[]
@@ -326,7 +338,7 @@ class MemoryRoomDriver implements RoomDriver {
       }
       keys ??= liveKeysWithPrefix(incarnation, prefix)
       page = takePage(keys, seen)
-      yield cellsRead(incarnation, page, Date.now())
+      yield cellsRead(incarnation, page, Date.now(), beside)
     } while (page.length === CELL_PAGE_SIZE)
   }
 

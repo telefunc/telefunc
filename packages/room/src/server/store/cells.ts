@@ -1,6 +1,8 @@
 export {
   MEMBER_CELL_PREFIX,
   memberCellKey,
+  memberLeaseCellKey,
+  MEMBER_LEASE_BESIDE,
   memberIdOfCellKey,
   departingCellKey,
   identityCellKey,
@@ -32,6 +34,8 @@ export {
   ackIdOfDmReplyCellKey,
 }
 
+import type { CellsBeside } from '../../backend/contract.js'
+
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
 const MEMBER_CELL_PREFIX = 'm:'
 function memberCellKey(memberId: string): string {
@@ -39,6 +43,12 @@ function memberCellKey(memberId: string): string {
 }
 function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
+}
+/** The id of the lease a member joined under, as text: written and removed with its record, so a read of the record
+ *  reads its lease beside it, by `MEMBER_LEASE_BESIDE`. A member written before it has none. */
+const MEMBER_LEASE_CELL_PREFIX = 'ml:'
+function memberLeaseCellKey(memberId: string): string {
+  return MEMBER_LEASE_CELL_PREFIX + memberId
 }
 /** A member that left, with its cause: an expiring cell its leave writes, which the backend deletes
  *  `ROOM_DEPARTING_RECORD_MS` later. A view that missed the leave event ends the member with it. */
@@ -61,6 +71,12 @@ const JOINS_CELL_KEY = 'joins'
 const LEASE_CELL_PREFIX = 'session:'
 function leaseCellKey(lease: string): string {
   return LEASE_CELL_PREFIX + lease
+}
+/** Beside each member's record, the cell of the lease it joined under. */
+const MEMBER_LEASE_BESIDE: CellsBeside = {
+  of: MEMBER_CELL_PREFIX,
+  reference: MEMBER_LEASE_CELL_PREFIX,
+  target: LEASE_CELL_PREFIX,
 }
 /** A member's mark under its lease, written and removed with its record, so the lease's cleaner finds it. */
 function leaseMemberCellPrefix(lease: string): string {

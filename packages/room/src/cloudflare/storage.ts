@@ -42,6 +42,7 @@ import {
   type HeadExpectation,
   type HeadNext,
   type CellSelector,
+  type CellsBeside,
   type CellsRead,
   type ExpiringCell,
   type ExpiringCellsRead,
@@ -292,13 +293,47 @@ type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
 type CellPage = (Extract<CellsRead, { kind: 'read' }> & { cursor?: string }) | StaleIncarnation
 
-function cellPage(rows: CellRow[], now: number): Extract<CellPage, { kind: 'read' }> {
-  return {
+function cellPage(
+  sql: SqlStorage,
+  inc: string,
+  rows: CellRow[],
+  now: number,
+  beside?: CellsBeside,
+): Extract<CellPage, { kind: 'read' }> {
+  const page: Extract<CellPage, { kind: 'read' }> = {
     kind: 'read',
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
     versions: new Map(rows.map((row) => [row.key, String(row.version)])),
     now,
   }
+  if (beside !== undefined) page.beside = cellsBeside(sql, inc, rows, beside)
+  return page
+}
+
+/** By the key of each row under `beside.of` whose reference is there, the cell it names, `null` where it is absent. */
+function cellsBeside(
+  sql: SqlStorage,
+  inc: string,
+  rows: CellRow[],
+  beside: CellsBeside,
+): Map<string, Uint8Array | null> {
+  const besides = new Map<string, Uint8Array | null>()
+  for (const { key } of rows) {
+    if (!key.startsWith(beside.of)) continue
+    const reference = cellBytes(sql, inc, beside.reference + key.slice(beside.of.length))
+    if (reference === null) continue
+    besides.set(key, cellBytes(sql, inc, beside.target + referenceDecoder.decode(reference)))
+  }
+  return besides
+}
+
+const referenceDecoder = new TextDecoder()
+
+function cellBytes(sql: SqlStorage, inc: string, key: string): Uint8Array | null {
+  const row = sql
+    .exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM cell WHERE inc = ? AND key = ?', inc, key)
+    .toArray()[0]
+  return row === undefined ? null : new Uint8Array(row.bytes)
 }
 
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
@@ -317,7 +352,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
-  return cellPage(selectCellRows(sql, inc, sel), now)
+  return cellPage(sql, inc, selectCellRows(sql, inc, sel), now, sel.beside)
 }
 
 /** The expiring cells of `keys` that haven't expired; the alarm deletes the others. */
@@ -353,7 +388,14 @@ function deleteExpiredCells(sql: SqlStorage, now: number): void {
   sql.exec('DELETE FROM expiring_cell WHERE expires_at <= ?', now)
 }
 
-function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
+function readCellPage(
+  sql: SqlStorage,
+  inc: string,
+  prefix: string,
+  cursor: string | undefined,
+  now: number,
+  beside?: CellsBeside,
+): CellPage {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const range = keyRange('key', prefix, cursor)
@@ -365,7 +407,7 @@ function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: stri
       CELL_PAGE_SIZE,
     )
     .toArray()
-  const page = cellPage(rows, now)
+  const page = cellPage(sql, inc, rows, now, beside)
   if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
   return page
 }

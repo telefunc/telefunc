@@ -5,6 +5,7 @@ import type {
   CellsExchange,
   CellsExchangeResult,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitAccepted,
   CommitOptions,
@@ -80,10 +81,10 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).readExpiringCells(inc, keys)
   }
 
-  async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
+  async *readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncGenerator<CellsRead> {
     let cursor: string | undefined
     do {
-      const page = await this.stub(roomId).readCellPage(inc, prefix, cursor)
+      const page = await this.stub(roomId).readCellPage(inc, prefix, cursor, beside)
       yield page
       if (page.kind === 'stale-incarnation') return
       cursor = page.cursor

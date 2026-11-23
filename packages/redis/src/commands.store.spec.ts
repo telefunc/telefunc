@@ -305,12 +305,13 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
         ],
+        // A join and a leave each write a member's lease reference beside its record.
         tfRoomOperation: [
+          '41 commands, 2 TYPE',
           '38 commands, 2 TYPE',
-          '35 commands, 2 TYPE',
           '28 commands, 2 TYPE',
-          '43 commands, 5 TYPE',
           '46 commands, 5 TYPE',
+          '49 commands, 5 TYPE',
         ],
       })
     }, 300_000)

@@ -6,6 +6,9 @@ export {
   RENEW_CLAIM,
   REMOVE_LEASE,
   RoomLease,
+  leaseCanHost,
+  leaseCellBytes,
+  decodeLeaseRecord,
   leaseHosting,
   runHosted,
   holdViews,
@@ -23,7 +26,7 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import type { CellCounter, CellMutation, OperationOptions, RoomOperation } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
-import { decodeRoomText } from '../lanes/lanes.js'
+import { assert } from '../../utils/assert.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import type { HoldConfig, RoomIncarnation } from '../protocol.js'
 import {
@@ -45,12 +48,67 @@ const leaseTextEncoder = new TextEncoder()
 /** Lapses at `until`, authority time; `cleaner` names the server that claimed it to remove what it hosted. */
 type LeaseRecord = { until: number; cleaner?: string }
 
-function decodeLeaseRecord(raw: Uint8Array): LeaseRecord {
-  return JSON.parse(decodeRoomText(raw)) as LeaseRecord
-}
-
+/** A lease's cell: its record as JSON, `{"until":<digits>}` or `{"until":<digits>,"cleaner":"<id>"}`, which
+ *  `decodeLeaseRecord()` reads by its bytes. */
 function leaseCellBytes(record: LeaseRecord): Uint8Array {
   return leaseTextEncoder.encode(JSON.stringify(record))
+}
+
+const UNTIL_BYTES = leaseTextEncoder.encode('{"until":')
+const CLEANER_BYTES = leaseTextEncoder.encode(',"cleaner":"')
+const DIGIT_0 = 0x30
+const DIGIT_9 = 0x39
+const QUOTE = 0x22
+const BACKSLASH = 0x5c
+const CLOSING_BRACE = 0x7d
+const leaseTextDecoder = new TextDecoder()
+
+/** The record of a lease cell, read as `leaseCellBytes()` writes it: a few byte reads, with no text decoded but a
+ *  cleaner's id. A cell in any other form is a bug, named by `at`: the cell's own key, or the key of the record it was
+ *  read beside. */
+function decodeLeaseRecord(at: string, raw: Uint8Array): LeaseRecord {
+  let byte = bytesAt(raw, UNTIL_BYTES, 0)
+  assertLeaseForm(byte !== -1, at, raw)
+  const digits = byte
+  let until = 0
+  while (isDigit(raw[byte])) {
+    until = until * 10 + ((raw[byte] ?? DIGIT_0) - DIGIT_0)
+    byte++
+  }
+  const length = byte - digits
+  assertLeaseForm(length > 0 && (length === 1 || raw[digits] !== DIGIT_0) && Number.isSafeInteger(until), at, raw)
+  if (raw[byte] === CLOSING_BRACE && byte + 1 === raw.length) return { until }
+  const cleaner = bytesAt(raw, CLEANER_BYTES, byte)
+  assertLeaseForm(cleaner !== -1, at, raw)
+  let end = cleaner
+  while (raw[end] !== undefined && raw[end] !== QUOTE && raw[end] !== BACKSLASH) end++
+  const closed = end > cleaner && raw[end] === QUOTE && raw[end + 1] === CLOSING_BRACE && end + 2 === raw.length
+  assertLeaseForm(closed, at, raw)
+  return { until, cleaner: leaseTextDecoder.decode(raw.subarray(cleaner, end)) }
+}
+
+/** A bug unless `form` holds, its message naming where the cell was read and its text, built only then. */
+function assertLeaseForm(form: boolean, at: string, raw: Uint8Array): asserts form {
+  if (!form)
+    assert(false, `the lease cell read at ${at} isn't one leaseCellBytes() writes: ${leaseTextDecoder.decode(raw)}`)
+}
+
+function isDigit(byte: number | undefined): boolean {
+  return byte !== undefined && byte >= DIGIT_0 && byte <= DIGIT_9
+}
+
+/** The index past `expected` in `raw` at `at`, or -1 where `raw` doesn't hold it there. */
+function bytesAt(raw: Uint8Array, expected: Uint8Array, at: number): number {
+  if (raw.length < at + expected.length) return -1
+  for (let i = 0; i < expected.length; i++) if (raw[at + i] !== expected[i]) return -1
+  return at + expected.length
+}
+
+/** Whether the lease cell `raw`, read at `at` (as for `decodeLeaseRecord()`), can host at `now`: no reap claimed it,
+ *  and it hasn't lapsed. */
+function leaseCanHost(at: string, raw: Uint8Array, now: number): boolean {
+  const record = decodeLeaseRecord(at, raw)
+  return record.cleaner === undefined && record.until >= now
 }
 
 /** A lease from `now`, the authority time its write read. */
@@ -97,7 +155,7 @@ type LeaseState = { id: string; created: boolean }
 function leaseHosting({ id, created }: LeaseState, raw: Uint8Array | undefined, now: number): CellMutation[] | null {
   const key = leaseCellKey(id)
   if (raw === undefined) return created ? null : [{ key, bytes: leaseRecordBytes(now) }]
-  const record = decodeLeaseRecord(raw)
+  const record = decodeLeaseRecord(key, raw)
   if (record.cleaner !== undefined) return null
   return record.until < now ? [{ key, bytes: leaseRecordBytes(now) }] : []
 }
@@ -159,7 +217,7 @@ const RENEW_LEASE: RoomOperation<{ id: string }, boolean> = {
   plan(tx, { id }) {
     const key = leaseCellKey(id)
     const raw = tx.cell(key)
-    if (raw === undefined || decodeLeaseRecord(raw).cleaner !== undefined) return false
+    if (raw === undefined || decodeLeaseRecord(key, raw).cleaner !== undefined) return false
     tx.write({ key, bytes: leaseRecordBytes(tx.now) })
     return true
   },
@@ -172,7 +230,7 @@ const CLAIM_LEASE: RoomOperation<LeaseCleanArgs, boolean> = {
   name: 'claimLease',
   plan(tx, { key, cleaner }) {
     const raw = tx.cell(key)
-    if (raw === undefined || decodeLeaseRecord(raw).until >= tx.now) return false
+    if (raw === undefined || decodeLeaseRecord(key, raw).until >= tx.now) return false
     tx.write({ key, bytes: claimRecordBytes(tx.now, cleaner) })
     return true
   },
@@ -183,7 +241,7 @@ const RENEW_CLAIM: RoomOperation<LeaseCleanArgs, boolean> = {
   name: 'renewClaim',
   plan(tx, { key, cleaner }) {
     const raw = tx.cell(key)
-    if (raw === undefined || decodeLeaseRecord(raw).cleaner !== cleaner) return false
+    if (raw === undefined || decodeLeaseRecord(key, raw).cleaner !== cleaner) return false
     tx.write({ key, bytes: claimRecordBytes(tx.now, cleaner) })
     return true
   },
@@ -194,7 +252,7 @@ const REMOVE_LEASE: RoomOperation<LeaseCleanArgs, void> = {
   name: 'removeLease',
   plan(tx, { key, cleaner }) {
     const raw = tx.cell(key)
-    if (raw !== undefined && decodeLeaseRecord(raw).cleaner === cleaner) tx.write({ key, bytes: null })
+    if (raw !== undefined && decodeLeaseRecord(key, raw).cleaner === cleaner) tx.write({ key, bytes: null })
   },
 }
 
@@ -232,7 +290,8 @@ async function reapLapsedLeases(store: RoomStore, room: RoomIncarnation): Promis
 
 /** False once none of the leases read had lapsed. */
 async function reapLeases(store: RoomStore, room: RoomIncarnation, { cells, now }: CellsAt): Promise<boolean> {
-  const lapsed = Array.from(cells.keys()).filter((key) => decodeLeaseRecord(cells.get(key)!).until < now)
+  const lapsed: string[] = []
+  for (const [key, raw] of cells) if (decodeLeaseRecord(key, raw).until < now) lapsed.push(key)
   const cleaner = crypto.randomUUID()
   await eachInFlight(lapsed, (key) => reapLease(store, room, key, cleaner))
   return lapsed.length > 0
