@@ -19,6 +19,7 @@ import { once } from 'node:events'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
+import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
 import { frameworkRequest } from './frameworkRequest.fixture.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
@@ -43,6 +44,14 @@ const listening: { close(): void }[] = []
 function nodeRequest(req: IncomingMessage, res: ServerResponse) {
   telefunc.serve({ req, res }).catch(() => {})
 }
+function nodeReadable(req: IncomingMessage, res: ServerResponse) {
+  serve({ url: req.url ?? '/', method: req.method ?? 'GET', readable: req, headers: req.headers })
+    .then((httpResponse) => {
+      res.writeHead(httpResponse.statusCode, httpResponse.headers)
+      return httpResponse.pipe(res)
+    })
+    .catch(() => {})
+}
 function fetchRequest(req: IncomingMessage | Http2ServerRequest, res: Answering) {
   telefunc
     .serve({ request: frameworkRequest(req, `http://127.0.0.1${telefuncPath}`) })
@@ -55,8 +64,8 @@ function fetchRequest(req: IncomingMessage | Http2ServerRequest, res: Answering)
 }
 /** What `fetchRequest` writes its answer to: Node's response, of HTTP/1.1 or HTTP/2. */
 type Answering = { writeHead(status: number): unknown; write(chunk: Uint8Array): unknown; end(): unknown }
-const servers = { 'Node request': nodeRequest, 'Fetch Request': fetchRequest }
-const vias = ['Node request', 'Fetch Request'] as const
+const servers = { 'Node request': nodeRequest, 'Node readable': nodeReadable, 'Fetch Request': fetchRequest }
+const vias = ['Node request', 'Node readable', 'Fetch Request'] as const
 
 async function portOf(server: { address(): ReturnType<Server['address']> }) {
   const address = server.address()

@@ -13,7 +13,7 @@ function nodeReadableToWebRequest(
   method: string,
   headers: HeadersInput,
   response?: Writable,
-): { request: Request; unwatch: () => void } {
+): { request: Request; unwatch: () => void; clientGone: AbortSignal } {
   // `new Request()` refuses a body for these methods.
   const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
   const body = hasBody ? webBodyOf(readable) : null
@@ -44,19 +44,26 @@ function nodeReadableToWebRequest(
     response.once('close', () => {
       if (!response.writableEnded) abortController.abort()
     })
-    // Once answered, Node no longer ends a request whose client leaves before the body's end: only the socket's close
-    // says it, watched until the body's end, as keep-alive reuses the socket.
-    if (socket) {
-      const left = () => abortController.abort()
-      socket.once('close', left)
-      readable.once('end', () => socket.off('close', left))
-    }
   } else if (socket) {
     const abort = () => abortController.abort()
     socket.once('close', abort)
     unwatch = () => socket.off('close', abort)
   }
-  return { request, unwatch }
+  // The client left: its request was cut short, or once answered, its socket closed before the body's end.
+  const clientGone = AbortSignal.any([abortController.signal, socketClosesBeforeEnd(readable, socket)])
+  return { request, unwatch, clientGone }
+}
+
+/** Aborts once `socket` closes before `readable`'s end: the client left mid-upload. Once the call is answered, Node no
+ *  longer ends the request then, and `serve()` no longer has the request's signal watch the socket (`unwatch`). Watched
+ *  until the body's end, as keep-alive reuses the socket. */
+function socketClosesBeforeEnd(readable: Readable, socket: EventEmitter | null | undefined): AbortSignal {
+  const gone = new AbortController()
+  if (!socket || readable.readableEnded) return gone.signal
+  const left = () => gone.abort()
+  socket.once('close', left)
+  readable.once('end', () => socket.off('close', left))
+  return gone.signal
 }
 
 /** `readable` as a Web body that reads it only once read itself. A binary call's or an SSE upload's body is read off

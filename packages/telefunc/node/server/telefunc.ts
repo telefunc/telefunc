@@ -129,7 +129,7 @@ async function resolveHttpRequest(
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
-    const { request, unwatch } = nodeReadableToWebRequest(
+    const { request, unwatch, clientGone } = nodeReadableToWebRequest(
       httpRequest.readable,
       url,
       httpRequest.method,
@@ -141,7 +141,7 @@ async function resolveHttpRequest(
       readable: httpRequest.readable,
       context: httpRequest.context,
       clientLeft: socketShowsClientLeft(httpRequest.readable),
-      clientGone: request.signal,
+      clientGone,
       unwatch,
     }
   }
