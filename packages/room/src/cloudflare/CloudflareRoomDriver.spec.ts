@@ -82,6 +82,39 @@ describe('CloudflareRoomDriver: its size rule, as a call checks it before it wri
     await Room.close(id)
   })
 
+  it("delivers a participant's send() of a message over the row limit, as its commit keeps no row of it", async () => {
+    const id = `cloudflare-participant-send-${crypto.randomUUID()}`
+    const room = await Room.create(id)
+    const sender = await room.join()
+    const recipient = await room.join()
+    const read: number[] = []
+    recipient.listen((data) => {
+      const length = typeof data === 'string' ? data.length : -1
+      read.push(length)
+      return length
+    })
+    withCloudflareRule()
+    const answer = await sender.send(recipient.id, OVER_ROW, { ack: true }).then((reply) => reply, told)
+    vi.restoreAllMocks()
+
+    expect({ answer, read }).toEqual({ answer: OVER_ROW.length, read: [OVER_ROW.length] })
+    await Room.close(id)
+  })
+
+  it("refuses a participant's send() whose recipient answers over the row limit, as the answer is kept in a row", async () => {
+    const id = `cloudflare-participant-reply-${crypto.randomUUID()}`
+    const room = await Room.create(id)
+    const sender = await room.join()
+    const recipient = await room.join()
+    recipient.listen(() => OVER_ROW)
+    withCloudflareRule()
+    const answer = await sender.send(recipient.id, 'small', { ack: true }).then(() => 'resolved', told)
+    vi.restoreAllMocks()
+
+    expect(answer).toBe('ChannelOverflowError')
+    await Room.close(id)
+  })
+
   it('refuses a Room.removeParticipant() whose reason is over the row limit, as its leave is kept in rows', async () => {
     const id = `cloudflare-remove-${crypto.randomUUID()}`
     await Room.create(id)
