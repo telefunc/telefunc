@@ -37,7 +37,7 @@ class RedisConnection {
   constructor({ redis, prefix }: RedisConnectionOptions) {
     assertKeyPrefix(prefix)
     this.source = redis
-    this.commands = commandClientOf(redis)
+    this.commands = this.makeCommandClient(redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.subscriptions = new RedisSubscriptions({ connection: this })
@@ -70,7 +70,7 @@ class RedisConnection {
     if (this.holders.has(redis)) return
     if (!connectsAlike(this.source, redis)) this.connectWith(redis)
     else if (this.commandsEnded) {
-      this.commands = commandClientOf(redis)
+      this.commands = this.makeCommandClient(redis)
       this.commandsEnded = false
     }
     const ended = () => {
@@ -89,12 +89,39 @@ class RedisConnection {
     this.holders.clear()
     const previous = this.commands
     this.source = redis
-    this.commands = commandClientOf(redis)
+    this.commands = this.makeCommandClient(redis)
     // QUIT lets the commands already sent get their replies; a client that never connected has none.
     if (previous.status === 'wait') previous.disconnect()
     else if (!this.commandsEnded) previous.quit().catch(() => {})
     this.commandsEnded = false
-    this.subscriptions.reconnect()
+    this.subscriptions.reconnect(
+      new Error("Telefunc's Redis backend moved to a client installed with other connection options"),
+    )
+  }
+
+  /** The backend's command client made from `redis`. On a Cluster, a failover gives a slot to a replica that may lack
+   *  what the old master accepted, and a subscriber connection on another node isn't cut by it: once a refresh of the
+   *  client's slot map shows a slot on one of its replicas, the subscriptions resume on a fresh connection, each from
+   *  where its key's master stands now. A slot that resharding moves to another master takes its keys with it, and
+   *  the bus keeps delivering. */
+  private makeCommandClient(redis: RedisClient): RedisClient {
+    const commands = commandClientOf(redis)
+    if (!isCluster(commands)) return commands
+    /** Each slot's nodes at the last refresh that listed it, its master first. */
+    const nodesBySlot: string[][] = []
+    commands.on('refresh', () => {
+      let failedOver = false
+      commands.slots.forEach((nodes, slot) => {
+        const before = nodesBySlot[slot]
+        if (before !== undefined && before[0] !== nodes[0] && before.includes(nodes[0]!)) failedOver = true
+        // A copy: a MOVED reply rewrites ioredis's entry in place.
+        nodesBySlot[slot] = [...nodes]
+      })
+      if (failedOver && commands === this.commands) {
+        this.subscriptions.reconnect(new Error('A Redis Cluster master failed over to its replica'))
+      }
+    })
+    return commands
   }
 
   async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {

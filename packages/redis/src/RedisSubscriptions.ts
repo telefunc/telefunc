@@ -258,10 +258,11 @@ class RedisSubscriptions {
     connection.awaitingPong = false
   }
 
-  /** Moves the subscriptions to a connection of the connection's current client, as a resume after a loss. */
-  reconnect(): void {
+  /** Moves the subscriptions to a connection of the connection's current client, as a resume after a loss: the commits
+   *  awaiting their fences see `reason`. */
+  reconnect(reason: Error): void {
     if (this.socket.phase === 'idle') return
-    this.loseAll(new Error("Telefunc's Redis backend moved to a client installed with other connection options"))
+    this.loseAll(reason)
     this.reconnectDelay = RECONNECT_DELAY_MIN_MS
     void this.connect()
   }

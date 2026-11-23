@@ -232,6 +232,9 @@ function isRefusal(error: unknown): error is RedisFailure {
   return error instanceof RedisFailure && error.refused
 }
 
+/** ioredis's own default. */
+const SLOTS_REFRESH_MS = 5_000
+
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
  *  only (Room reads are strongly consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
@@ -253,6 +256,9 @@ function createCommandClient(redis: RedisClient): RedisClient {
     ? redis.duplicate([], {
         scaleReads: 'master',
         retryDelayOnFailover: 0,
+        // How soon a failover is seen by the subscriptions, which its slot map tells (RedisConnection), whatever the
+        // app's client refreshes at.
+        slotsRefreshInterval: SLOTS_REFRESH_MS,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
         // variable key count is the count, and refuses a batch whose keys span masters.
         enableAutoPipelining: false,

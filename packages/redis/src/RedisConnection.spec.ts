@@ -1,11 +1,14 @@
 import { inspect } from 'node:util'
-import { Redis } from 'ioredis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { Cluster, Redis } from 'ioredis'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RedisClient } from './ioredis.js'
 import { RedisConnection } from './RedisConnection.js'
+import { RedisSubscriptions } from './RedisSubscriptions.js'
 
-const clients: Redis[] = []
+const clients: RedisClient[] = []
 afterEach(() => {
   for (const client of clients.splice(0)) client.disconnect()
+  vi.restoreAllMocks()
 })
 
 /** A client that connects only on a command, which these tests never send. */
@@ -31,7 +34,7 @@ async function printed(rejection: Promise<unknown>): Promise<string> {
   return inspect(await rejection.catch((error: unknown) => error), { depth: 8 })
 }
 
-function installed(redis: Redis): RedisConnection {
+function installed(redis: RedisClient): RedisConnection {
   const connection = new RedisConnection({ redis, prefix: 'tf:' })
   connection.holdFor(redis)
   return connection
@@ -143,5 +146,38 @@ describe('a failure of Redis, as a command rejects with it', () => {
     const text = await printed(rejection)
     expect(text).not.toContain('body-SECRET')
     expect(text).not.toContain('args')
+  })
+})
+
+describe('a Cluster whose slot gets another master', () => {
+  /** A lazy Cluster installed as the backend's client, and its command client, whose slot map the tests set as a
+   *  refresh leaves it: each slot's master, then its replicas. */
+  function commandsOfCluster(): Cluster {
+    const cluster = new Cluster([{ host: '127.0.0.1', port: 6390 }], { lazyConnect: true })
+    clients.push(cluster)
+    const commands = installed(cluster).client as Cluster
+    commands.slots[0] = ['127.0.0.1:7001', '127.0.0.1:7003']
+    commands.slots[1] = ['127.0.0.1:7002']
+    commands.emit('refresh')
+    return commands
+  }
+
+  it("a replica of it, by a failover: the subscriptions resume on a fresh connection, which the failover doesn't cut on another node", () => {
+    const reconnect = vi.spyOn(RedisSubscriptions.prototype, 'reconnect')
+    const commands = commandsOfCluster()
+    commands.slots[1] = ['127.0.0.1:7002', '127.0.0.1:7004']
+    commands.emit('refresh')
+    expect(reconnect).not.toHaveBeenCalled()
+    commands.slots[0] = ['127.0.0.1:7003']
+    commands.emit('refresh')
+    expect(reconnect).toHaveBeenCalledOnce()
+  })
+
+  it('another master, by resharding: the subscriptions stay, as the slot took its keys and the bus delivers', () => {
+    const reconnect = vi.spyOn(RedisSubscriptions.prototype, 'reconnect')
+    const commands = commandsOfCluster()
+    commands.slots[0] = ['127.0.0.1:7002']
+    commands.emit('refresh')
+    expect(reconnect).not.toHaveBeenCalled()
   })
 })
