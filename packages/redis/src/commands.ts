@@ -33,7 +33,7 @@ import {
   type StartRead,
 } from './orderRecord.js'
 import {
-  broadcastChannel,
+  broadcastPublishKeys,
   broadcastSequenceKey,
   cellIndexKey,
   cellValuesKey,
@@ -954,7 +954,7 @@ const REDIS_COMMANDS = {
       const data = publishedData(payload)
       assertPublishable(typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength)
       return {
-        keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
+        keys: broadcastPublishKeys(prefix, route),
         // ioredis sends a string as UTF-8.
         argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind, drawCommitId()],
       }

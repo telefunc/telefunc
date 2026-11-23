@@ -3,6 +3,7 @@ export {
   assertKeyPrefix,
   broadcastSequenceKey,
   broadcastChannel,
+  broadcastPublishKeys,
   headKey,
   incarnationKeysKey,
   revKey,
@@ -49,11 +50,21 @@ function broadcastTag(key: string): string {
   return key === '' ? '{_}:empty' : `{${encodeURIComponent(key)}}`
 }
 function broadcastSequenceKey(prefix: string, key: string): string {
-  return `${prefix}seq:${broadcastTag(key)}`
+  return sequenceKeyOf(prefix, broadcastTag(key))
 }
 function broadcastChannel(prefix: string, route: BroadcastRoute): string {
-  const kind = route.kind === 'text' ? 't' : 'b'
-  return `${prefix}${kind}:${broadcastTag(route.key)}`
+  return channelOf(prefix, route, broadcastTag(route.key))
+}
+/** A publish's keys, its key's order record and its kind's channel, from one encoding of its key. */
+function broadcastPublishKeys(prefix: string, route: BroadcastRoute): [order: string, channel: string] {
+  const tag = broadcastTag(route.key)
+  return [sequenceKeyOf(prefix, tag), channelOf(prefix, route, tag)]
+}
+function sequenceKeyOf(prefix: string, tag: string): string {
+  return `${prefix}seq:${tag}`
+}
+function channelOf(prefix: string, { kind }: BroadcastRoute, tag: string): string {
+  return `${prefix}${kind === 'text' ? 't' : 'b'}:${tag}`
 }
 
 function roomTag(prefix: string, roomId: string): string {
