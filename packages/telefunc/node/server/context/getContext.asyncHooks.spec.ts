@@ -62,13 +62,8 @@ test('an onClose() callback reads the context of its request, not the one provid
   expect(userAtClose).toBe('request')
 })
 
-test('provideTelefuncContext(context, undefined) throws', () => {
+test('provideTelefuncContext(context) without `fn` throws', () => {
   // @ts-expect-error
-  expect(() => provideTelefuncContext({ user: 'A' }, undefined)).toThrow()
+  expect(() => provideTelefuncContext({ user: 'A' })).toThrow()
   expect(readUser()).toBe('throws')
-})
-
-test('provideTelefuncContext(context) provides the context to the code that runs after it', async () => {
-  provideTelefuncContext<{ user: string }>({ user: 'A' })
-  expect(await onReadAroundAwait()).toEqual({ before: 'A', after: 'A' })
 })

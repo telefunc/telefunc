@@ -1,34 +1,19 @@
-export { provideTelefuncContext_async }
-
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
-import { PROVIDED_CONTEXT } from './getContext.js'
 import type { Context } from './context.js'
-import type { Telefunc } from './TelefuncNamespace.js'
 
 const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context> }>('getContext/async.ts', {})
 
 installAsyncMode({
   getContext_async,
-  provideTelefuncContext_async,
   restoreContext_async,
 })
 
 function getContext_async() {
   return globalObject.asyncStore?.getStore() ?? null
-}
-
-function provideTelefuncContext_async(context: Telefunc.Context): void {
-  assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
-  globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
-  assertUsage(
-    typeof globalObject.asyncStore.enterWith === 'function',
-    '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to serve() instead.',
-  )
-  globalObject.asyncStore.enterWith({ [PROVIDED_CONTEXT]: context })
 }
 
 function restoreContext_async<T>(rawContext: Context, fn: () => T): T {

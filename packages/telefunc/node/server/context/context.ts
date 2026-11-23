@@ -1,13 +1,11 @@
 export { getRawContext }
 export { restoreContext }
-export { provideContext }
 export { installAsyncMode }
 export { isAsyncMode }
 export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { restoreContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
-import type { Telefunc } from './TelefuncNamespace.js'
+import { restoreContext_sync, getContext_sync } from './sync.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
 type Context = {
@@ -18,18 +16,15 @@ type Context = {
 
 type ContextGetter = () => Context | null
 type RestoreContext = <T>(context: Context, fn: () => T) => T
-type ProvideTelefuncContext = (context: Telefunc.Context) => void
 
 const globalObject = getGlobalObject<{
   getContext: ContextGetter
   restoreContext: RestoreContext
-  provideTelefuncContext: ProvideTelefuncContext
   neverRestored: boolean
   isAsyncMode: boolean
 }>('context.ts', {
   getContext: getContext_sync,
   restoreContext: restoreContext_sync,
-  provideTelefuncContext: provideTelefuncContext_sync,
   neverRestored: true,
   isAsyncMode: false,
 })
@@ -62,23 +57,16 @@ function restoreContext<T>(context: Context, fn: () => T): T {
   return (isAsyncMode() ? globalObject.restoreContext : restoreContext_sync)(context, fn)
 }
 
-function provideContext(context: Telefunc.Context): void {
-  ;(isAsyncMode() ? globalObject.provideTelefuncContext : provideTelefuncContext_sync)(context)
-}
-
 // ── Async mode ─────────────────────────────────────────────────────
 
 function installAsyncMode({
   getContext_async,
-  provideTelefuncContext_async,
   restoreContext_async,
 }: {
   getContext_async: ContextGetter
-  provideTelefuncContext_async: ProvideTelefuncContext
   restoreContext_async: RestoreContext
 }): void {
   globalObject.getContext = getContext_async
-  globalObject.provideTelefuncContext = provideTelefuncContext_async
   globalObject.restoreContext = restoreContext_async
   globalObject.isAsyncMode = true
 }
