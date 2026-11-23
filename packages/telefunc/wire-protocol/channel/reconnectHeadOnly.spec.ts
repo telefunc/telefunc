@@ -29,25 +29,40 @@ afterAll(() => {
   server.close()
 })
 
-/** A forwarder that passes each connection both ways until `dropToHead()`, which cuts them; the next connection then
- *  gets the head of the server's answer alone. `connections`: when each came, whether it got the head alone, and when
- *  the page closed it. */
+/** Passes connections both ways; after `dropToHead()`, a cut session's next connection gets the server's head alone. */
 async function link() {
   const sockets = new Set<Socket>()
-  let headOnly = false
-  const connections: Array<{ at: number; headOnly: boolean; closedAt: number | null }> = []
+  /** The session each open connection's request named. */
+  const sessionOf = new Map<Socket, string | null>()
+  /** The sessions `dropToHead()` cut, till their next connection. */
+  const headOnly = new Set<string>()
+  const connections: Array<{ at: number; headOnly: boolean }> = []
   const forwarder = net.createServer((page) => {
     page.on('error', () => {})
     sockets.add(page)
-    const connection = { at: performance.now(), headOnly, closedAt: null as number | null }
-    headOnly = false
-    connections.push(connection)
-    page.on('close', () => void (connection.closedAt = performance.now()))
+    const at = performance.now()
     const upstream = net.connect(port, '127.0.0.1')
     upstream.on('error', () => {})
     sockets.add(upstream)
-    page.pipe(upstream)
-    if (connection.headOnly) {
+    page.on('close', () => {
+      sessionOf.delete(page)
+      upstream.destroy()
+    })
+    upstream.on('close', () => page.destroy())
+    let request = Buffer.alloc(0)
+    const untilRequestLine = (chunk: Buffer) => {
+      request = Buffer.concat([request, chunk])
+      const end = request.indexOf('\r\n')
+      if (end === -1) return
+      page.off('data', untilRequestLine)
+      page.pause()
+      const session = /[?&]session=([^&\s]+)/.exec(request.subarray(0, end).toString('latin1'))?.[1] ?? null
+      sessionOf.set(page, session)
+      const connection = { at, headOnly: session !== null && headOnly.delete(session) }
+      connections.push(connection)
+      upstream.write(request)
+      page.pipe(upstream)
+      if (!connection.headOnly) return void upstream.pipe(page)
       let answer = Buffer.alloc(0)
       const untilHead = (chunk: Buffer) => {
         answer = Buffer.concat([answer, chunk])
@@ -57,18 +72,18 @@ async function link() {
         page.write(answer.subarray(0, end + 4))
       }
       upstream.on('data', untilHead)
-    } else upstream.pipe(page)
-    page.on('close', () => upstream.destroy())
-    upstream.on('close', () => page.destroy())
+    }
+    page.on('data', untilRequestLine)
   })
   await new Promise<void>((resolve) => forwarder.listen(0, '127.0.0.1', resolve))
   const address = forwarder.address()
   if (address === null || typeof address === 'string') throw new Error('no port')
   return {
     telefuncUrl: `http://127.0.0.1:${address.port}/_telefunc`,
+    port: address.port,
     connections,
     dropToHead() {
-      headOnly = true
+      for (const session of sessionOf.values()) if (session !== null) headOnly.add(session)
       for (const socket of sockets) socket.destroy()
     },
     close() {
@@ -78,7 +93,8 @@ async function link() {
   }
 }
 
-test("over a WebSocket, a page whose next connection after a drop gets the server's head and nothing more drops it as its heartbeat finds it dead, then sends on the next", async () => {
+/** `stray`: another client connects just after the drop, as a page on a reused port may; `atOnce`: no backoff. */
+async function dropsHeadOnlyWire({ stray = false, atOnce = false } = {}) {
   const network = await link()
   const channel = new ServerChannel<string, string>()
   getChannelMux().registerChannel(channel)
@@ -89,25 +105,49 @@ test("over a WebSocket, a page whose next connection after a drop gets the serve
   })
   const lifecycle = register.mock.contexts.at(-1)
   register.mockRestore()
-  const late = vi.spyOn(WireLifecycle.prototype, 'onWireLate')
+  const onWireLate = WireLifecycle.prototype.onWireLate
+  let droppedAt = Number.POSITIVE_INFINITY
+  const late = vi.spyOn(WireLifecycle.prototype, 'onWireLate').mockImplementation(function (this: WireLifecycle, wire) {
+    if (this === lifecycle) droppedAt = Math.min(droppedAt, performance.now())
+    return onWireLate.call(this, wire)
+  })
   const reconcileLate = vi.spyOn(WireLifecycle.prototype, 'onReconcileLate')
+  const random = atOnce ? vi.spyOn(Math, 'random').mockReturnValue(0) : null
   try {
     await Promise.all([channel.opened, page.opened])
     const received = Promise.withResolvers<string>()
     channel.listen((message) => void received.resolve(message))
     network.dropToHead()
+    if (stray) {
+      const other = net.connect(network.port, '127.0.0.1')
+      other.on('error', () => {})
+      other.write('GET /_telefunc HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+      other.once('data', () => other.destroy())
+    }
     void page.send('after')
     expect(await received.promise).toBe('after')
-    const headOnly = network.connections.find((connection) => connection.headOnly)
-    const closedAt = headOnly?.closedAt ?? Number.POSITIVE_INFINITY
-    // The page closed it, and only then made the connection that carried the message.
-    expect(network.connections.some(({ at }) => at > closedAt)).toBe(true)
+    expect(network.connections.filter((connection) => connection.headOnly)).toHaveLength(1)
+    // The page's heartbeat dropped it, and only then did the page make the connection that carried the message.
     expect(late.mock.contexts.filter((context) => context === lifecycle)).toHaveLength(1)
+    expect(network.connections.some(({ at }) => at > droppedAt)).toBe(true)
     expect(reconcileLate).not.toHaveBeenCalled()
   } finally {
+    random?.mockRestore()
     late.mockRestore()
     reconcileLate.mockRestore()
     page.abort()
     network.close()
   }
+}
+
+test("over a WebSocket, a page whose next connection after a drop gets the server's head and nothing more drops it as its heartbeat finds it dead, then sends on the next", async () => {
+  await dropsHeadOnlyWire()
+}, 20_000)
+
+test("over a WebSocket, a page whose next connection after a drop gets the server's head and nothing more drops it as its heartbeat finds it dead, then sends on the next, while another client's connection reaches its link first", async () => {
+  await dropsHeadOnlyWire({ stray: true })
+}, 20_000)
+
+test("over a WebSocket, a page whose next connection after a drop gets the server's head and nothing more drops it as its heartbeat finds it dead, then sends on the next, when each reconnect goes at once", async () => {
+  await dropsHeadOnlyWire({ atOnce: true })
 }, 20_000)
