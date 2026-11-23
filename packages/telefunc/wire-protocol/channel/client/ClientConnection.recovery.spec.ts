@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { CHANNEL_TRANSPORT } from '../../constants.js'
-import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { CHANNEL_TRANSPORT, RECONCILE_TIMEOUT_MS } from '../../constants.js'
+import { encode, isOneFrame, messageFrames, withTook } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientConnection } from './ClientConnection.js'
 import { WireLifecycle } from './WireLifecycle.js'
@@ -20,12 +20,15 @@ const serverSettings = { pingInterval: PING_INTERVAL_MS, reconnectTimeout: RECON
 const SHORT_WINDOW = { pingInterval: 1_000, reconnectTimeout: 1_000 }
 
 /** What a socket the page makes does: reconciles `afterMs` after it opens; opens `afterMs` after it was made, then
- *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); fails at once as a refused
- *  connect, `error` then `close` in one task; fails with `error` alone, as Node 22's after a reset at accept; never opens
- *  nor fails, as one whose upgrade gets no answer (`hangs22`: and fires `error` twice, never `close`, once the page
- *  closes it, as Node 22's); or can't be made: its constructor throws. */
+ *  reconciles (`despiteClose`: even where the page closed it before, as a runtime may); opens and takes the page's
+ *  bytes over `takesMs`, as a slow link carries them, then reconciles; opens and answers PINGs only, as a proxy for a
+ *  server it lost; fails at once as a refused connect, `error` then `close` in one task; fails with `error` alone, as
+ *  Node 22's after a reset at accept; never opens nor fails, as one whose upgrade gets no answer (`hangs22`: and fires
+ *  `error` twice, never `close`, once the page closes it, as Node 22's); or can't be made: its constructor throws. */
 type Script =
   | { reconcile: { afterMs: number } }
+  | { takes: { takesMs: number } }
+  | 'pingsOnly'
   | { opens: { afterMs: number; despiteClose?: boolean } }
   | 'refused'
   | 'errors'
@@ -54,6 +57,11 @@ class ScriptedWebSocket {
   static mostConnecting = 0
   private readonly despiteClose: boolean
   private readonly errorsOnClose: boolean
+  /** Whether it takes the page's RECONCILE, and when it has taken all the page sent by then, where it takes it slowly. */
+  private readonly takesReconcile: boolean = true
+  private readonly takenBy: number | null = null
+  /** The bytes of the page's messages. */
+  private sentBytes = 0
 
   constructor() {
     if (ScriptedWebSocket.scripts[0] === 'throws') {
@@ -67,6 +75,21 @@ class ScriptedWebSocket {
     this.despiteClose = typeof script === 'object' && 'opens' in script && script.opens.despiteClose === true
     this.errorsOnClose = script === 'hangs22'
     if (script === 'hangs' || script === 'hangs22' || script === 'throws') return
+    if (script === 'pingsOnly') {
+      this.takesReconcile = false
+      queueMicrotask(() => this.open())
+      return
+    }
+    if (typeof script === 'object' && 'takes' in script) {
+      this.takesReconcile = false
+      this.takenBy = this.at + script.takes.takesMs
+      queueMicrotask(() => this.open())
+      setTimeout(() => {
+        this.deliver(encode.reconcileTaken())
+        this.deliver(reconciled())
+      }, script.takes.takesMs)
+      return
+    }
     if (script === 'refused') {
       queueMicrotask(() => {
         this.readyState = 3
@@ -96,10 +119,17 @@ class ScriptedWebSocket {
   }
   send(message: Uint8Array<ArrayBuffer>): void {
     this.sent++
+    this.sentBytes += message.byteLength
     for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
-      if (frame[0] === TAG.PING) queueMicrotask(() => this.deliver(encode.pong([])))
-      if (frame[0] === TAG.RECONCILE) queueMicrotask(() => this.deliver(encode.reconcileTaken()))
+      if (frame[0] === TAG.PING) queueMicrotask(() => this.deliver(withTook(encode.pong([]), this.took())))
+      if (frame[0] === TAG.RECONCILE && this.takesReconcile) queueMicrotask(() => this.deliver(encode.reconcileTaken()))
     }
+  }
+  /** How many of the page's bytes it took: all it got, or, taking them slowly, as many as the time since it opened gives. */
+  private took(): number {
+    if (this.takenBy === null) return this.takesReconcile ? this.sentBytes : 0
+    const share = Math.min(1, (performance.now() - this.at) / (this.takenBy - this.at))
+    return Math.floor(this.sentBytes * share)
   }
   close(): void {
     this.closedByPage = true
@@ -339,6 +369,43 @@ describe("a page's recovery", () => {
     await vi.advanceTimersByTimeAsync(4_000)
     expect(ScriptedWebSocket.made.map((ws) => Math.round(ws.at - startedAt))).toEqual([0, 3450])
     expect(ScriptedWebSocket.made.map((ws) => ws.closedByPage)).toEqual([true, false])
+    expect(ended).toEqual([])
+  })
+
+  test('gives up a first connect whose server answers its PINGs and never takes its RECONCILE 10 s after it, and opens the channel on the next socket', async () => {
+    ScriptedWebSocket.scripts = ['pingsOnly', { reconcile: { afterMs: 0 } }]
+    const ended: unknown[] = []
+    const channel = fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) })
+    const opened = vi.spyOn(channel, '_onTransportOpen')
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
+      transports: [CHANNEL_TRANSPORT.WS],
+      fetchImpl: fetch,
+      connectionKey: crypto.randomUUID(),
+    })
+    const startedAt = performance.now()
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 5_000)
+    const [first, second] = ScriptedWebSocket.made
+    expect(ScriptedWebSocket.made).toHaveLength(2)
+    expect(first?.closedByPage).toBe(true)
+    expect([second?.readyState, second?.closedByPage]).toEqual([1, false])
+    expect(Math.round((second?.at ?? 0) - startedAt)).toBeGreaterThanOrEqual(RECONCILE_TIMEOUT_MS)
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(ended).toEqual([])
+  })
+
+  test('keeps a first connect whose server takes its bytes as a slow link carries them, past 10 s, and then reconciles', async () => {
+    ScriptedWebSocket.scripts = [{ takes: { takesMs: 2.5 * RECONCILE_TIMEOUT_MS } }]
+    const ended: unknown[] = []
+    const channel = fakeMuxChannel({ _onConnectionLost: (e) => ended.push(e) })
+    const opened = vi.spyOn(channel, '_onTransportOpen')
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
+      transports: [CHANNEL_TRANSPORT.WS],
+      fetchImpl: fetch,
+      connectionKey: crypto.randomUUID(),
+    })
+    await vi.advanceTimersByTimeAsync(3 * RECONCILE_TIMEOUT_MS)
+    expect(ScriptedWebSocket.made.map((ws) => [ws.readyState, ws.closedByPage])).toEqual([[1, false]])
+    expect(opened).toHaveBeenCalledTimes(1)
     expect(ended).toEqual([])
   })
 

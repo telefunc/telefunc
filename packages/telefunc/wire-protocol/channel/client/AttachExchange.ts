@@ -70,7 +70,8 @@ class AttachExchange {
    *  (`reconcileTimer`) never outlives it. */
   private isReconciling = false
   /** On a WebSocket, a RECONCILE's deadline runs from its receipt, the server's RECONCILE_TAKEN: `'awaited'` till it
-   *  comes, then `'taken'`. `'none'` for a RECONCILE on SSE and a BARRIER, whose deadline runs from the start. */
+   *  comes, while the deadline runs from the last time the server took more of the page's bytes, then `'taken'`.
+   *  `'none'` for a RECONCILE on SSE and a BARRIER, whose deadline runs from the start. */
   private receipt: 'none' | 'awaited' | 'taken' = 'none'
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Resolved once no RECONCILE is in flight. */
@@ -320,15 +321,13 @@ class AttachExchange {
 
   // ── The await-RECONCILED window ──
 
-  /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline, or, where `receipted`, waits for its
-   *  receipt to. A follow-up RECONCILE for late registrations opens it again, restarting the deadline. */
+  /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline, which, where `receipted`, runs till the
+   *  receipt from what the server takes. A follow-up RECONCILE for late registrations opens it again, restarting it. */
   private enterReconciling(receipted: boolean): void {
     this.isReconciling = true
     this.inFlight = reconcileInFlight()
-    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
-    this.reconcileTimer = null
     this.receipt = receipted ? 'awaited' : 'none'
-    if (!receipted) this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
   }
 
   /** The RECONCILE's deadline runs from now: the server answered the request that carried it. */
@@ -364,13 +363,17 @@ class AttachExchange {
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
 
-  /** The RECONCILED didn't come by the deadline. Unless, without a receipt, the wire delivered something meanwhile, it
-   *  is dropped as on a missed pong, and `handleTransportLoss` reconnects. */
+  /** The RECONCILED didn't come by the deadline. Unless, without a receipt, the wire delivered something meanwhile, or,
+   *  awaiting one, the server took more of the page's bytes, it is dropped as on a missed pong, and
+   *  `handleTransportLoss` reconnects. */
   private onReconcileTimeout(): void {
     if (!this.isReconciling) return
     const { transport } = this.owner
+    const { heartbeat } = transport
     // A RECONCILE waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
-    const quiet = this.receipt === 'none' ? (transport.heartbeat?.quietFor() ?? Infinity) : Infinity
+    let quiet = this.receipt === 'none' ? (heartbeat?.quietFor() ?? Infinity) : Infinity
+    // Till its receipt, it crosses while the server takes more of the page's bytes.
+    if (this.receipt === 'awaited') quiet = heartbeat?.unconfirmedFor() ?? Infinity
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
     this.owner.onReconcileLate(transport)
   }

@@ -10,7 +10,7 @@ import {
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { ChannelClosedError } from '../channelErrors.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames, withTook } from '../../wire/frame.js'
 import type { ReconcilePayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
@@ -145,8 +145,8 @@ class SilentWebSocket {
   }
 }
 
-/** A live server's WebSocket, as the page sees it: it answers each PING, and does with each RECONCILE it takes what
- *  `onReconcile` says. */
+/** A live server's WebSocket, as the page sees it: it answers each PING, saying how many of the page's bytes it took,
+ *  and does with each RECONCILE it takes what `onReconcile` says. */
 class ServerSocket {
   static OPEN = 1
   static made: ServerSocket[] = []
@@ -165,15 +165,20 @@ class ServerSocket {
   readonly texts: number[] = []
   readonly textsOf = new Map<number, string[]>()
   readonly textOrder: string[] = []
+  /** The bytes of the page's messages, and, while it takes them as a slow link carries them, since when and till when. */
+  private sentBytes = 0
+  private taking: { from: number; to: number; bytes: number } | null = null
 
   constructor() {
     ServerSocket.made.push(this)
     queueMicrotask(() => this.onopen?.())
   }
   send(message: Uint8Array<ArrayBuffer>): void {
+    this.sentBytes += message.byteLength
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
-      if (frame.tag === TAG.PING && this.answers) queueMicrotask(() => this.deliver(encode.pong([])))
+      if (frame.tag === TAG.PING && this.answers)
+        queueMicrotask(() => this.deliver(withTook(encode.pong([]), this.took())))
       if (frame.tag === TAG.TEXT) {
         this.texts.push(frame.seq)
         this.textsOf.set(frame.index, [...(this.textsOf.get(frame.index) ?? []), frame.text])
@@ -183,6 +188,15 @@ class ServerSocket {
       this.reconciles.push(frame.payload)
       ServerSocket.onReconcile(this, frame.payload)
     }
+  }
+  /** Takes what the page sent so far over `ms`, as a slow link carries it. */
+  takeSlowly(ms: number): void {
+    this.taking = { from: performance.now(), to: performance.now() + ms, bytes: this.sentBytes }
+  }
+  private took(): number {
+    const { taking } = this
+    if (taking === null || performance.now() >= taking.to) return this.sentBytes
+    return Math.floor((taking.bytes * (performance.now() - taking.from)) / (taking.to - taking.from))
   }
   close(): void {
     this.readyState = 3
@@ -283,6 +297,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
         }
         if (receiptAt !== Number.POSITIVE_INFINITY) return
         receiptAt = performance.now() + UPLOAD_MS
+        socket.takeSlowly(UPLOAD_MS)
         setTimeout(() => socket.deliver(encode.reconcileTaken()), UPLOAD_MS)
       }
       await vi.advanceTimersByTimeAsync(1_000)
@@ -348,6 +363,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
     ServerSocket.onReconcile = (socket, reconcile) => {
       const answer = reconciledFor(reconcile)
       const third = Math.ceil(answer.byteLength / 3)
+      socket.takeSlowly(UPLOAD_MS)
       setTimeout(() => socket.deliver(encode.reconcileTaken()), UPLOAD_MS)
       for (let i = 0; i < 3; i++) {
         const piece = encode.piece(answer.byteLength, answer.subarray(i * third, (i + 1) * third))

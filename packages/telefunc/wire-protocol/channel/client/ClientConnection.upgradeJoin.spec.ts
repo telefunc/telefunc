@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection, type MuxChannel } from './ClientConnection.js'
-import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { withTook, decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'
 import { decodeU32 } from '../../wire/envelope.js'
@@ -48,8 +48,9 @@ class FakeWebSocket {
   onmessage: ((ev: { data: ArrayBuffer }) => void) | null = null
   binaryType = 'blob'
   readyState = 1
-  /** Frames the client sent on this socket, decoded. */
+  /** Frames the client sent on this socket, decoded, and the bytes of its messages. */
   readonly sent: DecodedFrame[] = []
+  sentBytes = 0
   private onSent: ((frame: DecodedFrame) => void) | null = null
 
   constructor(_url: string) {
@@ -58,6 +59,7 @@ class FakeWebSocket {
   }
   send(data: ArrayBuffer | Uint8Array): void {
     const message = bytes(data instanceof Uint8Array ? data : new Uint8Array(data))
+    this.sentBytes += message.byteLength
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
       this.sent.push(frame)
@@ -295,8 +297,14 @@ describe('SSE→WS handoff join', () => {
           transports: ['sse', 'ws'],
         })
       let reconciles = 0
+      // The server says in each PONG how many of the page's bytes it took: the second RECONCILE's over its upload.
+      let upload: { from: number; bytes: number } | null = null
+      const took = () =>
+        upload === null
+          ? h.probe.sentBytes
+          : Math.floor(upload.bytes * Math.min(1, (performance.now() - upload.from) / 90_000))
       h.probe.answer((frame) => {
-        if (frame.tag === TAG.PING) h.probe.deliver(encode.pong())
+        if (frame.tag === TAG.PING) h.probe.deliver(withTook(encode.pong(), took()))
         if (frame.tag !== TAG.RECONCILE) return
         const { open } = frame.payload
         // The first join's RECONCILE is taken and answered at once, and another channel registers meanwhile.
@@ -307,6 +315,7 @@ describe('SSE→WS handoff join', () => {
             h.probe.deliver(answer(open))
           })
         // The second's takes longer to arrive than a RECONCILE's deadline.
+        upload = { from: performance.now(), bytes: h.probe.sentBytes }
         setTimeout(() => {
           h.probe.deliver(encode.reconcileTaken())
           h.probe.deliver(answer(open))

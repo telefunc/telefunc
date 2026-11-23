@@ -237,6 +237,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const { downlink, headroom, sender, receiver, pair } = pieces
     this.pieces = pieces
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
+      const confirmed = sender.confirmedBytes
       if (frame.tag === TAG.PIECES_ACK) {
         if (!headroom.acknowledged(frame)) return false
         this.headroomChanged(sender)
@@ -248,6 +249,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         const paired = pair(frame)
         if (paired) this.owner.onTransportFrame(paired, this, byteLength, ws === this.abandoned?.ws)
       }
+      if (sender.confirmedBytes > confirmed) this.heartbeatOf(ws)?.noteConfirmed(at)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
