@@ -18,7 +18,10 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
   const raw = getRawContext()
   if (!raw) {
     if (isAsyncMode()) {
-      assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')
+      assertUsage(
+        false,
+        '[getContext()] Make sure to call getContext() inside the `fn` of provideTelefuncContext(context, fn)',
+      )
     }
     assertUsage(false, '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access')
   }
