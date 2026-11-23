@@ -58,11 +58,12 @@ function getRawContext(): Context | null {
  */
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
-  return globalObject.restoreContext(context, fn)
+  // Without Async Hooks, `globalObject` holds the functions of the copy of Telefunc that was loaded first.
+  return (isAsyncMode() ? globalObject.restoreContext : restoreContext_sync)(context, fn)
 }
 
 function provideContext(context: Telefunc.Context): void {
-  globalObject.provideTelefuncContext(context)
+  ;(isAsyncMode() ? globalObject.provideTelefuncContext : provideTelefuncContext_sync)(context)
 }
 
 // ── Async mode ─────────────────────────────────────────────────────
