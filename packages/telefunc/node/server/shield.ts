@@ -256,12 +256,12 @@ function verifyObject(obj: Record<string, unknown>, arg: unknown, breadcrumbs: s
   if (!isPlainObject(arg)) {
     return errorMessage(breadcrumbs, getTypeName(arg), 'object')
   }
-  const shieldKeys = Object.keys(obj)
-  for (const key of unique([...shieldKeys, ...Object.keys(arg)])) {
+  for (const key of unique([...Object.keys(obj), ...Object.keys(arg)])) {
+    const isShieldKey = Object.hasOwn(obj, key)
     const res = verifyRecursive(
-      Object.hasOwn(obj, key) ? obj[key] : undefined,
+      isShieldKey ? obj[key] : undefined,
       Object.hasOwn(arg, key) ? arg[key] : undefined,
-      `${breadcrumbs} > ${keyBreadcrumb(key, !shieldKeys.includes(key))}`,
+      `${breadcrumbs} > ${keyBreadcrumb(key, !isShieldKey)}`,
     )
     if (res !== true) {
       return res
