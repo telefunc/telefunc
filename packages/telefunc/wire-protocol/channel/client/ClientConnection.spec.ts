@@ -487,6 +487,52 @@ describe("a page's channels on a live WebSocket", () => {
     for (const page of pages) page.abort()
   })
 
+  test("a send waits behind a joining channel's send though the sends of a channel the server awaited went ahead of it at an earlier join's RECONCILED", async () => {
+    const { pages, add, open } = pageOf()
+    // The server answers the first RECONCILE, awaits the channel the second names, and answers the rest when the row
+    // says.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+      if (socket.reconciles.length === 2) socket.deliver(reconciledFor({ ...reconcile, open: [] }))
+    }
+    /** The RECONCILED of the `n`th RECONCILE, attaching what it names but the closed channel, which the server let go. */
+    const answer = async (n: number) => {
+      const reconcile = socket!.reconciles[n]!
+      const closed = n === 4 ? socket!.reconciles[1]!.open[0]!.ix : undefined
+      socket!.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== closed) }))
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    const a = await open()
+    const b = await open()
+    const [socket] = ServerSocket.made
+    void b.send('b1')
+    // A join, during which a send passes what the awaited channel queued.
+    await open()
+    void a.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
+    // The awaited channel closes, and a registration's follow-up names it; the server has it.
+    b.abort()
+    add()
+    await vi.advanceTimersByTimeAsync(100)
+    await answer(2)
+    expect(socket!.reconciles).toHaveLength(4)
+    await answer(3)
+    expect(socket!.textOrder).toEqual(['"a1"', '"b1"'])
+    // A later join's channel sends, then an open one.
+    const g = add()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.reconciles).toHaveLength(5)
+    void g.send('g1')
+    void a.send('a2')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"', '"b1"'])
+    await answer(4)
+    expect(socket!.textOrder).toEqual(['"a1"', '"b1"', '"g1"', '"a2"'])
+    for (const page of pages) page.abort()
+  })
+
   test('the unacknowledged sends of two channels go again on the next wire in the order they were made', async () => {
     const { pages, open } = pageOf()
     ServerSocket.onReconcile = (socket, reconcile) => {
