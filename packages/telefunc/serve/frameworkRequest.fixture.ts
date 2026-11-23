@@ -19,11 +19,17 @@ export function frameworkRequest(req: IncomingMessage | Http2ServerRequest, url:
         ? []
         : (Array.isArray(value) ? value : [value]).map((one): [string, string] => [name, one]),
     ),
-    body: domStream(Readable.toWeb(req).getReader()),
+    body: nodeRequestBody(req),
     signal: abort.signal,
     duplex: 'half',
   }
   return new Request(url, init)
+}
+
+/** Node's request body as Hono's and srvx's Node servers hand it on, `Readable.toWeb(req)`, as a stream `RequestInit`
+ *  takes. */
+export function nodeRequestBody(req: IncomingMessage | Http2ServerRequest): ReadableStream<Uint8Array> {
+  return domStream(Readable.toWeb(req).getReader())
 }
 
 /** The bridge's reader, read through a stream of the DOM's own type, which `RequestInit` takes: it holds nothing

@@ -6,7 +6,8 @@ import { hasProp } from '../../../utils/hasProp.js'
 
 /** Whether a failed read of a request's body is its client leaving, or null where nothing says. Only the server that
  *  received the request can say: the adapter that was handed it passes its runtime's evidence (`serve/node.ts`,
- *  `serve/bun.ts`, `serve/deno.ts`). */
+ *  `serve/bun.ts`, `serve/deno.ts`), and with it `clientGone`, a signal that aborts once its client left and only then
+ *  (Deno's `request.signal` also aborts at every response). */
 type ClientLeft = (err: unknown) => boolean | null
 
 /** A `Request` handed over without its transport, as an app or a framework built it: nothing Telefunc can read says who

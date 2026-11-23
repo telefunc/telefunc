@@ -258,7 +258,10 @@ const malformedRequest = {
   headers: [] as [string, string][],
 } as const
 
-async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[0]): Promise<HttpResponse> {
+/** The call's response, and when its body is over: read to its end, or its client gone (`RequestContext.bodyRead`). */
+async function runTelefunc(
+  httpRequestResolved: Parameters<typeof runTelefunc_>[0],
+): Promise<{ httpResponse: HttpResponse; bodyRead: Promise<void> }> {
   // Eagerly load `node:stream` so all downstream code (`createPushReadable`,
   // pipe/get helpers, `getStreamReadableNode`) can read it synchronously.
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
@@ -280,7 +283,7 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
-  return httpResponse
+  return { httpResponse, bodyRead: requestContext.bodyRead }
 }
 
 async function runTelefunc_(
@@ -289,11 +292,13 @@ async function runTelefunc_(
     readable,
     context,
     clientLeft,
+    clientGone,
   }: {
     request: Request
     readable?: StreamReadableNode
     context?: Telefunc.Context
     clientLeft: ClientLeft
+    clientGone: AbortSignal
   },
   requestContext: RequestContext,
 ): Promise<HttpResponse> {
@@ -306,6 +311,7 @@ async function runTelefunc_(
       request,
       readable,
       clientLeft,
+      clientGone,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,

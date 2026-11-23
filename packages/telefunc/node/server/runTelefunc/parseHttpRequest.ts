@@ -38,6 +38,8 @@ type RunContext = {
   readable?: Readable
   /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
   clientLeft: ClientLeft
+  /** Aborts once the client left, and only then, as the same adapter says. */
+  clientGone: AbortSignal
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -197,17 +199,17 @@ async function readBody(
     const reader = new BodyReader(source, clientLeft)
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    const { clientGone } = runContext
     // A page attaches to a channel the call returns once its upload is over: the body read off, or its client gone.
-    runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(request.signal)])
+    runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(clientGone)])
     runContext.requestContext.onAnswered(() => {
       reader.keepRest(queueMemory())
       // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
-      // its signal says it.
-      const { signal } = request
-      if (signal.aborted) reader.leftByClient(signal.reason)
-      else signal.addEventListener('abort', () => reader.leftByClient(signal.reason), { once: true })
+      // the adapter's evidence says it.
+      if (clientGone.aborted) reader.leftByClient(clientGone.reason)
+      else clientGone.addEventListener('abort', () => reader.leftByClient(clientGone.reason), { once: true })
     })
-    runContext.requestContext.onClose(() => void readOffBody(reader, request.signal))
+    runContext.requestContext.onClose(() => void readOffBody(reader, clientGone))
     const metadata = await reader
       .readFrame(CALL_METADATA_MAX_BYTES)
       .catch((err: unknown): 'oversize' | StreamTruncatedError => {

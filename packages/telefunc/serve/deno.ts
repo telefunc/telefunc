@@ -63,10 +63,24 @@ function telefunc(): TelefuncServe {
         return ws.handleUpgrade(request, info) as Response | Promise<Response>
       }
 
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
-      return toResponse(httpResponse)
+      // Deno.serve's `request.signal` aborts on every response unless Deno runs with `--unstable-no-legacy-abort`, so only
+      // a failed read of the body says that its client left (`clientLeft`).
+      const { httpResponse, bodyRead } = await serveRuntimeRequest(
+        context ? { request, context } : { request },
+        clientLeft,
+        new AbortController().signal,
+      )
+      return endingOnceBodyRead(toResponse(httpResponse), bodyRead)
     },
   }
+}
+
+/** `response`, whose body ends only once the call's body is over. Deno.serve never settles a read of a request's body
+ *  that is pending as its streamed response ends, and every later read waits behind it: a Channel's call, whose body is
+ *  read on past the answer, would keep neither its File nor its upload, and its connect window would never start. */
+function endingOnceBodyRead(response: Response, bodyRead: Promise<void>): Response {
+  const body = response.body?.pipeThrough(new TransformStream({ flush: () => bodyRead })) ?? null
+  return new Response(body, response)
 }
 
 /** Deno.serve fails the read of a request it made with its own `BadResource` (the client closed) or `Http` (the client

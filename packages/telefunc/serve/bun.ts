@@ -67,7 +67,11 @@ function telefunc(): TelefuncServe {
 
       // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails.
       const clientLeft = () => request.signal.aborted
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
+      const { httpResponse } = await serveRuntimeRequest(
+        context ? { request, context } : { request },
+        clientLeft,
+        request.signal,
+      )
       return toResponse(httpResponse)
     },
   }
