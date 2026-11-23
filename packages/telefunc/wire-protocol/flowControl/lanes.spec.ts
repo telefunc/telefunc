@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { addWireCopies, dropWireCopies } from '../channel/server/channelMemory.js'
 import {
+  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
@@ -10,6 +11,7 @@ import {
 } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
 import { HEADER, readU16 } from '../wire/header.js'
+import { pingDeadline } from '../wire/pingDeadline.js'
 import { TAG, isPublishBody, isSequencedTag } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
 import { ServerHeadroom } from './server/ServerHeadroom.js'
@@ -539,6 +541,77 @@ describe('the lanes', () => {
       }
     },
   )
+})
+
+/** The longest a page's WebSocket goes with nothing arriving before it is taken for dead, at the default interval. */
+const DEADLINE = pingDeadline(CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT.WS)
+
+/** Keeps `bytes` of channel 1's 64 KiB frames waiting, as a download whose app always has more. */
+function topUp(wire: Wire, bytes = 512 * 1024): void {
+  while (wire.headroom.sender.waitingBytes < bytes) wire.binary(1, 64 * 1024 - HEADER)
+}
+
+/** Every 500 ms for `ms`, a PONG and a 5-byte text on channel 2 while channel 1 keeps 512 KiB waiting: the longest each
+ *  waited, and the longest the page went with no frame arriving. */
+async function framesBehindADownload(wire: Wire, ms: number) {
+  const at = performance.now()
+  const sent: number[] = []
+  for (let t = 0; t < ms; t += 5) {
+    topUp(wire)
+    if (t % 500 === 0) {
+      wire.send(() => encode.pong())
+      wire.send((seq) => encode.text(2, 'small', seq))
+      sent.push(performance.now())
+    }
+    await sleep(5)
+  }
+  await sleep(Math.ceil(wire.linkBytes() / SLOW.bytesPerMs) + 60_000)
+  const pongs = wire.arrivals.filter((a) => a.tag === TAG.PONG && a.at >= at).map((a) => a.at)
+  const texts = wire.arrivals.filter((a) => a.tag === TAG.TEXT && a.ix === 2 && a.at >= at).map((a) => a.at)
+  const times = wire.arrivals.filter((a) => a.at >= at && a.at <= at + ms).map((a) => a.at)
+  let gap = 0
+  for (let i = 1; i < times.length; i++) gap = Math.max(gap, times[i]! - times[i - 1]!)
+  return {
+    pong: Math.max(...sent.map((s, i) => (pongs[i] ?? Number.POSITIVE_INFINITY) - s)),
+    text: Math.max(...sent.map((s, i) => (texts[i] ?? Number.POSITIVE_INFINITY) - s)),
+    gap,
+  }
+}
+
+describe('a link that is or becomes slow', () => {
+  test("on Slow 3G from the start, with a backlog, a PONG and another channel's message get through within 4.4 s", async () => {
+    const wire = wireTo(SLOW)
+    try {
+      for (let n = 0; n < 32; n++) wire.binary(1, 64 * 1024 - HEADER)
+      await sleep(5_000)
+      const seen = await framesBehindADownload(wire, 20_000)
+      expect(seen.pong).toBeLessThan(4_400)
+      expect(seen.text).toBeLessThan(4_400)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  for (const slow of [
+    { bytesPerMs: 1_000, delayMs: 20 },
+    { bytesPerMs: 50, delayMs: 200 },
+  ])
+    test(`a download at 100 MB/s whose link slows to ${slow.bytesPerMs} B/ms keeps the page within its ping deadline`, async () => {
+      const wire = wireTo(FAST)
+      try {
+        for (let t = 0; t < 2_000; t += 5) {
+          topUp(wire)
+          await sleep(5)
+        }
+        wire.reshape(slow)
+        const seen = await framesBehindADownload(wire, 20_000)
+        // The page hears a frame, the PONG included, within its deadline.
+        expect(seen.gap).toBeLessThan(DEADLINE)
+        expect(seen.pong).toBeLessThan(DEADLINE)
+      } finally {
+        wire.stop()
+      }
+    })
 })
 
 describe("the wire's control frames", () => {
