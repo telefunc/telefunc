@@ -3,7 +3,6 @@ export {
   STORES,
   runs,
   docker,
-  pullImage,
   startStore,
   hostOf,
   removeStores,
@@ -23,33 +22,7 @@ import { inject } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { installRedis } from '../src/index.js'
-import { docker, RUN_LABEL, runs } from './docker.js'
-
-type Store = { name: string; image: string; server: string }
-
-/** The oldest and the newest Redis and Valkey Telefunc supports. */
-const STORES: readonly Store[] = [
-  { name: 'Redis 7.0.0', image: 'redis:7.0.0', server: 'redis-server' },
-  { name: 'Redis 7.4.12', image: 'redis:7.4.12', server: 'redis-server' },
-  { name: 'Valkey 7.2.5', image: 'valkey/valkey:7.2.5', server: 'valkey-server' },
-  { name: 'Valkey 8.1.1', image: 'valkey/valkey:8.1.1', server: 'valkey-server' },
-]
-
-/** The store's image, pulled again once when a pull fails, as a registry does now and then; a second failure ends the
- *  run with a sentence that says so. */
-function pullImage(image: string): void {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      docker('pull', '--quiet', image)
-      return
-    } catch (error) {
-      if (attempt === 2) {
-        const reason = error instanceof Error ? error.message : String(error)
-        throw new Error(`Docker couldn't pull ${image}, tried twice: ${reason}`)
-      }
-    }
-  }
-}
+import { docker, RUN_LABEL, runs, STORES, type Store } from './docker.js'
 
 /** The stores this process started and hasn't removed, each with the admin client `startStore()` made of it. */
 const containers: { name: string; admin: Redis }[] = []
@@ -60,7 +33,6 @@ const forwarders = new Set<{ to: (host: string) => void }>()
 /** The store in a container of its own, once it answers; the container's name, its address, and an admin client of it. */
 async function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
   const name = `tf-redis-stores-${process.pid}-${containers.length}`
-  pullImage(store.image)
   docker(
     'run',
     '--detach',

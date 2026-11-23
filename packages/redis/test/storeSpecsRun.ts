@@ -1,12 +1,13 @@
-// The store specs' global setup: an id for the run, which labels every container its spec files start, and the removal
-// of those containers once the last file has ended. A run that ends without it, its main process or a worker killed,
-// leaves them to the next run's setup, which first removes the containers of every run that is gone.
+// The store specs' global setup: the stores' images, pulled once for the run; an id for the run, which labels every
+// container its spec files start; and the removal of those containers once the last file has ended. A run that ends
+// without it, its main process or a worker killed, leaves them to the next run's setup, which first removes the
+// containers of every run that is gone.
 export { setup }
 
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import type { TestProject } from 'vitest/node'
-import { docker, RUN_LABEL, runs } from './docker.js'
+import { docker, pullImages, RUN_LABEL, runs } from './docker.js'
 
 declare module 'vitest' {
   export interface ProvidedContext {
@@ -27,7 +28,10 @@ function setup(project: TestProject): () => void {
   // The machine, its boot and the run's main process: no other run alive has the same.
   const run = `${hostname()}/${BOOT ?? 'unknown'}/${process.pid}`
   project.provide('storeSpecsRun', run)
-  if (runs) removeContainers(listed().filter(({ of }) => isGone(of)))
+  if (runs) {
+    removeContainers(listed().filter(({ of }) => isGone(of)))
+    pullImages()
+  }
   return () => {
     if (runs) removeContainers(listed().filter(({ of }) => of === run))
   }
