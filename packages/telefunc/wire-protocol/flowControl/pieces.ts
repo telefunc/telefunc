@@ -1056,6 +1056,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
     this.took += arrival === 'riding' ? bytes + lengthBytes(tag) : bytes
     const announced = arrival === 'alone' && this.paced(bytes, at)
     this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
+    if (tag === TAG.PIECES_ACK_REQ) this.acknowledge()
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of 0 bytes opens an announcement; one naming its bytes closes it. */

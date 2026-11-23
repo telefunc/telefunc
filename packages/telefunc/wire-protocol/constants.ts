@@ -283,6 +283,8 @@ export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
  *  lossy send's confirmation is late past this, its slack and a round trip (`behindAfter()` in `WireSender` for a
  *  WebSocket page, and in `WsTransport`). */
 export const WIRE_QUEUE_DELAY_MS = 300
+/** The least time a server's flight on a WebSocket spans, so a page on loopback is seldom asked what it took. */
+export const WIRE_FLIGHT_LEAST_MS = 8
 /** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
 export const LOSSY_CONFIRM_SLACK_MS = 300
 /** The most a broadcast's `messages()` loop holds behind, and a Cloudflare bucket for a Durable Object starting up:

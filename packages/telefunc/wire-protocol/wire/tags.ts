@@ -16,7 +16,8 @@ import { assert } from '../../utils/assert.js'
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  wire-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x2f  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
+//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames), and past the full wire-level
+//              range, PIECES_ACK_REQ (no ix)
 
 const DATA_TAG_MIN = 0x10
 
@@ -110,6 +111,8 @@ const TAG = {
   /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
    *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
+  /** Server → client: say at once, in a PIECES_ACK, what you took. No ix: wire-level, past its full range. */
+  PIECES_ACK_REQ: 0x3c as const,
 }
 
 function isWireCtrlTag(tag: number): boolean {

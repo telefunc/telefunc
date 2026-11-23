@@ -237,6 +237,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const { downlink, headroom, sender, receiver, pair } = pieces
     this.pieces = pieces
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
+      if (frame.tag === TAG.PIECES_ACK_REQ) return true
       const confirmed = sender.confirmedBytes
       if (frame.tag === TAG.PIECES_ACK) {
         if (!headroom.acknowledged(frame)) return false
@@ -487,6 +488,7 @@ class PendingProbe implements ProbeWire {
   private readonly take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
     const { headroom, sender } = this.pieces
     if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
+    if (frame.tag === TAG.PIECES_ACK_REQ) return true
     if (frame.tag === TAG.PONG) {
       sender.heartbeat(frame.took, at)
       if (this.phase === 'reporting') this.owner.onProbePong()

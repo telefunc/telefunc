@@ -41,6 +41,13 @@ class DrainRate {
     this.dropSpan()
   }
 
+  /** Forgets every rate and span: the path may have changed. */
+  reset(): void {
+    this.fastest = 0
+    this.rates.length = 0
+    this.dropSpan()
+  }
+
   /** Drops the span not yet measured. */
   dropSpan(): void {
     this.spanBytes = this.spanMs = 0

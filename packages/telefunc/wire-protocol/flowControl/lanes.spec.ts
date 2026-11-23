@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { addWireCopies, dropWireCopies } from '../channel/server/channelMemory.js'
-import { CHANNEL_TRANSPORT, WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  WIRE_PROBE_FIRST_BYTES,
+  WIRE_PROBE_PAIR_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_AHEAD_MIN_BYTES,
+} from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
 import { HEADER, readU16 } from '../wire/header.js'
 import { TAG, isPublishBody, isSequencedTag } from '../wire/tags.js'
@@ -127,6 +133,86 @@ function wireTo(
 }
 
 type Wire = ReturnType<typeof wireTo>
+
+/** A step of the clock under a round trip of a millisecond: such a link is stepped by hand, as timers fire whole ms. */
+const STEP_MS = 0.05
+
+/** As `wireTo`, on a link whose round trip may be under a millisecond, with the clock stepped by `step()`. */
+function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: number }) {
+  const toPage: { message: Uint8Array<ArrayBuffer>; due: number }[] = []
+  const toServer: { ack: PiecesAck; due: number }[] = []
+  let linkFreeAt = 0
+  let handed = 0
+  let delivered = 0
+  const receiver = new ClientPieceReceiver({
+    owner: {
+      sendAck: (frame) => void toServer.push({ ack: decode(frame) as PiecesAck, due: performance.now() + delayMs }),
+      carryAck: () => {},
+    },
+  })
+  const take = (message: Uint8Array<ArrayBuffer>, at: number) => {
+    delivered += message.byteLength
+    const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
+    const own = frames.pop()!
+    for (const each of frames) receiver.arrived(each[0]!, each.byteLength, at, 'riding')
+    const frame = decode(own)
+    if (frame.tag === TAG.ANNOUNCE) receiver.announce(frame.bytes, at, frame.floor)
+    else if (frame.tag === TAG.PIECE) receiver.add(frame.total, frame.piece, at)
+    else receiver.arrived(frame.tag, own.byteLength, at, 'alone')
+  }
+  const headroom = new ServerHeadroom({
+    socket: {
+      send: (message) => {
+        handed += message.byteLength
+        linkFreeAt = Math.max(linkFreeAt, performance.now()) + message.byteLength / bytesPerMs
+        toPage.push({ message, due: linkFreeAt + delayMs })
+      },
+      bufferedAmount: 0,
+    },
+    pingInterval: 60_000,
+  })
+  return {
+    headroom,
+    /** What the socket was handed, crossing the link alone: the least time it takes. */
+    linkMs: () => handed / bytesPerMs + delayMs,
+    crossing: () => delivered < handed,
+    async step() {
+      await vi.advanceTimersByTimeAsync(STEP_MS)
+      const now = performance.now()
+      while (toPage.length > 0 && toPage[0]!.due <= now) take(toPage.shift()!.message, now)
+      while (toServer.length > 0 && toServer[0]!.due <= now) headroom.acknowledged(toServer.shift()!.ack)
+    },
+    stop: () => headroom.close(),
+  }
+}
+
+/** The most a flight puts past the page's word: the least send-ahead, and a wire's first large frame with no rate,
+ *  which starts with the probe's two pieces, each with its PIECE header, between two ANNOUNCEs and behind an empty one. */
+const FLIGHT_BOUND = WIRE_SEND_AHEAD_MIN_BYTES + 64 + WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES + 5 * 11
+
+/** The most bytes the page hasn't said it took, over a second of full copy pressure that starts once `send` sent. */
+async function mostUnconfirmedUnderCopyPressure(wire: Wire, send: () => void): Promise<number> {
+  const { sender } = wire.headroom
+  send()
+  addWireCopies(ALL_COPIES)
+  try {
+    let most = 0
+    for (let ms = 0; ms < 1_000; ms++) {
+      most = Math.max(most, sender.transmittedBytes - sender.confirmedBytes)
+      await sleep(1)
+    }
+    return most
+  } finally {
+    dropWireCopies(ALL_COPIES)
+  }
+}
+
+/** A 64 KiB and a 16 KiB frame of one channel, then 40 KiB of each of three others. */
+function framesOfFourChannels(wire: Wire): void {
+  wire.send((seq) => encode.binary(1, new Uint8Array(64 * 1024 - HEADER), seq))
+  wire.binary(1, 16 * 1024)
+  for (const ix of [2, 3, 4]) wire.binary(ix, 40 * 1024)
+}
 
 /** A wire that carried a 64 KiB download on a fast link, then nineteen on Slow 3G 2.5 s apart, each over and the link
  *  idle by the next. */
@@ -285,6 +371,67 @@ describe('the lanes', () => {
     }
   })
 
+  test("a report the page sent before it read a request for one isn't its answer, though it covers what went before the request", async () => {
+    const asks: number[] = []
+    const headroom: ServerHeadroom = new ServerHeadroom({
+      socket: {
+        send: (message) => {
+          const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
+          if (frames.some((frame) => frame[0] === TAG.PIECES_ACK_REQ)) asks.push(headroom.sender.transmittedBytes)
+        },
+        bufferedAmount: 0,
+      },
+      pingInterval: 60_000,
+    })
+    try {
+      let seq = 0
+      // 2 KiB frames past the flight, which wait whole: no probe, and the blocked flight asks.
+      for (let n = 0; n < 200; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq), performance.now())
+      await Promise.resolve()
+      const first = headroom.sender.transmittedBytes
+      // Half the flight confirmed frees room for more data while the request is open.
+      await sleep(10)
+      headroom.acknowledged({ bytes: Math.floor(first / 2), heldMs: 0, spanUs: 0 })
+      // The answer to the first request, 20 ms after it, asks again of the data handed since.
+      await sleep(10)
+      headroom.acknowledged({ bytes: asks[0]!, heldMs: 0, spanUs: 0 })
+      expect(asks.length).toBe(2)
+      // 1 ms after that request, the page's report of all it got before it: the request ends its message.
+      await sleep(1)
+      headroom.acknowledged({ bytes: asks[1]! - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
+      expect(headroom['leastRtt']).toBe(20)
+    } finally {
+      headroom.close()
+    }
+  })
+
+  for (const { mbPerS, delayMs, within } of [
+    { mbPerS: 100, delayMs: 0.2, within: 1.1 },
+    { mbPerS: 1_000, delayMs: 0.05, within: 1.03 },
+  ])
+    test(`on a ${mbPerS} MB/s link with a ${2 * delayMs} ms round trip, a 64 MiB download reaches the page within ${within} times the link's time`, async () => {
+      const wire = stepWireTo({ bytesPerMs: mbPerS * 1_000, delayMs })
+      try {
+        const TOTAL = 64 * 1024 * 1024
+        const FRAME = 64 * 1024
+        let seq = 0
+        let sent = 0
+        let steps = 0
+        while (sent < TOTAL || wire.headroom.sender.waitingBytes > 0 || wire.crossing()) {
+          // The app keeps 512 KiB waiting, as a stream that writes ahead of the socket does.
+          while (sent < TOTAL && wire.headroom.sender.waitingBytes < 512 * 1024) {
+            wire.headroom.send(encode.binary(1, new Uint8Array(FRAME - HEADER), ++seq), performance.now())
+            sent += FRAME
+          }
+          await wire.step()
+          steps++
+        }
+        expect((steps * STEP_MS) / wire.linkMs()).toBeLessThan(within)
+      } finally {
+        wire.stop()
+      }
+    })
+
   test('a heartbeat and an acknowledgement of the same bytes grow the flight once', async () => {
     const headroom = new ServerHeadroom({ socket: { send: () => {}, bufferedAmount: 0 }, pingInterval: 60_000 })
     try {
@@ -301,6 +448,32 @@ describe('the lanes', () => {
       expect(headroom.window()).toBe(afterHeartbeat)
     } finally {
       headroom.close()
+    }
+  })
+
+  test('on a wire whose page took its first frame, frames that wait in their lanes under copy pressure put no more past the page than the flight', async () => {
+    const wire = wireTo(FAST, { copiesOnSend: true })
+    try {
+      wire.send((seq) => encode.text(1, 'x'.repeat(20 * 1024), seq))
+      while (wire.headroom.sender.confirmedBytes < wire.handed()) await sleep(1)
+      expect(await mostUnconfirmedUnderCopyPressure(wire, () => framesOfFourChannels(wire))).toBeLessThanOrEqual(
+        FLIGHT_BOUND,
+      )
+    } finally {
+      wire.stop()
+    }
+  })
+
+  test('a second after a 128 KiB frame, frames that wait in their lanes under copy pressure put no more past the page than the flight', async () => {
+    const wire = wireTo(FAST, { copiesOnSend: true })
+    try {
+      wire.binary(1, 128 * 1024)
+      await sleep(1_000)
+      expect(await mostUnconfirmedUnderCopyPressure(wire, () => framesOfFourChannels(wire))).toBeLessThanOrEqual(
+        FLIGHT_BOUND,
+      )
+    } finally {
+      wire.stop()
     }
   })
 
