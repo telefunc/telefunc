@@ -32,6 +32,8 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
   admitSend,
   cancelWait,
+  joinLine,
+  parkWait,
   releaseBehind,
   reserveBehind,
   takeWait,
@@ -461,7 +463,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Makes a send that holds `held` with `go` once the ledger admits it: at once, or when room frees, first in line
    *  first, `keep` running as it starts to wait. A send made while one of its channel's waits, and one that can never
    *  fit, is refused: it holds nothing and takes no seq, so the page sees no gap on the wire, and later sends that fit
-   *  go through. The returned promise settles once, with `go`'s outcome, or with the channel's end. */
+   *  go through. Before its telefunction returns it, a send waits out of line, which it joins then. The returned promise
+   *  settles once, with `go`'s outcome, or with the channel's end. */
   private admitted(held: number, go: () => void | Promise<unknown>, keep?: () => void): void | Promise<unknown> {
     if (this.roomWait !== null) return Promise.reject<void>(this.refuseSend(held))
     const verdict = admitSend(this, held)
@@ -469,14 +472,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (verdict === 'refused') return Promise.reject<void>(this.refuseSend(held))
     keep?.()
     return new Promise<unknown>((resolve, reject) => {
-      const wait = waitForRoom(this, held, () => {
+      const made = () => {
         const lossy = this.roomWait?.lossy ?? null
         this.roomWait = null
         void settleMade(go(), resolve, reject)
         if (lossy === null) return
         releaseBehind(wait, lossy.held)
         void this.makeLossy(lossy)
-      })
+      }
+      const wait = this.didRegister ? waitForRoom(this, held, made) : parkWait(this, held, made)
       this.roomWait = { wait, reject, lossy: null }
     })
   }
@@ -618,6 +622,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       (held) => admit(this, held),
       (held) => this.refuseSend(held),
     )
+    // Its send waiting for room joins the line behind them, or is refused where `maxMemory` has no room for it.
+    const waiting = this.roomWait
+    if (waiting !== null && !joinLine(waiting.wait)) {
+      this.roomWait = null
+      waiting.reject(this.refuseSend(waiting.wait.bytes))
+    }
     if (this._phase === 'ended') return // the mux lets an ended channel go
     this.ttlTimer = unrefTimer(
       setTimeout(() => {

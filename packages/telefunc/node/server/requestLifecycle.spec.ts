@@ -7,6 +7,7 @@ import { Abort } from './Abort.js'
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
+import { holdsAtMost } from '../../wire-protocol/channel/server/channelMemory.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
 const requests = vi.hoisted(() => [] as { closed: number; signal: AbortSignal }[])
@@ -31,8 +32,12 @@ vi.mock('./runTelefunc/loadTelefuncFiles.js', () => ({
 
 const FILE = '/requestLifecycle.telefunc.ts'
 config.disableNamingConvention = true
+// One channel may hold 8 MiB, so a row can send past that quickly.
+config.channel = { maxPendingBytes: 8 * 1024 * 1024 }
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+/** What the sends waiting for room reserve, on that ledger. */
+const ledgerReserved = () => (globalThis as any)._telefunc['channelMemory.ts'].reserved as number
 /** The last channel a telefunction made, how often a stream it returned was cancelled, and what lets a waiting one return. */
 const opened = { channel: null as Channel<never, string> | null, cancelled: 0, letReturn: null as (() => void) | null }
 /** A channel holding a 64 KiB send. */
@@ -49,6 +54,14 @@ function circular() {
 const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
   onSuccess: async () => 42,
   onThrow: async () => {
+    throw new Error('the telefunction fails, as the test means it to')
+  },
+  onSendsPastItsChannelThenThrows: async () => {
+    const channel = new Channel<never, string>()
+    // Each over half what one channel may hold: the second waits for room.
+    const half = 'x'.repeat(holdsAtMost() / 2)
+    void channel.send(half)
+    void channel.send(half)
     throw new Error('the telefunction fails, as the test means it to')
   },
   onCircular: async () => circular(),
@@ -201,6 +214,15 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       expect(request.signal.aborted).toBe(true)
     })
   }
+
+  test('onSendsPastItsChannelThenThrows(): 500, and the send its channel had waiting for room reserves nothing', async () => {
+    const before = ledgerReserved()
+    const response = await call('onSendsPastItsChannelThenThrows')
+    await response.getBody()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(response.statusCode).toBe(500)
+    expect(ledgerReserved()).toBe(before)
+  })
 
   for (const name of ['onChannelThenCircular', 'onChannelThenThrowingGetter']) {
     test(`${name}(): 500, and the channel it returned before the failure closes with it`, async () => {

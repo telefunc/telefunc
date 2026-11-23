@@ -1,5 +1,8 @@
 import { afterEach, expect, onTestFinished, test, vi } from 'vitest'
 
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
+
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
@@ -42,6 +45,18 @@ const ledger = () => (globalThis as unknown as { _telefunc: Record<string, Ledge
 const WAITING_ROOM = Math.min(getChannelConfig().maxPendingBytes, getChannelConfig().maxMemory / 8)
 /** The most bytes held: `maxMemory` less that room. */
 const HELD_AT_MOST = getChannelConfig().maxMemory - WAITING_ROOM
+
+// A collection the test can force, as `node --expose-gc` gives.
+setFlagsFromString('--expose-gc')
+const gc: unknown = runInNewContext('gc')
+/** Collects what nothing reaches any more, across a few turns. */
+async function collect() {
+  if (typeof gc !== 'function') throw new Error('no gc')
+  for (let i = 0; i < 8; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    gc()
+  }
+}
 
 // Each row starts on an empty ledger: what a row's channels still hold or wait with as it ends goes.
 afterEach(() => {
@@ -488,6 +503,63 @@ test("on a WebSocket, the server's end rejects a send waiting for room once, and
     expect({ total: ledger().total, reserved: ledger().reserved }).toEqual({ total: 0, reserved: 0 })
   } finally {
     channel._onPeerGone(new Error('fixture closed'))
+  }
+})
+
+/** A channel made with a send past what it may hold waiting for room, then dropped before any telefunction returned it. */
+function droppedWithWaitingSend(): WeakRef<ServerChannel> {
+  const channel = new ServerChannel()
+  // 1.5 MB twice is past the 2 MiB one channel may hold: the second waits for room, holding a copy of its bytes.
+  void channel.sendBinary(new Uint8Array(1_500_000))
+  void channel.sendBinary(new Uint8Array(1_500_000))
+  return new WeakRef(channel)
+}
+
+test('a channel dropped before its telefunction returned it, with a send waiting for room, leaves the ledger nothing', async () => {
+  const dropped = droppedWithWaitingSend()
+  await new Promise((resolve) => setTimeout(resolve))
+  expect({ reserved: ledger().reserved, waiting: [...ledger().waiting].length }).toEqual({ reserved: 0, waiting: 0 })
+  await collect()
+  expect(dropped.deref()).toBeUndefined()
+})
+
+test('on a WebSocket, a send past what its channel may hold, made before its telefunction returned it, goes once its page confirms the one before', async () => {
+  const channel = new ServerChannel()
+  const first = channel.sendBinary(new Uint8Array(1_500_000))
+  const second = channel.sendBinary(new Uint8Array(1_500_000))
+  const page = overWebSocket([channel])
+  try {
+    const before = await settledIn(second, 5)
+    await page.readAll()
+    confirm(channel, 0, 2 * CREDIT_WINDOW_INITIAL_BYTES)
+    expect({ before, first: await settledIn(first), second: await settledIn(second) }).toEqual({
+      before: 'pending',
+      first: 'resolved',
+      second: 'resolved',
+    })
+  } finally {
+    channel.abort()
+  }
+})
+
+test('on a WebSocket, a send waiting for room, made before its telefunction returned the channel, is refused then if other sends hold the room', async () => {
+  const channel = new ServerChannel()
+  void channel.sendBinary(new Uint8Array(1_500_000))
+  const second = channel.sendBinary(new Uint8Array(1_500_000))
+  const other = new ServerChannel()
+  overWebSocket([other])
+  fillTo(HELD_AT_MOST, 15)
+  try {
+    expect(await settledIn(other.sendBinary(new Uint8Array(WAITING_ROOM - 519)), 5)).toBe('pending')
+    const reserved = ledger().reserved
+    channel._registerChannel()
+    expect({ second: await settledIn(second, 5), reserved: ledger().reserved }).toEqual({
+      second: 'overflow',
+      reserved,
+    })
+  } finally {
+    channel.abort()
+    other.abort()
   }
 })
 

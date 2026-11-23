@@ -5,6 +5,8 @@ export {
   admitPublish,
   admitSend,
   waitForRoom,
+  parkWait,
+  joinLine,
   cancelWait,
   takeWait,
   reserveBehind,
@@ -74,8 +76,16 @@ const memory = getGlobalObject('channelMemory.ts', {
 })
 
 /** A send waiting for room: `go` makes it, holding its bytes, once `admit` admits them and what the lossy send behind it
- *  reserves (`behind`); `cancelled` takes it out of line. */
-type RoomWait = { holder: MemoryHolder; bytes: number; behind: number; go: () => void; cancelled: boolean }
+ *  reserves (`behind`); `cancelled` takes it out of line. A `parked` one is out of line and reserves nothing, till
+ *  `joinLine`. */
+type RoomWait = {
+  holder: MemoryHolder
+  bytes: number
+  behind: number
+  go: () => void
+  cancelled: boolean
+  parked: boolean
+}
 
 /** Whether a send of `bytes` for `holder` is admitted now, is refused, or is to wait for room (`waitForRoom`), its
  *  bytes reserved. Sends wait in the order they were made, so one made while others wait waits too. One is refused
@@ -91,18 +101,36 @@ function admitSend(holder: MemoryHolder, bytes: number): 'now' | 'refused' | 'wa
  *  holding them, once room frees for it. The line is looked at once this task ends, so a send that fits already goes
  *  then. */
 function waitForRoom(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
-  const wait: RoomWait = { holder, bytes, behind: 0, go, cancelled: false }
-  memory.waiting.push(wait)
-  memory.reserved += bytes
-  wakeSoon()
+  const wait = parkWait(holder, bytes, go)
+  enterLine(wait)
   return wait
+}
+
+/** A send of `bytes` for `holder`, which the ledger doesn't count yet, made by `go`: it waits out of line, so a holder
+ *  dropped before it counts leaves the ledger nothing. */
+function parkWait(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
+  return { holder, bytes, behind: 0, go, cancelled: false, parked: true }
+}
+
+/** Puts a parked `wait` in line, with what the lossy send behind it reserves, where `maxMemory` has room for them. */
+function joinLine(wait: RoomWait): boolean {
+  if (!hasRoomFor(wait.bytes + wait.behind)) return false
+  enterLine(wait)
+  return true
+}
+
+function enterLine(wait: RoomWait): void {
+  wait.parked = false
+  memory.waiting.push(wait)
+  memory.reserved += wait.bytes + wait.behind
+  wakeSoon()
 }
 
 /** `wait` is never made: its reservation goes, and the line moves on without it. */
 function cancelWait(wait: RoomWait): void {
   if (wait.cancelled) return
   wait.cancelled = true
-  unreserve(wait.bytes + wait.behind)
+  if (!wait.parked) unreserve(wait.bytes + wait.behind)
   wait.behind = 0
 }
 
@@ -110,23 +138,25 @@ function cancelWait(wait: RoomWait): void {
 function takeWait(wait: RoomWait): void {
   if (wait.cancelled) return
   wait.cancelled = true
-  unreserve(wait.bytes)
+  if (!wait.parked) unreserve(wait.bytes)
   wait.go()
 }
 
 /** Reserves `bytes` more for the lossy send made behind `wait`, where `maxMemory` has room for them with what is held
- *  and what waits. They go in its turn, never ahead of an older wait. */
+ *  and what waits, or, for a parked one, as it joins the line. They go in its turn, never ahead of an older wait. */
 function reserveBehind(wait: RoomWait, bytes: number): boolean {
-  if (!hasRoomFor(bytes)) return false
+  if (!wait.parked) {
+    if (!hasRoomFor(bytes)) return false
+    memory.reserved += bytes
+  }
   wait.behind += bytes
-  memory.reserved += bytes
   return true
 }
 
 /** The lossy send behind `wait` reserves `bytes` less: it was made, or a smaller one or none took its place. */
 function releaseBehind(wait: RoomWait, bytes: number): void {
   wait.behind -= bytes
-  unreserve(bytes)
+  if (!wait.parked) unreserve(bytes)
 }
 
 /** Whether `maxMemory` has room for `bytes` more with what is held and what waits. */
