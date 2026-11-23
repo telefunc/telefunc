@@ -437,7 +437,8 @@ class RedisSubscriptions {
   }
 
   private dispatch(channel: string, frame: Buffer): void {
-    for (const attempt of [...(this.byChannel.get(channel) ?? [])]) attempt.receive(channel, frame)
+    // One that leaves meanwhile is passed over; one that joins holds the frame as early, for its start to order.
+    for (const attempt of this.byChannel.get(channel) ?? []) attempt.receive(channel, frame)
   }
 }
 
