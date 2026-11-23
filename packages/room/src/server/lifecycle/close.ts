@@ -33,9 +33,12 @@ async function takeOverClose(store: RoomStore, roomId: string, current: RoomHead
   return closing !== null && (await finishClose(store, roomId, closing))
 }
 
+/** The closing head, under a new close lease, or null when the head changed. The room is first due at the lease's end,
+ *  so a sweep takes the close over should this closer stop (`sweepDueRoom()`), whatever the room's hold timeouts. */
 async function acquireClosingLease(store: RoomStore, roomId: string, current: RoomHead): Promise<RoomHead | null> {
   assert(current.currentInc !== null) // only open and closing heads reach here; both name an incarnation
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
+  await store.directoryPut(roomId, current.currentInc, 0, ROOM_CLOSE_LEASE_MS)
   const result = await store.compareExchangeHead(
     roomId,
     { form: current.state === 'open' ? 'rev' : 'takeover', rev: current.rev },

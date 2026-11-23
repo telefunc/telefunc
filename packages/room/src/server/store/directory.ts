@@ -4,6 +4,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
 import { getRoomPlane } from '../../backend/plane.js'
+import { assert } from '../../utils/assert.js'
 import type { RoomHead } from '../../backend/contract.js'
 import type { RoomPlane } from '../../backend/RoomPlane.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
@@ -11,6 +12,7 @@ import { Slice } from '../../shared/Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import type { RoomIncarnation } from '../protocol.js'
 import { configFromHead, openConfig } from '../lanes/lanes.js'
+import { takeOverClose } from '../lifecycle/close.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { eachInFlight } from './inFlight.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -63,8 +65,18 @@ async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
   }
 }
 
+/** A due room whose head no longer names it is repaired. A closing one is due at its close lease's end: once the lease
+ *  ran out, its closer stopped, and the sweep takes the close over; a replica drops the second `closed` frame a
+ *  takeover commits after a closer that committed its own. Any other is due again. */
 async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
   const head = await plane.direct.reads.readHead(roomId)
-  if (head?.currentInc !== incTag) await plane.call((store) => repairRoomIndex(store, roomId, incTag, head))
-  else await listRoom(plane.direct, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
+  if (head?.currentInc !== incTag) return await plane.call((store) => repairRoomIndex(store, roomId, incTag, head))
+  if (head.state !== 'closing') {
+    return await listRoom(plane.direct, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
+  }
+  const lease = head.closeLease
+  assert(lease !== undefined) // a closing head carries its close lease
+  if (lease.until < Date.now() && (await plane.call((store) => takeOverClose(store, roomId, head)))) return
+  // Its lease holds, by this process's clock or the store's, or a closer took it over since: due at the lease's end.
+  await plane.direct.directoryPut(roomId, incTag, lease.until, 0)
 }

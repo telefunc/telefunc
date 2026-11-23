@@ -440,73 +440,102 @@ describe("an ended incarnation's lanes", () => {
 })
 
 describe('a closing head whose closer stopped', () => {
-  it('stays closing, due past its open lapse and a lease after each sweep, until a later close finishes it and its data goes', async () => {
-    const id = fresh('stopped-closer')
-    await Room.create(id, { emptyTimeout: 60_000, departureTimeout: 60_000 })
+  /** Closes room `id` with the store refusing its close's `step` once: the closed frame's commit, or, the frame
+   *  committed, the head's finalize. */
+  async function stoppedClose(id: string, step: 'commit' | 'finalize'): Promise<string> {
+    if (step === 'commit') {
+      const commit = MemoryRoomDriver.prototype.commitLane
+      vi.spyOn(MemoryRoomDriver.prototype, 'commitLane').mockImplementation(async function (
+        this: MemoryRoomDriver,
+        target,
+        payload,
+        opts,
+      ) {
+        if (target.roomId === id && target.lane.kind === 'control') throw new Error('refused before dispatch')
+        return await commit.call(this, target, payload, opts)
+      })
+    } else {
+      const exchange = MemoryRoomDriver.prototype.compareExchangeHead
+      vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeHead').mockImplementation(async function (
+        this: MemoryRoomDriver,
+        roomId,
+        expected,
+        next,
+      ) {
+        if (roomId === id && expected.form === 'finalize') throw new Error('refused before dispatch')
+        return await exchange.call(this, roomId, expected, next)
+      })
+    }
+    const outcome = await settled(Room.close(id))
+    vi.restoreAllMocks()
+    return outcome
+  }
+
+  /** Sweeps once the close lease ran out, with no call about the room, until its head no longer names `inc`. */
+  async function sweepPastLease(id: string, inc: string): Promise<void> {
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] })
+    vi.advanceTimersByTime(ROOM_CLOSE_LEASE_MS + 1_000)
+    const due = MemoryRoomDriver.prototype.directoryDue
+    let dueReads = 0
+    vi.spyOn(MemoryRoomDriver.prototype, 'directoryDue').mockImplementation(async function (this: MemoryRoomDriver) {
+      dueReads++
+      return await due.call(this)
+    })
+    await startSweep(() => dueReads > 0)
+    for (let tries = 0; (await currentInc(id)) === inc && tries < 100; tries++) await turns()
+    vi.restoreAllMocks()
+  }
+
+  for (const [label, options] of [
+    ['a room without hold timeouts', noHold],
+    ['a timed room', { emptyTimeout: 60_000, departureTimeout: 60_000 }],
+  ] as const) {
+    it(`is closed by a sweep once its close lease ran out, with no call about it: ${label}`, async () => {
+      const id = fresh('stopped-closer')
+      await Room.create(id, options)
+      const inc = await currentInc(id)
+      if (inc === null) throw new Error(`room ${id} has no head`)
+      const close = await stoppedClose(id, 'commit')
+      const { reads } = getRoomPlane().direct
+      const whileLeased = (await reads.readHead(id))?.state
+      await sweepPastLease(id, inc)
+      const head = await reads.readHead(id)
+      expect({
+        close,
+        whileLeased,
+        state: head?.state,
+        endedInc: head === null ? null : configFromHead(head).inc,
+        data: await holdsData(id, inc),
+        listed: (await reads.directoryList(id)).entries.some((entry) => entry.roomId === id),
+      }).toEqual({
+        close: 'refused before dispatch',
+        whileLeased: 'closing',
+        state: 'closed',
+        endedInc: inc,
+        data: false,
+        listed: false,
+      })
+    })
+  }
+
+  it("closes a view once, though the sweep's takeover commits a second closed frame after the stopped closer's", async () => {
+    const id = fresh('stopped-finalize')
+    await Room.create(id, noHold)
     const inc = await currentInc(id)
     if (inc === null) throw new Error(`room ${id} has no head`)
-    const commit = MemoryRoomDriver.prototype.commitLane
-    vi.spyOn(MemoryRoomDriver.prototype, 'commitLane').mockImplementation(async function (
-      this: MemoryRoomDriver,
-      target,
-      payload,
-      opts,
-    ) {
-      if (target.roomId === id && target.lane.kind === 'control') throw new Error('refused before dispatch')
-      return await commit.call(this, target, payload, opts)
-    })
-    await settled(Room.close(id))
-    vi.restoreAllMocks()
-    const { reads } = getRoomPlane().direct
-    const names = (entries: DirectoryPage['entries']) => entries.some((entry) => entry.roomId === id)
-    // The clock the sweep's own pacing reads moves too, so its next sweep may start.
-    vi.useFakeTimers({ toFake: ['Date', 'performance'] })
-    vi.advanceTimersByTime(70_000)
-    const pastLapse = names(await reads.directoryDue())
-    // The sweep's due reads as the store answers them. From its third on it is told nothing is due, so it ends.
-    const sweepReads: DirectoryPage['entries'][] = []
-    const ended = deferred()
-    const due = MemoryRoomDriver.prototype.directoryDue
-    vi.spyOn(MemoryRoomDriver.prototype, 'directoryDue').mockImplementation(async function (this: MemoryRoomDriver) {
-      if (sweepReads.length === 2) {
-        ended.open()
-        return []
-      }
-      const entries = await due.call(this)
-      sweepReads.push(entries)
-      if (entries.length === 0) ended.open()
-      return entries
-    })
-    await startSweep(() => sweepReads.length > 0)
-    await ended.done
-    vi.restoreAllMocks()
-    const [visited = [], afterVisit = []] = sweepReads
-    vi.advanceTimersByTime(ROOM_LEASE_TTL_MS + 1_000)
-    const aLeaseLater = names(await reads.directoryDue())
-    const stillClosing = (await reads.readHead(id))?.state
-    // Its close lease ran out long ago, so a close takes it over at once.
-    const closed = await settled(Room.close(id))
-    const head = await reads.readHead(id)
-    expect({
-      pastLapse,
-      visited: names(visited),
-      afterVisit: names(afterVisit),
-      aLeaseLater,
-      stillClosing,
-      closed,
-      state: head?.state,
-      endedInc: head === null ? null : configFromHead(head).inc,
-      data: await holdsData(id, inc),
-    }).toEqual({
-      pastLapse: true,
-      visited: true,
-      afterVisit: false,
-      aLeaseLater: true,
-      stillClosing: 'closing',
-      closed: 'resolved',
+    const view = await Room.get(id)
+    const closes: string[] = []
+    view.onClose((cause) => void closes.push(cause.type))
+    const close = await stoppedClose(id, 'finalize')
+    await turns()
+    const afterClose = [...closes]
+    await sweepPastLease(id, inc)
+    await turns()
+    expect({ close, afterClose, closes, state: (await getRoomPlane().direct.reads.readHead(id))?.state }).toEqual({
+      close: 'refused before dispatch',
+      afterClose: ['closed'],
+      closes: ['closed'],
       state: 'closed',
-      endedInc: inc,
-      data: false,
     })
   })
 })
