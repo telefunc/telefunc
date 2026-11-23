@@ -15,15 +15,19 @@ type ClientLeft = (err: unknown) => boolean | null
  *  body and an SSE upload end as a truncation, with the error as its `cause`. */
 const noTransportEvidence: ClientLeft = () => null
 
-/** Node, through the request's socket: the peer ended its side (the socket's `'end'`) or reading the socket failed (a
- *  reset). An app's own `req.destroy(err)` destroys the socket with that same `err`, and isn't taken for it. Server code
- *  that destroys the client's socket with another socket's read error (`req.socket.destroy(upstreamError)`) is taken for
- *  a reset: Node keeps only the error the socket was destroyed with, and both are a read error of a socket. */
+/** Node, through the request's socket: the peer ended its side (the socket's `'end'`), reading the socket failed (a
+ *  reset), or the socket was closed with no error, as the server's `closeAllConnections()` does at a shutdown: Node then
+ *  ends the request under the read with its own `aborted`, and no app's error is in it. An app's own `req.destroy(err)`
+ *  destroys the socket with that same `err`, and isn't taken for it. Server code that destroys the client's socket with
+ *  another socket's read error (`req.socket.destroy(upstreamError)`) is taken for a reset: Node keeps only the error the
+ *  socket was destroyed with, and both are a read error of a socket. */
 function socketShowsClientLeft(readable: Readable): ClientLeft {
   return (err) => {
     const socket = hasProp(readable, 'socket') ? readable.socket : null
     if (!hasProp(socket, 'errored') || !hasProp(socket, 'readableEnded', 'boolean')) return false
     if (socket.errored === err) return false
-    return socket.readableEnded || (hasProp(socket.errored, 'syscall', 'string') && socket.errored.syscall === 'read')
+    if (socket.readableEnded) return true
+    if (socket.errored === null) return hasProp(socket, 'destroyed', 'boolean') && socket.destroyed
+    return hasProp(socket.errored, 'syscall', 'string') && socket.errored.syscall === 'read'
   }
 }
