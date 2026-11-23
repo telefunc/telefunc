@@ -239,7 +239,7 @@ class BodyReader {
   private droppedError(by: FileRead | null): Error {
     assert(by !== null)
     return new Error(
-      `The telefunction returned before it read this File (${this.fileSizes.get(by.index)} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File before the telefunction returns, or while what it returns streams, to keep all of it.`,
+      `The telefunction returned before it read this File (${this.fileSizes.get(by.index)} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File before the telefunction returns to keep all of it: a read while what it returns streams fails too once the upload gets further ahead of it than those limits allow.`,
     )
   }
 

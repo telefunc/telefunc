@@ -147,7 +147,7 @@ function holdChannels() {
 }
 
 const dropped = (size: number) =>
-  `The telefunction returned before it read this File (${size} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File before the telefunction returns, or while what it returns streams, to keep all of it.`
+  `The telefunction returned before it read this File (${size} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File before the telefunction returns to keep all of it: a read while what it returns streams fails too once the upload gets further ahead of it than those limits allow.`
 
 for (const via of vias) {
   test(`past the bound: a call that returns a Channel and leaves its 4 MiB Blob to be read once the call is done: its body is read to its end, the second call on the connection is answered, and the Blob's read fails saying why (Telefunc given a ${via})`, async () => {
