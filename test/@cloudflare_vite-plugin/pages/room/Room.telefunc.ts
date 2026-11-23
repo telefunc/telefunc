@@ -24,12 +24,14 @@ export {
   onMetaUpdateOutcome,
   onSendOutcome,
   onBesideRead,
+  onSendAfterLapse,
+  onSendToClaimed,
 }
 
 import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
 import { getRoomPlane, type CellsBeside, type CellsRead } from '@telefunc/room/backend'
-import { inboxRegistrations } from './inboxRegistrations'
+import { authorityCalls, authorityClocks, type AuthorityCall } from './authorityCalls'
 
 async function onRoomRoundTrip() {
   const id = `telefunction-${crypto.randomUUID()}`
@@ -203,6 +205,21 @@ async function onThrowingListener() {
 /** The name of a room's authority, as `telefuncDurableObjectCall` sees it. */
 const authorityOf = (roomId: string) => `__telefunc_room__:${roomId}`
 
+/** A call that registers a member's inbox: its route's registration, or the join that registers it in its own write. */
+function isInboxRegistration(method: string, [route]: unknown[]): boolean {
+  if (method === 'runOperationWithInbox') return true
+  if (method !== 'registerRoute' || typeof route !== 'object' || route === null || !('laneKey' in route)) return false
+  return typeof route.laneKey === 'string' && route.laneKey.startsWith('inbox:')
+}
+
+/** Holds the next call of room `roomId`'s authority that `matches` where it reached the authority, until `release()`. */
+function holdNextCall(roomId: string, matches: AuthorityCall['matches']) {
+  const reached = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  authorityCalls.set(authorityOf(roomId), { matches, kind: 'hold', reached, release: release.promise })
+  return { reached: reached.promise, release: () => release.resolve() }
+}
+
 const failureOf = (error: unknown) => ({
   message: error instanceof Error ? error.message : String(error),
   cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : null,
@@ -212,17 +229,15 @@ const failureOf = (error: unknown) => ({
 async function onJoinClosing() {
   const roomId = `join-closing:${crypto.randomUUID()}`
   const room = await Room.create(roomId)
-  const reached = Promise.withResolvers<void>()
-  const release = Promise.withResolvers<void>()
-  inboxRegistrations.set(authorityOf(roomId), { kind: 'hold', reached, release: release.promise })
+  const registration = holdNextCall(roomId, isInboxRegistration)
   const startedAt = Date.now()
   const joining = room.join().then(
     () => ({ joined: true, failure: null }),
     (error: unknown) => ({ joined: false, failure: failureOf(error) }),
   )
-  await reached.promise
+  await registration.reached
   await Room.close(roomId)
-  release.resolve()
+  registration.release()
   const outcome = await joining
   return { ...outcome, seconds: Math.round((Date.now() - startedAt) / 100) / 10 }
 }
@@ -231,7 +246,8 @@ async function onJoinClosing() {
 async function onJoinRefused() {
   const roomId = `join-refused:${crypto.randomUUID()}`
   const room = await Room.create(roomId)
-  inboxRegistrations.set(authorityOf(roomId), { kind: 'refuse' })
+  const refusal = 'Test: the authority refused the inbox'
+  authorityCalls.set(authorityOf(roomId), { matches: isInboxRegistration, kind: 'refuse', refusal })
   const outcome = await room.join().then(
     () => ({ joined: true, failure: null }),
     (error: unknown) => ({ joined: false, failure: failureOf(error) }),
@@ -370,5 +386,64 @@ async function onBesideRead() {
       others,
       plain,
     }
+  })
+}
+
+// A message reaches a participant only while its lease hosts it at the commit that delivers it, by the authority's
+// clock. A lease lapses 120 s after its server last wrote it (packages/room/src/server/constants.ts).
+const PAST_LEASE_MS = 121_000
+
+/** A commit to a member's inbox. */
+function isInboxCommit(method: string, [, , lane]: unknown[]): boolean {
+  return method === 'commitLane' && typeof lane === 'object' && lane !== null && 'kind' in lane && lane.kind === 'inbox'
+}
+
+/** A member's leave. */
+function isLeave(method: string, [, request]: unknown[]): boolean {
+  if (method !== 'runOperation' || typeof request !== 'object' || request === null) return false
+  return 'name' in request && request.name === 'leave'
+}
+
+/** A `Room.send()` by identity whose tab's lease lapses after its lookup, before its inbox commit: its receipts, or
+ *  what it was told. The inbox's route lapses too, 90 s after its last renewal, so a commit the authority takes hands
+ *  the message to no one and the send is told it may not be delivered. */
+async function onSendAfterLapse() {
+  return inNewRoom(async (room, id) => {
+    await room.join({ identity: 'person' })
+    const commit = holdNextCall(id, isInboxCommit)
+    const sending = Room.send(id, { identity: 'person' }, 'private message')
+    await commit.reached
+    authorityClocks.set(authorityOf(id), PAST_LEASE_MS)
+    commit.release()
+    return await sending
+      .then(
+        (receipts) => ({ receipts: receipts.length }),
+        (error: unknown) => ({ told: failureOf(error).message }),
+      )
+      .finally(() => authorityClocks.delete(authorityOf(id)))
+  })
+}
+
+/** A participant's send to a tab this session's view lists, whose lease lapsed and a reap claimed, while the reap's
+ *  leave of the tab waits: what the send is told. */
+async function onSendToClaimed() {
+  return inNewRoom(async (room, id) => {
+    const old = await room.join({ identity: 'old' })
+    const leave = holdNextCall(id, isLeave)
+    authorityClocks.set(authorityOf(id), PAST_LEASE_MS)
+    const reading = Room.getParticipants(id).then(
+      () => 'read',
+      (error: unknown) => failureOf(error).message,
+    )
+    await leave.reached
+    authorityClocks.delete(authorityOf(id))
+    const sender = await room.join({ identity: 'live' })
+    const sent = await sender.send(old.id, 'hello').then(
+      () => 'delivered',
+      (error: unknown) => failureOf(error).message,
+    )
+    leave.release()
+    await reading
+    return { sent: sent === `Participant not found (left?): ${old.id}` ? 'participant not found' : sent }
   })
 }

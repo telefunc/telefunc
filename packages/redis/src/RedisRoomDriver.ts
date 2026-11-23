@@ -171,6 +171,7 @@ class RedisRoomDriver implements RoomDriver {
     args: Args,
   ): Promise<PlannedOperation<Value> | null> {
     const cells = new Map<string, Uint8Array | undefined>()
+    const lapsed = new Set<string>()
     const reads = new Map<string, string>()
     let now: number | null = null
     for (;;) {
@@ -180,6 +181,10 @@ class RedisRoomDriver implements RoomDriver {
         cell: (key) => {
           if (!reads.has(key)) missing.add(key)
           return cells.get(key)
+        },
+        lapsed: (key) => {
+          if (!reads.has(key)) missing.add(key)
+          return lapsed.has(key)
         },
       })
       if (now !== null && missing.size === 0) {
@@ -193,6 +198,7 @@ class RedisRoomDriver implements RoomDriver {
       now = read.now
       for (const key of missing) {
         cells.set(key, read.cells.get(key))
+        if (read.lapsed.has(key)) lapsed.add(key)
         reads.set(key, read.versions.get(key) ?? '')
       }
     }
@@ -239,7 +245,7 @@ class RedisRoomDriver implements RoomDriver {
       retain: false,
       owner: undefined,
       closingLease: undefined,
-      requiredCellKeys: [],
+      required: undefined,
       fenceTokens: fence.tokens,
       kit: this.kit,
     }
@@ -370,7 +376,7 @@ class RedisRoomDriver implements RoomDriver {
         retain: opts?.retain === true,
         owner: opts?.owner,
         closingLease: opts?.closingLease,
-        requiredCellKeys: opts?.requiredCellKeys ?? [],
+        required: opts?.required,
         fenceTokens: fence?.tokens ?? NO_FENCE_TOKENS,
         kit: this.kit,
       })

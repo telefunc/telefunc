@@ -11,6 +11,9 @@ export {
   JOINS_CELL_KEY,
   LEASE_CELL_PREFIX,
   leaseCellKey,
+  leaseClaimCellKey,
+  leaseOfCellKey,
+  hostedMembers,
   leaseMemberCellPrefix,
   leaseMemberCellKey,
   memberIdOfLeaseMemberKey,
@@ -35,7 +38,7 @@ export {
   ackIdOfDmReplyCellKey,
 }
 
-import type { CellsBeside } from '../../backend/contract.js'
+import type { CellsBeside, RequiredCells } from '../../backend/contract.js'
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
 const MEMBER_CELL_PREFIX = 'm:'
@@ -67,17 +70,33 @@ function identityCellKey(identity: string, memberId: string): string {
 /** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
 const HOLDS_CELL_KEY = 'holds'
 const JOINS_CELL_KEY = 'joins'
-/** One per server hosting a member or a page's view in the room: its lease (see `lease.ts`). Lease ids
- *  hold no `:`. */
+/** One per server hosting a member or a page's view in the room: its lease (see `lease.ts`), a cell that lapses unless
+ *  the server renews it. Once a reap claims it, its claim is a cell of its own, which names the reaping server and
+ *  lapses unless that server renews it, and the lease's cell is gone. Lease ids hold no `:`, so no lease's key is a
+ *  claim's. */
 const LEASE_CELL_PREFIX = 'session:'
 function leaseCellKey(lease: string): string {
   return LEASE_CELL_PREFIX + lease
 }
-/** Beside each member's record, the cell of the lease it joined under. */
+const LEASE_CLAIM_CELL_PREFIX = `${LEASE_CELL_PREFIX}claim:`
+function leaseClaimCellKey(lease: string): string {
+  return LEASE_CLAIM_CELL_PREFIX + lease
+}
+/** The lease a lease's or a claim's cell is of, and whether it is the claim. */
+function leaseOfCellKey(key: string): { lease: string; claim: boolean } {
+  return key.startsWith(LEASE_CLAIM_CELL_PREFIX)
+    ? { lease: key.slice(LEASE_CLAIM_CELL_PREFIX.length), claim: true }
+    : { lease: key.slice(LEASE_CELL_PREFIX.length), claim: false }
+}
+/** Beside each member's record, the cell of the lease it joined under, which a read gives only while it is live. */
 const MEMBER_LEASE_BESIDE: CellsBeside = {
   of: MEMBER_CELL_PREFIX,
   reference: MEMBER_LEASE_CELL_PREFIX,
   target: LEASE_CELL_PREFIX,
+}
+/** What a commit to or from `ids` requires: each member there, on a lease that can host it, unclaimed and not lapsed. */
+function hostedMembers(...ids: string[]): RequiredCells {
+  return { keys: ids.map(memberCellKey), beside: MEMBER_LEASE_BESIDE }
 }
 /** A member's mark under its lease, written and removed with its record, so the lease's cleaner finds it. */
 function leaseMemberCellPrefix(lease: string): string {

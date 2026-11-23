@@ -17,17 +17,39 @@ afterEach(() => vi.restoreAllMocks())
 /** What the Redis backend commits at most (packages/redis/src/commands.ts). */
 const CEILING = 28 * 1024 * 1024
 
-/** Writes the cell of `lease` in the incarnation whose cells are `values`, as the backend writes a cell. */
-async function writeLease(admin: Redis, values: string, lease: string, record: { until: number; cleaner?: string }) {
-  await admin.hset(values, `session:${lease}`, JSON.stringify(record))
+/** The incarnation whose cells are `values`. */
+function incarnationOf(values: string): string {
+  return values.slice(0, -':values'.length)
+}
+
+/** Lets `lease` of the incarnation whose cells are `values` lapse, as the backend keeps a cell's lapse. */
+async function lapseLease(admin: Redis, values: string, lease: string) {
+  await admin.hset(`${incarnationOf(values)}:lapses`, `session:${lease}`, '0')
+}
+
+/** Moves `lease` to `cleaner`'s claim, a cell lapsing 15 s from now by the store's clock, as a reap's claim does. */
+async function claimLease(admin: Redis, values: string, lease: string, cleaner: string) {
+  const incarnation = incarnationOf(values)
+  const [seconds, micros] = await admin.time()
+  const claim = `session:claim:${lease}`
+  await removeCell(admin, values, `session:${lease}`)
+  await admin.hset(values, claim, cleaner)
+  await admin.hset(`${incarnation}:versions`, claim, crypto.randomUUID())
+  await admin.zadd(`${incarnation}:cells`, 0, claim)
+  await admin.hset(
+    `${incarnation}:lapses`,
+    claim,
+    String(Number(seconds) * 1000 + Math.floor(Number(micros) / 1000) + 15_000),
+  )
 }
 
 /** Removes the cell `key` of the incarnation whose cells are `values`, as the backend removes one. */
 async function removeCell(admin: Redis, values: string, key: string) {
-  const incarnation = values.slice(0, -':values'.length)
+  const incarnation = incarnationOf(values)
   await admin.hdel(values, key)
   await admin.hdel(`${incarnation}:versions`, key)
   await admin.zrem(`${incarnation}:cells`, key)
+  await admin.hdel(`${incarnation}:lapses`, key)
 }
 
 /** From here on, each operation named `name` in room `id` first runs `before`, then runs as it would. */
@@ -70,7 +92,7 @@ describe.runIf(runs)('a member whose lease a reap claimed, while the reap is ref
       await Room.create(id)
       const member = await joinedByAnotherServer(String(admin.options.host), id)
       const { values, lease } = await hostingLease(admin, id, member)
-      await writeLease(admin, values, lease, { until: 0 })
+      await lapseLease(admin, values, lease)
       beforeOperation(id, 'leave', refused)
       await Room.getParticipants(id).catch(() => {})
       vi.restoreAllMocks()
@@ -109,7 +131,7 @@ describe.runIf(runs)('a member joined under a lease the reader’s lease scan mi
       // P joins under a new lease, which a reap claims and the store then refuses.
       const p = await joinedByAnotherServer(host, id)
       const { values, lease } = await hostingLease(admin, id, p)
-      await writeLease(admin, values, lease, { until: Date.now() + 15_000, cleaner: 'another reap' })
+      await claimLease(admin, values, lease, 'another reap')
       // Q joins live after P's claim.
       const q = await joinedByAnotherServer(host, id)
       held.resolve()
@@ -129,13 +151,13 @@ describe.runIf(runs)('a reader whose claim on a lapsed lease another reap took f
       await Room.create(id)
       const member = await joinedByAnotherServer(String(admin.options.host), id)
       const { values, lease } = await hostingLease(admin, id, member)
-      await writeLease(admin, values, lease, { until: 0 })
+      await lapseLease(admin, values, lease)
       // Just before this reader's claim, another reap claims the lease.
       let first = true
       beforeOperation(id, 'claimLease', async () => {
         if (!first) return
         first = false
-        await writeLease(admin, values, lease, { until: Date.now() + 15_000, cleaner: 'another reap' })
+        await claimLease(admin, values, lease, 'another reap')
       })
       const listed = (await Room.getParticipants(id)).map((each) => each.id)
       admin.disconnect()
@@ -216,7 +238,7 @@ describe.runIf(runs)('a removal by identity whose reason fits a visible tab’s 
       const visible = await Room.join(id, { identity: 'u1' })
       const hidden = await joinedByAnotherServer(String(admin.options.host), id, { identity: 'u1', hidden: true })
       const { values, lease } = await hostingLease(admin, id, hidden)
-      await writeLease(admin, values, lease, { until: 0 })
+      await lapseLease(admin, values, lease)
       // The visible tab's leave is exactly the ceiling; the hidden tab's is 14 bytes over it.
       const reason = 'r'.repeat(CEILING - leaveRecordBytes(visible.id, '', false))
       const removed = await Room.removeParticipant(id, { identity: 'u1', reason }).then(
@@ -242,7 +264,7 @@ describe.runIf(runs)('a call over the size whose participant is on a lapsed leas
       await Room.create(id)
       const member = await joinedByAnotherServer(String(admin.options.host), id)
       const { values, lease } = await hostingLease(admin, id, member)
-      await writeLease(admin, values, lease, { until: 0 })
+      await lapseLease(admin, values, lease)
       const told = await Room.send(id, { id: member }, 'x'.repeat(CEILING + 1)).then(
         () => 'resolved',
         (error: unknown) => (error instanceof Error ? error.message : typeof error),
@@ -264,7 +286,7 @@ describe.runIf(runs)('a call over the size whose participant is on a lapsed leas
       ]
       for (const tab of tabs) {
         const { values, lease } = await hostingLease(admin, id, tab)
-        await writeLease(admin, values, lease, { until: 0 })
+        await lapseLease(admin, values, lease)
       }
       const removed = await Room.removeParticipant(id, { identity: 'u1', reason: 'r'.repeat(CEILING + 1) }).then(
         () => 'removed',
@@ -294,9 +316,10 @@ describe.runIf(runs)('a healthy Room.send() by id', () => {
       const calls = (command: string) => Number(new RegExp(`^cmdstat_${command}:calls=(\\d+)`, 'm').exec(stats)?.[1])
       admin.disconnect()
 
-      // At the parent: 5 scripts, which read 5 cells by HGET; the lease beside the member adds its reference's and
-      // the lease's.
-      expect({ evalsha: calls('evalsha'), hget: calls('hget') }).toEqual({ evalsha: 5, hget: 7 })
+      // 5 scripts. Their reads take 4 values by HGET (the lease the scan finds, the member, and beside it its
+      // reference and its lease), the versions of the 2 cells read, and the lapses of those 2 and of the lease beside:
+      // 9. The commit takes the member's reference, its lease's lapse and the inbox's order: 3.
+      expect({ evalsha: calls('evalsha'), hget: calls('hget') }).toEqual({ evalsha: 5, hget: 12 })
     }, 60_000)
   }
 })

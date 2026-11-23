@@ -1,6 +1,8 @@
 export {
   headExpectationHolds,
   commitPreconditionHolds,
+  hasLapsed,
+  unheldRequiredCell,
   isOpenIncarnation,
   materializeHead,
   publicHead,
@@ -9,9 +11,9 @@ export {
   encodeCellCounter,
   decodeCellCounter,
 }
-export type { StoredHead }
+export type { StoredHead, HeldCell }
 
-import type { CellCount, CellCounter, HeadExpectation, HeadNext, LaneId, RoomHead } from './contract.js'
+import type { CellCount, CellCounter, HeadExpectation, HeadNext, LaneId, RequiredCells, RoomHead } from './contract.js'
 import type { OrderingInfo } from 'telefunc/__internal'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
@@ -77,6 +79,31 @@ function commitPreconditionHolds(
     head.closeLease?.id === closingLease &&
     now <= head.closeLease.until
   )
+}
+
+/** Whether a cell that lapses at `lapsesAt` (authority time, none for a cell that never lapses) has lapsed by `now`. */
+function hasLapsed(lapsesAt: number | undefined, now: number): boolean {
+  return lapsesAt !== undefined && lapsesAt < now
+}
+
+/** A cell as a commit's check of its required cells finds it. */
+type HeldCell = { bytes: Uint8Array; lapsed: boolean }
+
+const referenceDecoder = new TextDecoder()
+
+/** The first of `required.keys` that doesn't hold (`RequiredCells`), each cell as `cell` finds it; none once all hold. */
+function unheldRequiredCell(
+  { keys, beside }: RequiredCells,
+  cell: (key: string) => HeldCell | undefined,
+): string | undefined {
+  for (const key of keys) {
+    if (cell(key) === undefined) return key
+    if (beside === undefined || !key.startsWith(beside.of)) continue
+    const reference = cell(beside.reference + key.slice(beside.of.length))
+    const target = reference && cell(beside.target + referenceDecoder.decode(reference.bytes))
+    if (target === undefined || target.lapsed) return key
+  }
+  return undefined
 }
 
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */

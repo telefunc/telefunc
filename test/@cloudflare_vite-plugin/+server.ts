@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
-import { inboxRegistrations } from './pages/room/inboxRegistrations'
+import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
 
 const tf = new Telefunc({ scale: 5 })
 
@@ -59,20 +59,21 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
     const object = this.ctx.id.name ?? null
     const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
     roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })
-    // Test-only: the next inbox registration a test set up for this room is refused, or held until it releases it,
-    // with the join that registers the inbox in its own write.
-    const next =
-      (inbox || method === 'runOperationWithInbox') && object !== null ? inboxRegistrations.get(object) : undefined
-    if (object !== null && next !== undefined) {
+    // Test-only: the next call a test set up for this room is refused, or held until it releases it.
+    const next = object !== null ? authorityCalls.get(object) : undefined
+    if (object !== null && next !== undefined && next.matches(method, args)) {
       if (next.kind === 'refuse') {
-        inboxRegistrations.delete(object)
-        throw new Error('Test: the authority refused the inbox')
+        authorityCalls.delete(object)
+        throw new Error(next.refusal)
       }
       next.reached.resolve()
       await next.release
-      if (inboxRegistrations.get(object) === next) inboxRegistrations.delete(object)
+      if (authorityCalls.get(object) === next) authorityCalls.delete(object)
     }
-    const result = await super.telefuncDurableObjectCall(name, method, args)
+    // Test-only: the room's authority reads its clock ahead by what a test set, while it serves the call.
+    const ahead = object !== null ? authorityClocks.get(object) : undefined
+    const call = () => super.telefuncDurableObjectCall(name, method, args)
+    const result = ahead === undefined ? await call() : await withClockAhead(ahead, call)
     if (inbox && roomCalls !== null) {
       await new Promise((resolve) => setTimeout(resolve, 200))
       roomCalls?.push({ object, method: 'registerRoute(inbox) replied', room })
@@ -95,6 +96,18 @@ type TelefuncDurableObjectWithPresence = new (
   telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
+}
+const realNow = Date.now
+let callsAhead = 0
+/** `work`, with `Date.now()` `ms` ahead of the real clock until it and every other call ahead settled. */
+async function withClockAhead<T>(ms: number, work: () => Promise<T>): Promise<T> {
+  callsAhead++
+  Date.now = () => realNow() + ms
+  try {
+    return await work()
+  } finally {
+    if (--callsAhead === 0) Date.now = realNow
+  }
 }
 const refusedPresences = new Set<string>()
 const lapsedPresences = new Map<string, number>()

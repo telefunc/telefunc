@@ -28,6 +28,7 @@ import type {
   RoomSubscriptionSource,
   CellsRead,
   ExpiringCellsRead,
+  RequiredCells,
   RoomPlaneKit,
   StaleCommit,
   StaleIncarnation,
@@ -39,6 +40,7 @@ import {
   cellIndexKey,
   cellValuesKey,
   cellVersionsKey,
+  cellLapsesKey,
   directoryChecksKey,
   directoryIndexKey,
   directoryTagsKey,
@@ -142,6 +144,18 @@ if not ${name}_decoded or type(${name}) ~= 'table' then ${refuseLua('ERR', `${wh
 function numberLua(value: string, what: string): string {
   return `if type(${value}) ~= 'number' or ${value} ~= ${value} or ${value} == math.huge or ${value} == -math.huge then
   ${refuseLua('ERR', `${what} .. " isn't a number Telefunc writes"`)}
+end`
+}
+
+/** Lua that declares `name`, whether the lapse `raw` (a Lua name holding a cell's field of the lapses hash, or false)
+ *  is past `now`: a cell written with no lapse holds '' there, and never lapses. Refused where `raw` is no number Telefunc
+ *  writes; `what` is a Lua string expression. */
+function lapsedLua(name: string, raw: string, now: string, what: string): string {
+  return `local ${name} = false
+if ${raw} and ${raw} ~= '' then
+  local lapses_at = tonumber(${raw})
+  ${numberLua('lapses_at', what)}
+  ${name} = lapses_at < ${now}
 end`
 }
 
@@ -259,15 +273,16 @@ redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts}
 `
 
-// Writes a cell at `version`, or deletes it with no value; counts a counter cell, appending its key, value and
-// changedAt to `reply` (see CellCount).
-//   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them
+// Writes a cell at `version`, lapsing at `lapses_at` (authority time) or never with none, or deletes it with no value;
+// counts a counter cell, appending its key, value and changedAt to `reply` (see CellCount).
+//   KEYS: [4]=cell-index [5]=values [6]=versions, as every script that uses them has them, and the lapses at `lapses`
 // `tf_checked`: the counter cells the checks before the first write read, by key: `{ counter = <decoded> }`, or `{}`
 // where the cell was absent. A count takes its cell from there, and only from there: a cell the script writes leaves it,
 // so no script counts a cell it wrote, or counts one twice.
-const CELL_WRITES_LUA = `
+function cellWritesLua(lapses: string): string {
+  return `
 local tf_checked = {}
-local function tf_write(key, value, version)
+local function tf_write(key, value, version, lapses_at)
   tf_checked[key] = nil
   if value then
     redis.call('HSET', KEYS[5], key, value)
@@ -278,6 +293,11 @@ local function tf_write(key, value, version)
     redis.call('HDEL', KEYS[6], key)
     redis.call('ZREM', KEYS[4], key)
   end
+  if value then
+    redis.call('HSET', ${lapses}, key, lapses_at and string.format('%.0f', lapses_at) or '')
+  else
+    redis.call('HDEL', ${lapses}, key)
+  end
 end
 -- The calls tf_write and tf_count make.
 local function tf_cell_writes_allowed()
@@ -287,6 +307,8 @@ local function tf_cell_writes_allowed()
   tf_allowed('HDEL', KEYS[5], '')
   tf_allowed('HDEL', KEYS[6], '')
   tf_allowed('ZREM', KEYS[4], '')
+  tf_allowed('HSET', ${lapses}, '', '')
+  tf_allowed('HDEL', ${lapses}, '')
 end
 local function tf_count(key, delta, create, version, now, reply)
   local checked = tf_checked[key]
@@ -305,14 +327,15 @@ local function tf_count(key, delta, create, version, now, reply)
   reply[#reply + 1] = string.format('%d', counter.changedAt)
 end
 `
+}
 
 // HEAD EXCHANGE: compares by form, then stores the next head, and counts a create's cells in its incarnation.
-//   KEYS: [1]=head, and with counts [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions of the next
-//         head's incarnation
+//   KEYS: [1]=head, and with counts [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=lapses of
+//         the next head's incarnation
 //   ARGV: [1]=HeadExpectation JSON {form,rev?,lease?} [2]=nextJson{rev,state,inc?,config,lease?,ttlMs?} [3..]=per counted
 //         cell its key, delta and create ('1' or '')
-const CELL_HOLDS = ['string', 'string', 'set', 'zset', 'hash', 'hash'] as const
-const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
+const CELL_HOLDS = ['string', 'string', 'set', 'zset', 'hash', 'hash', 'hash'] as const
+const HEAD_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${cellWritesLua('KEYS[7]')}
 local head_key = KEYS[1]
 local now = tf_now()
 ${jsonLua('expected', 'ARGV[1]', "'the expected head'")}
@@ -358,13 +381,14 @@ if #KEYS > 1 then
   ${holdsCheckLua('KEYS[3]', CELL_HOLDS[2])}
   ${holdsCheckLua('KEYS[4]', CELL_HOLDS[3])}
   ${holdsCheckLua('KEYS[6]', CELL_HOLDS[5])}
+  ${holdsCheckLua('KEYS[7]', CELL_HOLDS[6])}
 end
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
 if #KEYS > 1 then
   local version = redis.call('INCR', KEYS[2])
   for at = 3, #ARGV, 3 do tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, {}) end
-  redis.call('SADD', KEYS[3], KEYS[2], KEYS[4], KEYS[5], KEYS[6])
+  redis.call('SADD', KEYS[3], KEYS[2], KEYS[4], KEYS[5], KEYS[6], KEYS[7])
 end
 return '{"tag":"head","head":' .. encoded .. '}'
 `
@@ -380,15 +404,21 @@ return '{"head":' .. cjson.encode(head) .. '}'
 
 // Reads the named cells, or every cell under a prefix, each with its version, while the head still names the
 // incarnation (closing tails may read), after the authority time of the read. A missing cell is left out.
-//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
+//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions [5]=lapses
 //   ARGV: [1]=inc [2..4]=the read's beside (of, reference, target; of '' for none) [5]='keys' then the cell keys, or
 //   'prefix' then the prefix
 // No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
-// Appends each of keys[first..] that has a value, with its value and version, to reply. With beside, each such cell
-// also gets what its reference names: 'none' where the cell has none (as does every cell outside of), else 'cell' and
-// the named cell's value, or 'gone' where that cell is absent, so a reply's tag ends ':beside'.
+// Appends each of keys[first..] that has a value, with its value, its version and whether it lapsed by `now` ('1' or
+// '0'), to reply. With beside, each such cell also gets what its reference names: 'none' where the cell has none (as
+// does every cell outside of), else 'cell' and the named cell's value, or 'gone' where that cell is absent or lapsed,
+// so a reply's tag ends ':beside'.
 const CELLS_REPLY_LUA = `
-local function tf_cells_reply(reply, keys, first, of, reference, target)
+local function tf_lapsed(key, now)
+  local raw_lapse = redis.call('HGET', KEYS[5], key)
+  ${lapsedLua('lapsed', 'raw_lapse', 'now', "KEYS[5] .. ' of ' .. key")}
+  return lapsed
+end
+local function tf_cells_reply(reply, keys, first, now, of, reference, target)
   if of ~= '' then reply[1] = reply[1] .. ':beside' end
   for i = first, #keys do
     local value = redis.call('HGET', KEYS[3], keys[i])
@@ -396,6 +426,7 @@ local function tf_cells_reply(reply, keys, first, of, reference, target)
       reply[#reply + 1] = keys[i]
       reply[#reply + 1] = value
       reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
+      reply[#reply + 1] = tf_lapsed(keys[i], now) and '1' or '0'
       if of ~= '' then
         local named = false
         if string.sub(keys[i], 1, #of) == of then
@@ -406,6 +437,7 @@ local function tf_cells_reply(reply, keys, first, of, reference, target)
           reply[#reply + 1] = ''
         else
           local cell = redis.call('HGET', KEYS[3], target .. named)
+          if cell and tf_lapsed(target .. named, now) then cell = false end
           reply[#reply + 1] = cell and 'cell' or 'gone'
           reply[#reply + 1] = cell or ''
         end
@@ -424,7 +456,7 @@ local keys, first = ARGV, 6
 if ARGV[5] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[6], '(' .. ARGV[6] .. '\\255'), 1
 end
-return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first, ARGV[2], ARGV[3], ARGV[4])
+return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first, now, ARGV[2], ARGV[3], ARGV[4])
 `
 
 // The expiring cells of the keys that Redis hasn't expired yet, after the head names the incarnation.
@@ -447,7 +479,7 @@ return reply
 // A prefix read's page: up to ARGV[4] cells of the index range from ARGV[2] ('[' then the prefix, or '(' then the
 // previous page's last key) to past the prefix ARGV[3], after the authority time of the read. A full page is tagged
 // 'more', with its last key after the time.
-//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
+//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions [5]=lapses
 //   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size [5..7]=the read's beside, as for READ_CELLS_LUA
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
@@ -456,8 +488,8 @@ if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
 local time = string.format('%.0f', now)
-if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, ARGV[5], ARGV[6], ARGV[7]) end
-return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, ARGV[5], ARGV[6], ARGV[7])
+if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7]) end
+return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7])
 `
 
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
@@ -531,14 +563,14 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 
 // CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the
 // head precondition (open + inc) held at apply time. A commit's writes take the incarnation's next revision as version.
-//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions
-//   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
-//         and value, per expected cell its key and version ('' while absent), per counted cell its key, delta and
-//         create ('1' or ''), then, with a control record, which counted cell numbers it (from 0) and how many digits
-//         that cell's value may take
-const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${CELL_WRITES_LUA}
-local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key =
-  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
+//   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=lapses
+//   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del'),
+//         value and lapse in ms ('' for none), per expected cell its key and version ('' while absent), per counted
+//         cell its key, delta and create ('1' or ''), then, with a control record, which counted cell numbers it (from
+//         0) and how many digits that cell's value may take
+const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${cellWritesLua('KEYS[7]')}
+local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key, lapses_key =
+  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7]
 local now = tf_now()
 ${headReadLua('head_key')}
 local head = tf_live_head(raw_head, head_key, now)
@@ -547,7 +579,7 @@ local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumbe
 ${integerLua('mutated', "'the count of mutated cells'")}
 ${integerLua('expected', "'the count of expected cells'")}
 ${integerLua('counted', "'the count of counted cells'")}
-local first_expected = 5 + 3 * mutated
+local first_expected = 5 + 4 * mutated
 local first_counted = first_expected + 2 * expected
 for at = first_expected, first_counted - 1, 2 do
   ${heldCallLua('local version', CELL_HOLDS[5], "'HGET', versions_key, ARGV[at]", 'versions_key')}
@@ -576,15 +608,17 @@ ${holdsCheckLua('incarnation_keys_key', CELL_HOLDS[2])}
 ${holdsCheckLua('cell_index_key', CELL_HOLDS[3])}
 if expected == 0 then ${holdsCheckLua('versions_key', CELL_HOLDS[5])} end
 if counted == 0 then ${holdsCheckLua('values_key', CELL_HOLDS[4])} end
+${holdsCheckLua('lapses_key', CELL_HOLDS[6])}
 local version = redis.call('INCR', rev_key)
-for at = 5, first_expected - 1, 3 do
-  tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version)
+for at = 5, first_expected - 1, 4 do
+  local lapses_at = ARGV[at + 3] ~= '' and now + tonumber(ARGV[at + 3]) or nil
+  tf_write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil, version, lapses_at)
 end
 local reply = {'committed'}
 for at = first_counted, first_counted + 3 * counted - 1, 3 do
   tf_count(ARGV[at], tonumber(ARGV[at + 1]), ARGV[at + 2] == '1', version, now, reply)
 end
-redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, values_key, versions_key)
+redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, values_key, versions_key, lapses_key)
 return reply
 `
 
@@ -618,10 +652,11 @@ const COMMIT_KEYS = {
   retainedLanes: 11,
   /** The member each retained frame of a lane other than a binary one is from. */
   retainedOwners: 12,
+  cellLapses: 13,
 } as const
 
-/** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local
- *  delivery-fence token, or `''`. */
+/** COMMIT's ARGV, by index; the required cells' keys follow the last (`RequiredCells`). A fence token is the
+ *  channel's local delivery-fence token, or `''`. */
 const COMMIT_ARGS = {
   inc: 0,
   laneKind: 1,
@@ -636,7 +671,11 @@ const COMMIT_ARGS = {
   everyMemberFence: 8,
   /** The member a retained frame is from, `''` for none. */
   owner: 9,
-  requiredCells: 10,
+  /** The required cells' beside: `of`, `''` for none, its reference and its target. */
+  requiredOf: 10,
+  requiredReference: 11,
+  requiredTarget: 12,
+  requiredCells: 13,
 } as const
 
 /** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
@@ -665,6 +704,7 @@ const COMMIT_HOLD = {
   trackLanes: 'set',
   retainedLanes: 'set',
   retainedOwners: 'hash',
+  cellLapses: 'hash',
 } satisfies Record<keyof typeof COMMIT_KEYS, Hold>
 const COMMIT_HOLDS = holdList(COMMIT_KEYS, COMMIT_HOLD)
 
@@ -749,7 +789,10 @@ function commitHoldsLua(
   return `${
     afterWrites
       ? `if ${K.head} ~= ${OPERATION_KEY.head} then ${holdsCheckLua(K.head, COMMIT_HOLD.head)} end
-if #${args} > ${COMMIT_ARGS.requiredCells} then ${holdsCheckLua(K.cellValues, COMMIT_HOLD.cellValues)} end
+if #${args} > ${COMMIT_ARGS.requiredCells} then
+  ${holdsCheckLua(K.cellValues, COMMIT_HOLD.cellValues)}
+  if ${A.requiredOf} ~= '' then ${holdsCheckLua(K.cellLapses, COMMIT_HOLD.cellLapses)} end
+end
 if ${K.incarnationKeys} ~= ${OPERATION_KEY.incarnationKeys} then
   ${holdsCheckLua(K.incarnationKeys, COMMIT_HOLD.incarnationKeys)}
 end
@@ -792,9 +835,24 @@ if head and head.inc == ${A.inc} then
   end
 end
 if not ok then return '{"kind":"stale-incarnation"}' end
+-- Each required cell is there, and one under the beside's of has a reference whose target is there, not lapsed: a
+-- cell's lapse field is there exactly while the cell is.
+local required_of = ${A.requiredOf}
 for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
-  ${heldCallLua('local present', COMMIT_HOLD.cellValues, `'HEXISTS', ${K.cellValues}, ${args}[i]`, K.cellValues)}
-  if present == 0 then
+  local key = ${args}[i]
+  ${heldCallLua('local present', COMMIT_HOLD.cellValues, `'HEXISTS', ${K.cellValues}, key`, K.cellValues)}
+  local held = present == 1
+  if held and required_of ~= '' and string.sub(key, 1, #required_of) == required_of then
+    local named = redis.call('HGET', ${K.cellValues}, ${A.requiredReference} .. string.sub(key, #required_of + 1))
+    held = false
+    if named then
+      local target = ${A.requiredTarget} .. named
+      ${heldCallLua('local raw_lapse', COMMIT_HOLD.cellLapses, `'HGET', ${K.cellLapses}, target`, K.cellLapses)}
+      ${lapsedLua('lapsed', 'raw_lapse', 'now', `${K.cellLapses} .. ' of ' .. target`)}
+      held = raw_lapse ~= false and not lapsed
+    end
+  end
+  if not held then
     return '{"kind":"stale-cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}'
   end
 end
@@ -893,7 +951,7 @@ const OPERATION_KEYS = {
   head: 0,
   rev: 1,
   incarnationKeys: 2,
-  // Where `CELL_WRITES_LUA` reads them.
+  // Where `cellWritesLua()` reads them.
   cellIndex: 3,
   cellValues: 4,
   cellVersions: 5,
@@ -901,6 +959,7 @@ const OPERATION_KEYS = {
   /** The semantic lane's retained frame. */
   semanticRetained: 7,
   retainedOwners: 8,
+  cellLapses: 9,
 } as const
 const OPERATION_KEY = luaRefs('KEYS', OPERATION_KEYS)
 /** The KEYS and ARGV of the commit an operation carries, as OPERATION's tables CK and CA hold them. */
@@ -916,6 +975,7 @@ const OPERATION_HOLD = {
   retainedLanes: 'set',
   semanticRetained: 'string',
   retainedOwners: 'hash',
+  cellLapses: 'hash',
 } satisfies Record<keyof typeof OPERATION_KEYS, Hold>
 const OPERATION_HOLDS = holdList(OPERATION_KEYS, OPERATION_HOLD)
 /** What each key the plan gives the index of holds, by the plan's field and the key's place in its entry. */
@@ -933,7 +993,7 @@ function planHoldsLua(field: 'retained' | 'trackLanes' | 'expiring', at: number)
   return `for _, entry in ipairs(plan.${field}) do\n  ${checks.join('\n  ')}\nend`
 }
 
-const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${CELL_WRITES_LUA}${RETAINED_DELETE_FN_LUA}
+const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${cellWritesLua(OPERATION_KEY.cellLapses)}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', true)}
 end
@@ -1011,6 +1071,7 @@ if takes_revision or #plan.prefixes > 0 then
   if #plan.counts == 0 then ${holdsCheckLua(OPERATION_KEY.cellValues, OPERATION_HOLD.cellValues)} end
   if #plan.expect == 0 then ${holdsCheckLua(OPERATION_KEY.cellVersions, OPERATION_HOLD.cellVersions)} end
   if #plan.prefixes == 0 then ${holdsCheckLua('cell_index_key', OPERATION_HOLD.cellIndex)} end
+  ${holdsCheckLua(OPERATION_KEY.cellLapses, OPERATION_HOLD.cellLapses)}
 end
 if #plan.members > 0 or #plan.retained > 0 then
   ${holdsCheckLua('retained_lanes_key', OPERATION_HOLD.retainedLanes)}
@@ -1029,13 +1090,14 @@ local counters = {}
 if takes_revision then
   local version = redis.call('INCR', rev_key)
   for _, mutation in ipairs(plan.mutations) do
-    tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version)
+    local lapses_at = mutation[3] and now + mutation[3] or nil
+    tf_write(mutation[1], mutation[2] > 0 and ARGV[mutation[2]] or nil, version, lapses_at)
   end
   for _, count in ipairs(plan.counts) do tf_count(count[1], count[2], count[3], version, now, counters) end
 end
 if #plan.prefixes > 0 or #plan.mutations > 0 or #plan.counts > 0 then
   redis.call('SADD', incarnation_keys_key, rev_key, cell_index_key, ${OPERATION_KEY.cellValues},
-    ${OPERATION_KEY.cellVersions})
+    ${OPERATION_KEY.cellVersions}, ${OPERATION_KEY.cellLapses})
 end
 for _, member in ipairs(plan.members) do
   redis.call('SREM', incarnation_keys_key, KEYS[member[4]])
@@ -1151,18 +1213,18 @@ type CommitInput = RoomInc & {
   retain: boolean
   owner: string | undefined
   closingLease: string | undefined
-  requiredCellKeys: readonly string[]
+  required: RequiredCells | undefined
   fenceTokens: FenceTokens
   kit: RoomPlaneKit
 }
 
-/** The commit script's JSON reply: a missing required cell by its index among them. */
+/** The commit script's JSON reply: a required cell that doesn't hold by its index among them. */
 type CommitReply =
   | StaleIncarnation
   | { kind: 'stale-cell'; index: number }
   | { kind: 'accepted'; seq: number; timestamp: number }
 
-/** A commit as the driver hands it on: a missing required cell by its key. */
+/** A commit as the driver hands it on: a required cell that doesn't hold by its key. */
 type CommitOutcome = StaleCommit | Extract<CommitReply, { kind: 'accepted' }>
 
 /** OPERATION_LUA's ARGV[2], as JSON: what the plan read and wrote. A `keys` number is where the entry's KEYS start, and
@@ -1177,8 +1239,8 @@ type OperationPacket = {
   semantic: string
   /** The cell prefixes the plan drops, before its mutations. */
   prefixes: string[]
-  /** Each cell write: its key, and its bytes' index in ARGV, 0 for a delete. */
-  mutations: [key: string, argv: number][]
+  /** Each cell write: its key, its bytes' index in ARGV, 0 for a delete, and its lapse in ms for a cell that lapses. */
+  mutations: ([key: string, argv: number] | [key: string, argv: number, lapsesInMs: number])[]
   /** Each counter cell's change (`CellCount`). */
   counts: [key: string, delta: number, create: boolean][]
   /** The dropped members' retained binary lanes; a frame's key and its member's and track's retained lanes are its
@@ -1249,6 +1311,7 @@ const REDIS_COMMANDS = {
               cellIndexKey(prefix, roomId, inc),
               cellValuesKey(prefix, roomId, inc),
               cellVersionsKey(prefix, roomId, inc),
+              cellLapsesKey(prefix, roomId, inc),
             ]
       return {
         keys: [headKey(prefix, roomId), ...cells],
@@ -1282,7 +1345,7 @@ const REDIS_COMMANDS = {
     name: 'tfRoomReadCells',
     writes: false,
     lua: READ_CELLS_LUA,
-    numberOfKeys: 4,
+    numberOfKeys: 5,
     binaryReply: true,
     invoke: (prefix, { roomId, inc, sel }: RoomInc & { sel: CellSelector }) => ({
       keys: [
@@ -1290,6 +1353,7 @@ const REDIS_COMMANDS = {
         cellIndexKey(prefix, roomId, inc),
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
+        cellLapsesKey(prefix, roomId, inc),
       ],
       argv: [inc, ...besideArgv(sel.beside), ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
     }),
@@ -1321,7 +1385,7 @@ const REDIS_COMMANDS = {
     name: 'tfRoomReadCellPage',
     writes: false,
     lua: READ_CELL_PAGE_LUA,
-    numberOfKeys: 4,
+    numberOfKeys: 5,
     binaryReply: true,
     invoke: (
       prefix,
@@ -1339,6 +1403,7 @@ const REDIS_COMMANDS = {
         cellIndexKey(prefix, roomId, inc),
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
+        cellLapsesKey(prefix, roomId, inc),
       ],
       argv: [
         inc,
@@ -1450,7 +1515,7 @@ const REDIS_COMMANDS = {
     writes: true,
     holds: CELL_HOLDS,
     lua: CELLS_EXCHANGE_LUA,
-    numberOfKeys: 6,
+    numberOfKeys: 7,
     invoke: (
       prefix,
       { roomId, inc, exchange, record }: RoomInc & { exchange: CellsExchange; record: ControlRecord | undefined },
@@ -1464,14 +1529,15 @@ const REDIS_COMMANDS = {
           cellIndexKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
           cellVersionsKey(prefix, roomId, inc),
+          cellLapsesKey(prefix, roomId, inc),
         ],
         argv: [
           inc,
           String(exchange.mutations.length),
           String(exchange.expect.length),
           String(counts.length),
-          ...exchange.mutations.flatMap(({ key, bytes }) =>
-            bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
+          ...exchange.mutations.flatMap(({ key, bytes, lapsesInMs }) =>
+            bytes === null ? [key, 'del', '', ''] : [key, 'set', toBuffer(bytes), lapseArg(lapsesInMs)],
           ),
           ...exchange.expect.flatMap(({ key, version }) => [key, version ?? '']),
           ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
@@ -1504,10 +1570,10 @@ const REDIS_COMMANDS = {
     lua: COMMIT_LUA,
     numberOfKeys: Object.keys(COMMIT_KEYS).length,
     invoke: commitInvocation,
-    parse: (reply, { requiredCellKeys }): CommitOutcome => {
+    parse: (reply, { required }): CommitOutcome => {
       const parsed = JSON.parse(reply as string) as CommitReply
       if (parsed.kind !== 'stale-cell') return parsed
-      const key = requiredCellKeys[parsed.index]
+      const key = required?.keys[parsed.index]
       assert(key !== undefined)
       return { kind: 'stale-cell', key }
     },
@@ -1530,12 +1596,13 @@ const REDIS_COMMANDS = {
       keys[OPERATION_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
       keys[OPERATION_KEYS.semanticRetained] = retainedKey(prefix, roomId, inc, semanticLaneKey)
       keys[OPERATION_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
+      keys[OPERATION_KEYS.cellLapses] = cellLapsesKey(prefix, roomId, inc)
       const keysAt = (...added: string[]) => keys.push(...added) - added.length + 1
       const argv: (string | Buffer)[] = [inc, '']
-      const mutations = writes.mutations.map(({ key, bytes }): [string, number] => {
+      const mutations = writes.mutations.map(({ key, bytes, lapsesInMs }): OperationPacket['mutations'][number] => {
         if (bytes === null) return [key, 0]
         argv.push(toBuffer(bytes))
-        return [key, argv.length]
+        return lapsesInMs === undefined ? [key, argv.length] : [key, argv.length, lapsesInMs]
       })
       const retained = members
         .flatMap(({ retained }) => retained)
@@ -1672,23 +1739,36 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-/** The read's time, then key, value and version triples. */
-/** A read's cells; with `withBeside`, each followed by what its reference names (`CELLS_REPLY_LUA`). */
+/** A read's cells, each its key, value, version and whether it lapsed (`CELLS_REPLY_LUA`); with `withBeside`, each
+ *  followed by what its reference names. */
 function parseCells(now: Buffer, found: Buffer[], withBeside: boolean): Extract<CellsRead, { kind: 'read' }> {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
+  const lapsed = new Set<string>()
   const beside = new Map<string, Uint8Array | null>()
-  for (let i = 0; i < found.length; i += withBeside ? 5 : 3) {
+  for (let i = 0; i < found.length; i += withBeside ? 6 : 4) {
     const key = found[i]!.toString()
     cells.set(key, Uint8Array.from(found[i + 1]!))
     versions.set(key, found[i + 2]!.toString())
+    if (found[i + 3]!.toString() === '1') lapsed.add(key)
     if (!withBeside) continue
-    const named = found[i + 3]!.toString()
-    if (named !== 'none') beside.set(key, named === 'cell' ? Uint8Array.from(found[i + 4]!) : null)
+    const named = found[i + 4]!.toString()
+    if (named !== 'none') beside.set(key, named === 'cell' ? Uint8Array.from(found[i + 5]!) : null)
   }
-  const read: Extract<CellsRead, { kind: 'read' }> = { kind: 'read', cells, versions, now: Number(now.toString()) }
+  const read: Extract<CellsRead, { kind: 'read' }> = {
+    kind: 'read',
+    cells,
+    versions,
+    now: Number(now.toString()),
+    lapsed,
+  }
   if (withBeside) read.beside = beside
   return read
+}
+
+/** A cell's lapse as a script's argument: `''` for one that never lapses. */
+function lapseArg(lapsesInMs: number | undefined): string {
+  return lapsesInMs === undefined ? '' : String(lapsesInMs)
 }
 
 /** A read's beside as its script's arguments: `of` empty for none. */
@@ -1766,6 +1846,7 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   keys[COMMIT_KEYS.trackLanes] = lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order
   keys[COMMIT_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
   keys[COMMIT_KEYS.retainedOwners] = retainedOwnersKey(prefix, roomId, inc)
+  keys[COMMIT_KEYS.cellLapses] = cellLapsesKey(prefix, roomId, inc)
   const argv: (string | Buffer)[] = []
   argv[COMMIT_ARGS.inc] = inc
   argv[COMMIT_ARGS.laneKind] = lane.kind
@@ -1777,6 +1858,10 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   argv[COMMIT_ARGS.laneKey] = laneKey
   argv[COMMIT_ARGS.everyMemberFence] = fenceTokens.everyMember
   argv[COMMIT_ARGS.owner] = input.owner ?? ''
-  for (const key of input.requiredCellKeys) argv.push(key)
+  const { keys: required = [], beside } = input.required ?? {}
+  argv[COMMIT_ARGS.requiredOf] = beside?.of ?? ''
+  argv[COMMIT_ARGS.requiredReference] = beside?.reference ?? ''
+  argv[COMMIT_ARGS.requiredTarget] = beside?.target ?? ''
+  for (const key of required) argv.push(key)
   return { keys, argv }
 }

@@ -9,6 +9,7 @@ export {
   cellIndexKey,
   cellValuesKey,
   cellVersionsKey,
+  cellLapsesKey,
   orderKey,
   memberOrderKey,
   trackLanesKey,
@@ -89,6 +90,12 @@ function cellValuesKey(prefix: string, roomId: string, inc: string): string {
 /** Each cell's version, by its key. */
 function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
   return `${incarnationPrefix(prefix, roomId, inc)}:versions`
+}
+/** Each cell's lapse, by its key: the authority time it lapses at, or '' for a cell written with no `lapsesInMs`. A
+ *  field for every cell keeps this hash there whenever the values are: a script of a slot that migrates is asked to the
+ *  importing node only while it finds all of its keys there. */
+function cellLapsesKey(prefix: string, roomId: string, inc: string): string {
+  return `${incarnationPrefix(prefix, roomId, inc)}:lapses`
 }
 /** An expiring cell's bytes, under a TTL of its own, so Redis deletes it. It isn't in the incarnation's manifest:
  *  it expires by itself. */

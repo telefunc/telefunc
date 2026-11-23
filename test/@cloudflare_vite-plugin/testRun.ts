@@ -59,6 +59,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
   testRoomStorage()
+  testRoomHostingAtCommit()
   testServerFirst()
 }
 
@@ -763,6 +764,18 @@ async function overRowLimit(card: string) {
     else high = middle
   }
   return await outcomeAt(card, low + 1)
+}
+
+function testRoomHostingAtCommit() {
+  test("Room: a Room.send() whose tab's lease lapsed between its lookup and its inbox commit is refused at the commit", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'send-after-lapse')).deep.equal({ receipts: 0 })
+  })
+
+  test("Room: a participant's send() to a tab its view lists, whose lease a reap claimed, is told the participant is gone", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'send-to-claimed')).deep.equal({ sent: 'participant not found' })
+  })
 }
 
 async function openRoomPage() {

@@ -37,7 +37,7 @@ import type {
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
 import type { ParticipantMeta, RoomSendReceipt, Sender } from '../types.js'
-import { memberCellKey } from './store/cells.js'
+import { hostedMembers } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
 import {
   SEMANTIC_LANE,
@@ -136,7 +136,7 @@ class RoomWrites {
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
-      const opts = { retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
+      const opts = { retain, owner: from, required: hostedMembers(from) }
       const committing = commitLane(getRoomPlane().direct, target, record, opts)
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
@@ -154,7 +154,7 @@ class RoomWrites {
       const { sender } = await this.admitPublish(from, message, track)
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
-      const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
+      const opts = { retain: frame.retain, owner: from, required: hostedMembers(from) }
       const committing = commitLane(
         getRoomPlane().direct,
         {
@@ -304,8 +304,7 @@ class RoomWrites {
         dm.guarded()
       }
       const payload = dm.bytes()
-      const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-      const committed = await commitLane(store, inbox, payload, { requiredCellKeys })
+      const committed = await commitLane(store, inbox, payload, { required: hostedMembers(from, to) })
       const receipt = acceptedOrThrow(this.incarnation.id, committed)
       if (receipt.lost !== undefined) throw messageLostError()
       const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
@@ -323,7 +322,7 @@ class RoomWrites {
     const target = inboxOf(id, inc, to)
     const frame = dmAckFrame(direct, target.lane, { __r: 'dm-ack', to, ackId, ...reply })
     await storeDmReply(id, inc, to, ackId, frame)
-    const acked = await commitLane(direct, target, frame, { requiredCellKeys: [memberCellKey(to)] })
+    const acked = await commitLane(direct, target, frame, { required: hostedMembers(to) })
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 

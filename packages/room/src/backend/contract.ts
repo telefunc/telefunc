@@ -14,6 +14,7 @@ export type {
   ExpiringCellsRead,
   CommitKept,
   CommitOptions,
+  RequiredCells,
   CommitTarget,
   DirectoryPage,
   EveryMemberLane,
@@ -135,11 +136,14 @@ type HeadExchangeResult = { kind: 'committed'; head: RoomHead } | { kind: 'confl
  *  `stored`, also a record of its own that a later read takes (a DM's reply, a leave's handoff). */
 type CommitKept = 'delivered' | 'stored'
 
-/** `bytes: null` deletes the cell. */
-type CellMutation = { key: string; bytes: Uint8Array | null }
+/** `bytes: null` deletes the cell. With `lapsesInMs`, the cell lapses that long after the write, by the authority's
+ *  clock (at once where it is negative): a read then lists it among `lapsed`, and a commit that requires it as a
+ *  target refuses (`RequiredCells`). A write without it leaves a cell that never lapses. */
+type CellMutation = { key: string; bytes: Uint8Array | null; lapsesInMs?: number }
 
 /** For each cell under `of` it returns, a read also reads the cell `reference` + that key past `of` and, where that cell
- *  is there, the cell `target` + its bytes, in the same turn: a reference the driver follows without decoding a cell. */
+ *  is there and hasn't lapsed, the cell `target` + its bytes, in the same turn: a reference the driver follows without
+ *  decoding a cell. */
 type CellsBeside = { of: string; reference: string; target: string }
 
 type CellSelector = ({ keys: string[] } | { prefix: string }) & { beside?: CellsBeside }
@@ -152,8 +156,10 @@ type CellsRead =
       cells: Map<string, Uint8Array>
       versions: Map<string, string>
       now: number
+      /** The keys of the cells found that lapsed before `now` (`CellMutation`). */
+      lapsed: Set<string>
       /** With `beside`: by the key of each cell under `of` whose reference is there, the cell it names, `null` where
-       *  that cell is absent. */
+       *  that cell is absent or lapsed. */
       beside?: Map<string, Uint8Array | null>
     }
   | StaleIncarnation
@@ -185,8 +191,13 @@ type CellsExchangeResult =
   | { kind: 'conflict' }
   | StaleIncarnation
 
+/** Cells a commit requires, checked in its atomic step: each of `keys` is there, and with `beside`, each of them under
+ *  `of` has a reference whose target is there and hasn't lapsed. A commit that finds one that doesn't hold is
+ *  `stale-cell`, with its key. */
+type RequiredCells = { keys: string[]; beside?: CellsBeside }
+
 /** `owner`: with `retain`, the member the frame is from; `dropMemberLanes()` of that member drops it. */
-type CommitOptions = { retain?: boolean; owner?: string; closingLease?: string; requiredCellKeys?: string[] }
+type CommitOptions = { retain?: boolean; owner?: string; closingLease?: string; required?: RequiredCells }
 
 type RetainedFrame = OrderingInfo & { payload: Uint8Array }
 
@@ -204,7 +215,8 @@ type CommitAccepted = {
   delivery?: Promise<void>
 }
 
-/** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a required cell is gone. */
+/** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a cell it requires doesn't
+ *  hold (`RequiredCells`). */
 type StaleCommit = StaleIncarnation | { kind: 'stale-cell'; key: string }
 
 type CommitResult = CommitAccepted | StaleCommit
@@ -213,6 +225,8 @@ type CommitResult = CommitAccepted | StaleCommit
 type OperationTx = {
   readonly now: number
   cell(key: string): Uint8Array | undefined
+  /** Whether the cell `key` is there and lapsed before `now` (`CellMutation`). */
+  lapsed(key: string): boolean
   write(mutation: CellMutation): void
   count(count: CellCount): void
   /** Deletes every cell under `prefix`, before the operation's writes. */

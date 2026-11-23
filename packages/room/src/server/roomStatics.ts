@@ -36,7 +36,7 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
-import { memberCellKey } from './store/cells.js'
+import { hostedMembers } from './store/cells.js'
 import { tryCreateRoom } from './lifecycle/create.js'
 import { allSettledOrThrow, eachInFlight } from './store/inFlight.js'
 import { evictMember, leaveCommits } from './store/members.js'
@@ -499,8 +499,7 @@ async function sendDm(
   member: string,
   envelope: Uint8Array,
 ): Promise<LaneCommit> {
-  const requiredCellKeys = [memberCellKey(member)]
-  return await commitLane(store, inboxOf(id, inc, member), envelope, { requiredCellKeys })
+  return await commitLane(store, inboxOf(id, inc, member), envelope, { required: hostedMembers(member) })
 }
 
 /** The delivered message's receipt; a member that left, a closed room or a lost handoff throws. */

@@ -46,7 +46,7 @@ type JoinArgs = {
 const JOIN: RoomOperation<JoinArgs, 'joined' | 'lease-lost'> = {
   name: 'join',
   plan(tx, { lease, hold, id, record, meta, join }) {
-    const leaseWrites = leaseHosting(lease, tx.cell(leaseCellKey(lease.id)), tx.now)
+    const leaseWrites = leaseHosting(lease, tx)
     if (leaseWrites === null) return 'lease-lost'
     for (const mutation of leaseWrites) tx.write(mutation)
     tx.write({

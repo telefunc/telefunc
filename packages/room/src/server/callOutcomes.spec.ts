@@ -10,7 +10,7 @@ import { Room } from '../index.js'
 import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
 import { newRoomHold } from './lifecycle/hold.js'
 import { RoomReplica } from './RoomReplica.js'
-import { LEASE_CELL_PREFIX, META_SEQ_CELL_KEY } from './store/cells.js'
+import { META_SEQ_CELL_KEY, leaseCellKey } from './store/cells.js'
 import { RoomLease } from './store/lease.js'
 import { joinMember } from './store/members.js'
 
@@ -48,9 +48,9 @@ async function lapsedLease(id: string): Promise<() => Promise<boolean>> {
   const head = await plane.direct.reads.readHead(id)
   if (head === null) throw new Error(`room ${id} has no head`)
   const { inc } = configFromHead(head)
-  const key = `${LEASE_CELL_PREFIX}lapsed-${crypto.randomUUID()}`
-  const bytes = new TextEncoder().encode(JSON.stringify({ until: 0 }))
-  await plane.direct.compareExchangeCells(id, inc, { expect: [], mutations: [{ key, bytes }] })
+  const key = leaseCellKey(`lapsed-${crypto.randomUUID()}`)
+  const lapsed = { key, bytes: new Uint8Array(), lapsesInMs: -1 }
+  await plane.direct.compareExchangeCells(id, inc, { expect: [], mutations: [lapsed] })
   return async () => {
     const read = await plane.direct.reads.readCells(id, inc, { keys: [key] })
     return read.kind !== 'stale-incarnation' && read.cells.has(key)
@@ -81,16 +81,16 @@ async function otherServersMember(
     },
     {},
   )
-  const bytes = new TextEncoder().encode(JSON.stringify({ until: 0 }))
+  const key = leaseCellKey(lease.id)
   const lapse = async () => {
     await plane.direct.compareExchangeCells(id, room.inc, {
       expect: [],
-      mutations: [{ key: `${LEASE_CELL_PREFIX}${lease.id}`, bytes }],
+      mutations: [{ key, bytes: new Uint8Array(), lapsesInMs: -1 }],
     })
   }
   const leaseStays = async () => {
-    const read = await plane.direct.reads.readCells(id, room.inc, { keys: [`${LEASE_CELL_PREFIX}${lease.id}`] })
-    return read.kind !== 'stale-incarnation' && read.cells.has(`${LEASE_CELL_PREFIX}${lease.id}`)
+    const read = await plane.direct.reads.readCells(id, room.inc, { keys: [key] })
+    return read.kind !== 'stale-incarnation' && read.cells.has(key)
   }
   return { member, lapse, leaseStays }
 }

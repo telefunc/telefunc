@@ -64,8 +64,9 @@ async function lapsedLease(admin: Redis, id: string): Promise<void> {
   const incarnation = values.slice(0, -':values'.length)
   const key = 'session:lapsed'
   await admin.zadd(`${incarnation}:cells`, 0, key)
-  await admin.hset(values, key, JSON.stringify({ until: 0 }))
+  await admin.hset(values, key, '')
   await admin.hset(`${incarnation}:versions`, key, '1')
+  await admin.hset(`${incarnation}:lapses`, key, '0')
 }
 
 // The ACL rules that refuse one call of the commit past its first write (its lane's order), and the rules that allow it
@@ -267,7 +268,7 @@ describe.runIf(runs)('Room.send() by identity of a tab that hosts and one on a l
       const first = await joinedByAnotherServer(String(admin.options.host), id, { identity: 'u1' })
       const left = await Room.join(id, { identity: 'u1' })
       const { values, lease } = await hostingLease(admin, id, first)
-      await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+      await admin.hset(`${values.slice(0, -':values'.length)}:lapses`, `session:${lease}`, '0')
       const { assertCommittable } = RedisRoomDriver.prototype
       const checked: string[] = []
       vi.spyOn(RedisRoomDriver.prototype, 'assertCommittable').mockImplementation(function (

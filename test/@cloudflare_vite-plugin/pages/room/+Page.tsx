@@ -27,6 +27,8 @@ import {
   onMetaUpdateOutcome,
   onSendOutcome,
   onBesideRead,
+  onSendAfterLapse,
+  onSendToClaimed,
 } from './Room.telefunc'
 
 type Channels = Awaited<ReturnType<typeof onOrderChannels>>
@@ -110,6 +112,8 @@ function Page() {
       {card('meta-update-outcome', () => onMetaUpdateOutcome(Number(length.current?.value)))}
       {card('send-outcome', () => onSendOutcome(Number(length.current?.value)))}
       {card('beside-read', () => onBesideRead())}
+      {card('send-after-lapse', () => onSendAfterLapse())}
+      {card('send-to-claimed', () => onSendToClaimed())}
     </div>
   )
 }

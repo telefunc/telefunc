@@ -291,27 +291,27 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       expect(made).toEqual({
         tfBroadcastStart: ['3 commands, 0 TYPE'],
         tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
-        tfRoomCellsExchange: ['18 commands, 2 TYPE', '15 commands, 2 TYPE'],
-        tfRoomCommit: [commit, commit, commit, commit, '8 commands, 1 TYPE', '8 commands, 1 TYPE', commit, commit],
+        tfRoomCellsExchange: ['22 commands, 3 TYPE', '18 commands, 3 TYPE'],
+        tfRoomCommit: [commit, commit, commit, commit, '10 commands, 1 TYPE', '10 commands, 1 TYPE', commit, commit],
         tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
         tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
         tfRoomDropIncarnation: ['3 commands, 1 TYPE', '3 commands, 1 TYPE'],
         tfRoomHeadExchange: [
-          '18 commands, 3 TYPE',
+          '21 commands, 4 TYPE',
           '4 commands, 0 TYPE',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
-          '18 commands, 3 TYPE',
+          '21 commands, 4 TYPE',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
         ],
         // A join and a leave each write a member's lease reference beside its record.
         tfRoomOperation: [
-          '41 commands, 2 TYPE',
-          '38 commands, 2 TYPE',
-          '28 commands, 2 TYPE',
-          '46 commands, 5 TYPE',
-          '49 commands, 5 TYPE',
+          '50 commands, 3 TYPE',
+          '46 commands, 3 TYPE',
+          '33 commands, 3 TYPE',
+          '53 commands, 6 TYPE',
+          '57 commands, 6 TYPE',
         ],
       })
     }, 300_000)
@@ -439,13 +439,15 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       if (store === undefined) throw new Error(`${name} didn't start`)
       // No call of Telefunc's counts a cell it also writes: a count takes the cell only as the check before the first
       // write read it, and the write left none to take.
-      const keys = ['head', 'rev', 'manifest', 'index', 'values', 'versions'].map((part) => `written-count:${part}`)
+      const keys = ['head', 'rev', 'manifest', 'index', 'values', 'versions', 'lapses'].map(
+        (part) => `written-count:${part}`,
+      )
       const [head, , , , values] = keys
       if (head === undefined || values === undefined) throw new Error('no keys')
       await store.admin.set(head, JSON.stringify({ inc: 'i', state: 'open' }))
       await store.admin.hset(values, 'counter', '{"value":1,"changedAt":1}')
       const written = '{"value":5,"changedAt":2}'
-      const argv = ['i', '1', '0', '1', 'counter', 'set', written, 'counter', '1', '']
+      const argv = ['i', '1', '0', '1', 'counter', 'set', written, '', 'counter', '1', '']
 
       const reply = await store.admin.eval(REDIS_COMMANDS.cellsExchange.lua, keys.length, ...keys, ...argv).then(
         () => 'replied',

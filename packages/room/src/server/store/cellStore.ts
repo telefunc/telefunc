@@ -18,8 +18,9 @@ async function readPrefix(
   return (await readPrefixAt(store, roomId, inc, prefix)).cells
 }
 
-/** Cells read, the authority time of the last page's read, and the keys of the cells a `Kept` left out. */
-type CellsAt = { cells: Map<string, Uint8Array>; now: number; left: string[] }
+/** Cells read, the authority time of the last page's read, the keys of those that lapsed by their page's read, and the
+ *  keys of the cells a `Kept` left out. */
+type CellsAt = { cells: Map<string, Uint8Array>; now: number; lapsed: Set<string>; left: string[] }
 
 /** A read's `beside`, and which of a read's cells to keep, judged by the read they came in. */
 type Kept = { beside: CellsBeside; keeps(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean }
@@ -32,19 +33,23 @@ async function readPrefixAt(
   kept?: Kept,
 ): Promise<CellsAt> {
   const cells = new Map<string, Uint8Array>()
+  const lapsed = new Set<string>()
   const left: string[] = []
   let now = 0
   const slice = new Slice()
   for await (const page of store.reads.readCellPages(roomId, inc, prefix, kept?.beside)) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) {
-      if (kept === undefined || kept.keeps(page, key)) cells.set(key, raw)
-      else left.push(key)
+      if (kept !== undefined && !kept.keeps(page, key)) left.push(key)
+      else {
+        cells.set(key, raw)
+        if (page.lapsed.has(key)) lapsed.add(key)
+      }
     }
     now = page.now
     if (slice.over) await slice.next()
   }
-  return { cells, now, left }
+  return { cells, now, lapsed, left }
 }
 
 async function readOpenCells(

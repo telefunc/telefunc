@@ -14,7 +14,7 @@ import { RoomStore } from '../backend/RoomStore.js'
 import type { CommitOptions, CommitResult, CommitTarget, LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
 import { configFromHead, decodeRoomRecord, encodeRoomRecord } from './lanes/lanes.js'
-import { LEASE_CELL_PREFIX, leaseCellKey, memberCellKey } from './store/cells.js'
+import { leaseCellKey, memberCellKey } from './store/cells.js'
 import { RoomLease } from './store/lease.js'
 import { joinMember } from './store/members.js'
 
@@ -49,22 +49,22 @@ function withSizeRule(): void {
 }
 
 /** A lease of another server in room `id` that lapsed, hosting nothing: a call that finds a participant there reaps
- *  it. Reads its cell back with `read`. */
-async function lapsedLease(id: string): Promise<{ read: () => Promise<string | undefined> }> {
+ *  it. `read` tells whether its cell is still there, lapsed: no reap claimed it. */
+async function lapsedLease(id: string): Promise<{ read: () => Promise<'lapsed' | 'live' | 'gone'> }> {
   const { direct } = getRoomPlane()
   const head = await direct.reads.readHead(id)
   if (head === null) throw new Error(`room ${id} has no head`)
   const { inc } = configFromHead(head)
-  const key = `${LEASE_CELL_PREFIX}lapsed`
+  const key = leaseCellKey('lapsed')
   await direct.compareExchangeCells(id, inc, {
     expect: [],
-    mutations: [{ key, bytes: new TextEncoder().encode('{"until":0}') }],
+    mutations: [{ key, bytes: new Uint8Array(), lapsesInMs: -1 }],
   })
   return {
     read: async () => {
       const read = await direct.reads.readCells(id, inc, { keys: [key] })
-      const raw = read.kind === 'stale-incarnation' ? undefined : read.cells.get(key)
-      return raw === undefined ? undefined : new TextDecoder().decode(raw)
+      if (read.kind === 'stale-incarnation' || !read.cells.has(key)) return 'gone'
+      return read.lapsed.has(key) ? 'lapsed' : 'live'
     },
   }
 }
@@ -81,7 +81,7 @@ for (const by of ['id', 'identity'] as const) {
     const refused = await sending.then(() => 'resolved', told)
     vi.restoreAllMocks()
 
-    expect({ refused, lease: await lease.read() }).toEqual({ refused: 'ChannelOverflowError', lease: '{"until":0}' })
+    expect({ refused, lease: await lease.read() }).toEqual({ refused: 'ChannelOverflowError', lease: 'lapsed' })
     await Room.close(id)
   })
 
@@ -99,7 +99,7 @@ for (const by of ['id', 'identity'] as const) {
       refused,
       lease: await lease.read(),
       listed: (await Room.getParticipants(id)).map((each) => each.id),
-    }).toEqual({ refused: 'ChannelOverflowError', lease: '{"until":0}', listed: [participant.id] })
+    }).toEqual({ refused: 'ChannelOverflowError', lease: 'lapsed', listed: [participant.id] })
     await Room.close(id)
   })
 }
@@ -144,7 +144,7 @@ async function joinedElsewhere(id: string, identity?: string): Promise<{ member:
     {},
   )
   const lapse = async () => {
-    const mutations = [{ key: leaseCellKey(lease.id), bytes: new TextEncoder().encode('{"until":0}') }]
+    const mutations = [{ key: leaseCellKey(lease.id), bytes: new Uint8Array(), lapsesInMs: -1 }]
     await direct.compareExchangeCells(id, room.inc, { expect: [], mutations })
   }
   return { member, lapse }
@@ -164,7 +164,7 @@ it("a participant's send() of data over the size, to a participant this server h
   expect({ refused, lookups: lookups.count, lease: await lease.read() }).toEqual({
     refused: 'ChannelOverflowError',
     lookups: 1,
-    lease: '{"until":0}',
+    lease: 'lapsed',
   })
   await Room.close(id)
 })

@@ -21,20 +21,21 @@ import {
   memberCellKey,
   memberIdOfCellKey,
 } from './cells.js'
-import { leaseCanHost, reapLeases } from './lease.js'
+import { reapLeases } from './lease.js'
 
 // The room's members as read from its cells, each read after reaping the lapsed leases it found. A member counts only
-// while it hosts: the lease it joined under, read beside its record in the same turn, can host.
+// while it hosts: the lease it joined under, read beside its record in the same turn, is live, unclaimed and not
+// lapsed, as the store gives it beside the record.
 
 /** The members that host, and the ids of those a read left out as their lease can't: their removal is under way. */
 type Roster = { members: MemberSnapshot[]; leaving: ReadonlySet<string> }
 
-/** Whether the member whose record is `key` in `read` hosts: the lease read beside it can host. A member is written
- *  and removed with its lease's reference, so a record read without one is a bug. */
+/** Whether the member whose record is `key` in `read` hosts: the read gives its lease beside it, as it does only for
+ *  a live lease. A member is written and removed with its lease's reference, so a record read without one is a bug. */
 function hosts(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean {
   const lease = read.beside?.get(key)
   if (lease === undefined) assert(false, `the member record ${key} was read without its lease reference`)
-  return lease !== null && leaseCanHost(key, lease, read.now)
+  return lease !== null
 }
 
 const HOSTED_MEMBERS: Kept = { beside: MEMBER_LEASE_BESIDE, keeps: hosts }

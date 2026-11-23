@@ -14,6 +14,7 @@ function committedLeave(id: string, hidden: boolean, reason: string): Uint8Array
   const tx: OperationTx = {
     now: 1,
     cell: (key) => (key === memberCellKey(id) ? record : undefined),
+    lapsed: () => false,
     write() {},
     count() {},
     dropPrefix() {},

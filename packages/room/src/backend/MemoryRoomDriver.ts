@@ -39,12 +39,14 @@ import {
   commitPreconditionHolds,
   countCell,
   encodeCellCounter,
+  hasLapsed,
   headExpectationHolds,
   isOpenIncarnation,
   materializeHead,
   nextOrdering,
   publicHead,
   type StoredHead,
+  unheldRequiredCell,
 } from './semantics.js'
 import {
   type BackendReceiver,
@@ -60,7 +62,8 @@ import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
 import { MemoryCommitQueue } from './MemoryCommitQueue.js'
 
 type Expiring = { expiresAt: number | null }
-type StoredCell = { bytes: Uint8Array; version: string }
+/** `lapsesAt`: the authority time the cell lapses at, for one written with `lapsesInMs`. */
+type StoredCell = { bytes: Uint8Array; version: string; lapsesAt?: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number; owner?: string }
 
 type Incarnation = {
@@ -187,24 +190,33 @@ const referenceDecoder = new TextDecoder()
 function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number, beside?: CellsBeside): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
+  const lapsed = new Set<string>()
   const besides = beside === undefined ? undefined : new Map<string, Uint8Array | null>()
   for (const key of keys) {
     const cell = incarnation.cells.get(key)
     if (cell === undefined) continue
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
+    if (hasLapsed(cell.lapsesAt, now)) lapsed.add(key)
     if (beside === undefined || besides === undefined || !key.startsWith(beside.of)) continue
     const reference = incarnation.cells.get(beside.reference + key.slice(beside.of.length))
     if (reference === undefined) continue
     const target = incarnation.cells.get(beside.target + referenceDecoder.decode(reference.bytes))
-    besides.set(key, target === undefined ? null : copyBytes(target.bytes))
+    const live = target !== undefined && !hasLapsed(target.lapsesAt, now)
+    besides.set(key, live ? copyBytes(target.bytes) : null)
   }
   return besides === undefined
-    ? { kind: 'read', cells, versions, now }
-    : { kind: 'read', cells, versions, now, beside: besides }
+    ? { kind: 'read', cells, versions, now, lapsed }
+    : { kind: 'read', cells, versions, now, lapsed, beside: besides }
 }
 
-function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null, version: string): void {
+function setCell(
+  incarnation: Incarnation,
+  key: string,
+  bytes: Uint8Array | null,
+  version: string,
+  lapsesAt?: number,
+): void {
   if (bytes === null) {
     if (!incarnation.cells.delete(key)) return
     for (const prefix of separatorPrefixes(key)) unindex(incarnation.cellsByPrefix, prefix, key)
@@ -214,7 +226,9 @@ function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null
     for (const prefix of separatorPrefixes(key))
       getOrCreate(incarnation.cellsByPrefix, prefix, () => new Set()).add(key)
   }
-  incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
+  const cell: StoredCell = { bytes: copyBytes(bytes), version }
+  if (lapsesAt !== undefined) cell.lapsesAt = lapsesAt
+  incarnation.cells.set(key, cell)
 }
 
 /** Writes an expiring cell, replacing one at its key, and the timer that deletes it, which may run late. */
@@ -237,10 +251,13 @@ function applyCells(
   // A revision only for what is written: an operation that writes nothing writes no revision, as on Redis.
   let version: string | undefined
   const written = () => (version ??= String(++incarnation.version))
-  for (const mutation of mutations) setCell(incarnation, mutation.key, mutation.bytes, written())
+  const now = Date.now()
+  for (const { key, bytes, lapsesInMs } of mutations) {
+    setCell(incarnation, key, bytes, written(), lapsesInMs === undefined ? undefined : now + lapsesInMs)
+  }
   const counters = new Map<string, CellCounter>()
   for (const count of counts) {
-    const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
+    const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, now)
     if (counted === null) continue
     if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), written())
     counters.set(count.key, counted.counter)
@@ -384,11 +401,16 @@ class MemoryRoomDriver implements RoomDriver {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)
+    const now = Date.now()
     const { value, writes } = recordOperation(operation, args, {
-      now: Date.now(),
+      now,
       cell: (key) => {
         const cell = incarnation.cells.get(key)
         return cell === undefined ? undefined : copyBytes(cell.bytes)
+      },
+      lapsed: (key) => {
+        const cell = incarnation.cells.get(key)
+        return cell !== undefined && hasLapsed(cell.lapsesAt, now)
       },
     })
     for (const prefix of writes.prefixes) {
@@ -413,12 +435,18 @@ class MemoryRoomDriver implements RoomDriver {
   ): Promise<CommitResult> {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
-    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
+    const now = Date.now()
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, now)) {
       return { kind: 'stale-incarnation' }
     }
     const incarnation = this.incarnation(room, inc)
-    const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
-    if (missing !== undefined) return { kind: 'stale-cell', key: missing }
+    const unheld =
+      opts?.required &&
+      unheldRequiredCell(opts.required, (key) => {
+        const cell = incarnation.cells.get(key)
+        return cell && { bytes: cell.bytes, lapsed: hasLapsed(cell.lapsesAt, now) }
+      })
+    if (unheld !== undefined) return { kind: 'stale-cell', key: unheld }
     return await this.commitOn(incarnation, lane, payload, opts)
   }
 

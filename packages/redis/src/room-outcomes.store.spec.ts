@@ -157,6 +157,11 @@ describe.runIf(runs)('Room.removeParticipant() by id, called again', () => {
   }
 })
 
+/** The cells' lapses of the incarnation whose cells are `values`. */
+function lapsesOf(values: string): string {
+  return `${values.slice(0, -':values'.length)}:lapses`
+}
+
 /** A lease of another server in room `id` that lapsed, hosting nothing, written as the backend writes a cell: a call
  *  that finds a participant there reaps it. Whether it is still there. */
 async function lapsedLease(admin: Redis, id: string): Promise<() => Promise<boolean>> {
@@ -165,8 +170,9 @@ async function lapsedLease(admin: Redis, id: string): Promise<() => Promise<bool
   const incarnation = values.slice(0, -':values'.length)
   const key = 'session:lapsed'
   await admin.zadd(`${incarnation}:cells`, 0, key)
-  await admin.hset(values, key, JSON.stringify({ until: 0 }))
+  await admin.hset(values, key, '')
   await admin.hset(`${incarnation}:versions`, key, '1')
+  await admin.hset(`${incarnation}:lapses`, key, '0')
   return async () => (await admin.hexists(values, key)) === 1
 }
 
@@ -230,7 +236,7 @@ describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up re
       const lease = marks[0]?.split(':')[1]
       if (lease === undefined) throw new Error(`no lease hosts ${member}`)
       // The other server's lease lapses.
-      await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+      await admin.hset(`${incarnation}:lapses`, `session:${lease}`, '0')
       // GET is refused on the departing records alone: the refresh reads the member's after its reap removed it.
       await admin.call(
         'ACL',
@@ -244,7 +250,8 @@ describe.runIf(runs)('Room.get() of a view this process holds, whose catch-up re
         (error: unknown) => error,
       )
       const reaped = {
-        lease: await admin.hexists(values, `session:${lease}`),
+        lease:
+          (await admin.hexists(values, `session:${lease}`)) + (await admin.hexists(values, `session:claim:${lease}`)),
         member: await admin.hexists(values, `m:${member}`),
       }
       admin.disconnect()
@@ -283,10 +290,9 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       // The failed call handed over no removal after its close: the views not yet removed stay, the lease claimed.
       const leftAtRejection = await viewsLeft()
       // How long the claim keeps other reapers off, by the store's clock: a close lease's length, 15 s.
-      const claim = (await admin.hget(values, `session:${lease}`)) ?? ''
+      const claimLapsesAt = Number(await admin.hget(lapsesOf(values), `session:claim:${lease}`))
       const [seconds, micros] = await admin.time()
-      const claimMs =
-        Number(/"until":(\d+)/.exec(claim)?.[1]) - (Number(seconds) * 1000 + Math.floor(Number(micros) / 1000))
+      const claimMs = claimLapsesAt - (Number(seconds) * 1000 + Math.floor(Number(micros) / 1000))
       // What the apps see while the claim lasts, once the store allows the read: another server's list of the room's
       // participants, `Room.list()`'s count, and the roster of a member that joins then.
       await admin.call('ACL', 'SETUSER', 'telefunc', '+hkeys')
@@ -298,7 +304,7 @@ describe.runIf(runs)('a call whose reap of a lapsed lease is refused while the r
       const whileClaimed = { anotherServerLists, listedCount, rosterLists }
       console.log(`${store.name}: while the failed call's claim lasts: ${JSON.stringify(whileClaimed)}`)
       // Once the claim lapses, two reapers come at once: one removes the rest.
-      await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
+      await admin.hset(lapsesOf(values), `session:claim:${lease}`, '0')
       await Promise.all([Room.getParticipants(room.id), Room.getParticipants(room.id)])
       const afterNextReap = await reapedOnce(admin, room.id, values, lease, member)
       admin.disconnect()
@@ -343,7 +349,7 @@ async function lapsedWithViews(
   const held = /"value":(\d+)/.exec(holds)?.[1]
   if (held === undefined) throw new Error(`room ${id} counts no holds`)
   await admin.hset(values, 'holds', holds.replace(/"value":\d+/, `"value":${Number(held) + views.length}`))
-  await admin.hset(values, `session:${lease}`, JSON.stringify({ until: 0 }))
+  await admin.hset(`${incarnation}:lapses`, `session:${lease}`, '0')
   return { values, lease, member, held: Number(held) }
 }
 
@@ -353,7 +359,8 @@ async function lapsedWithViews(
 async function reapedOnce(admin: Redis, id: string, values: string, lease: string, member: string) {
   return {
     viewsLeft: (await admin.hkeys(values)).filter((key) => key.startsWith(`v:${lease}:`)).length,
-    leaseLeft: await admin.hexists(values, `session:${lease}`),
+    leaseLeft:
+      (await admin.hexists(values, `session:${lease}`)) + (await admin.hexists(values, `session:claim:${lease}`)),
     memberListed: (await Room.getParticipants(id)).some((participant) => participant.id === member),
     holds: Number(/"value":(\d+)/.exec((await admin.hget(values, 'holds')) ?? '')?.[1]),
   }
@@ -417,10 +424,10 @@ describe.runIf(runs)('a reap of a lapsed lease that runs longer than half its cl
       const reap = holdingReap(room.id)
       const reaping = Room.getParticipants(room.id)
       await reap.allHeld
-      const claim = await admin.hget(values, `session:${lease}`)
+      const claim = await admin.hget(values, `session:claim:${lease}`)
       // Another server reads the room while the claim is live: it reaps nothing.
       await listedByAnotherServer(String(admin.options.host), room.id)
-      const claimKept = (await admin.hget(values, `session:${lease}`)) === claim
+      const claimKept = (await admin.hget(values, `session:claim:${lease}`)) === claim
       // Half the claim's 15 s passed by this process's clock.
       clockAhead(8_000)
       reap.release()
@@ -457,8 +464,7 @@ describe.runIf(runs)('a reap of a lapsed lease that runs longer than its claim',
       await reap.allHeld
       // The claim lapses while the reap's removals are held, as once they took longer than it, and another server's
       // read takes the lease over and reaps it.
-      const claim = (await admin.hget(values, `session:${lease}`)) ?? ''
-      await admin.hset(values, `session:${lease}`, claim.replace(/"until":\d+/, '"until":0'))
+      await admin.hset(lapsesOf(values), `session:claim:${lease}`, '0')
       const takenOver = !(await listedByAnotherServer(String(admin.options.host), room.id)).includes(member)
       clockAhead(16_000)
       reap.release()

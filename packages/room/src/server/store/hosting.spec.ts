@@ -10,7 +10,8 @@ import { Room } from '../../index.js'
 import { RoomModel, type RosterRead } from '../../shared/RoomModel.js'
 import { configFromHead, encodeRoomRecord } from '../lanes/lanes.js'
 import type { RoomIncarnation } from '../protocol.js'
-import { LEASE_CELL_PREFIX, MEMBER_CELL_PREFIX, memberCellKey } from './cells.js'
+import { ROOM_CLOSE_LEASE_MS } from '../constants.js'
+import { MEMBER_CELL_PREFIX, leaseCellKey, leaseClaimCellKey, memberCellKey } from './cells.js'
 import { CLAIM_LEASE, RoomLease, type LeaseState } from './lease.js'
 import { JOIN, LEAVE, joinMember } from './members.js'
 import { runOperation } from './operations.js'
@@ -60,17 +61,28 @@ async function joinAs(room: RoomIncarnation, lease: LeaseState): Promise<string>
   return member
 }
 
-/** Writes `lease`'s cell as `record`, as a lease that lapsed (`{ until: 0 }`) or a claim. */
 /** Which of `ids` the store holds a member record of, hidden ones too. */
 async function storedMembers(room: RoomIncarnation, ids: string[]): Promise<string[]> {
   const read = await getRoomPlane().direct.reads.readCells(room.id, room.inc, { keys: ids.map(memberCellKey) })
   return read.kind === 'read' ? ids.filter((id) => read.cells.has(memberCellKey(id))) : []
 }
 
-async function writeLease(room: RoomIncarnation, lease: string, record: { until: number; cleaner?: string }) {
+/** Lets `lease` lapse, as once its server stopped renewing it. */
+async function lapseLease(room: RoomIncarnation, lease: string) {
   await getRoomPlane().direct.compareExchangeCells(room.id, room.inc, {
     expect: [],
-    mutations: [{ key: `${LEASE_CELL_PREFIX}${lease}`, bytes: encodeRoomRecord(record) }],
+    mutations: [{ key: leaseCellKey(lease), bytes: new Uint8Array(), lapsesInMs: -1 }],
+  })
+}
+
+/** Moves `lease` to `cleaner`'s claim, as a reap's claim does. */
+async function claimLease(room: RoomIncarnation, lease: string, cleaner: string) {
+  await getRoomPlane().direct.compareExchangeCells(room.id, room.inc, {
+    expect: [],
+    mutations: [
+      { key: leaseCellKey(lease), bytes: null },
+      { key: leaseClaimCellKey(lease), bytes: new TextEncoder().encode(cleaner), lapsesInMs: ROOM_CLOSE_LEASE_MS },
+    ],
   })
 }
 
@@ -109,7 +121,7 @@ describe('a member whose lease a reap claimed, while the reap is refused', () =>
     const room = await openRoom('hosting-claimed')
     const lease = new RoomLease()
     const member = await joinUnder(room, lease)
-    await writeLease(room, lease.id, { until: 0 })
+    await lapseLease(room, lease.id)
     refusingLeaves(room)
     await Room.getParticipants(room.id).catch(() => {})
     vi.restoreAllMocks()
@@ -144,7 +156,7 @@ describe('a member joined under a lease the reader’s lease scan missed', () =>
     // P joins under a new lease, which lapses and is claimed by a reap that the store then refuses.
     const leaseP = new RoomLease()
     const p = await joinUnder(room, leaseP)
-    await writeLease(room, leaseP.id, { until: Date.now() + 15_000, cleaner: 'another reap' })
+    await claimLease(room, leaseP.id, 'another reap')
     // Q joins live after P's claim.
     const q = await joinUnder(room, new RoomLease())
     release()
@@ -159,7 +171,7 @@ describe('a reader whose claim on a lapsed lease another reap took first', () =>
     const room = await openRoom('hosting-lost-claim')
     const lease = new RoomLease()
     const member = await joinUnder(room, lease)
-    await writeLease(room, lease.id, { until: 0 })
+    await lapseLease(room, lease.id)
     // Just before this reader's claim, another reap claims the lease, and its eviction is refused.
     const { runOperation: run } = MemoryRoomDriver.prototype
     let first = true
@@ -173,7 +185,7 @@ describe('a reader whose claim on a lapsed lease another reap took first', () =>
     ): Promise<OperationResult<Value>> {
       if (roomId === room.id && operation.name === 'claimLease' && first) {
         first = false
-        await run.bind(this)(roomId, inc, CLAIM_LEASE, { key: `${LEASE_CELL_PREFIX}${lease.id}`, cleaner: 'another' })
+        await run.bind(this)(roomId, inc, CLAIM_LEASE, { lease: lease.id, cleaner: 'another' })
       }
       return await run.bind(this)(roomId, inc, operation, args, options)
     }
@@ -191,12 +203,12 @@ describe('a lease id that its server reused after the lease was removed', () => 
     const lease = { id: crypto.randomUUID(), created: false }
     const first = await joinAs(room, lease)
     // A reap claims it, evicts its member and removes it.
-    await writeLease(room, lease.id, { until: Date.now() + 15_000, cleaner: 'a reap' })
+    await claimLease(room, lease.id, 'a reap')
     const { direct } = getRoomPlane()
     await runOperation(direct, room, LEAVE, { id: first, cause: { cause: 'disconnected' }, hold: room.hold })
     await direct.compareExchangeCells(room.id, room.inc, {
       expect: [],
-      mutations: [{ key: `${LEASE_CELL_PREFIX}${lease.id}`, bytes: null }],
+      mutations: [{ key: leaseClaimCellKey(lease.id), bytes: null }],
     })
     // The server joins another member under the same id, which writes the lease's cell anew.
     const member = await joinAs(room, lease)
@@ -229,7 +241,7 @@ describe('a removal by identity whose reason fits a visible tab’s leave and no
     const visible = await Room.join(room.id, { identity: 'u1' })
     const lapsed = new RoomLease()
     const hidden = await joinUnder(room, lapsed, { hidden: true, identity: 'u1' })
-    await writeLease(room, lapsed.id, { until: 0 })
+    await lapseLease(room, lapsed.id)
     // A store whose size rule takes a visible tab's leave with this reason, and refuses a hidden tab's, 14 bytes
     // longer (members.spec.ts).
     const reason = 'r'.repeat(64)
@@ -263,7 +275,7 @@ describe('a call over the size whose participant is on a lapsed lease', () => {
     const room = await openRoom('hosting-lapsed-target')
     const lease = new RoomLease()
     const member = await joinUnder(room, lease)
-    await writeLease(room, lease.id, { until: 0 })
+    await lapseLease(room, lease.id)
     withSizeRule()
     const told = await Room.send(room.id, { id: member }, 'x'.repeat(2 * LIMIT)).then(
       () => 'resolved',
@@ -284,7 +296,7 @@ describe('a call over the size whose participant is on a lapsed lease', () => {
       await joinUnder(room, lease, { identity: 'u1' }),
       await joinUnder(room, lease, { identity: 'u1', hidden: true }),
     ]
-    await writeLease(room, lease.id, { until: 0 })
+    await lapseLease(room, lease.id)
     withSizeRule()
     const removed = await Room.removeParticipant(room.id, { identity: 'u1', reason: 'r'.repeat(2 * LIMIT) }).then(
       () => 'removed',
@@ -341,7 +353,7 @@ describe('a view whose roster read leaves out a member whose reap is stalled', (
     })
     // The view knows the member.
     await Room.get(id)
-    await writeLease(room, lease.id, { until: 0 })
+    await lapseLease(room, lease.id)
     // A reap claims the lease, and its eviction of the member stalls in the store.
     const evicting = Promise.withResolvers<void>()
     const stalled = Promise.withResolvers<void>()

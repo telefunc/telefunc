@@ -1,7 +1,5 @@
 // A reap's claim on a lapsed lease keeps other reapers off for as long as a close's lease, not a lease's: so a reap
 // the store refuses leaves the lease to the next reader within 15 s.
-// A lease's cell is read back as `leaseCellBytes()` wrote it, in each of its two forms, and a cell in another form is
-// a bug that names it.
 import { afterEach, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
@@ -10,8 +8,8 @@ import type { OperationOptions, OperationResult, RoomOperation } from '../../bac
 import { Room } from '../../index.js'
 import { ROOM_CLOSE_LEASE_MS } from '../constants.js'
 import { configFromHead } from '../lanes/lanes.js'
-import { LEASE_CELL_PREFIX } from './cells.js'
-import { RoomLease, decodeLeaseRecord, leaseCellBytes } from './lease.js'
+import { leaseCellKey, leaseClaimCellKey } from './cells.js'
+import { RoomLease } from './lease.js'
 import { joinMember } from './members.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -39,10 +37,9 @@ it('a reap whose eviction the store refuses leaves a claim that lapses within a 
     },
     {},
   )
-  const key = `${LEASE_CELL_PREFIX}${lease.id}`
   await plane.direct.compareExchangeCells(id, room.inc, {
     expect: [],
-    mutations: [{ key, bytes: new TextEncoder().encode('{"until":0}') }],
+    mutations: [{ key: leaseCellKey(lease.id), bytes: new Uint8Array(), lapsesInMs: -1 }],
   })
   const { runOperation } = MemoryRoomDriver.prototype
   async function refusingLeaves<Args, Value>(
@@ -64,39 +61,18 @@ it('a reap whose eviction the store refuses leaves a claim that lapses within a 
     (error: unknown) => error,
   )
   vi.restoreAllMocks()
-  const read = await plane.direct.reads.readCells(id, room.inc, { keys: [key] })
-  const raw = read.kind === 'stale-incarnation' ? undefined : read.cells.get(key)
-  const until = Number(/"until":(\d+)/.exec(raw === undefined ? '' : new TextDecoder().decode(raw))?.[1])
-  const claimMs = until - Date.now()
+  const claim = leaseClaimCellKey(lease.id)
+  const lapsedAt = async (at: number) => {
+    vi.setSystemTime(at)
+    const read = await plane.direct.reads.readCells(id, room.inc, { keys: [claim] })
+    return read.kind === 'read' && read.cells.has(claim) ? read.lapsed.has(claim) : 'absent'
+  }
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() })
+  const claimed = { now: await lapsedAt(Date.now()), past: await lapsedAt(Date.now() + ROOM_CLOSE_LEASE_MS + 1) }
+  vi.useRealTimers()
 
-  expect({ refused, claimed: claimMs > 0 && claimMs <= ROOM_CLOSE_LEASE_MS }).toMatchObject({
+  expect({ refused, claimed }).toMatchObject({
     refused: { name: 'BackendError', code: 'denied', outcome: 'may-have-run' },
-    claimed: true,
-  })
-})
-
-it('reads back each lease record leaseCellBytes() writes, with or without a cleaner, and names a cell in another form', () => {
-  const cleaner = crypto.randomUUID()
-  const records = [
-    { until: 0 },
-    { until: Number.MAX_SAFE_INTEGER },
-    { until: 1_795_400_000_000, cleaner },
-    { until: 0, cleaner },
-    { until: Number.MAX_SAFE_INTEGER, cleaner },
-  ]
-  const read = records.map((record) => decodeLeaseRecord('session:l', leaseCellBytes(record)))
-  const other = new TextEncoder().encode('{"cleaner":"c","until":1}')
-  const refused = (() => {
-    try {
-      decodeLeaseRecord('session:other', other)
-      return 'read'
-    } catch (error) {
-      return error instanceof Error ? error.message : typeof error
-    }
-  })()
-
-  expect({ read, namesTheCell: refused.includes('the lease cell read at session:other') }).toEqual({
-    read: records,
-    namesTheCell: true,
+    claimed: { now: false, past: true },
   })
 })
