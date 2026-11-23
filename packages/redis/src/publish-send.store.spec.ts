@@ -11,7 +11,7 @@ import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Abort } from 'telefunc'
 import { Room } from '@telefunc/room'
-import { hostingLease, joinedByAnotherServer } from '../test/servers.js'
+import { atAnotherServer, hostingLease, joinedByAnotherServer } from '../test/servers.js'
 import { changedKeys, endReached, reached, runs, snapshot, STORES } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
@@ -194,6 +194,33 @@ describe.runIf(runs)('Room.publish() and Room.send() of data over the size the s
         })
       }, 60_000)
     }
+
+    it(`${store.name}: a participant's send() of data over the size, to a participant of a room another server created and joined it to, found by its lookup in the store, where that lookup would reap a lapsed lease, is refused before its first write`, async () => {
+      const admin = await reached(store)
+      const id = `participant-send-large-${i}`
+      const printed = await atAnotherServer(
+        String(admin.options.host),
+        id,
+        'await Room.create(id); console.log((await Room.join(id)).id)',
+      )
+      const recipient = printed.at(-1)
+      if (recipient === undefined || recipient === '') throw new Error('the other server joined no one')
+      const sender = await Room.join(id)
+      await lapsedLease(admin, id)
+      const held = await snapshot(admin)
+      const lookups = countLookups(recipient)
+      const refused = await sender.send(recipient, LARGE).then(() => 'resolved', told)
+      vi.restoreAllMocks()
+      const changed = changedKeys(held, await snapshot(admin))
+      await sender.leave()
+      admin.disconnect()
+
+      expect({ refused, lookups: lookups.count, changed }).toEqual({
+        refused: { name: 'ChannelOverflowError', code: 'none', outcome: 'none' },
+        lookups: 1,
+        changed: [],
+      })
+    }, 60_000)
 
     for (const by of ['id', 'identity'] as const) {
       it(`${store.name}: Room.removeParticipant() by ${by} with a reason over the size, where finding the participant would reap a lapsed lease, is refused before its first write`, async () => {
