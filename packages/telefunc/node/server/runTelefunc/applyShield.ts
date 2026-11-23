@@ -38,8 +38,7 @@ function applyShield(runContext: {
       telefuncFilePath,
       subject: 'the arguments passed',
       wrongType: applyResult,
-      // Arguments can hold secrets such as passwords, so production logs leave their values out
-      extra: isProduction() ? undefined : `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
+      args: telefunctionArgs,
     },
     runContext.serverConfig.log.shieldErrors,
   )

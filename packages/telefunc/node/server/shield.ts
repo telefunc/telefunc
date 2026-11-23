@@ -36,8 +36,8 @@ type ShieldErrorDetail = {
   subject: string
   /** The raw verifier output (human-readable breadcrumb). */
   wrongType: string
-  /** Optional extra sentence appended before `wrongType` (e.g. JSON of arguments). */
-  extra?: string
+  /** The telefunction's arguments, listed before `wrongType` in development logs. */
+  args?: unknown[]
 }
 
 /** Write a shield-error message to the server log, gated by `config.log.shieldErrors`.
@@ -47,7 +47,14 @@ function logShieldError(detail: ShieldErrorDetail, shieldErrors: ShieldLogConfig
   const parts = [
     `Shield Validation Error: ${detail.subject} on telefunction ${detail.telefunctionName}() (${detail.telefuncFilePath}) has the wrong type.`,
   ]
-  if (detail.extra) parts.push(detail.extra)
+  // Arguments can hold secrets such as passwords, so production logs leave them out
+  if (detail.args && !isProduction()) {
+    try {
+      parts.push(`Arguments: \`${JSON.stringify(detail.args)}\`.`)
+    } catch {
+      // Not JSON-serializable, e.g. a BigInt
+    }
+  }
   parts.push(`Wrong type: ${detail.wrongType}`)
   console.error(parts.join(' '))
 }
