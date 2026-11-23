@@ -9,8 +9,9 @@
 //   Deno (examples/babel);
 // - `framework`: `serve({ request })` with a `Request` a framework built of it (its body `Readable.toWeb(req)`, its
 //   signal the framework's own, aborted as the socket closes), answered with `httpResponse.body`.
-// `/leave?entry=<entry>&row=<row>`, on the `adapter` entry's port, makes a call whose client leaves after the answer,
-// from this process (`callAndLeave`). It prints `READY {"entries":{<entry>:<port>,…}}` once every entry listens.
+// Its control route, `POST /run {entry, row}` on a port of its own, runs a row's call through an entry from this process
+// (deno.clientLeft.client.fixture.ts), and answers with how its client's rest went and what its telefunction saw once
+// that settled. It prints `READY {"control":<port>,"entries":{<entry>:<port>,…}}` once every entry listens.
 
 import { createServer } from 'node:http'
 import { Readable } from 'node:stream'
@@ -19,23 +20,24 @@ import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
 import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
-import { startCall } from './deno.clientLeft.client.fixture.js'
+import { TELEFUNC_FILE, WINDOW_MS, sendRest, startCall } from './deno.clientLeft.client.fixture.js'
+import { seen } from './deno.clientLeft.telefunc.js'
 
 config.root = dirname(fileURLToPath(import.meta.url))
-config.telefuncFiles = [`${config.root}/deno.clientLeft.telefunc.js`]
+config.telefuncFiles = [`${config.root}${TELEFUNC_FILE}`]
 config.disableNamingConvention = true
-config.channel = { connectTtl: 1000 }
+config.channel = { connectTtl: WINDOW_MS }
+
+/** How long a row's telefunction may take to settle once its client's rest is done. */
+const SETTLE_MS = 5000
 
 const telefunc = new Telefunc()
 
 /** Each entry's port. */
 const entries = {
-  adapter: await listenDeno(async (request, info) => {
-    const url = new URL(request.url)
-    if (url.pathname === '/leave')
-      return new Response(await callAndLeave(url.searchParams.get('entry'), url.searchParams.get('row')))
-    return (await telefunc.serve({ request, info })) ?? new Response(null, { status: 404 })
-  }),
+  adapter: await listenDeno(
+    async (request, info) => (await telefunc.serve({ request, info })) ?? new Response(null, { status: 404 }),
+  ),
   stream: await listenDeno(async (request) => {
     const httpResponse = await serve({ request })
     return new Response(httpResponse.getReadableWebStream(), responseInit(httpResponse))
@@ -47,7 +49,15 @@ const entries = {
   node: await listenNode((req) => serve({ url: req.url, method: req.method, readable: req, headers: req.headers })),
   framework: await listenNode((req) => serve({ request: frameworkRequest(req) })),
 }
-console.log(`READY ${JSON.stringify({ entries })}`)
+const control = await listenDeno(async (request) => {
+  const { entry, row } = await request.json()
+  const socket = await startCall(entries[entry], row)
+  const sent = await sendRest(socket, row)
+  const state = await seen(row.row, SETTLE_MS)
+  socket.destroy()
+  return Response.json({ sent, ...state })
+})
+console.log(`READY ${JSON.stringify({ control, entries })}`)
 
 /** `Deno.serve` with `handler`; resolves with its port once it listens. */
 function listenDeno(handler) {
@@ -72,16 +82,6 @@ async function listenNode(answer) {
 /** The status and headers of Telefunc's `httpResponse`, as a `Response` takes them. */
 function responseInit(httpResponse) {
   return { status: httpResponse.statusCode, headers: httpResponse.headers }
-}
-
-/** Makes `row`'s call to `keepsFile` through `entry`, with a File of 8 × 64 KiB read 120 ms after the call, and sends its
- *  first 64 KiB; leaves 160 ms after the answer begins. Its client is this process: where the client is another
- *  process, Deno at times fails the read on its own as the client leaves, which hides a read left pending. */
-async function callAndLeave(entry, row) {
-  const socket = await startCall(entries[entry], row, 8, 120)
-  await new Promise((resolve) => setTimeout(resolve, 160))
-  socket.destroy()
-  return 'left'
 }
 
 /** The `Request` a framework builds of Deno's `node:http` request `req`, with its own signal. */

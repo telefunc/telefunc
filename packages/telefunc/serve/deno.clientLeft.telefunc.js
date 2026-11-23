@@ -1,32 +1,48 @@
 // The telefunctions of serve/deno.clientLeft.spec.ts, which its Deno server (deno.clientLeft.server.fixture.mjs) loads
-// as an app's: a call that keeps its File and returns a Channel, and a call that says how that File's read and that
-// channel ended.
+// as an app's: a call that keeps its File and returns a Channel; and what each row's call saw, which the server reads
+// in its own process (`seen`).
 
 import { Channel } from '../wire-protocol/channel/server/ServerChannel.js'
 
-/** What each row's call kept: how its File's read ended, and when its channel closed and why. */
+/** What each row's call saw: how its File's read ended, and how its channel closed. */
 const rows = new Map()
 
 /** Keeps its File and returns a Channel; reads the File `readAfterMs` after the call, or never where that is null. */
 export async function keepsFile(file, row, readAfterMs) {
-  const start = performance.now()
-  const kept = { read: readAfterMs === null ? 'not read' : 'pending', closed: 'open' }
-  rows.set(row, kept)
+  const kept = record(row, readAfterMs === null ? 'not read' : 'pending', 'open')
   const channel = new Channel()
-  channel.onClose((err) => {
-    kept.closed = `closed at ${Math.round(performance.now() - start)} ms: ${err?.message ?? 'no error'}`
-  })
+  channel.onClose((err) => kept.set({ closed: `closed: ${err?.message ?? 'no error'}` }))
   if (readAfterMs !== null)
     setTimeout(() => {
       file.arrayBuffer().then(
-        (bytes) => void (kept.read = `read ${bytes.byteLength} bytes`),
-        (err) => void (kept.read = `failed: ${err?.message ?? err}`),
+        (bytes) => kept.set({ read: `read ${bytes.byteLength} bytes` }),
+        (err) => kept.set({ read: `failed: ${err?.message ?? err}` }),
       )
     }, readAfterMs)
   return channel
 }
 
-/** How the File and the channel of `row`'s call ended so far. */
-export async function rowState(row) {
-  return rows.get(row) ?? 'no such row'
+/** How `row`'s File read and channel ended: once neither is under way any more, or as they are `withinMs` from now. */
+export async function seen(row, withinMs) {
+  const kept = rows.get(row)
+  if (kept === undefined) return { read: 'no such row', closed: 'no such row' }
+  let deadline
+  await Promise.race([kept.settled, new Promise((resolve) => (deadline = setTimeout(resolve, withinMs)))])
+  clearTimeout(deadline)
+  return kept.state
+}
+
+/** `row`'s record, from its read's and its channel's start; `settled` resolves once neither is under way. */
+function record(row, read, closed) {
+  let settle
+  const kept = {
+    state: { read, closed },
+    settled: new Promise((resolve) => (settle = resolve)),
+    set(change) {
+      Object.assign(kept.state, change)
+      if (kept.state.read !== 'pending' && kept.state.closed !== 'open') settle()
+    },
+  }
+  rows.set(row, kept)
+  return kept
 }
