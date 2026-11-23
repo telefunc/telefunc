@@ -1343,6 +1343,14 @@ async function onLanesPastRewind(roomId: string) {
   Broadcast.subscribe(onlyHere, () => {})
   await Broadcast.publish(onlyHere, 'not on the replica')
   await entry.send()
+  // The rewind takes its record: what it delivered is lost only once a publish of the new history reaches it.
+  atRest.set(roomId, {
+    ...entry,
+    send: async () => {
+      await entry.send()
+      await Broadcast.publish(onlyHere, 'text')
+    },
+  })
   await sleep(200)
 }
 
