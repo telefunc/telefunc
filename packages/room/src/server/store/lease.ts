@@ -94,10 +94,12 @@ type LeaseState = { id: string; created: boolean }
 
 /** What a write hosting something under `lease` adds, given its plan's read of the lease's cell: nothing while the cell
  *  is live, the lease written again while it lapsed unclaimed or wasn't created yet, `null` once the lease is lost: a
- *  claim took its cell. */
+ *  claim took its cell. A lease not known as created may still have been, by a write whose reply was lost, so its
+ *  claim is read with its cell. */
 function leaseHosting({ id, created }: LeaseState, tx: OperationTx): CellMutation[] | null {
   const key = leaseCellKey(id)
-  if (tx.cell(key) === undefined) return created ? null : [leaseMutation(id)]
+  const claimed = !created && tx.cell(leaseClaimCellKey(id)) !== undefined
+  if (tx.cell(key) === undefined) return created || claimed ? null : [leaseMutation(id)]
   return tx.lapsed(key) ? [leaseMutation(id)] : []
 }
 

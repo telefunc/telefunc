@@ -305,9 +305,10 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
         ],
-        // A join and a leave each write a member's lease reference beside its record.
+        // A join and a leave each write a member's lease reference beside its record. The first join, under a lease
+        // its server doesn't know as created yet, checks that no claim took that lease too.
         tfRoomOperation: [
-          '50 commands, 3 TYPE',
+          '51 commands, 3 TYPE',
           '46 commands, 3 TYPE',
           '33 commands, 3 TYPE',
           '53 commands, 6 TYPE',

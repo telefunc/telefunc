@@ -218,6 +218,22 @@ describe('a lease id that its server reused after the lease was removed', () => 
   })
 })
 
+describe('a lease whose first write’s reply was lost, while a reap’s claim on it runs', () => {
+  it('is lost to its server: its next write hosts under a new lease, and the claimed member stays unlisted', async () => {
+    const room = await openRoom('hosting-claimed-uncreated')
+    const lease = new RoomLease()
+    // The join committed but its reply was lost: the server still holds the lease as never created.
+    await joinAs(room, { id: lease.id, created: false })
+    const claimed = lease.id
+    await lapseLease(room, claimed)
+    await runOperation(getRoomPlane().direct, room, CLAIM_LEASE, { lease: claimed, cleaner: 'a reap' })
+    const next = await joinUnder(room, lease)
+    const listed = (await Room.getParticipants(room.id)).map((each) => each.id)
+
+    expect({ reused: lease.id === claimed, listed }).toEqual({ reused: false, listed: [next] })
+  })
+})
+
 describe('a member record without its lease reference', () => {
   it('is a bug a read names', async () => {
     const room = await openRoom('hosting-no-reference')
