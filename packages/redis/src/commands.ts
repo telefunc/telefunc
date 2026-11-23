@@ -73,17 +73,20 @@ const ROOM_FRAMING_MAX_BYTES = 6 * 1024
 // A write script checks each call it may make past its first write before that write, as Redis 7 and later can without
 // making it: one the user's ACL refuses is made there, so Redis answers with its own refusal and nothing is written.
 // Redis 6 can't check, and its scripts can't undo a write, so the guide asks a restricted user for Redis 7.
+const allowedCall = (args: string) =>
+  `if redis.acl_check_cmd and not redis.acl_check_cmd(${args}) then redis.call(${args}) end`
 const ALLOWED_LUA = `
 local function tf_allowed(...)
-  if redis.acl_check_cmd and not redis.acl_check_cmd(...) then redis.call(...) end
+  ${allowedCall('...')}
 end
 `
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
+const msOfTime = (time: string) => `tonumber(${time}[1]) * 1000 + math.floor(tonumber(${time}[2]) / 1000)`
 const NOW_LUA = `
 local function tf_now()
   local t = redis.call('TIME')
-  return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+  return ${msOfTime('t')}
 end
 `
 
@@ -101,10 +104,10 @@ end
 
 // The ordering frame orderingFrame.ts reads: four u32 big-endian words, the commit's id and its lane predecessor's,
 // then the payload. What goes before it is built into the same string, as each concatenation copies the payload.
+const u64Words = (n: string) => `math.floor(${n} / 4294967296), ${n} % 4294967296`
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
-  local hi = math.floor(n / 4294967296)
-  return struct.pack('>I4I4', hi, n - hi * 4294967296)
+  return struct.pack('>I4I4', ${u64Words('n')})
 end
 local function tf_ordering_frame(before, seq, ts, id, prev, payload)
   return before .. tf_u64(seq) .. tf_u64(ts) .. id .. prev .. payload
@@ -115,13 +118,36 @@ end
 // place and id; a Broadcast key's '<dddc8c8>', its seq, each kind's place, and the id of each kind's last publish. An
 // id is the 8 bytes its publisher drew, all zero for none. A record Telefunc didn't write, or one whose next count would
 // pass 2^53 - 1, is refused before the script's first write.
+const orderRefusal = (key: string) =>
+  `redis.error_reply('TFORDER ' .. ${key} .. ": not an order record Telefunc writes, or one at the last safe integer")`
+const countOk = (n: string) => `${n} == math.floor(${n}) and ${n} >= 0 and ${n} < 9007199254740991`
+// A missing Broadcast record (new, evicted or flushed) starts at authority time `time` (Redis TIME's pair) in
+// microseconds, above every seq it issued.
+const firstSeqOf = (time: string) => `tonumber(${time}[1]) * 1000000 + tonumber(${time}[2])`
+// Declares seq, text, binary, text_id and binary_id: the Broadcast record at `key`, read and checked, or a missing one's
+// start at `time`. A record the check refuses ends the script with its refusal.
+const broadcastOrderOf = (key: string, time: string) => `
+local seq, text, binary, text_id, binary_id
+do
+  local no_id = string.rep('\\0', 8)
+  seq, text, binary, text_id, binary_id = ${firstSeqOf(time)}, 0, 0, no_id, no_id
+  local raw = redis.call('GET', ${key})
+  if raw then
+    if #raw ~= 40 then return ${orderRefusal(key)} end
+    seq, text, binary, text_id, binary_id = struct.unpack('<dddc8c8', raw)
+    if not (${countOk('seq')} and ${countOk('text')} and ${countOk('binary')} and seq >= text + binary
+      and (text == 0) == (text_id == no_id) and (binary == 0) == (binary_id == no_id)) then
+      return ${orderRefusal(key)}
+    end
+  end
+end`
 const ORDER_RECORD_LUA = `
 local TF_NO_ID = string.rep('\\0', 8)
 local function tf_count_ok(n)
-  return n == math.floor(n) and n >= 0 and n < 9007199254740991
+  return ${countOk('n')}
 end
 local function tf_order_refusal(key)
-  return redis.error_reply('TFORDER ' .. key .. ": not an order record Telefunc writes, or one at the last safe integer")
+  return ${orderRefusal('key')}
 end
 local function tf_lane_order(raw)
   if not raw then return 0, TF_NO_ID end
@@ -129,13 +155,6 @@ local function tf_lane_order(raw)
   local place, id = struct.unpack('<dc8', raw)
   if not tf_count_ok(place) or (place == 0) ~= (id == TF_NO_ID) then return nil end
   return place, id
-end
-local function tf_broadcast_order(raw)
-  if #raw ~= 40 then return nil end
-  local seq, text, binary, text_id, binary_id = struct.unpack('<dddc8c8', raw)
-  if not (tf_count_ok(seq) and tf_count_ok(text) and tf_count_ok(binary) and seq >= text + binary) then return nil end
-  if (text == 0) ~= (text_id == TF_NO_ID) or (binary == 0) ~= (binary_id == TF_NO_ID) then return nil end
-  return seq, text, binary, text_id, binary_id
 end
 `
 
@@ -151,18 +170,10 @@ end
 // (two u32 big-endian words, from 1) and the ordering frame, with its id and its kind's last publish's.
 //   KEYS: [1]=order (ORDER_RECORD_LUA's Broadcast record) [2]=channel
 //   ARGV: [1]=payload [2]=kind ('text'|'binary') [3]=its id
-const PUBLISH_LUA = `${ALLOWED_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}${ORDER_RECORD_LUA}
-local raw = redis.call('GET', KEYS[1])
-local ts = tf_now()
-local seq, text, binary, text_id, binary_id
-if raw then
-  seq, text, binary, text_id, binary_id = tf_broadcast_order(raw)
-  if not seq then return tf_order_refusal(KEYS[1]) end
-else
-  -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
-  local t = redis.call('TIME')
-  seq, text, binary, text_id, binary_id = tonumber(t[1]) * 1000000 + tonumber(t[2]), 0, 0, TF_NO_ID, TF_NO_ID
-end
+// It runs on every publish, so it defines no function: its parts are built in.
+const PUBLISH_LUA = `
+local t = redis.call('TIME')
+local ts = ${msOfTime('t')}${broadcastOrderOf('KEYS[1]', 't')}
 seq = seq + 1
 local place, prev
 if ARGV[2] == 'text' then
@@ -172,9 +183,10 @@ else
   binary, prev, binary_id = binary + 1, binary_id, ARGV[3]
   place = binary
 end
-tf_allowed('PUBLISH', KEYS[2], '')
+${allowedCall("'PUBLISH', KEYS[2], ''")}
 redis.call('SET', KEYS[1], struct.pack('<dddc8c8', seq, text, binary, text_id, binary_id))
-redis.call('PUBLISH', KEYS[2], tf_ordering_frame(tf_u64(place), seq, ts, ARGV[3], prev, ARGV[1]))
+redis.call('PUBLISH', KEYS[2],
+  struct.pack('>I4I4I4I4I4I4', ${u64Words('place')}, ${u64Words('seq')}, ${u64Words('ts')}) .. ARGV[3] .. prev .. ARGV[1])
 return {seq, ts}
 `
 
@@ -437,7 +449,7 @@ if not authority then return refusal end
 local raw = redis.call('GET', KEYS[1])
 if raw then return {authority, raw} end
 local t = redis.call('TIME')
-raw = struct.pack('<dddc8c8', tonumber(t[1]) * 1000000 + tonumber(t[2]), 0, 0, TF_NO_ID, TF_NO_ID)
+raw = struct.pack('<dddc8c8', ${firstSeqOf('t')}, 0, 0, TF_NO_ID, TF_NO_ID)
 redis.call('SET', KEYS[1], raw)
 return {authority, raw}
 `
