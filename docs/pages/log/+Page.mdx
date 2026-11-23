@@ -6,7 +6,7 @@ import { ConfigWhereServer } from '../../components'
 
 Whether to log shield validation errors.
 
-In production, the logged error names the telefunction, its file and the wrong type, but not the values of the arguments passed (they may contain passwords or other secrets).
+In production, the logged error names the telefunction, its file and the wrong type, and leaves out the list of arguments passed (it may contain passwords or other secrets). In development, the list is logged.
 
 ```ts
 // Environment: server
