@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
 import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
-import { startCall } from './deno.clientLeft.call.js'
+import { startCall } from './deno.clientLeft.client.fixture.js'
 
 config.root = dirname(fileURLToPath(import.meta.url))
 config.telefuncFiles = [`${config.root}/deno.clientLeft.telefunc.js`]

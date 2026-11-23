@@ -11,7 +11,8 @@
 //   answered before reading it, not as its client leaving;
 // - where the client leaves after the answer, the channel closes by its connect window (`config.channel.connectTtl`,
 //   1 s here), and the File's read fails as its client's leaving, or, where nothing says it left, as the channel closes.
-// The server is deno.clientLeft.server.fixture.mjs, the call deno.clientLeft.call.ts; CI's Vitest job has Deno.
+// The server is deno.clientLeft.server.fixture.mjs, the call deno.clientLeft.client.fixture.ts; CI's Vitest job has
+// Deno.
 
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -21,7 +22,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
 import { isObject } from '../utils/isObject.js'
-import { PART, part, startCall } from './deno.clientLeft.call.js'
+import { PART, part, startCall } from './deno.clientLeft.client.fixture.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const file = '/deno.clientLeft.telefunc.js'
