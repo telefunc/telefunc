@@ -23,7 +23,6 @@ let reach: { proxy: Awaited<ReturnType<typeof forwarder>>; app: Redis } | undefi
 afterAll(() => {
   reach?.app.disconnect()
   reach?.proxy.close()
-  removeStores()
 })
 
 /** A new store with the user of `rule`, which the backend reaches through the forwarder; the store's answer to the rule,

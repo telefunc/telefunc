@@ -41,7 +41,6 @@ afterAll(() => {
   vi.restoreAllMocks()
   app?.disconnect()
   for (const proxy of via ?? []) proxy.close()
-  removeStores()
 })
 /** The rooms a row created, closed after it, before the next row's Cluster replaces this one. */
 const opened: string[] = []

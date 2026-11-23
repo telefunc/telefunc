@@ -85,7 +85,6 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
   afterAll(() => {
     app?.disconnect()
     for (const proxy of via ?? []) proxy.close()
-    removeStores()
   })
 
   for (const [i, store] of STORES.entries()) {

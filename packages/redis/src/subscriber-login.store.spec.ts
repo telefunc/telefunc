@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Redis } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Broadcast } from 'telefunc'
-import { forwarder, removeStores, runs, STORES, startStore } from '../test/stores.js'
+import { forwarder, runs, STORES, startStore } from '../test/stores.js'
 import { installRedis } from './index.js'
 
 describe.runIf(runs)('a subscriber whose login the store refuses', () => {
@@ -13,7 +13,6 @@ describe.runIf(runs)('a subscriber whose login the store refuses', () => {
   afterAll(() => {
     app?.disconnect()
     proxy?.close()
-    removeStores()
   })
 
   for (const [i, store] of STORES.entries()) {

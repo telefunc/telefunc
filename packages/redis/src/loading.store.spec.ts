@@ -55,7 +55,6 @@ describe.runIf(runs)('a write made while the store loads its data set', () => {
   afterAll(() => {
     app?.disconnect()
     proxy?.close()
-    removeStores()
   })
 
   for (const store of STORES) {

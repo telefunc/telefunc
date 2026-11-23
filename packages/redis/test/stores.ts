@@ -15,14 +15,15 @@ export {
   type Store,
 }
 
-import { execFileSync } from 'node:child_process'
 import { connect, createServer, type Socket } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
+import { inject } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { installRedis } from '../src/index.js'
+import { docker, RUN_LABEL, runs } from './docker.js'
 
 type Store = { name: string; image: string; server: string }
 
@@ -33,21 +34,6 @@ const STORES: readonly Store[] = [
   { name: 'Valkey 7.2.5', image: 'valkey/valkey:7.2.5', server: 'valkey-server' },
   { name: 'Valkey 8.1.1', image: 'valkey/valkey:8.1.1', server: 'valkey-server' },
 ]
-
-const docker = (...args: string[]) =>
-  execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-
-/** Without Docker, the store specs skip here and fail on CI. */
-const runs = (() => {
-  try {
-    docker('version', '--format', '{{.Server.Version}}')
-    return true
-  } catch {
-    if (process.env.CI !== undefined) return true
-    console.log('Skipping the Redis and Valkey store tests: Docker is not running here.')
-    return false
-  }
-})()
 
 /** The store's image, pulled again once when a pull fails, as a registry does now and then; a second failure ends the
  *  run with a sentence that says so. */
@@ -76,6 +62,8 @@ async function startStore(store: Store, ...options: string[]): Promise<{ name: s
     '--detach',
     '--name',
     name,
+    '--label',
+    `${RUN_LABEL}=${storeSpecsRun()}`,
     store.image,
     store.server,
     '--protected-mode',
@@ -102,7 +90,18 @@ function hostOf(name: string): string {
   return docker('inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name)
 }
 
-/** Removes every store this process started. */
+/** The run's id, which its global setup provides. */
+function storeSpecsRun(): string {
+  const run = inject('storeSpecsRun')
+  if (typeof run !== 'string')
+    throw new Error(
+      'The store specs run with packages/redis/vitest.stores.config.ts, whose global setup removes their containers.',
+    )
+  return run
+}
+
+/** Removes the stores this process started so far, as a row does before it starts its own. Those a spec file leaves
+ *  at its end go with the run's global teardown. */
 function removeStores(): void {
   for (const name of containers.splice(0)) docker('rm', '--force', name)
 }
@@ -155,7 +154,7 @@ async function forwarder(): Promise<{
 let reach: { proxy: Awaited<ReturnType<typeof forwarder>>; app: Redis } | undefined
 
 /** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last row's
- *  store goes first, so the file never removes more than one at its end. */
+ *  store goes first, so a file leaves only its last row's to the run's global teardown. */
 async function reached(store: Store): Promise<Redis> {
   if (reach === undefined) {
     const proxy = await forwarder()
@@ -182,12 +181,11 @@ async function reached(store: Store): Promise<Redis> {
   return admin
 }
 
-/** Ends the client and the forwarder `reached()` made, and removes the stores: a spec file's `afterAll`. */
+/** Ends the client and the forwarder `reached()` made: a spec file's `afterAll`. */
 function endReached(): void {
   reach?.app.disconnect()
   reach?.proxy.close()
   reach = undefined
-  removeStores()
 }
 
 /** Every key under Telefunc's prefix and what it holds as the store's bytes, a hash's fields in their bytes' order. */

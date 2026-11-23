@@ -9,7 +9,7 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { DEFAULT_PREFIX } from './keys.js'
 import { RedisConnection } from './RedisConnection.js'
-import { removeStores, runs, STORES, startStore } from '../test/stores.js'
+import { runs, STORES, startStore } from '../test/stores.js'
 
 type Value = { type: string; content: string[]; pttl: number }
 type Snapshot = Map<string, Value>
@@ -262,7 +262,6 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       store.admin.disconnect()
       store.trialClient.disconnect()
     }
-    removeStores()
   })
 
   it('the scenario makes every write script', () => {

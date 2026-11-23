@@ -15,7 +15,6 @@ let via: Forwarder[] | undefined
 afterAll(() => {
   app?.disconnect()
   for (const proxy of via ?? []) proxy.close()
-  removeStores()
 })
 
 /** A new Cluster whose nodes have a user of `+@all`, and the backend installed on a client of that user that follows no

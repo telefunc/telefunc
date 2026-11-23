@@ -6,11 +6,9 @@ import { execFile } from 'node:child_process'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { afterAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { removeStores, runs, STORES, startStore } from '../test/stores.js'
 import { directoryChecksKey, directoryIndexKey, directoryTagsKey } from './keys.js'
-
-afterAll(() => removeStores())
 
 const PREFIXES = ['app:', '}app:', 'a}b:', 'a}c:', 'my app '] as const
 

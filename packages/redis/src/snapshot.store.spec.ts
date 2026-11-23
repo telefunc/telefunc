@@ -1,9 +1,7 @@
 // The store specs' snapshot on the oldest and the newest Redis and Valkey Telefunc supports: it holds a hash's fields
 // and values as the store's bytes, so a cell that changed by a byte that isn't UTF-8 on its own is a changed key.
-import { afterAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { changedKeys, removeStores, runs, snapshot, startStore, STORES } from '../test/stores.js'
-
-afterAll(() => removeStores())
 
 describe.runIf(runs)("the store specs' snapshot", () => {
   for (const store of STORES) {

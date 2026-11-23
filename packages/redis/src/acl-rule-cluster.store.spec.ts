@@ -31,7 +31,6 @@ let via: Forwarder[] | undefined
 afterAll(() => {
   app?.disconnect()
   for (const proxy of via ?? []) proxy.close()
-  removeStores()
 })
 
 /** A new Cluster whose nodes have the user of `rule`, the backend installed on a client of that user once it reaches the
