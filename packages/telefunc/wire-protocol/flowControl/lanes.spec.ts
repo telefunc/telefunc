@@ -369,6 +369,22 @@ describe('the lanes', () => {
 })
 
 describe("the wire's control frames", () => {
+  test("a channel's BDP_PING_ACK goes behind what that channel has waiting, so the page's probe counts what its window let out", async () => {
+    const wire = wireTo(SLOW)
+    try {
+      for (let n = 0; n < 4; n++) wire.binary(1, 64 * 1024 - HEADER)
+      expect(wire.headroom.sender.dataWaits).toBe(true)
+      wire.send(() => encode.bdpPingAck(1, 7, 0, 0))
+      await sleep(60_000)
+      const order = wire.arrivals
+        .filter(({ tag }) => tag === TAG.BINARY || tag === TAG.BDP_PING_ACK)
+        .map(({ tag }) => tag)
+      expect(order).toEqual([TAG.BINARY, TAG.BINARY, TAG.BINARY, TAG.BINARY, TAG.BDP_PING_ACK])
+    } finally {
+      wire.stop()
+    }
+  })
+
   test('a RECONCILED that waited for the rate goes ahead of the channels once it may pass the frame in pieces', async () => {
     const wire = wireTo(SLOW)
     try {

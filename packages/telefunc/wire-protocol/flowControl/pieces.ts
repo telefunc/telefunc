@@ -286,7 +286,8 @@ class PieceSender {
       this.servingLane = lane
       return this.start(frame)
     }
-    if (this.passesRest(frame)) return this.pass(frame)
+    // A probe's answer waits in its channel's lane (see `laneOf`).
+    if (!(this.laned && tag === TAG.BDP_PING_ACK) && this.passesRest(frame)) return this.pass(frame)
     this.enqueue(lane, frame)
     // A sender that cuts data lets go of what waits only as its owner frees headroom.
     if (!this.cutsData && tag !== TAG.PUBLISH_TO) this.release()
@@ -296,6 +297,8 @@ class PieceSender {
   private laneOf(frame: Uint8Array<ArrayBuffer>, tag: number): number {
     if (!this.laned) return 0
     if (isPublishBody(tag)) return this.bodyLane
+    // A probe's answer goes behind what its channel has waiting, so the probe counts what its window let out.
+    if (tag === TAG.BDP_PING_ACK) return readU16(frame, 1)
     if (!isSequencedTag(tag)) return tag === TAG.FIN ? FIN_LANE : CONTROL_LANE
     const ix = readU16(frame, 1)
     if (tag === TAG.PUBLISH_TO) this.bodyLane = ix
