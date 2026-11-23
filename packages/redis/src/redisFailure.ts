@@ -1,5 +1,5 @@
 // The store's replies: how each wording a store replies with becomes Telefunc's `BackendError`, in one ordered table.
-export { redisFailure, isRefusal, isLoginRefusal }
+export { redisFailure, isRefusal, isLoginRefusal, orderRecordRefusal, staleStart }
 
 import { BackendError } from 'telefunc/__internal'
 import { isBug } from './assert.js'
@@ -89,8 +89,12 @@ const REDIRECTION = /^(MOVED|ASK) /
 const BUSY_SLOT = /^TRYAGAIN /
 
 /** A write script's guard's refusal before its first write (`refuseLua`, commands.ts), by its word: WRONGTYPE for a
- *  key of another type, ERR for a value. Only the guard puts TFNOTRUN at the start of a reply. */
+ *  key of another type, ERR for a value, an order record too. Only the guard puts TFNOTRUN at the start of a reply. It
+ *  stands until an operator changes the key. */
 const GUARD_REFUSAL = /^TFNOTRUN (WRONGTYPE|ERR) /
+
+/** A subscription's start script's refusal before anything else, as its user's ACL denies the `INFO` it reads first. */
+const TF_INFO = /^TFINFO (.+)$/
 
 /** What the backend reports of an error ioredis gave on a connection of `redis`'s, for a command that may write
  *  (`writes`) or one that can't: the one place a failure of Redis becomes Telefunc's `BackendError`, which says what
@@ -142,6 +146,19 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
       message: `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
     })
   }
+  const info = TF_INFO.exec(message)?.[1]
+  if (info !== undefined) {
+    const failure = new BackendError({
+      code: 'denied',
+      outcome: outcome(true),
+      message:
+        `Redis at ${where} refused Telefunc's Redis backend ${info} by its user's ACL, which a subscription's start ` +
+        'reads: allow that user +info, and +cluster|info on a Cluster, as the ACL rule in the docs of @telefunc/redis lists',
+    })
+    refusals.set(failure, 'acl')
+    return failure
+  }
+  if (message.startsWith('TFSTALE ')) return staleStart(where)
   const guarded = GUARD_REFUSAL.exec(message)
   if (guarded !== null) {
     // In Telefunc's own words, as for every reply: the reply's text names the key.
@@ -149,13 +166,15 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
       guarded[1] === 'WRONGTYPE'
         ? ['WRONGTYPE', 'a key of another type than Telefunc keeps there']
         : ['ERR', "a value Telefunc didn't write"]
-    return new BackendError({
+    const failure = new BackendError({
       code: 'failed',
       outcome: outcome(true),
       message:
         `Redis at ${where} holds, under Telefunc's prefix, ${held}, so Telefunc's Redis backend changed nothing ` +
         `(${word}): keep that prefix to Telefunc`,
     })
+    refusals.set(failure, 'guard')
+    return failure
   }
   const wrapper = IN_SCRIPT.exec(message)
   const reply = wrapper === null ? message : message.slice(wrapper[0].length)
@@ -178,6 +197,32 @@ function redisFailure(error: unknown, redis: RedisClient, writes: boolean): unkn
     message:
       `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
       (known?.toDo === undefined ? ": Redis's log may say why" : `: ${known.toDo}`),
+  })
+}
+
+/** A record at `key`, read for a subscription's start, that the backend can't go on from: another client wrote it, or
+ *  its next count would pass 2^53 - 1. A script refuses it as the guard does; read, it stands until an operator changes
+ *  the key, as a refusal does. */
+function orderRecordRefusal(key: string): BackendError {
+  const failure = new BackendError({
+    code: 'failed',
+    outcome: 'not-run',
+    message:
+      `Telefunc's Redis backend can't go on from the order record at ${key}: it isn't one Telefunc writes, or its next ` +
+      "count would pass 2^53 - 1; keep Telefunc's prefix to Telefunc",
+  })
+  refusals.set(failure, 'order record')
+  return failure
+}
+
+/** A subscription's start read from a replica, or across two histories: it is read again, once the primary answers. */
+function staleStart(where: string): BackendError {
+  return new BackendError({
+    code: 'unavailable',
+    outcome: 'not-run',
+    message:
+      `Telefunc's Redis backend read a subscription's start at ${where} from a replica or across a change of Redis's ` +
+      'history: it reads it again',
   })
 }
 
@@ -224,7 +269,8 @@ function connectionCode(error: unknown): string | undefined {
 }
 
 /** A refusal that stands until an operator changes something: a row of `REPLIES` that `stands`, an ACL refusal, a
- *  refused login or a command Redis doesn't run; `READONLY`, `BUSY`, `LOADING` and the like pass. */
+ *  refused login, a command Redis doesn't run or an order record Telefunc can't go on from; `READONLY`, `BUSY`,
+ *  `LOADING`, a stale start and the like pass. */
 function isRefusal(error: unknown): error is BackendError {
   return error instanceof BackendError && refusals.has(error)
 }
@@ -238,5 +284,5 @@ function isLoginRefusal(error: unknown): error is BackendError {
 
 const { refusals } = getGlobalObject('redisFailure.ts', () => ({
   /** The failures that are a refusal that stands, with their reply's kind (`isRefusal()`, `isLoginRefusal()`). */
-  refusals: new WeakMap<BackendError, Kind>(),
+  refusals: new WeakMap<BackendError, Kind | 'guard' | 'order record'>(),
 }))

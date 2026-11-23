@@ -112,7 +112,7 @@ describe('RoomHeartbeat', () => {
       model,
       lanePlan: { replan: async () => {}, observing: true, controlEstablished: true },
     })
-    authority.controlDelivered(1)
+    authority.controlDelivered({ seq: 1, timestamp: 0 })
     // The close dropped the room's lanes, and its closed frame reaches the view while the check reads the control lane.
     await getRoomPlane().direct.dropIncarnation(room.id, room.inc)
     const check = authority.checkCoverage()

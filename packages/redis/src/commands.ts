@@ -4,13 +4,12 @@ export {
   LANE_PAGE_SIZE,
   REDIS_COMMANDS,
   assertCommittable,
-  parseOrdering,
 }
 export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
-import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
+import type { BroadcastPayload, BroadcastRoute } from 'telefunc/__internal'
 import { ChannelOverflowError, publishedData } from 'telefunc/__internal'
 import type {
   CellCounter,
@@ -35,7 +34,15 @@ import type {
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
-  broadcastChannel,
+  decodeBroadcastOrder,
+  decodeLaneOrder,
+  drawCommitId,
+  laneWhere,
+  type LaneStart,
+  type StartRead,
+} from './orderRecord.js'
+import {
+  broadcastPublishKeys,
   broadcastSequenceKey,
   cellIndexKey,
   cellValuesKey,
@@ -76,9 +83,11 @@ const ROOM_FRAMING_MAX_BYTES = 6 * 1024
 // A write script checks each call it may make past its first write before that write, as Redis 7 and later can without
 // making it: one the user's ACL refuses is made there, so Redis answers with its own refusal and nothing is written.
 // Redis 6 can't check, and its scripts can't undo a write, so the guide asks a restricted user for Redis 7.
+const allowedCall = (args: string) =>
+  `if redis.acl_check_cmd and not redis.acl_check_cmd(${args}) then redis.call(${args}) end`
 const ALLOWED_LUA = `
 local function tf_allowed(...)
-  if redis.acl_check_cmd and not redis.acl_check_cmd(...) then redis.call(...) end
+  ${allowedCall('...')}
 end
 `
 
@@ -197,10 +206,11 @@ tf_checked[${key}] = checked`
 }
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
+const msOfTime = (time: string) => `tonumber(${time}[1]) * 1000 + math.floor(tonumber(${time}[2]) / 1000)`
 const NOW_LUA = `
 local function tf_now()
   local t = redis.call('TIME')
-  return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+  return ${msOfTime('t')}
 end
 `
 
@@ -224,52 +234,80 @@ local function tf_live_head(raw, key, now)
 end
 `
 
-// The ordering frame orderingFrame.ts reads: four u32 big-endian words, then the payload.
+// The ordering frame orderingFrame.ts reads: four u32 big-endian words, the commit's id and its lane predecessor's,
+// then the payload. What goes before it is built into the same string, as each concatenation copies the payload.
+const u64Words = (n: string) => `math.floor(${n} / 4294967296), ${n} % 4294967296`
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_u64(n)
-  local hi = math.floor(n / 4294967296)
-  return struct.pack('>I4I4', hi, n - hi * 4294967296)
+  return struct.pack('>I4I4', ${u64Words('n')})
 end
-local function tf_ordering_frame(seq, ts, payload)
-  return tf_u64(seq) .. tf_u64(ts) .. payload
+local function tf_ordering_frame(before, seq, ts, id, prev, payload)
+  return before .. tf_u64(seq) .. tf_u64(ts) .. id .. prev .. payload
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of this publish's
-// place among the key's publishes of its kind (two u32 big-endian words, from 1) and the ordering frame.
-//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes') [2]=channel
-//   ARGV: [1]=payload [2]=kind ('text'|'binary')
-const PUBLISH_HOLDS = ['string', 'channel'] as const
-const PUBLISH_LUA = `${ALLOWED_LUA}${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
-${heldCallLua('local prev', PUBLISH_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
-local ts = tf_now()
-local seq
-local text, binary = 0, 0
-if prev then
-  local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
-  if not pseq then ${refuseLua('ERR', `KEYS[1] .. " holds no order Telefunc writes"`)} end
-  seq = tonumber(pseq) + 1
-  ${integerLua('seq', `KEYS[1] .. "'s next publish"`)}
-  if tonumber(pts) > ts then ts = tonumber(pts) end
-  text, binary = tonumber(ptext), tonumber(pbinary)
-else
-  -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
-  local t = redis.call('TIME')
-  seq = tonumber(t[1]) * 1000000 + tonumber(t[2]) + 1
+// Order records, packed little-endian, which `decodeOrderRecord()` reads: a Room lane's '<dc8>', its last commit's
+// place and id; a Broadcast key's '<dddc8c8>', its seq, each kind's place, and the id of each kind's last publish. An
+// id is the 8 bytes its publisher drew, all zero for none. A record Telefunc didn't write, or one whose next count would
+// pass 2^53 - 1, is refused before the script's first write, as any value Telefunc didn't write is (`refuseLua`).
+const orderRefusal = (key: string) =>
+  refuseLua('ERR', `${key} .. " holds no order record Telefunc writes, or one at the last safe integer"`)
+const countOk = (n: string) => `${n} == math.floor(${n}) and ${n} >= 0 and ${n} < 9007199254740991`
+// A missing Broadcast record (new, evicted or flushed) starts at authority time `time` (Redis TIME's pair) in
+// microseconds, above every seq it issued.
+const firstSeqOf = (time: string) => `tonumber(${time}[1]) * 1000000 + tonumber(${time}[2])`
+// Declares seq, text, binary, text_id and binary_id: the Broadcast record at `key`, read and checked, or a missing one's
+// start at `time`. A record the check refuses ends the script with its refusal.
+const broadcastOrderOf = (key: string, time: string) => `
+local seq, text, binary, text_id, binary_id
+do
+  local no_id = string.rep('\\0', 8)
+  seq, text, binary, text_id, binary_id = ${firstSeqOf(time)}, 0, 0, no_id, no_id
+  ${heldCallLua('local raw', 'string', `'GET', ${key}`, key)}
+  if raw then
+    if #raw ~= 40 then ${orderRefusal(key)} end
+    seq, text, binary, text_id, binary_id = struct.unpack('<dddc8c8', raw)
+    if not (${countOk('seq')} and ${countOk('text')} and ${countOk('binary')} and seq >= text + binary
+      and (text == 0) == (text_id == no_id) and (binary == 0) == (binary_id == no_id)) then
+      ${orderRefusal(key)}
+    end
+  end
+end`
+// Declares tf_lane_order(raw): a Room lane's record decoded, place and id, 0 and no id for none, nil for one that
+// `orderRefusal` refuses.
+const ORDER_RECORD_LUA = `
+local function tf_lane_order(raw)
+  local no_id = string.rep('\\0', 8)
+  if not raw then return 0, no_id end
+  if #raw ~= 16 then return nil end
+  local place, id = struct.unpack('<dc8', raw)
+  if not (${countOk('place')}) or (place == 0) ~= (id == no_id) then return nil end
+  return place, id
 end
-local place
+`
+
+// Broadcast publish: next per-key seq, then one PUBLISH of this publish's place among the key's publishes of its kind
+// (two u32 big-endian words, from 1) and the ordering frame, with its id and its kind's last publish's.
+//   KEYS: [1]=order (ORDER_RECORD_LUA's Broadcast record) [2]=channel
+//   ARGV: [1]=payload [2]=kind ('text'|'binary') [3]=its id
+// It runs on every publish, so it defines no function: its parts are built in.
+const PUBLISH_HOLDS = ['string', 'channel'] as const
+const PUBLISH_LUA = `
+local t = redis.call('TIME')
+local ts = ${msOfTime('t')}${broadcastOrderOf('KEYS[1]', 't')}
+seq = seq + 1
+local place, prev
 if ARGV[2] == 'text' then
-  text = text + 1
+  text, prev, text_id = text + 1, text_id, ARGV[3]
   place = text
 else
-  binary = binary + 1
+  binary, prev, binary_id = binary + 1, binary_id, ARGV[3]
   place = binary
 end
-${integerLua('place', `KEYS[1] .. "'s next publish of its kind"`)}
-tf_allowed('PUBLISH', KEYS[2], '')
-redis.call('SET', KEYS[1], string.format('%.0f:%.0f:%.0f:%.0f', seq, ts, text, binary))
-local frame = tf_u64(place) .. tf_ordering_frame(seq, ts, ARGV[1])
-redis.call('PUBLISH', KEYS[2], frame)
+${allowedCall("'PUBLISH', KEYS[2], ''")}
+redis.call('SET', KEYS[1], struct.pack('<dddc8c8', seq, text, binary, text_id, binary_id))
+redis.call('PUBLISH', KEYS[2],
+  struct.pack('>I4I4I4I4I4I4', ${u64Words('place')}, ${u64Words('seq')}, ${u64Words('ts')}) .. ARGV[3] .. prev .. ARGV[1])
 return {seq, ts}
 `
 
@@ -493,61 +531,99 @@ if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, now, ARGV[
 return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7], ARGV[8])
 `
 
+// The history a start is read from, read before anything else: the node's replication id, and on a Cluster its config
+// epoch, which a slot moving away and back raises. A node that isn't a primary answers TFSTALE, read again; a user whose
+// ACL denies INFO, or CLUSTER INFO on a Cluster, TFINFO, before anything is read or written.
+const AUTHORITY_LUA = `
+local function tf_authority()
+  if redis.acl_check_cmd and not redis.acl_check_cmd('INFO', 'replication') then
+    return nil, redis.error_reply("TFINFO INFO")
+  end
+  local info = redis.call('INFO', 'replication')
+  if not string.find(info, 'role:master', 1, true) then
+    return nil, redis.error_reply("TFSTALE a subscription's start reached a replica")
+  end
+  local authority = string.match(info, 'master_replid:(%x+)')
+  -- Only a Cluster has a config epoch, which only CLUSTER INFO tells.
+  if not string.find(redis.call('INFO', 'cluster'), 'cluster_enabled:1', 1, true) then return authority end
+  if redis.acl_check_cmd and not redis.acl_check_cmd('CLUSTER', 'INFO') then
+    return nil, redis.error_reply("TFINFO CLUSTER INFO")
+  end
+  local cluster = redis.pcall('CLUSTER', 'INFO')
+  if type(cluster) == 'table' and cluster.err then return nil, cluster end
+  return authority .. ':' .. string.match(cluster, 'cluster_my_epoch:(%d+)')
+end
+`
+
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
 // closed or dropped during establishment is never reported ready, and its frames start after its lane's last commit.
 //   KEYS: [1]=head [2]=order: the order hash of an inbox or binary lane's member, or another lane's own key
 //   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
-//   Reply: nil once the incarnation is not the open head, else the lane's 'seq:ts', '' before its first commit
-const LANE_START_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, the lane's order record or '' before its
+//   first commit}
+const LANE_START_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 local mark
 if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('HGET', KEYS[2], ARGV[2]) end
-return mark or ''
+return {authority, mark or ''}
 `
 
 // A page of a member's lanes' last commits, inbox included, read as LANE_START_LUA reads one lane's, for its every-track
 // subscription.
 //   KEYS: [1]=head [2]=the member's order hash
 //   ARGV: [1]=inc [2]=HSCAN cursor
-//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, 'seq:ts', ...}}
-const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, {next cursor, {lane key, order record, ...}}}
+const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
-return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+return {authority, redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})}
 `
 
 // A page of a track's binary lanes that have a commit, read as LANE_START_LUA reads one lane,
 // for its every-member subscription.
 //   KEYS: [1]=head [2]=the track's lane set
 //   ARGV: [1]=inc [2]=SSCAN cursor
-//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, ...}}
-const TRACK_LANES_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, {next cursor, {lane key, ...}}}
+const TRACK_LANES_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
-return redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+return {authority, redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})}
 `
 
 // Each binary lane's last commit, '' for one whose member's order is gone.
 //   KEYS: [1..]=each lane's member's order hash
 //   ARGV: [1..]=the lane keys, in KEYS's order
-const LANE_MARKS_LUA = `
+//   Reply: {authority, {mark, ...}}
+const LANE_MARKS_LUA = `${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local marks = {}
 for i = 1, #KEYS do marks[i] = redis.call('HGET', KEYS[i], ARGV[i]) or '' end
-return marks
+return {authority, marks}
 `
 
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
-//   KEYS: [1]=order ('seq:ts:text publishes:binary publishes')
+//   KEYS: [1]=order (ORDER_RECORD_LUA's Broadcast record)
+//   Reply: {authority, the record}
 const BROADCAST_START_HOLDS = ['string'] as const
-const BROADCAST_START_LUA = `
-${heldCallLua('local mark', BROADCAST_START_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
-if mark then return mark end
+const BROADCAST_START_LUA = `${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
+${heldCallLua('local raw', BROADCAST_START_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
+if raw then return {authority, raw} end
 local t = redis.call('TIME')
-mark = string.format('%.0f', tonumber(t[1]) * 1000000 + tonumber(t[2])) .. ':0:0:0'
-redis.call('SET', KEYS[1], mark)
-return mark
+local no_id = string.rep('\\0', 8)
+raw = struct.pack('<dddc8c8', ${firstSeqOf('t')}, 0, 0, no_id, no_id)
+redis.call('SET', KEYS[1], raw)
+return {authority, raw}
 `
 
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
@@ -672,12 +748,14 @@ const COMMIT_ARGS = {
   everyMemberFence: 8,
   /** The member a retained frame is from, `''` for none. */
   owner: 9,
+  /** The commit's id, `drawCommitId()`'s. */
+  id: 10,
   /** The required cells' beside: `'1'`, then its `of`, reference and target; `''` and three `''` for none. */
-  requiredBeside: 10,
-  requiredOf: 11,
-  requiredReference: 12,
-  requiredTarget: 13,
-  requiredCells: 14,
+  requiredBeside: 11,
+  requiredOf: 12,
+  requiredReference: 13,
+  requiredTarget: 14,
+  requiredCells: 15,
 } as const
 
 /** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
@@ -717,23 +795,19 @@ function holdList<Name extends string>(table: Record<Name, number>, holds: Recor
   return list
 }
 
-/** Lua that reads a lane's last commit, as the watermark 'seq:ts' its order at `orderKey` gives it (a member lane's
- *  under `laneKey` in the order hash, as `memberLane` tells), into the locals `seq`, `ts` and `prev`: its seq and
- *  time, 0 and 0 with none yet, and whether it has one. An order a later commit couldn't add to is refused. As the
- *  order's first command, its read is the order's check. */
-function laneOrderLua(orderKey: string, memberLane: string, laneKey: string, [seq, ts, prev]: readonly string[]) {
-  return `local ${seq}, ${ts}, ${prev} = 0, 0, false
+/** Lua that reads a lane's order record (`ORDER_RECORD_LUA`'s Room lane record) at `orderKey`, a member lane's under
+ *  `laneKey` in the order hash, as `memberLane` tells, into the locals `place`, `id` and `had`: its last commit's place
+ *  and id, 0 and no id with none yet, and whether it has one. A record a later commit couldn't go on from is refused
+ *  (`orderRefusal`). As the order's first command, its read is the order's check. */
+function laneOrderLua(orderKey: string, memberLane: string, laneKey: string, [place, id, had]: readonly string[]) {
+  return `local ${place}, ${id}, ${had}
 do
-  local mark
-  if ${memberLane} then mark = redis.pcall('HGET', ${orderKey}, ${laneKey}) else mark = redis.pcall('GET', ${orderKey}) end
-  ${heldReplyLua('mark', COMMIT_HOLD.order, orderKey, `${orderKey} .. " holds no order Telefunc writes for its lane"`)}
-  if mark then
-    local pseq, pts = string.match(mark, '^(%d+):(%d+)$')
-    if not pseq then ${refuseLua('ERR', `${orderKey} .. " holds no order Telefunc writes"`)} end
-    local next_seq = tonumber(pseq) + 1
-    ${integerLua('next_seq', `${orderKey} .. "'s next commit"`)}
-    ${seq}, ${ts}, ${prev} = tonumber(pseq), tonumber(pts), true
-  end
+  local raw
+  if ${memberLane} then raw = redis.pcall('HGET', ${orderKey}, ${laneKey}) else raw = redis.pcall('GET', ${orderKey}) end
+  ${heldReplyLua('raw', COMMIT_HOLD.order, orderKey, `${orderKey} .. " holds no order Telefunc writes for its lane"`)}
+  ${place}, ${id} = tf_lane_order(raw)
+  if not ${place} then ${orderRefusal(orderKey)} end
+  ${had} = raw ~= false
 end`
 }
 
@@ -860,26 +934,24 @@ for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
 end
 
 local member_lane = ${A.laneKind} == 'inbox' or ${A.laneKind} == 'binary'
-${laneOrderLua('order_key', 'member_lane', A.laneKey, ['base_seq', 'base_ts', 'prev'])}
-local seq = base_seq + 1
-local ts = now
-if base_ts > ts then ts = base_ts end
+${laneOrderLua('order_key', 'member_lane', A.laneKey, ['base', 'prev', 'had_commit'])}
+local seq = base + 1
 ${commitAllowedLua(K, A, false)}
-${afterWrites ? '' : commitHoldsLua(K, A, args, 'prev', false)}
+${afterWrites ? '' : commitHoldsLua(K, A, args, 'had_commit', false)}
 -- tostring keeps only 14 significant digits.
 local seq_text = string.format('%.0f', seq)
-local ts_text = string.format('%.0f', ts)
+local ts_text = string.format('%.0f', now)
 if member_lane then
-  redis.call('HSET', order_key, ${A.laneKey}, seq_text .. ':' .. ts_text)
+  redis.call('HSET', order_key, ${A.laneKey}, struct.pack('<dc8', seq, ${A.id}))
 else
-  redis.call('SET', order_key, seq_text .. ':' .. ts_text)
+  redis.call('SET', order_key, struct.pack('<dc8', seq, ${A.id}))
 end
 redis.call('SADD', incarnation_keys_key, order_key)
-if not prev and ${A.laneKind} == 'binary' then
+if not had_commit and ${A.laneKind} == 'binary' then
   redis.call('SADD', ${K.trackLanes}, ${A.laneKey})
   redis.call('SADD', incarnation_keys_key, ${K.trackLanes})
 end
-local frame = tf_ordering_frame(seq, ts, ${A.payload})
+local frame = tf_ordering_frame('', seq, now, ${A.id}, prev, ${A.payload})
 if ${A.retain} == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
@@ -920,7 +992,7 @@ return '{"kind":"accepted","seq":' .. seq_text .. ',"timestamp":' .. ts_text .. 
 }
 
 const COMMIT_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}
-${REDIS_ORDERING_FRAME_LUA}
+${REDIS_ORDERING_FRAME_LUA}${ORDER_RECORD_LUA}
 ${commitLua(COMMIT_KEY, COMMIT_ARG, 'ARGV', false)}`
 
 // Deletes one lane's retained frame. `member` and `track` are the retained lanes of a binary lane's member and its
@@ -995,7 +1067,7 @@ function planHoldsLua(field: 'retained' | 'trackLanes' | 'expiring', at: number)
   return `for _, entry in ipairs(plan.${field}) do\n  ${checks.join('\n  ')}\nend`
 }
 
-const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${cellWritesLua(OPERATION_KEY.cellLapses)}${RETAINED_DELETE_FN_LUA}
+const OPERATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${REDIS_ORDERING_FRAME_LUA}${ORDER_RECORD_LUA}${cellWritesLua(OPERATION_KEY.cellLapses)}${RETAINED_DELETE_FN_LUA}
 local function tf_commit(CK, CA)
 ${commitLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', true)}
 end
@@ -1063,8 +1135,8 @@ end
 if plan.commit[1] then
   local commit_kind = ${COMMIT_IN_OPERATION_ARG.laneKind}
   local commit_member_lane = commit_kind == 'inbox' or commit_kind == 'binary'
-  ${laneOrderLua(COMMIT_IN_OPERATION_KEY.order, 'commit_member_lane', COMMIT_IN_OPERATION_ARG.laneKey, ['commit_seq', 'commit_ts', 'commit_prev'])}
-  ${commitHoldsLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', 'commit_prev', true)}
+  ${laneOrderLua(COMMIT_IN_OPERATION_KEY.order, 'commit_member_lane', COMMIT_IN_OPERATION_ARG.laneKey, ['commit_base', 'commit_prev', 'commit_had'])}
+  ${commitHoldsLua(COMMIT_IN_OPERATION_KEY, COMMIT_IN_OPERATION_ARG, 'CA', 'commit_had', true)}
 end
 -- The keys the writes below reach that no command above read: the cell keys a write reaches unread, the members'
 -- dropped frames and lane sets, and the expiring cells.
@@ -1282,15 +1354,16 @@ const REDIS_COMMANDS = {
       const data = publishedData(payload)
       assertPublishable(typeof data === 'string' ? Buffer.byteLength(data) : data.byteLength)
       return {
-        keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
+        keys: broadcastPublishKeys(prefix, route),
         // ioredis sends a string as UTF-8.
-        argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind],
+        argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind, drawCommitId()],
       }
     },
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
       const values = Array.isArray(reply) ? reply.map(Number) : []
-      assert(values.length === 2 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
+      // The ordering itself is checked by core, as every driver's is.
+      assert(values.length === 2, 'Publish script returned an unexpected reply')
       const [seq, timestamp] = values as [number, number]
       return { seq, timestamp }
     },
@@ -1432,6 +1505,7 @@ const REDIS_COMMANDS = {
     writes: false,
     lua: LANE_START_LUA,
     numberOfKeys: 2,
+    binaryReply: true,
     invoke: (prefix, { roomId, inc, lane, laneKey }: RoomSubscriptionSource & { laneKey: string }) => {
       const memberLane = lane.kind === 'inbox' || lane.kind === 'binary'
       return {
@@ -1442,9 +1516,14 @@ const REDIS_COMMANDS = {
         argv: [inc, memberLane ? laneKey : ''],
       }
     },
-    parse: (reply): Map<string, OrderingInfo> | null => {
+    parse: (reply, { roomId, laneKey }): StartRead<Map<string, LaneStart>> | null => {
       if (reply === null) return null
-      return reply === '' ? new Map() : new Map([['', parseOrdering(reply as string)]])
+      const [authority, record] = reply as [Buffer, Buffer]
+      return {
+        authority: authority.toString(),
+        read:
+          record.byteLength === 0 ? new Map() : new Map([['', decodeLaneOrder(record, laneWhere(roomId, laneKey))]]),
+      }
     },
   }),
   memberLaneStarts: command({
@@ -1452,16 +1531,20 @@ const REDIS_COMMANDS = {
     writes: false,
     lua: MEMBER_LANE_STARTS_LUA,
     numberOfKeys: 2,
+    binaryReply: true,
     invoke: (prefix, { roomId, inc, member, cursor }: RoomInc & { member: string; cursor: string }) => ({
       keys: [headKey(prefix, roomId), memberOrderKey(prefix, roomId, inc, member)],
       argv: [inc, cursor],
     }),
-    parse: (reply): { cursor: string; starts: Array<[string, OrderingInfo]> } | null => {
+    parse: (reply, { roomId }): StartRead<{ cursor: string; starts: Array<[string, LaneStart]> }> | null => {
       if (reply === null) return null
-      const [cursor, fields] = reply as [string, string[]]
-      const starts: Array<[string, OrderingInfo]> = []
-      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrdering(fields[i + 1]!)])
-      return { cursor, starts }
+      const [authority, [cursor, fields]] = reply as [Buffer, [Buffer, Buffer[]]]
+      const starts: Array<[string, LaneStart]> = []
+      for (let i = 0; i < fields.length; i += 2) {
+        const laneKey = fields[i]!.toString()
+        starts.push([laneKey, decodeLaneOrder(fields[i + 1]!, laneWhere(roomId, laneKey))])
+      }
+      return { authority: authority.toString(), read: { cursor: cursor.toString(), starts } }
     },
   }),
   trackLanes: command({
@@ -1473,10 +1556,10 @@ const REDIS_COMMANDS = {
       keys: [headKey(prefix, roomId), trackLanesKey(prefix, roomId, inc, track)],
       argv: [inc, cursor],
     }),
-    parse: (reply): { cursor: string; lanes: string[] } | null => {
+    parse: (reply): StartRead<{ cursor: string; lanes: string[] }> | null => {
       if (reply === null) return null
-      const [cursor, lanes] = reply as [string, string[]]
-      return { cursor, lanes }
+      const [authority, [cursor, lanes]] = reply as [string, [string, string[]]]
+      return { authority, read: { cursor, lanes } }
     },
   }),
   laneMarks: command({
@@ -1484,11 +1567,20 @@ const REDIS_COMMANDS = {
     writes: false,
     lua: LANE_MARKS_LUA,
     numberOfKeys: null,
+    binaryReply: true,
     invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
       keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).member)),
       argv: lanes,
     }),
-    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrdering(mark))),
+    parse: (reply, { roomId, lanes }): StartRead<Array<LaneStart | null>> => {
+      const [authority, records] = reply as [Buffer, Buffer[]]
+      return {
+        authority: authority.toString(),
+        read: records.map((record, i) =>
+          record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, lanes[i]!)),
+        ),
+      }
+    },
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
@@ -1497,11 +1589,15 @@ const REDIS_COMMANDS = {
     holds: BROADCAST_START_HOLDS,
     lua: BROADCAST_START_LUA,
     numberOfKeys: 1,
+    binaryReply: true,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
     // The lane of a route counts its kind's publishes, in which a hole is a lost message.
-    parse: (reply, { kind }): Map<string, OrderingInfo> => {
-      const [, timestamp, text, binary] = (reply as string).split(':').map(Number) as [number, number, number, number]
-      return new Map([['', { seq: kind === 'text' ? text : binary, timestamp }]])
+    parse: (reply, { key, kind }): StartRead<Map<string, LaneStart>> => {
+      const [authority, record] = reply as [Buffer, Buffer]
+      return {
+        authority: authority.toString(),
+        read: new Map([['', decodeBroadcastOrder(record, kind, `the Broadcast key '${key}'`)]]),
+      }
     },
   }),
   dropIncarnation: command({
@@ -1804,11 +1900,6 @@ function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes)
 }
 
-function parseOrdering(reply: string): OrderingInfo {
-  const [seq, timestamp] = reply.split(':').map(Number) as [number, number]
-  return { seq, timestamp }
-}
-
 function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kind: 'binary' }> {
   const lane = kit.decodeLaneKey(laneKey)
   assert(lane.kind === 'binary')
@@ -1887,6 +1978,7 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   argv[COMMIT_ARGS.requiredOf] = of
   argv[COMMIT_ARGS.requiredReference] = reference
   argv[COMMIT_ARGS.requiredTarget] = target
+  argv[COMMIT_ARGS.id] = drawCommitId()
   for (const key of required) argv.push(key)
   return { keys, argv }
 }

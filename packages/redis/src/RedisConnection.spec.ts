@@ -4,12 +4,14 @@ import { inspect } from 'node:util'
 import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
-import { addressOf, createSubscriberSocket, deploymentOf } from './ioredis.js'
+import { addressOf, createSubscriberSocket, deploymentOf, type RedisClient } from './ioredis.js'
 import { redisFailure } from './redisFailure.js'
+import { RedisSubscriptions } from './RedisSubscriptions.js'
 
-const clients: Array<Redis | Cluster> = []
+const clients: RedisClient[] = []
 afterEach(() => {
   for (const client of clients.splice(0)) client.disconnect()
+  vi.restoreAllMocks()
 })
 
 /** A client that connects only on a command, which these tests never send. */
@@ -30,7 +32,7 @@ function answered(message: string, command: { name: string; args: unknown[] }): 
   return Object.assign(replyError(message), { command })
 }
 
-function installed(redis: Redis): RedisConnection {
+function installed(redis: RedisClient): RedisConnection {
   const connection = new RedisConnection({ redis, prefix: 'tf:' })
   connection.holdFor(redis)
   return connection
@@ -436,5 +438,25 @@ describe('a key prefix', () => {
     const at = (prefix: string) => () => new RedisConnection({ redis: client(), prefix })
     expect(at('tf:\ud800')).toThrow('installRedis(): the prefix must be a well-formed string')
     for (const prefix of ['}app:', 'a}b:', 'my app ']) expect(at(prefix)).not.toThrow()
+  })
+})
+
+describe('a Cluster whose slot gets another master', () => {
+  it('has its subscriptions follow the move, with the master the slot had: a failover cuts no subscriber connection on another node', () => {
+    const followMoves = vi.spyOn(RedisSubscriptions.prototype, 'followMoves').mockResolvedValue()
+    const cluster = new Cluster([{ host: '127.0.0.1', port: 6390 }], { lazyConnect: true })
+    clients.push(cluster)
+    const commands = installed(cluster).client
+    if (!(commands instanceof Cluster)) throw new Error('A Cluster got a client of another kind')
+    // ioredis's slot map, as a refresh leaves it: each slot's master, then its replicas.
+    commands.slots[0] = ['127.0.0.1:7001', '127.0.0.1:7003']
+    commands.slots[1] = ['127.0.0.1:7002']
+    commands.emit('refresh')
+    commands.slots[1] = ['127.0.0.1:7002', '127.0.0.1:7004']
+    commands.emit('refresh')
+    expect(followMoves).not.toHaveBeenCalled()
+    commands.slots[0] = ['127.0.0.1:7005']
+    commands.emit('refresh')
+    expect(followMoves.mock.calls.map(([moved]) => moved)).toEqual([new Map([[0, '127.0.0.1:7001']])])
   })
 })

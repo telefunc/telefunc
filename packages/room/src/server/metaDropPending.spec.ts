@@ -1,13 +1,13 @@
-// A replaced meta generation whose drop the store refused stays marked, with the flag that a drop is pending. The meta
-// writes after it take the drop forward: a merge that reads the flag, and a replace that another replace overtook, each
-// once its own write settled, in a call of its own. On the memory store.
+// A replaced meta generation whose drop the store refused stays marked, with the flag that a drop is pending. A replace
+// drops in a call of its own once its write committed, so its caller is told the write; the meta writes after it take
+// the drop forward: a merge that reads the flag, and the next replace. On the memory store.
 import { afterEach, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
 import type { CellSelector } from '../backend/contract.js'
 import { Room } from '../index.js'
-import { META_DROP_CELL_PREFIX, META_DROP_PENDING_CELL_KEY, META_GEN_CELL_KEY } from './store/cells.js'
+import { META_DROP_CELL_PREFIX, META_DROP_PENDING_CELL_KEY } from './store/cells.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -83,40 +83,11 @@ it('a merge after a replace whose drop the store refused drops the old generatio
   await Room.updateMeta(id, { merged: true })
 
   expect({ replaced, afterRefusal, afterMerge: await held(id, inc), meta: (await Room.get(id)).meta }).toEqual({
-    replaced: 'denied',
+    replaced: 'resolved',
     afterRefusal: { marks: 1, pending: true, generations: 2 },
     afterMerge: { marks: 0, pending: false, generations: 1 },
     meta: { replacement: true, merged: true },
   })
-})
-
-it('a replace that another replace overtook, both having read no drop pending, drops what the other left', async () => {
-  const { id, inc } = await roomWithMeta('drop-overtaken')
-  const read = gate()
-  const release = gate()
-  let firstMetaRead = true
-  onReads(id, async (selector, marksRead) => {
-    if ('keys' in selector && selector.keys.includes(META_GEN_CELL_KEY) && firstMetaRead) {
-      firstMetaRead = false
-      read.open()
-      await release.opened
-    }
-    if (isMarksRead(selector) && marksRead === 1) throw refused()
-  })
-  // The overtaken replace reads the meta, and waits while the other replace commits and its drop is refused.
-  const overtaken = outcomeOf(Room.setMeta(id, { overtaken: true }))
-  await read.opened
-  const overtaking = await outcomeOf(Room.setMeta(id, { overtaking: true }))
-  const beforeOvertaken = await held(id, inc)
-  release.open()
-
-  expect({ overtaking, beforeOvertaken, overtaken: await overtaken, after: await held(id, inc) }).toEqual({
-    overtaking: 'denied',
-    beforeOvertaken: { marks: 1, pending: true, generations: 2 },
-    overtaken: 'resolved',
-    after: { marks: 0, pending: false, generations: 1 },
-  })
-  expect((await Room.get(id)).meta).toEqual({ overtaking: true })
 })
 
 it('a drop that read the marks before a newer replace marked finishes its own and leaves the newer mark and flag', async () => {
@@ -151,7 +122,7 @@ it('a drop that read the marks before a newer replace marked finishes its own an
   await Room.updateMeta(id, { again: true })
 
   expect({ newer, merged, afterDrop, afterNextMerge: await held(id, inc) }).toEqual({
-    newer: 'denied',
+    newer: 'resolved',
     merged: 'resolved',
     afterDrop: { marks: 1, pending: true, generations: 2 },
     afterNextMerge: { marks: 0, pending: false, generations: 1 },

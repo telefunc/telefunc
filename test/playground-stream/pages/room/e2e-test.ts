@@ -2075,7 +2075,7 @@ function testRoomRedisSubscriberDropped() {
   )
   testRoomScenario<{ reported: string[]; arrivedAfter: number }>(
     'rewound',
-    "room and broadcast: a failover rewinds Redis across a server's dropped subscriber connection: each lane that delivered past it reports a loss it can't count",
+    "room and broadcast: a failover rewinds Redis across a server's dropped subscriber connection: each lane that delivered past it reports a loss it can't count once a commit of the new history reaches it",
     (r) => {
       const commits = "An unknown number of commits never reached this server's Redis subscription"
       const messages = "An unknown number of text messages never reached this server's Redis subscription"

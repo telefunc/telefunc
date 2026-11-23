@@ -1,7 +1,7 @@
 export { RoomStore, CallStore }
 export type { RoomReads }
 
-import { assertDriverOrdering, type BackendCall, type OrderingInfo } from 'telefunc/__internal'
+import { assertDriverOrdering, type BackendCall } from 'telefunc/__internal'
 import type {
   CellsExchange,
   ControlRecord,
@@ -35,7 +35,7 @@ type RoomReads = Pick<
   | 'directoryList'
   | 'directoryDue'
 > & {
-  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
+  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<{ seq: number } | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
 }
 

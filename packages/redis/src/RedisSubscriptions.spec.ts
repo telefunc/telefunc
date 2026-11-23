@@ -1,10 +1,11 @@
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
-import type { SubscriberSocket } from './ioredis.js'
+import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
+import type { Starts } from './orderRecord.js'
 
 const TEXT = 'text-channel'
 const BINARY = 'binary-channel'
@@ -12,7 +13,10 @@ const BINARY = 'binary-channel'
  *  has it. */
 const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
 
-type ReadStarts = () => Promise<Map<string, { seq: number; timestamp: number }>>
+type ReadStarts = () => Promise<Starts>
+
+/** No lane has a commit yet, on the history `authority`. */
+const none = (authority = 'a'): Starts => ({ authority, starts: new Map() })
 
 function replyError(message: string): Error {
   const error = new Error(message)
@@ -37,6 +41,7 @@ const REFUSALS = [
   "ERR ACL failure in script: User probe has no permissions to run the 'get' command script: d3c21d0c2b9ca22f82737626a27bcaf5d288f99f, on @user_script:1.",
   'ERR ACL failure in script: No permissions to access a channel script: 9ddb5d56e1d5c3a3b21c1aad774273186b4a6d34, on @user_script:1.',
   'ERR Error running script (call to ee33e8171bc4a2b477d56ebe06c4d9545f5b840a): @user_script:2: -NOPERM probe has no ACL permissions',
+  'TFINFO INFO',
 ]
 /** Replies that pass, among them a replica's refusal (the same stores, at top level and inside a script), which a
  *  failover ends, and a dropped command connection. */
@@ -51,6 +56,7 @@ const PASSING = [
   replyError('LOADING Redis is loading the dataset in memory'),
   replyError('BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSCRIPT.'),
   new Error('Connection is closed.'),
+  replyError("TFSTALE a subscription's start reached a replica"),
 ]
 
 function setup(
@@ -61,6 +67,8 @@ function setup(
 ) {
   /** What Redis sends the subscriber socket: a frame on a channel. */
   let publish = (_channel: string, _frame: Buffer) => {}
+  /** The subscriber connection drops. */
+  let close = () => {}
   const socket: SubscriberSocket = {
     connect,
     subscribe,
@@ -69,6 +77,7 @@ function setup(
     disconnect() {},
     on(event: string, listener: (channel: Buffer, frame: Buffer) => void) {
       if (event === 'messageBuffer') publish = (channel, frame) => listener(Buffer.from(channel), frame)
+      if (event === 'close') close = listener as unknown as () => void
       return socket
     },
   }
@@ -81,39 +90,52 @@ function setup(
   const delivered: string[] = []
   const listen = (
     channel: string,
-    readStarts: ReadStarts = async () => new Map(),
+    readStarts: ReadStarts = async () => none(),
     frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
   ): DriverAttempt =>
     subscriptions.subscribe({
       channel,
       invalidationChannel: null,
       frames,
+      laneChannel: frames.fanIn ? (laneKey) => `${channel}:${laneKey}` : null,
       readStarts,
       receiver: {
         deliver(payload) {
           delivered.push(String(payload))
         },
       },
-      reportMissed() {},
+      reportMissed(count) {
+        missed.push(count)
+      },
     })
+  const missed: Array<number | null> = []
   return {
     subscriptions,
     listen,
     delivered,
+    missed,
+    close: () => close(),
     publish: (channel: string, frame: Buffer) => publish(channel, frame),
     sends: new NewSubscriptionWait({ subscriptions }),
   }
 }
 
 /** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
- *  `[seq_hi][seq_lo][ts_hi][ts_lo][payload]`, u32 big-endian. */
-function frameOf(place: number, text: string, { lane, seq = place }: { lane?: string; seq?: number } = {}): Buffer {
-  const header = Buffer.alloc(24)
+ *  `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its predecessor's, and the payload. Its id is
+ *  its place, so a lane's frames name the one before them. */
+function frameOf(
+  place: number,
+  text: string,
+  { lane, seq = place, id = BigInt(place) }: { lane?: string; seq?: number; id?: bigint } = {},
+): Buffer {
+  const header = Buffer.alloc(40)
   header.writeBigUInt64BE(BigInt(place), 0)
   header.writeUInt32BE(Math.floor(seq / 0x1_0000_0000), 8)
   header.writeUInt32BE(seq % 0x1_0000_0000, 12)
   header.writeUInt32BE(0, 16)
   header.writeUInt32BE(1_700_000_000, 20)
+  header.writeBigUInt64BE(id, 24)
+  header.writeBigUInt64BE(BigInt(Math.max(place - 1, 0)), 32)
   const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
   if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
   return Buffer.concat([laneKey, header, Buffer.from(text)])
@@ -143,7 +165,7 @@ describe('a start read Redis answers with an error', () => {
       const { listen } = setup()
       const attempt = listen(TEXT, async () => {
         if (++reads === 1) throw error
-        return new Map()
+        return none()
       })
 
       await expect.poll(() => attempt.state(), { timeout: 3_000 }).toBe('ready')
@@ -152,15 +174,84 @@ describe('a start read Redis answers with an error', () => {
   }
 })
 
+describe('a resume', () => {
+  const lane = (place: number) => ({ authority: 'a', starts: new Map([['', { place, id: BigInt(place) }]]) })
+
+  it('counts what it missed on the history it last read, and reports nothing where it missed nothing', async () => {
+    const { listen, publish, close, missed } = setup()
+    let start = lane(1)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(2, 'm2'))
+    close()
+    await expect.poll(() => attempt.state()).toBe('ready')
+    close()
+    start = lane(4)
+    await expect.poll(() => missed.length).toBe(1)
+    expect(missed).toEqual([2])
+  })
+
+  it('reports once, with no count, that it may have missed some, from another history, with lanes or none', async () => {
+    for (const form of ['same place', 'ahead', 'none'] as const) {
+      const { listen, close, missed } = setup()
+      let start = form === 'none' ? none('a') : lane(3)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      close()
+      start = { ...(form === 'ahead' ? lane(5) : form === 'none' ? none() : lane(3)), authority: 'b' }
+      await expect.poll(() => missed.length).toBe(1)
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(missed).toEqual([null])
+    }
+  })
+})
+
+describe('a Cluster slot whose master changed', () => {
+  const lane = (place: number, authority = 'a') => ({
+    authority,
+    starts: new Map([['', { place, id: BigInt(place) }]]),
+  })
+  const moved = new Map([[slotOf(TEXT), '127.0.0.1:7001']])
+
+  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, or is of another history', async () => {
+    const views: Array<MasterView | null> = [null, { history: 'a', serves: true }, { history: 'x', serves: false }]
+    for (const view of views) {
+      const { subscriptions, listen, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      // A failover's new master: another history, which lacks what the old one accepted and never replicated.
+      start = lane(3, 'b')
+      await subscriptions.followMoves(moved, async () => view)
+      await expect.poll(() => missed).toEqual([null])
+      expect(attempt.state()).toBe('ready')
+    }
+  })
+
+  it('goes on where the old master, of the history it started from, sends its key elsewhere: a resharding', async () => {
+    const { subscriptions, listen, close, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    const states: string[] = []
+    attempt.onStateChange((state) => states.push(state))
+    // The new master, which the key moved to with its record.
+    start = lane(3, 'b')
+    await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+    expect(states).toEqual([])
+    // A cut after it resumes from the new master's history, which it follows now: nothing was missed.
+    close()
+    await expect.poll(() => states).toEqual(['lost', 'ready'])
+    expect(missed).toEqual([])
+  })
+})
+
 describe('a publish waiting on its key’s new subscriptions', () => {
   it('goes out once the other kind’s start read, failed and read again, is ready: a failed read is no end', async () => {
     const { subscriptions, listen, sends } = setup()
     listen(TEXT)
     await Promise.all(subscriptions.establishingOn([TEXT]))
-    const reads = [
-      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
-      createDeferred<Map<string, { seq: number; timestamp: number }>>(),
-    ]
+    const reads = [createDeferred<Starts>(), createDeferred<Starts>()]
     let read = 0
     const binary = listen(BINARY, () => reads[read++]!.promise)
 
@@ -168,7 +259,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     reads[0]!.reject(new Error('the command connection dropped'))
     await expect.poll(() => read, { timeout: 3_000 }).toBe(2)
     expect(binary.state()).toBe('establishing')
-    reads[1]!.resolve(new Map())
+    reads[1]!.resolve(none())
 
     await expect(waiting.turn).resolves.toBe('hello')
     expect(binary.state()).toBe('ready')
@@ -207,6 +298,7 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
     ['a place and no ordering header', frameOf(1, '').subarray(0, 12)],
     ['a seq of 0', frameOf(1, 'x', { seq: 0 })],
     ['a place of 0', frameOf(0, 'x', { seq: 1 })],
+    ['an id of 0', frameOf(1, 'x', { id: BigInt(0) })],
   ]
 
   for (const [name, frame] of FOREIGN) {
@@ -230,7 +322,7 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
   it('is dropped where its lane key runs past its end, on a channel of many lanes', async () => {
     spyReports()
     const { subscriptions, listen, publish, delivered } = setup()
-    listen(TEXT, async () => new Map(), { fanIn: true, placed: true, text: true, lanesEndWithMembers: false })
+    listen(TEXT, async () => none(), { fanIn: true, placed: true, text: true, lanesEndWithMembers: false })
     await Promise.all(subscriptions.establishingOn([TEXT]))
     const overlong = frameOf(1, 'x', { lane: 'lane' })
     overlong.writeUInt16BE(500, 0)
@@ -244,14 +336,14 @@ describe("a frame on a subscribed channel that isn't in the form Telefunc's scri
 
   it('is dropped where it arrives while the subscription is confirmed, which then goes live', async () => {
     spyReports()
-    const starts = createDeferred<Map<string, { seq: number; timestamp: number }>>()
+    const starts = createDeferred<Starts>()
     const { listen, publish, delivered } = setup()
     const attempt = listen(TEXT, () => starts.promise)
     await new Promise((resolve) => setImmediate(resolve))
 
     publish(TEXT, Buffer.from([1, 2, 3]))
     publish(TEXT, frameOf(1, 'early'))
-    starts.resolve(new Map())
+    starts.resolve(none())
 
     await expect.poll(() => attempt.state()).toBe('ready')
     expect(delivered).toEqual(['early'])
@@ -389,7 +481,8 @@ describe('a receiver that throws, ahead of another on the same channel', () => {
         channel: TEXT,
         invalidationChannel: null,
         frames: { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
-        readStarts: async () => new Map(),
+        laneChannel: null,
+        readStarts: async () => none(),
         receiver: { deliver },
         reportMissed() {},
       })

@@ -265,14 +265,14 @@ const ROWS: Row[] = [
     'TFNOTRUN WRONGTYPE tf:0:o:k holds hash script: 06f79f6ab4, on @user_script:1.',
     'failed',
     'not-run',
-    false,
+    true,
     "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing (WRONGTYPE): keep that prefix to Telefunc",
   ],
   [
     'TFNOTRUN ERR tf:0:h:r holds no JSON script: 06f79f6ab4, on @user_script:1.',
     'failed',
     'not-run',
-    false,
+    true,
     "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a value Telefunc didn't write, so Telefunc's Redis backend changed nothing (ERR): keep that prefix to Telefunc",
   ],
   [

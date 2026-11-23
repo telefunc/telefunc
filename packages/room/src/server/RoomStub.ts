@@ -321,9 +321,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   relayText(serialized: string, bodies: MemberMessageBodies, from: string, ord: OrderingInfo): void {
-    if (this.tail !== null) {
-      this.tail.push({ serialized, ord, from })
-    } else if (this.wantsTextFrom(from)) {
+    if (this.tail !== null) return this.tail.push({ serialized, ord, from })
+    if (ord.rewound) this.replay.rewound(null, '', ord.seq)
+    if (this.wantsTextFrom(from)) {
       const replay = this.replay
       if (replay.holding) {
         const relay = () => this.relayText(serialized, bodies, from, ord)
@@ -334,6 +334,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   }
 
   relayBinary(body: PublishBody, from: string, track: string, info: OrderingInfo): void {
+    if (info.rewound) this.replay.rewound(from, track, info.seq)
     if (!this.wantsBinary(from, track)) return
     const replay = this.replay
     if (
@@ -414,6 +415,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
     const held = this.tail.take()
     this.tail = null
     for (const { serialized, ord, from } of held) {
+      if (ord.rewound) this.replay.rewound(null, '', ord.seq)
       if (!this.wantsTextFrom(from)) continue
       this.relayTextLive(from, orderedBody(serialized, ord), ord)
     }

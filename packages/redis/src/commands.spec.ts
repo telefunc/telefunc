@@ -3,15 +3,23 @@ import { describe, expect, it } from 'vitest'
 import { isBug } from './assert.js'
 import { REDIS_COMMANDS } from './commands.js'
 
-/** Whether a script marked as only reading may make the call `name`: a failure of such a script is told it didn't run.
- *  The commands ioredis's own table flags `readonly`, and TIME, which reads the clock (flagged `loading, stale, fast`). */
-const reads = (name: string) => name === 'TIME' || hasFlag(name.toLowerCase(), 'readonly')
+/** Whether a script marked as only reading may make the call `name` (with `sub`, its first argument): a failure of such
+ *  a script is told it didn't run. The commands ioredis's own table flags `readonly`, TIME, which reads the clock
+ *  (flagged `loading, stale, fast`), and INFO and CLUSTER INFO, which read the node's state. */
+const reads = (name: string, sub: string) =>
+  name === 'TIME' ||
+  name === 'INFO' ||
+  (name === 'CLUSTER' && sub === 'INFO') ||
+  hasFlag(name.toLowerCase(), 'readonly')
 
 describe('a script marked as only reading', () => {
   it.each(Object.values(REDIS_COMMANDS).filter((command) => !command.writes))('$name calls only reads', ({ lua }) => {
-    const called = Array.from(lua.matchAll(/redis\.p?call\(([^,)]*)/g), (match) => match[1] ?? '')
+    const called = Array.from(lua.matchAll(/redis\.p?call\(([^,)]*)(?:, '(\w+)')?/g), ([, name = '', sub = '']) => ({
+      name: name.replace(/^'(\w+)'$/, '$1'),
+      sub,
+    }))
     expect(called.length).toBeGreaterThan(0)
-    expect(called.filter((name) => !reads(name.replace(/^'(\w+)'$/, '$1')))).toEqual([])
+    expect(called.filter(({ name, sub }) => !reads(name, sub))).toEqual([])
   })
 })
 
@@ -93,21 +101,29 @@ describe('a call Redis does not refuse', () => {
     const cellWrites = ['tf_write', 'tf_cell_writes_allowed', 'tf_count']
     const frame = ['tf_u64', 'tf_ordering_frame']
     expect(defined).toEqual({
-      tfPublish: ['tf_allowed', 'tf_now', ...frame],
+      tfPublish: [],
       tfRoomHeadExchange: ['tf_allowed', ...head, ...cellWrites],
       tfRoomReadHead: head,
       tfRoomReadCells: [...head, 'tf_lapsed', 'tf_cells_reply'],
       tfRoomReadExpiringCells: head,
       tfRoomReadCellPage: [...head, 'tf_lapsed', 'tf_cells_reply'],
-      tfRoomLaneStart: head,
-      tfRoomMemberLaneStarts: head,
-      tfRoomTrackLanes: head,
-      tfRoomLaneMarks: [],
-      tfBroadcastStart: [],
+      tfRoomLaneStart: [...head, 'tf_authority'],
+      tfRoomMemberLaneStarts: [...head, 'tf_authority'],
+      tfRoomTrackLanes: [...head, 'tf_authority'],
+      tfRoomLaneMarks: ['tf_authority'],
+      tfBroadcastStart: ['tf_authority'],
       tfRoomDropIncarnation: ['tf_allowed'],
       tfRoomCellsExchange: ['tf_allowed', ...head, ...cellWrites],
-      tfRoomCommit: ['tf_allowed', ...head, ...frame],
-      tfRoomOperation: ['tf_allowed', ...head, ...frame, ...cellWrites, 'tf_retained_delete', 'tf_commit'],
+      tfRoomCommit: ['tf_allowed', ...head, ...frame, 'tf_lane_order'],
+      tfRoomOperation: [
+        'tf_allowed',
+        ...head,
+        ...frame,
+        'tf_lane_order',
+        ...cellWrites,
+        'tf_retained_delete',
+        'tf_commit',
+      ],
       tfRoomDirectoryPut: ['tf_allowed', 'tf_now'],
       tfRoomDirectoryDelete: ['tf_allowed'],
       tfRoomDirectoryDue: ['tf_now'],

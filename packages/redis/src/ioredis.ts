@@ -15,13 +15,15 @@ export {
   isReplyError,
   isUnsent,
   lastClusterReply,
+  slotOf,
+  masterView,
 }
-export type { RedisClient, SubscriberSocket, RawCommand }
+export type { RedisClient, SubscriberSocket, RawCommand, MasterView }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { hasFlag } from '@ioredis/commands'
-import { Cluster, type Redis } from 'ioredis'
+import { Cluster, Command, Redis } from 'ioredis'
 import { isObject } from 'telefunc/__internal'
 import { getGlobalObject } from './getGlobalObject.js'
 
@@ -33,6 +35,7 @@ const RAW_COMMANDS = [
   'get',
   'getBuffer',
   'hget',
+  'hgetBuffer',
   'hkeys',
   'hmget',
   'smembers',
@@ -171,6 +174,9 @@ function isReplyError(error: unknown): error is Error {
   return error instanceof Error && error.name === 'ReplyError'
 }
 
+/** ioredis's own default. */
+const SLOTS_REFRESH_MS = 5_000
+
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
  *  it can't write yet (`nextReady()` waits for it to be ready instead), and reads masters only (Room reads are strongly
  *  consistent). */
@@ -195,6 +201,9 @@ function createCommandClient(redis: RedisClient): RedisClient {
         // A closed connection fails its command (`lastClusterReply()` counts on it).
         retryDelayOnFailover: 0,
         enableOfflineQueue: false,
+        // How soon a failover is seen by the subscriptions, which its slot map tells (RedisConnection), whatever the
+        // app's client refreshes at.
+        slotsRefreshInterval: SLOTS_REFRESH_MS,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
         // variable key count is the count, and refuses a batch whose keys span masters.
         enableAutoPipelining: false,
@@ -223,6 +232,49 @@ function recordAttempts(client: RedisClient): void {
     attempt.lastError = new Error('Connection is closed.')
     attempt.nodeErrors.clear()
   })
+}
+
+/** A key's Cluster slot. */
+function slotOf(key: string): number {
+  return new Command('exists', [key]).getSlot()
+}
+
+/** What a slot's former master says of itself: the history it is master of, its replication id, and whether it still
+ *  serves the slot. */
+type MasterView = { history: string; serves: boolean }
+
+/** How long the backend waits on the master a slot had, which a failover may have taken down. */
+const MASTER_VIEW_MS = 2_000
+
+/** What `node`, a Cluster node as the slot map names it, says now of `key`'s slot; null where it can't be reached, isn't
+ *  a master, or answers otherwise. A command on `key` that it redirects (`MOVED`, or `ASK` while it migrates the
+ *  slot's keys) says it no longer serves the slot. */
+async function masterView(cluster: Cluster, node: string, key: string): Promise<MasterView | null> {
+  const at = node.lastIndexOf(':')
+  const redis = new Redis({
+    ...cluster.options.redisOptions,
+    host: node.slice(0, at),
+    port: Number(node.slice(at + 1)),
+    lazyConnect: true,
+    connectTimeout: MASTER_VIEW_MS,
+    commandTimeout: MASTER_VIEW_MS,
+    maxRetriesPerRequest: 0,
+    retryStrategy: () => null,
+  })
+  redis.on('error', () => {})
+  try {
+    await redis.connect()
+    const replies = await redis.pipeline().info('replication').exists(key).exec()
+    const [[infoError, info], [keyError]] = replies as [[Error | null, string], [Error | null, unknown]]
+    const history = infoError === null ? /^master_replid:(\w+)/m.exec(info)?.[1] : undefined
+    if (history === undefined || !/^role:master\r?$/m.test(info)) return null
+    if (keyError === null) return { history, serves: true }
+    return /^(?:MOVED|ASK) /.test(keyError.message) ? { history, serves: false } : null
+  } catch {
+    return null
+  } finally {
+    redis.disconnect()
+  }
 }
 
 /** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live node. */

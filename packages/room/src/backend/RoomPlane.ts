@@ -10,6 +10,7 @@ import {
 } from 'telefunc/__internal'
 import type { EveryMemberLane, EveryTrackLane, LaneId, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
+import { assert } from '../utils/assert.js'
 import { CallStore, RoomStore, type RoomReads } from './RoomStore.js'
 
 type RoomPlaneOptions = { driver: RoomDriver }
@@ -42,7 +43,8 @@ class RoomPlane {
       directoryDue: () => driver.directoryDue(),
       readLaneOrder: async (roomId, inc, lane) => {
         const order = await driver.readLaneOrder(roomId, inc, lane)
-        if (order !== null) assertDriverOrdering(order)
+        if (order !== null)
+          assert(Number.isSafeInteger(order.seq) && order.seq > 0, 'A backend driver returned an invalid ordering')
         return order
       },
       readRetained: async (roomId, inc, lane) => {

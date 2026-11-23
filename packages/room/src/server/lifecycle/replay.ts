@@ -40,9 +40,9 @@ class ReplayHold {
   held: HeldFrame[] = []
   bytes = 0
   holding = true
-  /** Once flushed early: each lane's first live frame the holder got, which a retained frame read later is older than
-   *  only if the holder never got it. */
-  readonly firstLive = new Map<string, Map<string, OrderingInfo>>()
+  /** Once flushed early: the seq of each lane's first live frame the holder got, which a retained frame read later is
+   *  below only if the holder never got it. */
+  readonly firstLive = new Map<string, Map<string, number>>()
 
   constructor({ change, gate }: ReplayHoldOptions) {
     this.change = change
@@ -71,15 +71,16 @@ class ReplayHold {
   }
 }
 
-/** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
- *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against
- *  live frames committed before it, so this drops its live echo and the sender's older frames, and a retained frame
- *  older than the sender's live stream, unless its replay let its held frames go early. Another sender's frames are
- *  never dropped by it. */
+/** One holder's order across retained replay and live frames, per sender: a frame is admitted only if its seq is above
+ *  every frame's the holder already has from that sender on its lane. A replayed retained frame can win the race
+ *  against live frames committed before it, so this drops its live echo and the sender's older frames, and a retained
+ *  frame older than the sender's live stream, unless its replay let its held frames go early. Another sender's frames
+ *  are never dropped by it, except where a failover rewound their lane (`rewound()`). */
 class ReplayGate {
-  private readonly high = new Map<string, OrderingInfo>()
+  /** The text lane's seq of each sender's last admitted message. */
+  private readonly high = new Map<string, number>()
   /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
-  private readonly binaryHigh = new Map<string, Map<string, OrderingInfo>>()
+  private readonly binaryHigh = new Map<string, Map<string, number>>()
   /** The binary replays whose reads haven't settled. */
   private readonly replays = new Set<ReplayHold>()
   /** The late retained frames the holder got while some replay is pending: overlapping replays read the same one. */
@@ -111,11 +112,30 @@ class ReplayGate {
       return this.admitBinary(member, track, info)
     }
     const firstLive = hold.firstLive.get(member)?.get(track ?? '')
-    if (firstLive === undefined || !isNewer(firstLive, info)) return false
-    const key = JSON.stringify([member, track, info.seq, info.timestamp])
+    if (firstLive === undefined || firstLive <= info.seq) return false
+    const key = JSON.stringify([member, track, info.seq])
     if (this.lateRetained.has(key)) return false
     this.lateRetained.add(key)
     return true
+  }
+
+  /** A failover replaced what the lane delivered from `seq` on, and the frame at `seq` follows: the holds that would
+   *  hold the lane's frames let theirs go first, as they came before it, and the lane's marks drop below `seq`, so the
+   *  new history's frames are admitted. `member` null is the text lane, which every sender shares. A retained frame read
+   *  later follows only a lane's first live frame from here on. */
+  rewound(member: string | null, track: string, seq: number): void {
+    for (const hold of this.replays) {
+      if (member === null ? hold.change !== null : !hold.covers(member, track)) continue
+      this.flush(hold)
+      if (member !== null) hold.firstLive.get(member)?.delete(track)
+      else for (const lanes of hold.firstLive.values()) lanes.delete('')
+    }
+    if (member === null) {
+      for (const [sender, last] of this.high) if (last >= seq) this.high.set(sender, seq - 1)
+      return
+    }
+    const high = this.binaryHigh.get(member)
+    if ((high?.get(track) ?? 0) >= seq) high!.set(track, seq - 1)
   }
 
   /** A sender no text want covers any more starts afresh: a later subscription gets its retained message again. */
@@ -202,7 +222,7 @@ class ReplayGate {
     for (const hold of this.replays) {
       if (hold.holding || !hold.covers(member, track)) continue
       const lanes = getOrCreate(hold.firstLive, member, () => new Map())
-      if (!lanes.has(track ?? '')) lanes.set(track ?? '', info)
+      if (!lanes.has(track ?? '')) lanes.set(track ?? '', info.seq)
     }
   }
 
@@ -212,16 +232,10 @@ class ReplayGate {
   }
 }
 
-/** A later time is newer whatever the seq: a commit never sets its lane's time back,
- *  and a failover may rewind its seq. */
-function isNewer(info: OrderingInfo, than: OrderingInfo): boolean {
-  return info.timestamp > than.timestamp || (info.timestamp === than.timestamp && info.seq > than.seq)
-}
-
-function admitInto(high: Map<string, OrderingInfo>, key: string, info: OrderingInfo): boolean {
+function admitInto(high: Map<string, number>, key: string, { seq }: OrderingInfo): boolean {
   const last = high.get(key)
-  if (last !== undefined && !isNewer(info, last)) return false
-  high.set(key, info)
+  if (last !== undefined && seq <= last) return false
+  high.set(key, seq)
   return true
 }
 
@@ -324,6 +338,7 @@ class LocalHolder implements LaneHolder {
   }
 
   relayText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string): void {
+    if (info.rewound) this.replay.rewound(null, '', info.seq)
     if (!this.wantsTextFrom(event.from)) return
     const replay = this.replay
     if (replay.holding) {
@@ -334,6 +349,7 @@ class LocalHolder implements LaneHolder {
   }
 
   relayBinary(frame: BinaryFrame, info: OrderingInfo): void {
+    if (info.rewound) this.replay.rewound(frame.from, frame.track, info.seq)
     if (!this.wantsBinary(frame.from, frame.track)) return
     const { from, track } = frame
     const replay = this.replay

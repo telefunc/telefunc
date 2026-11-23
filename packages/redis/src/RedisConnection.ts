@@ -6,6 +6,7 @@ import {
   createCommandClient,
   createSubscriberSocket,
   isCluster,
+  masterView,
   nextReady,
   rawWrites,
   subscriberNodeCount,
@@ -43,7 +44,7 @@ class RedisConnection {
   constructor({ redis, prefix }: RedisConnectionOptions) {
     assertKeyPrefix(prefix)
     this.source = redis
-    this.commands = commandClientOf(redis)
+    this.commands = this.makeCommandClient(redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.subscriptions = new RedisSubscriptions({ connection: this })
@@ -99,7 +100,7 @@ class RedisConnection {
     if (this.holders.has(redis)) return
     if (!connectsAlike(this.source, redis)) this.connectWith(redis)
     else if (this.commandsEnded) {
-      this.commands = commandClientOf(redis)
+      this.commands = this.makeCommandClient(redis)
       this.commandsEnded = false
     }
     const ended = () => {
@@ -118,7 +119,7 @@ class RedisConnection {
     this.holders.clear()
     const previous = this.commands
     this.source = redis
-    this.commands = commandClientOf(redis)
+    this.commands = this.makeCommandClient(redis)
     // QUIT lets the commands already sent get their replies; a client that never connected has none.
     if (previous.status === 'wait') previous.disconnect()
     else if (!this.commandsEnded) previous.quit().catch(() => {})
@@ -126,14 +127,35 @@ class RedisConnection {
     this.subscriptions.reconnect()
   }
 
+  /** The backend's command client made from `redis`. On a Cluster, a failover gives a slot to a replica that may lack
+   *  what the old master accepted, and a subscriber connection on another node isn't cut by it: once a refresh of the
+   *  client's slot map shows a slot on another master, its subscriptions follow the move (`followMoves`). */
+  private makeCommandClient(redis: RedisClient): RedisClient {
+    const commands = commandClientOf(redis)
+    if (!isCluster(commands)) return commands
+    /** Each slot's master at the last refresh that listed it. */
+    const masters: (string | undefined)[] = []
+    commands.on('refresh', () => {
+      const moved = new Map<number, string>()
+      commands.slots.forEach(([master], slot) => {
+        const before = masters[slot]
+        if (before !== undefined && before !== master) moved.set(slot, before)
+        masters[slot] = master
+      })
+      if (moved.size === 0 || commands !== this.commands) return
+      void this.subscriptions.followMoves(moved, (node, key) => masterView(commands, node, key))
+    })
+    return commands
+  }
+
   async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
-    const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
+    const parts = command.numberOfKeys === null ? [[String(keys.length)], keys, argv] : [keys, argv]
     const name = command.binaryReply ? bufferForm(command.name) : command.name
-    // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
-    // arguments. The method is the script's, as definedCommands.ts types it.
-    return command.parse(await this.dispatch(command.writes, (client) => client[name](keysAndArgs)), input)
+    // Each part an array argument, which ioredis flattens into the command, so no array joins them first: an
+    // incarnation's keys can outnumber a call's arguments. The method is the script's, as definedCommands.ts types it.
+    return command.parse(await this.dispatch(command.writes, (client) => client[name](...parts)), input)
   }
 }
 

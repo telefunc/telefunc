@@ -512,7 +512,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
   }
 
   private onControl(serialized: string, info: OrderingInfo): void {
-    this.authority.controlDelivered(info.seq)
+    this.authority.controlDelivered(info)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
     this.applyControl(ctrl, () => orderedBody(serialized, info))

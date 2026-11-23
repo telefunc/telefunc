@@ -4,6 +4,7 @@ export {
   writeRoomMeta,
   dropReplacedMetaGenerations,
   memberMetaMutations,
+  SET_ROOM_META,
   SET_MEMBER_META,
   SET_MEMBER_CONNECTION,
   setMemberMeta,
@@ -16,13 +17,7 @@ export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { getOrCreate } from 'telefunc/__internal'
-import {
-  CELL_PAGE_SIZE,
-  type CellMutation,
-  type CellsExchangeResult,
-  type ControlRecord,
-  type RoomOperation,
-} from '../../backend/contract.js'
+import { CELL_PAGE_SIZE, type CellMutation, type RoomOperation } from '../../backend/contract.js'
 import { assert } from '../../utils/assert.js'
 import { decodeCellCounter } from '../../backend/semantics.js'
 import { Slice } from '../../shared/Slice.js'
@@ -50,11 +45,10 @@ import {
   metaKeyOfCellKey,
   roomMetaGenPrefix,
 } from './cells.js'
-import { EXCHANGE_CONFLICT, retryCompareExchange } from './retryCompareExchange.js'
 import { deleteCells, readOpenCells } from './cellStore.js'
-import { eachInFlight, failingAfter } from './inFlight.js'
+import { eachInFlight } from './inFlight.js'
 import { runOperation } from './operations.js'
-import { acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
 
 // A meta, the room's or a member's, is a cell per top-level key under its generation's prefix, each holding the
 // key's value and place. A replace writes a new generation; a merge writes its keys into the current one.
@@ -200,109 +194,73 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
   return seq === undefined ? 0 : decodeCellCounter(seq).value
 }
 
-/** Writes the room's meta in one compare-exchange. Each commit adds one to `meta:seq` and publishes what it changed at
- *  that seq, and views apply the changes in seq order.
- *  - First write (no `meta:seq` yet): stores the whole meta as generation 0, the replace, or the merge applied to the
- *    meta the room was created with. It expects no `meta:seq`, so of racing first writes one commits and the others
- *    retry as a merge or a replace.
- *  - Merge: writes only its keys, in the current generation. It expects `meta:gen` unchanged, which only a replace
- *    changes, so merges never conflict with each other (a key two of them write ends as the later commit wrote it), and
- *    one that a replace overtook retries on the new meta. A key already there keeps its place; a new one is placed at
- *    the `meta:seq` the merge read.
- *  - Replace: writes the whole meta as a new generation, marks the old one to drop and flags a drop pending, then drops
- *    the marked generations in the same call. It also expects `meta:gen` unchanged: one that another replace overtook
- *    counts as the earlier of the two, and writes nothing.
- *  Returns whether a drop is left to the caller: one the merge read pending, or any for a replace another replace
- *  overtook, whose read may predate that replace's mark (`writeMeta()` in roomStatics.ts runs it). */
+type SetRoomMetaArgs = { write: RoomMetaWrite; created: RoomMeta }
+
+/** The room's meta write and its `update` event, at the next `meta:seq`, which every write counts; views apply the
+ *  events in seq order. Every write reads `meta:seq`, so of two racing writes one replans on the meta the other left.
+ *  - First write (no `meta:seq` yet): stores the whole meta as generation 0, the replace, or the merge applied to
+ *    `created`, the meta the room was created with.
+ *  - Merge: writes only its keys, in the current generation. A key already there keeps its place; a new one is placed
+ *    at the `meta:seq` the merge read.
+ *  - Replace: writes the whole meta as a new generation, marks the old one to drop and flags a drop pending.
+ *  Returns whether the write leaves a drop: a replace's own, or a pending one a merge read. */
+const SET_ROOM_META: RoomOperation<SetRoomMetaArgs, { drop: boolean }> = {
+  name: 'setRoomMeta',
+  plan(tx, { write, created }) {
+    const raw = tx.cell(META_SEQ_CELL_KEY)
+    // Read with `meta:seq`, which a first write writes with it, and the flag a replace writes with it.
+    const rawGen = tx.cell(META_GEN_CELL_KEY)
+    const dropPending = tx.cell(META_DROP_PENDING_CELL_KEY) !== undefined
+    if (raw === undefined) {
+      const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(created, write.merge), 0)
+      const prefix = roomMetaGenPrefix(0)
+      tx.write(genMutation(0))
+      for (const entry of meta) tx.write(metaKeyMutation(prefix, entry))
+      tx.count({ key: META_SEQ_CELL_KEY, delta: 1, create: true })
+      tx.commit(encodeRoomRecord({ __r: 'update', seq: 1, meta } satisfies RoomMetaUpdate))
+      return { drop: false }
+    }
+    assert(rawGen !== undefined)
+    const count = decodeCellCounter(raw).value
+    const gen = decodeRoomRecord<number>(rawGen)
+    tx.count({ key: META_SEQ_CELL_KEY, delta: 1 })
+    if ('replace' in write) {
+      const meta = metaEntriesAt(write.replace, count)
+      const prefix = roomMetaGenPrefix(count)
+      tx.write(genMutation(count))
+      tx.write({ key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) })
+      tx.write({ key: META_DROP_PENDING_CELL_KEY, bytes: encodeRoomRecord(gen) })
+      for (const entry of meta) tx.write(metaKeyMutation(prefix, entry))
+      tx.commit(encodeRoomRecord({ __r: 'update', seq: count + 1, meta } satisfies RoomMetaUpdate))
+      return { drop: true }
+    }
+    const prefix = roomMetaGenPrefix(gen)
+    const merging = new Map<string, Uint8Array>()
+    for (const key of Object.keys(write.merge)) {
+      const cellKey = metaKeyCellKey(prefix, key)
+      const cell = tx.cell(cellKey)
+      if (cell !== undefined) merging.set(cellKey, cell)
+    }
+    const changes = metaChanges(write.merge, prefix, count, merging)
+    for (const change of changes) tx.write(changeMutation(prefix, change))
+    tx.commit(encodeRoomRecord({ __r: 'update', seq: count + 1, changes } satisfies RoomMetaUpdate))
+    return { drop: dropPending }
+  },
+}
+
+/** Writes the room's meta with its event. Returns whether it left a drop (`SET_ROOM_META`), which `writeMeta()` in
+ *  roomStatics.ts runs in a call of its own. */
 async function writeRoomMeta(
   store: RoomStore,
   roomId: string,
   config: RoomConfigRecord,
   write: RoomMetaWrite,
 ): Promise<boolean> {
-  const { inc } = config
-  let dropPending = false
-  const update = await retryCompareExchange(async (): Promise<Uint8Array | null | typeof EXCHANGE_CONFLICT> => {
-    const read = await readOpenCells(store, roomId, inc, [
-      META_SEQ_CELL_KEY,
-      META_GEN_CELL_KEY,
-      META_DROP_PENDING_CELL_KEY,
-    ])
-    dropPending = read.cells.has(META_DROP_PENDING_CELL_KEY)
-    const seq = read.cells.get(META_SEQ_CELL_KEY)
-    if (seq === undefined) {
-      const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
-      const prefix = roomMetaGenPrefix(0)
-      const sized = sizedUpdate(roomId, 1, (seq) => ({ __r: 'update', seq, meta }))
-      const result = await store.compareExchangeCells(
-        roomId,
-        inc,
-        {
-          expect: [{ key: META_SEQ_CELL_KEY, version: null }],
-          mutations: [genMutation(0), ...meta.map((entry) => metaKeyMutation(prefix, entry))],
-          counts: [{ key: META_SEQ_CELL_KEY, delta: 1, create: true }],
-        },
-        sized.record,
-      )
-      return sized.committed(result)
-    }
-    const counts = [{ key: META_SEQ_CELL_KEY, delta: 1 }]
-    const expect = [{ key: META_GEN_CELL_KEY, version: read.versions.get(META_GEN_CELL_KEY)! }]
-    const count = decodeCellCounter(seq).value
-    const gen = decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!)
-    if ('replace' in write) {
-      const meta = metaEntriesAt(write.replace, count)
-      const prefix = roomMetaGenPrefix(count)
-      const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
-      const pending = { key: META_DROP_PENDING_CELL_KEY, bytes: encodeRoomRecord(gen) }
-      const mutations = [genMutation(count), drop, pending, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
-      const sized = sizedUpdate(roomId, count + 1, (seq) => ({ __r: 'update', seq, meta }))
-      const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
-      return result.kind === 'conflict' ? null : sized.committed(result)
-    }
-    const prefix = roomMetaGenPrefix(gen)
-    const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-    const merging = keys.length === 0 ? new Map() : (await readOpenCells(store, roomId, inc, keys)).cells
-    const changes = metaChanges(write.merge, prefix, count, merging)
-    const mutations = changes.map((change) => changeMutation(prefix, change))
-    const sized = sizedUpdate(roomId, count + 1, (seq) => ({ __r: 'update', seq, changes }))
-    const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
-    return sized.committed(result)
+  const { value } = await runOperation(store, { id: roomId, inc: config.inc }, SET_ROOM_META, {
+    write,
+    created: config.meta,
   })
-  if (update === null) return true
-  // A failed drop is told once the commit, which waits for its handoff, settled.
-  const committing = commitLane(store, controlLane(roomId, inc), update)
-  const [commit] = await Promise.all([
-    committing,
-    'replace' in write && failingAfter(committing, dropReplacedMetaGenerations(store, roomId, inc)),
-  ])
-  acceptedOrThrow(roomId, commit)
-  return 'merge' in write && dropPending
-}
-
-/** An update as the control record of its exchange's count of `meta:seq`, and the update's bytes once the exchange
- *  committed. The update is encoded once, at the `meta:seq` its read predicts (`predicted`), and the record is that
- *  encoding's length besides the seq's digits: the Redis store refuses, before its first write, an update its commit
- *  on the control lane would refuse (`ControlRecord` says what each store does). When merges committed between the
- *  read and the exchange, the exchange leaves another seq, and the update is encoded again at it: the store took that
- *  length, as the length besides the digits of the seq it wrote. */
-function sizedUpdate(
-  roomId: string,
-  predicted: number,
-  update: (seq: number) => RoomMetaUpdate,
-): { record: ControlRecord; committed(result: CellsExchangeResult): Uint8Array | typeof EXCHANGE_CONFLICT } {
-  const bytes = encodeRoomRecord(update(predicted))
-  return {
-    record: { counter: META_SEQ_CELL_KEY, bytes: bytes.byteLength - String(predicted).length },
-    committed(result) {
-      if (result.kind === 'stale-incarnation') throw roomClosedError(roomId)
-      if (result.kind === 'conflict') return EXCHANGE_CONFLICT
-      const counter = result.counters.get(META_SEQ_CELL_KEY)
-      // The first write creates `meta:seq`, and a later one counts it while `meta:gen`, written with it, is as read.
-      assert(counter !== undefined)
-      return counter.value === predicted ? bytes : encodeRoomRecord(update(counter.value))
-    },
-  }
+  return value.drop
 }
 
 /** Each generation a replace marked, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, its mark going with

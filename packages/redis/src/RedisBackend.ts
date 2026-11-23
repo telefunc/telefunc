@@ -47,7 +47,11 @@ class RedisBackend implements BroadcastDriver {
       channel,
       invalidationChannel: null,
       frames: { fanIn: false, placed: true, text: route.kind === 'text', lanesEndWithMembers: false },
-      readStarts: () => this.connection.run(REDIS_COMMANDS.broadcastStart, route),
+      laneChannel: null,
+      readStarts: async () => {
+        const { authority, read } = await this.connection.run(REDIS_COMMANDS.broadcastStart, route)
+        return { authority, starts: read }
+      },
       receiver,
       reportMissed: (count) =>
         reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
