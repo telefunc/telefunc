@@ -275,7 +275,10 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
-  const held = isDeno() ? heldClientGone(httpRequestResolved.clientGone) : null
+  // A `Request`'s own `signal` (`telefunc/deno`, `serve({ request })`) is one Deno.serve aborts at every response's end
+  // too; the Node entries' is their socket's, which no response aborts, also on Deno's `node:http`.
+  const { request, clientGone } = httpRequestResolved
+  const held = isDeno() && clientGone === request.signal ? heldClientGone(clientGone) : null
   let response: HttpResponseParts | undefined
   try {
     response = await runTelefunc_(
@@ -293,11 +296,11 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   }
   // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
   // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
-  // at every response's end. So on Deno the response ends once the call's body is over.
+  // at every response's end. So on Deno the response to a `Request` ends once the call's body is over.
   return createHttpResponse(response, held && { over: requestContext.bodyRead, unheld: held.unheld })
 }
 
-/** On Deno, the entry's `clientGone` while the response holds it: Deno's `request.signal` says the client left only while
+/** On Deno, a `Request`'s `signal` while the response holds it: Deno's `request.signal` says the client left only while
  *  the response is open. Once the answer goes out as a string (`httpResponse.body`), which nothing holds open, its later
  *  aborts don't count (Deno also aborts it at every response's end), and a failed read of the body says it. */
 function heldClientGone(clientGone: AbortSignal): { signal: AbortSignal; unheld: () => void } {

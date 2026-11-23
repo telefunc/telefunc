@@ -4,10 +4,14 @@
 // - `adapter`: `telefunc/deno`, as docs/pages/Telefunc shows it;
 // - `stream`: `serve({ request })`, answered with `httpResponse.getReadableWebStream()`, as docs/pages/serve shows it;
 // - `string`: `serve({ request })`, answered with `httpResponse.body`, as examples/cloudflare-workers and examples/next.
+// And on a server of its own, Deno's `node:http`:
+// - `node`: `serve({ url, method, readable, headers })`, answered with `httpResponse.body`, as an Express app does under
+//   Deno (examples/babel).
 // `/leave?entry=<entry>&row=<row>` makes a call whose client leaves after the answer, from this process
-// (`callAndLeave`). It prints `LISTENING <port>` once it listens.
+// (`callAndLeave`). It prints `LISTENING <port> <node:http port>` once both listen.
 
 import { connect } from 'node:net'
+import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,8 +27,16 @@ config.channel = { connectTtl: 1000 }
 
 const PART = 64 * 1024
 const telefunc = new Telefunc()
+const nodeServer = createServer(async (req, res) => {
+  const httpResponse = await serve({ url: req.url, method: req.method, readable: req, headers: req.headers })
+  for (const [key, value] of httpResponse.headers) res.setHeader(key, value)
+  res.writeHead(httpResponse.statusCode)
+  res.end(httpResponse.body)
+})
+await new Promise((resolve) => nodeServer.listen(0, '127.0.0.1', resolve))
+const nodePort = nodeServer.address().port
 const server = Deno.serve(
-  { port: 0, hostname: '127.0.0.1', onListen: ({ port }) => console.log(`LISTENING ${port}`) },
+  { port: 0, hostname: '127.0.0.1', onListen: ({ port }) => console.log(`LISTENING ${port} ${nodePort}`) },
   async (request, info) => {
     const url = new URL(request.url)
     if (url.pathname === '/leave')
@@ -49,7 +61,7 @@ async function callAndLeave(entry, row) {
   const start = new Uint8Array(4 + metadata.length)
   new DataView(start.buffer).setUint32(0, metadata.length)
   start.set(metadata, 4)
-  const socket = connect(server.addr.port, '127.0.0.1')
+  const socket = connect(entry === 'node' ? nodePort : server.addr.port, '127.0.0.1')
   socket.on('error', () => {})
   await once(socket, 'connect')
   const answered = new Promise((resolve) =>
