@@ -1,8 +1,8 @@
-// Deno.serve, run without `--unstable-no-legacy-abort`, aborts a request's signal at its response, whether or not its
-// client left: that abort is not the client leaving. A call that returns a Channel answers while its body is still being
-// sent, and Telefunc reads the rest of that body on past the answer. These rows hand `telefunc/deno` such a request
-// (Node's server here; its signal aborts as the response is handed back) and read that a File the call kept reads
-// whole, and that the channel's connect window counts from the upload's end. `config.channel` can't change once a channel
+// Deno.serve, run without `--unstable-no-legacy-abort`, aborts a request's signal at its response's end, whether or not
+// its client left: that abort is not the client leaving. A call that returns a Channel answers while its body is still
+// being sent, and Telefunc reads the rest of that body on past the answer. These rows hand `telefunc/deno` such a request
+// (Node's server here; its signal aborts once the response is written) and read that a File the call kept reads whole,
+// and that the channel's connect window counts from the upload's end. deno.clientLeft.spec.ts runs real Deno. `config.channel` can't change once a channel
 // used it, so these rows have a file of their own.
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
@@ -50,7 +50,7 @@ afterAll(() => {
   vi.unstubAllGlobals()
 })
 
-/** Serves `req` as Deno.serve hands a request over: its signal aborts once the response is handed back. */
+/** Serves `req` as Deno.serve hands a request over: its signal aborts once the response is written. */
 async function answer(telefunc: Telefunc, req: IncomingMessage, res: ServerResponse) {
   const signal = new AbortController()
   const init: RequestInit & { duplex: 'half' } = {
@@ -63,10 +63,10 @@ async function answer(telefunc: Telefunc, req: IncomingMessage, res: ServerRespo
     duplex: 'half',
   }
   const response = await telefunc.serve({ request: new Request(`http://127.0.0.1${req.url}`, init), info: {} })
-  signal.abort()
   res.writeHead(response?.status ?? 404, [...(response?.headers ?? [])])
   for await (const chunk of response?.body ?? []) res.write(chunk)
   res.end()
+  signal.abort()
 }
 
 /** The Channels the calls return, made by the spec (`requestBody.telefunc:channel`), and the `Blob`s handed to it. */
@@ -121,7 +121,7 @@ async function startCall(name: string, parts: number) {
 const part = () => new Uint8Array(PART).fill(120)
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-test('a call that returns a Channel and keeps its File unread, sent after the answer: the File is read whole once its upload has ended (Telefunc given a request whose signal aborts at the response)', async () => {
+test('a call that returns a Channel and keeps its File unread, sent after the answer: the File is read whole once its upload has ended (Telefunc given a request whose signal aborts once its response ends)', async () => {
   const channels = holdChannels()
   const { socket, size } = await startCall('returnsChannelKeepingBlob', 8)
   for (let sent = 0; sent < 8; sent++) socket.write(part())
@@ -136,7 +136,7 @@ test('a call that returns a Channel and keeps its File unread, sent after the an
   expect(read).toBe(`read ${size} bytes`)
 })
 
-test('a call that returns a Channel and leaves its File unread, whose upload takes longer than the connect window: a page that attaches once the upload has ended opens the channel (Telefunc given a request whose signal aborts at the response)', async () => {
+test('a call that returns a Channel and leaves its File unread, whose upload takes longer than the connect window: a page that attaches once the upload has ended opens the channel (Telefunc given a request whose signal aborts once its response ends)', async () => {
   const channels = holdChannels()
   const { socket } = await startCall('returnsChannelIgnoringBlob', 16)
   // The File in 16 parts, 100 ms apart: its upload ends about 1.6 s after the answer, past the connect window.

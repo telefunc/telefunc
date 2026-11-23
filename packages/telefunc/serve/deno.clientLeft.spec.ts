@@ -1,7 +1,7 @@
 // On Deno, a call that returns a Channel answers while its body is still being sent, and Telefunc reads the rest of that
 // body on past the answer. These rows run such calls on real Deno, in both of its signal modes: without
 // `--unstable-no-legacy-abort`, Deno aborts `request.signal` at every response; with it, only once the client left.
-// Through `serve({ request })`, answered with its stream or with its string body:
+// Through `telefunc/deno` and through `serve({ request })` (answered with its stream, or with its string body):
 // - a File sent on after the answer and read later is read whole;
 // - a 32 MiB File left unread is taken whole, so that a browser gets the answer, and the channel closes by its connect
 //   window;
@@ -119,6 +119,7 @@ async function rowState(port: number, row: string): Promise<{ read: string; clos
 
 const closedByTtl = 'closed: Channel timed out: no client connected within TTL after response was sent'
 const entries = {
+  adapter: 'telefunc/deno',
   stream: 'serve({ request }) and its stream',
   string: 'serve({ request }) and its string body',
 }
