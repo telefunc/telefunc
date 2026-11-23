@@ -29,7 +29,7 @@ import type {
   RoomSubscriptionSource,
   StaleIncarnation,
 } from '@telefunc/room/backend'
-import { decodeOrderingFrame } from './orderingFrame.js'
+import { decodeRetainedFrame } from './orderingFrame.js'
 import { addressOf, isCluster, staleStart } from './ioredis.js'
 import {
   channelKey,
@@ -403,7 +403,7 @@ class RedisRoomDriver implements RoomDriver {
       client.getBuffer(retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane))),
     )
     if (frame === null) return null
-    const decoded = decodeOrderingFrame(frame)
+    const decoded = decodeRetainedFrame(frame)
     assert(decoded !== null, 'A retained frame is not an ordering frame')
     return { payload: Uint8Array.from(decoded.payload), seq: decoded.info.seq, timestamp: decoded.info.timestamp }
   }

@@ -4,10 +4,9 @@ import { randomUUID } from 'node:crypto'
 import type { BackendReceiver } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, getOrCreate, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
-import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import { isRefusal, redisFailure, type SubscriberSocket } from './ioredis.js'
 import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
-import { decodeOrderingFrame } from './orderingFrame.js'
+import { decodeLaneFrame } from './orderingFrame.js'
 import type { Starts } from './orderRecord.js'
 import type { RedisConnection } from './RedisConnection.js'
 
@@ -535,7 +534,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     this.authority = authority
     const early = new Map<string, LaneFrame[]>()
     for (const message of this.early) {
-      const frame = this.decodeLaneFrame(message)
+      const frame = this.decode(message)
       if (frame !== null) getOrCreate(early, frame.lane, () => []).push(frame)
     }
     this.early = []
@@ -580,7 +579,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
     if (this.state() === 'ready') {
-      const frame = this.decodeLaneFrame(message)
+      const frame = this.decode(message)
       if (frame === null) return
       const lane = this.laneOf(frame.lane)
       return lane.history.offer(frame, this.pass(lane, frame))
@@ -648,32 +647,9 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     return before
   }
 
-  /** A frame on the wire: its commit's fence token, if armed; its lane key and its place, if its shape has them; then
-   *  the ordering frame. */
-  private decodeLaneFrame(message: Buffer): LaneFrame | null {
-    const fenced = message[0] === REDIS_DELIVERY_FENCE_BYTE
-    let at = fenced ? 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH : 0
-    const token = fenced ? message.toString('latin1', 1, at) : null
-    let lane = ''
-    const { fanIn, placed } = this.frames
-    if (fanIn) {
-      const end = message.byteLength >= at + 2 ? at + 2 + message.readUInt16BE(at) : Number.POSITIVE_INFINITY
-      if (end > message.byteLength) return this.dropForeign()
-      lane = message.toString('latin1', at + 2, end)
-      at = end
-    }
-    let place = 0
-    if (placed) {
-      if (message.byteLength < at + 8) return this.dropForeign()
-      place = Number(message.readBigUInt64BE(at))
-      at += 8
-    }
-    const decoded = decodeOrderingFrame(message.subarray(at))
-    if (decoded === null) return this.dropForeign()
-    if (!placed) place = decoded.info.seq
-    if (!Number.isSafeInteger(place) || place < 1) return this.dropForeign()
-    const { payload, info, id, prev } = decoded
-    return { lane, place, id, prev, payload, info, token, via: this }
+  /** The message's frame, or null for one in another form. */
+  private decode(message: Buffer): LaneFrame | null {
+    return decodeLaneFrame(message, this.frames, this) ?? this.dropForeign()
   }
 
   /** A frame in a form Telefunc's scripts don't write, from another client publishing to the channel: reported once. */
