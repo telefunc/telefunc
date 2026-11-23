@@ -12,16 +12,10 @@ const PART = 64 * 1024
 
 const part = () => new Uint8Array(PART).fill(120)
 
-/** A socket that has sent, through `entry` (`x-entry`), the head and envelope of a call to `keepsFile` with a File of
- *  `parts` × 64 KiB read `readAfterMs` after the call (never where it is null), and the File's first part: the rest of
- *  its bytes are the caller's to send. Resolves once the answer begins. */
-async function startCall(
-  port: number,
-  entry: string,
-  row: string,
-  parts: number,
-  readAfterMs: number | null,
-): Promise<Socket> {
+/** A socket that has sent, to an entry's `port`, the head and envelope of a call to `keepsFile` with a File of `parts` ×
+ *  64 KiB read `readAfterMs` after the call (never where it is null), and the File's first part: the rest of its bytes
+ *  are the caller's to send. Resolves once the answer begins. */
+async function startCall(port: number, row: string, parts: number, readAfterMs: number | null): Promise<Socket> {
   const size = parts * PART
   const token = `!TelefuncBlob:${JSON.stringify({ index: 0, size, type: '' })}`
   const metadata = new TextEncoder().encode(
@@ -40,7 +34,7 @@ async function startCall(
     }),
   )
   socket.write(
-    `POST /_telefunc?wire=${WIRE_VERSION} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-entry: ${entry}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${envelope.length + size}\r\n\r\n`,
+    `POST /_telefunc?wire=${WIRE_VERSION} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${envelope.length + size}\r\n\r\n`,
   )
   socket.write(envelope)
   socket.write(part())

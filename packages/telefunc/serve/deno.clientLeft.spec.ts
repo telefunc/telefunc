@@ -28,29 +28,57 @@ const here = dirname(fileURLToPath(import.meta.url))
 const file = '/deno.clientLeft.telefunc.js'
 const telefuncPath = `/_telefunc?wire=${WIRE_VERSION}`
 type Mode = 'legacy' | 'modern'
-/** The ports of a Deno server: `Deno.serve`'s, and its `node:http` server's. */
-type Ports = { deno: number; node: number }
+/** The entries a request goes through, each on a port of its own of the Deno server. */
+const entries = {
+  adapter: 'telefunc/deno',
+  stream: 'serve({ request }) and its stream',
+  string: 'serve({ request }) and its string body',
+  node: "serve({ readable }) on Deno's node:http and its string body",
+  framework: "serve({ request }) with a framework's Request on Deno's node:http and its string body",
+}
 const servers: ChildProcess[] = []
-const ports: Record<Mode, Ports> = { legacy: { deno: 0, node: 0 }, modern: { deno: 0, node: 0 } }
+/** Each mode's Deno server: each entry's port. */
+const ports: Record<Mode, Map<string, number>> = { legacy: new Map(), modern: new Map() }
 
-/** Starts the Deno server in `mode`; resolves with its ports once it listens. */
-async function startServer(mode: Mode): Promise<{ server: ChildProcess; ports: Ports }> {
+/** Starts the Deno server in `mode`; resolves with its entries' ports once every entry listens. */
+async function startServer(mode: Mode): Promise<{ server: ChildProcess; ports: Map<string, number> }> {
   const flags = mode === 'modern' ? ['--unstable-no-legacy-abort'] : []
   const server = spawn(
     'deno',
     ['run', '-A', '--sloppy-imports', '--node-modules-dir=manual', ...flags, 'deno.clientLeft.server.fixture.mjs'],
     { cwd: here, stdio: ['ignore', 'pipe', 'inherit'] },
   )
-  const listening = await new Promise<Ports>((resolve, reject) => {
+  const ready = await new Promise<string>((resolve, reject) => {
     let out = ''
     server.stdout?.on('data', (data: Buffer) => {
       out += data.toString()
-      const line = /LISTENING (\d+) (\d+)/.exec(out)
-      if (line) resolve({ deno: Number(line[1]), node: Number(line[2]) })
+      const line = /READY (.*)\n/.exec(out)?.[1]
+      if (line !== undefined) resolve(line)
     })
     server.once('exit', (code) => reject(new Error(`deno exited with ${code}: ${out}`)))
   })
-  return { server, ports: listening }
+  const served = entryPorts(ready)
+  // An entry the server lacks, or one this spec doesn't run, fails here rather than as a row.
+  expect([...served.keys()].sort()).toEqual(Object.keys(entries).sort())
+  return { server, ports: served }
+}
+
+/** Each entry's port, as the Deno server's `READY` line gives them. */
+function entryPorts(ready: string): Map<string, number> {
+  const parsed: unknown = JSON.parse(ready)
+  const listed = isObject(parsed) && isObject(parsed.entries) ? parsed.entries : {}
+  return new Map(
+    Object.entries(listed).flatMap(([entry, port]): [string, number][] =>
+      typeof port === 'number' ? [[entry, port]] : [],
+    ),
+  )
+}
+
+/** The port of `entry` on a Deno server. */
+function portOf(served: Map<string, number>, entry: string): number {
+  const port = served.get(entry)
+  if (port === undefined) throw new Error(`no entry ${entry}`)
+  return port
 }
 
 beforeAll(async () => {
@@ -76,11 +104,12 @@ async function sendAll(socket: Socket, parts: number): Promise<string> {
   return 'all sent'
 }
 
-/** How `row`'s File read and channel ended so far, as the server says, with the channel's close time left out. */
-async function rowState(port: number, row: string): Promise<{ read: string; closed: string }> {
-  const response = await fetch(`http://127.0.0.1:${port}${telefuncPath}`, {
+/** How `row`'s File read and channel ended so far, as the server says through its `adapter` entry, with the channel's
+ *  close time left out. */
+async function rowState(served: Map<string, number>, row: string): Promise<{ read: string; closed: string }> {
+  const response = await fetch(`http://127.0.0.1:${portOf(served, 'adapter')}${telefuncPath}`, {
     method: 'POST',
-    headers: { 'x-entry': 'adapter', 'x-telefunc-request': 'txt' },
+    headers: { 'x-telefunc-request': 'txt' },
     body: JSON.stringify({ file, name: 'rowState', args: [row] }),
   })
   const body: unknown = await response.json()
@@ -91,49 +120,40 @@ async function rowState(port: number, row: string): Promise<{ read: string; clos
 }
 
 const closedByTtl = 'closed: Channel timed out: no client connected within TTL after response was sent'
-const entries = {
-  adapter: 'telefunc/deno',
-  stream: 'serve({ request }) and its stream',
-  string: 'serve({ request }) and its string body',
-  node: "serve({ readable }) on Deno's node:http and its string body",
-  framework: "serve({ request }) with a framework's Request on Deno's node:http and its string body",
-}
-/** The port a call through `entry` goes to. */
-const portOf = (served: Ports, entry: string) => (entry === 'node' || entry === 'framework' ? served.node : served.deno)
 
 for (const mode of ['legacy', 'modern'] as const) {
   describe(`Deno, ${mode === 'legacy' ? 'its signal aborted at every response' : '`--unstable-no-legacy-abort`'}`, () => {
     for (const [entry, through] of Object.entries(entries)) {
       test(`a call that returns a Channel and keeps its File, most of it sent after the answer, read 1 s later: the File is read whole, and the channel closes by its connect window (${through})`, async () => {
         const row = `${mode}-${entry}-late`
-        const socket = await startCall(portOf(ports[mode], entry), entry, row, 8, 1000)
+        const socket = await startCall(portOf(ports[mode], entry), row, 8, 1000)
         for (let sent = 1; sent < 8; sent++) {
           await pause(40)
           socket.write(part())
         }
         await pause(2500)
-        const state = await rowState(ports[mode].deno, row)
+        const state = await rowState(ports[mode], row)
         socket.destroy()
         expect(state).toEqual({ read: `read ${8 * PART} bytes`, closed: closedByTtl })
       }, 15_000)
 
       test(`a call that returns a Channel and leaves its 32 MiB File unread: the server takes the whole upload, and the channel closes by its connect window (${through})`, async () => {
         const row = `${mode}-${entry}-big`
-        const socket = await startCall(portOf(ports[mode], entry), entry, row, 512, null)
+        const socket = await startCall(portOf(ports[mode], entry), row, 512, null)
         const sent = await sendAll(socket, 511)
         // The connect window counts from the upload's end: the channel closes by it once the server has taken the upload.
         await pause(2500)
-        const state = await rowState(ports[mode].deno, row)
+        const state = await rowState(ports[mode], row)
         socket.destroy()
         expect({ sent, ...state }).toEqual({ sent: 'all sent', read: 'not read', closed: closedByTtl })
       }, 15_000)
 
       test(`a call that returns a Channel and keeps its File, sent whole, read once its channel closed, its client still there: the read fails as the server having answered first, not as its client leaving (${through})`, async () => {
         const row = `${mode}-${entry}-kept`
-        const socket = await startCall(portOf(ports[mode], entry), entry, row, 8, 2000)
+        const socket = await startCall(portOf(ports[mode], entry), row, 8, 2000)
         const sent = await sendAll(socket, 7)
         await pause(3000)
-        const state = await rowState(ports[mode].deno, row)
+        const state = await rowState(ports[mode], row)
         socket.destroy()
         expect({ sent, ...state }).toEqual({
           sent: 'all sent',
@@ -149,10 +169,10 @@ for (const mode of ['legacy', 'modern'] as const) {
         // the read on its own as the client leaves, which hides a read left pending.
         const own = await startServer(mode)
         onTestFinished(() => void own.server.kill())
-        const left = await fetch(`http://127.0.0.1:${own.ports.deno}/leave?entry=${entry}&row=${row}`)
+        const left = await fetch(`http://127.0.0.1:${portOf(own.ports, 'adapter')}/leave?entry=${entry}&row=${row}`)
         const leaving = await left.text()
         await pause(2000)
-        expect({ leaving, ...(await rowState(own.ports.deno, row)) }).toEqual({
+        expect({ leaving, ...(await rowState(own.ports, row)) }).toEqual({
           leaving: 'left',
           // A framework's own `Request` says nothing Telefunc can tell from Deno's end of the response, so its read ends
           // as the channel closes and the server lets the body go.
