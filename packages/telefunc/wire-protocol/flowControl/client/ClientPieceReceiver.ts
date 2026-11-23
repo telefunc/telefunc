@@ -13,7 +13,8 @@ class ClientPieceReceiver extends PieceReceiver {
   private reportedTook = 0
 
   protected tookFrame({ bytes, data, at }: FrameArrival): void {
-    this.date(data, at)
+    // The server measures the link by the frames it tracks: a small frame after them would date their arrival late.
+    if (acknowledges(bytes)) this.date(data, at)
     const unreported = this.took - Math.max(this.acknowledgedTook, this.reportedTook)
     if (acknowledges(bytes) || unreported > WIRE_UNREPORTED_MAX_BYTES) this.acknowledgeWithNextSoon()
   }

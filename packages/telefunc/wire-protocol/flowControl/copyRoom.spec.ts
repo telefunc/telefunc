@@ -83,3 +83,20 @@ describe('ServerHeadroom.copyRoom', () => {
     expect(wire.acknowledgements()).toBe(acknowledged)
   })
 })
+
+describe('ClientPieceReceiver', () => {
+  it('an acknowledgement dates the newest frame the server measures the link by, not a small frame that came after it', async () => {
+    const acks: PiecesAck[] = []
+    const receiver = new ClientPieceReceiver({
+      owner: { sendAck: (frame) => void acks.push(decode(frame) as PiecesAck), carryAck: () => {} },
+    })
+    const data = encode.binary(1, new Uint8Array(20_000), 1)
+    receiver.arrived(TAG.BINARY, data.byteLength, performance.now(), 'alone')
+    await vi.advanceTimersByTimeAsync(20)
+    const small = encode.msgWindow(1, 100)
+    receiver.arrived(small[0]!, small.byteLength, performance.now(), 'alone')
+    // The page sends nothing else, so the acknowledgement goes alone, a gap after the data.
+    await vi.advanceTimersByTimeAsync(WIRE_PIECES_ACK_GAP_MS)
+    expect(acks.map((ack) => ack.heldMs)).toEqual([WIRE_PIECES_ACK_GAP_MS])
+  })
+})
