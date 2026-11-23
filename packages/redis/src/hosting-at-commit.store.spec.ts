@@ -1,9 +1,10 @@
 // A message reaches a participant only while its lease hosts it at the commit that delivers it, by the store's clock,
-// on the oldest and the newest Redis and Valkey Telefunc supports: whatever a lookup or a server's view saw before.
+// on the oldest and the newest Redis and Valkey Telefunc supports: whatever a lookup or a server's view saw before. A
+// tab's own publishes, sends and answers commit only while its lease hosts it.
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
-import { hostingLease } from '../test/servers.js'
+import { hostingLease, joinedByAnotherServer } from '../test/servers.js'
 import { endReached, reached, runs, STORES } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
 
@@ -47,6 +48,16 @@ async function claimLease(admin: Redis, values: string, lease: string, cleaner: 
   await admin.hset(`${incarnation}:versions`, claim, crypto.randomUUID())
   await admin.zadd(`${incarnation}:cells`, 0, claim)
   await admin.hset(`${incarnation}:lapses`, claim, String((await storeNow(admin)) + 15_000))
+}
+
+/** How a lease stops hosting: it lapses, as once its server stopped renewing it, or a reap claims it. */
+type LeaseEnd = 'lapsed' | 'claimed'
+
+/** Ends the lease that hosts `member` in room `id` as `end` says. */
+async function endLeaseOf(admin: Redis, id: string, member: string, end: LeaseEnd): Promise<void> {
+  const { values, lease } = await hostingLease(admin, id, member)
+  if (end === 'lapsed') await lapseLease(admin, values, lease)
+  else await claimLease(admin, values, lease, 'a reap')
 }
 
 /** Each commit to `member`'s inbox in room `id` runs `step` first, then commits as it was asked. */
@@ -161,5 +172,88 @@ describe.runIf(runs)("a participant's send() to a tab its server's view lists", 
 
       expect(Number(/^cmdstat_evalsha:calls=(\d+)/m.exec(stats)?.[1])).toBe(1)
     }, 60_000)
+  }
+})
+
+describe.runIf(runs)('a tab whose own lease no longer hosts it', () => {
+  for (const [i, store] of STORES.entries()) {
+    for (const end of ['lapsed', 'claimed'] as const) {
+      it(`${store.name}: publishes nothing once its lease ${end}`, async () => {
+        const admin = await reached(store)
+        const id = `hosting-at-commit-publisher-${end}-${i}`
+        await Room.create(id)
+        const tab = await Room.join(id)
+        const other = await Room.join(id)
+        const received: unknown[] = []
+        other.listen((message) => {
+          received.push(message)
+        })
+        await endLeaseOf(admin, id, tab.id, end)
+        const published = await tab.publish('hello').then(() => 'published', told)
+        const onTrack = await tab.publish('hello', { track: 'cursor' }).then(() => 'published', told)
+        await Room.close(id)
+        admin.disconnect()
+
+        expect({ published, onTrack, received }).toEqual({
+          published: `Participant not found (left?): ${tab.id}`,
+          onTrack: `Participant not found (left?): ${tab.id}`,
+          received: [],
+        })
+      }, 60_000)
+
+      it(`${store.name}: sends nothing to a tab another server hosts once its lease ${end}`, async () => {
+        const admin = await reached(store)
+        const id = `hosting-at-commit-sender-${end}-${i}`
+        const handle = await Room.create(id)
+        const sender = await Room.join(id)
+        // The sender's view lists the recipient, so the send looks no one up.
+        const listed = Promise.withResolvers<void>()
+        handle.onJoin((member) => {
+          if (member.id !== sender.id) listed.resolve()
+        })
+        const recipient = await joinedByAnotherServer(String(admin.options.host), id)
+        await listed.promise
+        await endLeaseOf(admin, id, sender.id, end)
+        const sent = await sender.send(recipient, 'hello').then(() => 'delivered', told)
+        await Room.close(id)
+        admin.disconnect()
+
+        expect(sent).toBe(`Participant not found (left?): ${sender.id}`)
+      }, 60_000)
+
+      it(`${store.name}: is answered nothing once its lease ${end} after it asked`, async () => {
+        const admin = await reached(store)
+        const id = `hosting-at-commit-asker-${end}-${i}`
+        await Room.create(id)
+        const asker = await Room.join(id)
+        const answerer = await Room.join(id)
+        answerer.listen(async () => {
+          await endLeaseOf(admin, id, asker.id, end)
+          return 'answer'
+        })
+        const answer = Promise.withResolvers<string>()
+        const { commitLane } = RedisRoomDriver.prototype
+        vi.spyOn(RedisRoomDriver.prototype, 'commitLane').mockImplementation(async function (
+          this: RedisRoomDriver,
+          target,
+          payload,
+          options,
+        ) {
+          const committed = await commitLane.call(this, target, payload, options)
+          if (target.roomId === id && target.lane.kind === 'inbox' && target.lane.member === asker.id) {
+            answer.resolve(committed.kind)
+          }
+          return committed
+        })
+        const asked = asker.send(answerer.id, 'question', { ack: true }).catch(told)
+        const answerCommit = await answer.promise
+        vi.restoreAllMocks()
+        await Room.close(id)
+        await asked
+        admin.disconnect()
+
+        expect(answerCommit).toBe('stale-cell')
+      }, 60_000)
+    }
   }
 })
