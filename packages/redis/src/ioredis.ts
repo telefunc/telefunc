@@ -12,12 +12,14 @@ export {
   isRefusal,
   orderRecordRefusal,
   staleStart,
+  slotOf,
+  masterView,
 }
-export type { RedisClient, SubscriberSocket }
+export type { RedisClient, SubscriberSocket, MasterView }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { Cluster, type Redis } from 'ioredis'
+import { Cluster, Command, Redis } from 'ioredis'
 import { assert, isBug } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
@@ -268,6 +270,49 @@ function createCommandClient(redis: RedisClient): RedisClient {
   // A connection error reaches the backend as its command's rejection.
   commands.on('error', () => {})
   return commands
+}
+
+/** A key's Cluster slot. */
+function slotOf(key: string): number {
+  return new Command('exists', [key]).getSlot()
+}
+
+/** What a slot's former master says of itself: the history it is master of, its replication id, and whether it still
+ *  serves the slot. */
+type MasterView = { history: string; serves: boolean }
+
+/** How long the backend waits on the master a slot had, which a failover may have taken down. */
+const MASTER_VIEW_MS = 2_000
+
+/** What `node`, a Cluster node as the slot map names it, says now of `key`'s slot; null where it can't be reached, isn't
+ *  a master, or answers otherwise. A command on `key` that it redirects (`MOVED`, or `ASK` while it migrates the
+ *  slot's keys) says it no longer serves the slot. */
+async function masterView(cluster: Cluster, node: string, key: string): Promise<MasterView | null> {
+  const at = node.lastIndexOf(':')
+  const redis = new Redis({
+    ...cluster.options.redisOptions,
+    host: node.slice(0, at),
+    port: Number(node.slice(at + 1)),
+    lazyConnect: true,
+    connectTimeout: MASTER_VIEW_MS,
+    commandTimeout: MASTER_VIEW_MS,
+    maxRetriesPerRequest: 0,
+    retryStrategy: () => null,
+  })
+  redis.on('error', () => {})
+  try {
+    await redis.connect()
+    const replies = await redis.pipeline().info('replication').exists(key).exec()
+    const [[infoError, info], [keyError]] = replies as [[Error | null, string], [Error | null, unknown]]
+    const history = infoError === null ? /^master_replid:(\w+)/m.exec(info)?.[1] : undefined
+    if (history === undefined || !/^role:master\r?$/m.test(info)) return null
+    if (keyError === null) return { history, serves: true }
+    return /^(?:MOVED|ASK) /.test(keyError.message) ? { history, serves: false } : null
+  } catch {
+    return null
+  } finally {
+    redis.disconnect()
+  }
 }
 
 /** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live node. */

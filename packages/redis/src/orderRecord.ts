@@ -1,4 +1,4 @@
-export { NO_ID, drawCommitId, decodeLaneOrder, decodeBroadcastOrder, laneWhere }
+export { NO_ID, drawCommitId, decodeLaneOrder, decodeBroadcastOrder, laneWhere, historyOf }
 export type { LaneStart, StartRead, Starts }
 
 import { randomFillSync } from 'node:crypto'
@@ -11,6 +11,11 @@ type LaneStart = { place: number; id: bigint }
 /** What a start script read, with the history it read it from: the node's replication id, and on a Cluster its config
  *  epoch. Another history than a route's last start can lack what the old one accepted. */
 type StartRead<T> = { authority: string; read: T }
+
+/** The history an authority names: its node's replication id, without a Cluster's config epoch. */
+function historyOf(authority: string): string {
+  return authority.split(':')[0]!
+}
 
 /** Where each lane of a route starts, by its lane key, and the history that says so. */
 type Starts = { authority: string; starts: Map<string, LaneStart> }

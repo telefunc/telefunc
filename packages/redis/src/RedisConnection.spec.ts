@@ -150,34 +150,21 @@ describe('a failure of Redis, as a command rejects with it', () => {
 })
 
 describe('a Cluster whose slot gets another master', () => {
-  /** A lazy Cluster installed as the backend's client, and its command client, whose slot map the tests set as a
-   *  refresh leaves it: each slot's master, then its replicas. */
-  function commandsOfCluster(): Cluster {
+  it('has its subscriptions follow the move, with the master the slot had: a failover cuts no subscriber connection on another node', () => {
+    const followMoves = vi.spyOn(RedisSubscriptions.prototype, 'followMoves').mockResolvedValue()
     const cluster = new Cluster([{ host: '127.0.0.1', port: 6390 }], { lazyConnect: true })
     clients.push(cluster)
     const commands = installed(cluster).client as Cluster
+    // ioredis's slot map, as a refresh leaves it: each slot's master, then its replicas.
     commands.slots[0] = ['127.0.0.1:7001', '127.0.0.1:7003']
     commands.slots[1] = ['127.0.0.1:7002']
     commands.emit('refresh')
-    return commands
-  }
-
-  it("a replica of it, by a failover: the subscriptions resume on a fresh connection, which the failover doesn't cut on another node", () => {
-    const reconnect = vi.spyOn(RedisSubscriptions.prototype, 'reconnect')
-    const commands = commandsOfCluster()
     commands.slots[1] = ['127.0.0.1:7002', '127.0.0.1:7004']
     commands.emit('refresh')
-    expect(reconnect).not.toHaveBeenCalled()
-    commands.slots[0] = ['127.0.0.1:7003']
+    expect(followMoves).not.toHaveBeenCalled()
+    commands.slots[0] = ['127.0.0.1:7005']
     commands.emit('refresh')
-    expect(reconnect).toHaveBeenCalledOnce()
-  })
-
-  it('another master, by resharding: the subscriptions stay, as the slot took its keys and the bus delivers', () => {
-    const reconnect = vi.spyOn(RedisSubscriptions.prototype, 'reconnect')
-    const commands = commandsOfCluster()
-    commands.slots[0] = ['127.0.0.1:7002']
-    commands.emit('refresh')
-    expect(reconnect).not.toHaveBeenCalled()
+    expect(followMoves).toHaveBeenCalledOnce()
+    expect(followMoves.mock.calls[0]![0]).toEqual(new Map([[0, '127.0.0.1:7001']]))
   })
 })

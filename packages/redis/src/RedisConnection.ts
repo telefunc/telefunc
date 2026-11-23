@@ -7,6 +7,7 @@ import {
   createCommandClient,
   createSubscriberSocket,
   isCluster,
+  masterView,
   redisFailure,
   type RedisClient,
   type SubscriberSocket,
@@ -94,32 +95,26 @@ class RedisConnection {
     if (previous.status === 'wait') previous.disconnect()
     else if (!this.commandsEnded) previous.quit().catch(() => {})
     this.commandsEnded = false
-    this.subscriptions.reconnect(
-      new Error("Telefunc's Redis backend moved to a client installed with other connection options"),
-    )
+    this.subscriptions.reconnect()
   }
 
   /** The backend's command client made from `redis`. On a Cluster, a failover gives a slot to a replica that may lack
    *  what the old master accepted, and a subscriber connection on another node isn't cut by it: once a refresh of the
-   *  client's slot map shows a slot on one of its replicas, the subscriptions resume on a fresh connection, each from
-   *  where its key's master stands now. A slot that resharding moves to another master takes its keys with it, and
-   *  the bus keeps delivering. */
+   *  client's slot map shows a slot on another master, its subscriptions follow the move (`followMoves`). */
   private makeCommandClient(redis: RedisClient): RedisClient {
     const commands = commandClientOf(redis)
     if (!isCluster(commands)) return commands
-    /** Each slot's nodes at the last refresh that listed it, its master first. */
-    const nodesBySlot: string[][] = []
+    /** Each slot's master at the last refresh that listed it. */
+    const masters: (string | undefined)[] = []
     commands.on('refresh', () => {
-      let failedOver = false
-      commands.slots.forEach((nodes, slot) => {
-        const before = nodesBySlot[slot]
-        if (before !== undefined && before[0] !== nodes[0] && before.includes(nodes[0]!)) failedOver = true
-        // A copy: a MOVED reply rewrites ioredis's entry in place.
-        nodesBySlot[slot] = [...nodes]
+      const moved = new Map<number, string>()
+      commands.slots.forEach(([master], slot) => {
+        const before = masters[slot]
+        if (before !== undefined && before !== master) moved.set(slot, before)
+        masters[slot] = master
       })
-      if (failedOver && commands === this.commands) {
-        this.subscriptions.reconnect(new Error('A Redis Cluster master failed over to its replica'))
-      }
+      if (moved.size === 0 || commands !== this.commands) return
+      void this.subscriptions.followMoves(moved, (node, key) => masterView(commands, node, key))
     })
     return commands
   }

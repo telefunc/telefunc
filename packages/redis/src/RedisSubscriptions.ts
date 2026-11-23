@@ -4,10 +4,10 @@ import { randomUUID } from 'node:crypto'
 import type { BackendReceiver } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, getOrCreate, unrefTimer, type Deferred } from 'telefunc/__internal'
 import type { CommitChannels, FenceTokens } from './keys.js'
-import { isRefusal, redisFailure, type SubscriberSocket } from './ioredis.js'
+import { isRefusal, redisFailure, slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
 import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
 import { decodeLaneFrame } from './orderingFrame.js'
-import type { Starts } from './orderRecord.js'
+import { historyOf, type Starts } from './orderRecord.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionsOptions = { connection: RedisConnection }
@@ -258,13 +258,52 @@ class RedisSubscriptions {
     connection.awaitingPong = false
   }
 
-  /** Moves the subscriptions to a connection of the connection's current client, as a resume after a loss: the commits
-   *  awaiting their fences see `reason`. */
-  reconnect(reason: Error): void {
+  /** Moves the subscriptions to a connection of the connection's current client, as a resume after a loss. */
+  reconnect(): void {
     if (this.socket.phase === 'idle') return
-    this.loseAll(reason)
+    this.loseAll(new Error("Telefunc's Redis backend moved to a client installed with other connection options"))
     this.reconnectDelay = RECONNECT_DELAY_MIN_MS
     void this.connect()
+  }
+
+  /** Cluster slots whose master changed, each with the master it had. A ready attempt on one goes on where that master
+   *  gave the slot away by resharding while master of the history the attempt started from: the slot took its keys
+   *  with it, and the bus delivers. Anywhere else, a failover, the old master may have accepted what the new one lacks,
+   *  and the attempt resumes as after a cut, from where its key's master stands now. `view` asks a node. */
+  async followMoves(
+    moved: Map<number, string>,
+    view: (node: string, key: string) => Promise<MasterView | null>,
+  ): Promise<void> {
+    const views = new Map<string, Promise<MasterView | null>>()
+    const follow = async (attempt: RedisAttempt) => {
+      const slot = slotOf(attempt.channel)
+      const before = moved.get(slot)
+      const history = attempt.history
+      if (before === undefined || history === null || attempt.state() !== 'ready') return
+      const seen = await getOrCreate(views, `${before} ${slot}`, () => view(before, attempt.channel))
+      if (seen !== null && !seen.serves && seen.history === history) return this.followResharded(attempt)
+      this.resume(attempt, new Error(`The Redis Cluster master of '${attempt.channel}' failed over`))
+    }
+    await Promise.all([...this.attempts()].map(follow))
+  }
+
+  /** Its key moved by resharding: the history goes on at the key's new master, which its next resume compares with. */
+  private async followResharded(attempt: RedisAttempt): Promise<void> {
+    let starts: Starts | null
+    try {
+      starts = await attempt.readStarts()
+    } catch (error) {
+      return this.resume(attempt, error)
+    }
+    if (starts !== null) attempt.followHistory(starts.authority)
+  }
+
+  /** Resumes a ready attempt as after a cut: the commits awaiting its fences see `reason`. */
+  private resume(attempt: RedisAttempt, reason: unknown): void {
+    if (attempt.state() !== 'ready') return
+    attempt.lose(reason)
+    this.unconfirmed.add(attempt)
+    this.syncChannels()
   }
 
   private loseAll(error: unknown): void {
@@ -524,6 +563,16 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   awaitsConfirmation(): boolean {
     const state = this.state()
     return state === 'establishing' || state === 'lost'
+  }
+
+  /** The history its last ready start came from, its node's replication id. */
+  get history(): string | null {
+    return this.authority === null ? null : historyOf(this.authority)
+  }
+
+  /** Its key's history goes on under `authority`, a master its key moved to by resharding. */
+  followHistory(authority: string): void {
+    if (this.state() === 'ready') this.authority = authority
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from

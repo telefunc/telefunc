@@ -1,7 +1,7 @@
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
-import type { SubscriberSocket } from './ioredis.js'
+import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
@@ -198,6 +198,46 @@ describe('a resume', () => {
       await new Promise((resolve) => setImmediate(resolve))
       expect(missed).toEqual([null])
     }
+  })
+})
+
+describe('a Cluster slot whose master changed', () => {
+  const lane = (place: number, authority = 'a') => ({
+    authority,
+    starts: new Map([['', { place, id: BigInt(place) }]]),
+  })
+  const moved = new Map([[slotOf(TEXT), '127.0.0.1:7001']])
+
+  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, or is of another history', async () => {
+    const views: Array<MasterView | null> = [null, { history: 'a', serves: true }, { history: 'x', serves: false }]
+    for (const view of views) {
+      const { subscriptions, listen, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      // A failover's new master: another history, which lacks what the old one accepted and never replicated.
+      start = lane(3, 'b')
+      await subscriptions.followMoves(moved, async () => view)
+      await expect.poll(() => missed).toEqual([null])
+      expect(attempt.state()).toBe('ready')
+    }
+  })
+
+  it('goes on where the old master, of the history it started from, sends its key elsewhere: a resharding', async () => {
+    const { subscriptions, listen, close, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    const states: string[] = []
+    attempt.onStateChange((state) => states.push(state))
+    // The new master, which the key moved to with its record.
+    start = lane(3, 'b')
+    await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+    expect(states).toEqual([])
+    // A cut after it resumes from the new master's history, which it follows now: nothing was missed.
+    close()
+    await expect.poll(() => states).toEqual(['lost', 'ready'])
+    expect(missed).toEqual([])
   })
 })
 
