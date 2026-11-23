@@ -87,6 +87,16 @@ describe('shield', () => {
         '[root] > [tuple: element 0] > [object: value of key `a`] > [object: value of key `b`] > [object: value of a key] is `number` but should be `undefined`.',
       )
     }
+    {
+      const telefunction = shield([{ required: t.string }], (_a) => {})
+      expect(shieldApply(telefunction, [{ required: 'ready', toString: 'label' }])).toBe(
+        '[root] > [tuple: element 0] > [object: value of a key] is `string` but should be `undefined`.',
+      )
+    }
+    {
+      const telefunction = shield([{ toString: t.optional(t.string) }], (_a) => {})
+      expect(shieldApply(telefunction, [{}])).toBe(true)
+    }
   })
 
   const t = shield.type

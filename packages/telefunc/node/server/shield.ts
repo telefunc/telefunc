@@ -258,7 +258,11 @@ function verifyObject(obj: Record<string, unknown>, arg: unknown, breadcrumbs: s
   }
   const shieldKeys = Object.keys(obj)
   for (const key of unique([...shieldKeys, ...Object.keys(arg)])) {
-    const res = verifyRecursive(obj[key], arg[key], `${breadcrumbs} > ${keyBreadcrumb(key, !shieldKeys.includes(key))}`)
+    const res = verifyRecursive(
+      Object.hasOwn(obj, key) ? obj[key] : undefined,
+      Object.hasOwn(arg, key) ? arg[key] : undefined,
+      `${breadcrumbs} > ${keyBreadcrumb(key, !shieldKeys.includes(key))}`,
+    )
     if (res !== true) {
       return res
     }
