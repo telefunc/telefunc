@@ -4,7 +4,7 @@ export type { TransportOwner, WireLifecycleOwner }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError, rejectedFrameError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, rejectedFrameError, replayLossError } from '../channelErrors.js'
 import { closeTimedOutError } from '../ChannelEnding.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
@@ -815,6 +815,7 @@ function channelErrorFor(reason: number): Error {
     )
   }
   if (reason === ERROR_REASON.CLOSE_TIMED_OUT) return closeTimedOutError()
+  if (reason === ERROR_REASON.LOST) return replayLossError('server')
   if (reason === ERROR_REASON.NOT_IN_EFFECT) {
     return new ChannelClosedError(
       'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',

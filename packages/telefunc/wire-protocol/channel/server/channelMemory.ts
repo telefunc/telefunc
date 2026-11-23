@@ -6,10 +6,14 @@ export {
   admitSend,
   waitForRoom,
   cancelWait,
+  takeWait,
+  reserveBehind,
+  releaseBehind,
   dropWireCopies,
   fits,
   fitsPublish,
   hasCopyRoom,
+  hasRoomFor,
   heldAnswerBytes,
   heldPublishBytes,
   heldSendBytes,
@@ -69,8 +73,9 @@ const memory = getGlobalObject('channelMemory.ts', {
   wakeQueued: false,
 })
 
-/** A send waiting for room: `go` makes it, holding its bytes, once `admit` admits them; `cancelled` takes it out of line. */
-type RoomWait = { holder: MemoryHolder; bytes: number; go: () => void; cancelled: boolean }
+/** A send waiting for room: `go` makes it, holding its bytes, once `admit` admits them and what the lossy send behind it
+ *  reserves (`behind`); `cancelled` takes it out of line. */
+type RoomWait = { holder: MemoryHolder; bytes: number; behind: number; go: () => void; cancelled: boolean }
 
 /** Whether a send of `bytes` for `holder` is admitted now, is refused, or is to wait for room (`waitForRoom`), its
  *  bytes reserved. Sends wait in the order they were made, so one made while others wait waits too. One is refused
@@ -79,14 +84,14 @@ type RoomWait = { holder: MemoryHolder; bytes: number; go: () => void; cancelled
 function admitSend(holder: MemoryHolder, bytes: number): 'now' | 'refused' | 'wait' {
   if (bytes > holdsAtMost()) return 'refused'
   if (memory.waiting.length === 0 && admit(holder, bytes)) return 'now'
-  return memory.total + memory.reserved + bytes <= maxMemoryOf() ? 'wait' : 'refused'
+  return hasRoomFor(bytes) ? 'wait' : 'refused'
 }
 
 /** Puts a send of `bytes` for `holder` in line, its bytes reserved, which `admitSend` found room for: `go` makes it,
  *  holding them, once room frees for it. The line is looked at once this task ends, so a send that fits already goes
  *  then. */
 function waitForRoom(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
-  const wait: RoomWait = { holder, bytes, go, cancelled: false }
+  const wait: RoomWait = { holder, bytes, behind: 0, go, cancelled: false }
   memory.waiting.push(wait)
   memory.reserved += bytes
   wakeSoon()
@@ -97,7 +102,36 @@ function waitForRoom(holder: MemoryHolder, bytes: number, go: () => void): RoomW
 function cancelWait(wait: RoomWait): void {
   if (wait.cancelled) return
   wait.cancelled = true
+  unreserve(wait.bytes + wait.behind)
+  wait.behind = 0
+}
+
+/** `wait` goes now, out of turn, holding what it reserved: its channel ends, and its page reads what was sent first. */
+function takeWait(wait: RoomWait): void {
+  if (wait.cancelled) return
+  wait.cancelled = true
   unreserve(wait.bytes)
+  wait.go()
+}
+
+/** Reserves `bytes` more for the lossy send made behind `wait`, where `maxMemory` has room for them with what is held
+ *  and what waits. They go in its turn, never ahead of an older wait. */
+function reserveBehind(wait: RoomWait, bytes: number): boolean {
+  if (!hasRoomFor(bytes)) return false
+  wait.behind += bytes
+  memory.reserved += bytes
+  return true
+}
+
+/** The lossy send behind `wait` reserves `bytes` less: it was made, or a smaller one or none took its place. */
+function releaseBehind(wait: RoomWait, bytes: number): void {
+  wait.behind -= bytes
+  unreserve(bytes)
+}
+
+/** Whether `maxMemory` has room for `bytes` more with what is held and what waits. */
+function hasRoomFor(bytes: number): boolean {
+  return memory.total + memory.reserved + bytes <= maxMemoryOf()
 }
 
 function unreserve(bytes: number): void {
@@ -146,25 +180,27 @@ function wake(): void {
   const target = shedTarget(maxMemory)
   // A send made from the line holds what it reserved, so it goes within the held bytes' room alone.
   const most = maxMemory - waitingRoom(maxMemory)
-  // What waits ahead, held back by the cap, and what lossy sends behind the line reserve.
+  // What waits ahead, held back by the cap.
   let ahead = memory.reserved
-  for (const wait of memory.waiting) if (!wait.cancelled) ahead -= wait.bytes
+  for (const wait of memory.waiting) if (!wait.cancelled) ahead -= wait.bytes + wait.behind
   let reclaimed = false
   const perHolder = holdsAtMost()
   memory.waiting.remove((wait) => {
     if (wait.cancelled) return true
+    // It goes with the lossy send behind it.
+    const bytes = wait.bytes + wait.behind
     // One past its channel's limit waits for its own page, and holds back no other channel.
-    if (wait.holder.heldBytes + wait.bytes > perHolder) return false
-    if (ahead + memory.total + wait.bytes > most) {
-      ahead += wait.bytes
+    if (wait.holder.heldBytes + bytes > perHolder) return false
+    if (ahead + memory.total + bytes > most) {
+      ahead += bytes
       return false
     }
-    if (!reclaimed && memory.total + ahead + wait.bytes > target) {
+    if (!reclaimed && memory.total + ahead + bytes > target) {
       reclaimed = true
-      reclaim(ahead + wait.bytes, target)
+      reclaim(ahead + bytes, target)
     }
     // One its share holds back leaves its room to the sends behind it, as one past its channel's limit does.
-    if (!admitsAsIs(wait.holder, wait.bytes, ahead, maxMemory, most)) return false
+    if (!admitsAsIs(wait.holder, bytes, ahead, maxMemory, most)) return false
     // Held as it goes, so the next one in line sees it.
     wait.cancelled = true
     memory.reserved -= wait.bytes

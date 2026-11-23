@@ -32,6 +32,9 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
   admitSend,
   cancelWait,
+  releaseBehind,
+  reserveBehind,
+  takeWait,
   waitForRoom,
   admit,
   fits,
@@ -120,6 +123,10 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
 /** A `send(data, { lossy: true })` to an attached page, text or a copy of its bytes once held; `held` is what it holds
  *  while it waits. */
 type LossySend = { data: EntryData; held: number }
+/** A lossy send, and what it holds. */
+type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; bytes: number; held: number }
+/** A send that waits for room, how its promise settles if the channel ends first, and the lossy send behind it. */
+type WaitingSend = { wait: RoomWait; reject: (err: Error) => void; lossy: LossyBehind | null }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -187,11 +194,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pendingEnd: Array<(peer: IndexedPeer) => void> = []
   /** The page closed its end, so it takes nothing more from this channel. */
   private pageClosed = false
+  /** Its page attaches lacking an end its replay had no room to keep. */
+  private endLost = false
   /** Its lossy sends while its page is attached, from the first one on. */
   private lossySends: LossyDelivery<LossySend> | null = null
   /** Its send that waits for room on the ledger, how its promise settles if the channel ends first, and the newest lossy
    *  send made since, which goes right after it. */
-  private roomWait: { wait: RoomWait; reject: (err: Error) => void } | null = null
+  private roomWait: WaitingSend | null = null
 
   // ── Wire state — channel-owned, kept across the page's attaches ────
   /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
@@ -352,10 +361,29 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  the next one replaces; attached, it goes, or waits as the newest while the page is behind or out of credit. */
   private sendLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void | Promise<void> {
     const held = heldSendBytes(bytes)
+    if (this.roomWait !== null) return this.sendLossyBehind(this.roomWait, { tag, data, bytes, held })
     const added = held - this.replaceableHeld()
     if (added > 0 && !admit(this, added)) return Promise.reject<void>(this.refuseSend(added))
+    return this.makeLossy({ tag, data, bytes, held })
+  }
+
+  /** Makes a lossy send admitted, or held from what it reserved. */
+  private makeLossy({ tag, data, bytes, held }: LossyBehind): void | Promise<void> {
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
     this.lossyDelivery().send({ data, held })
+  }
+
+  /** Behind a send of its channel that waits for room, a lossy one waits too, as the newest, reserved in that one's turn:
+   *  it goes right after it, so nothing passes it. */
+  private sendLossyBehind(waiting: WaitingSend, lossy: LossyBehind): void | Promise<void> {
+    // The two go together, so a lossy one they can't both fit in its channel is refused, leaving the other its turn.
+    if (waiting.wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
+    const replaced = waiting.lossy?.held ?? 0
+    if (lossy.held > replaced && !reserveBehind(waiting.wait, lossy.held - replaced))
+      return Promise.reject<void>(this.refuseSend(lossy.held - replaced, false))
+    if (lossy.held < replaced) releaseBehind(waiting.wait, replaced - lossy.held)
+    // The caller may write into its bytes once `send` returned, as for a send that waits.
+    waiting.lossy = { ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) }
   }
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
@@ -442,23 +470,38 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     keep?.()
     return new Promise<unknown>((resolve, reject) => {
       const wait = waitForRoom(this, held, () => {
+        const lossy = this.roomWait?.lossy ?? null
         this.roomWait = null
         void settleMade(go(), resolve, reject)
+        if (lossy === null) return
+        releaseBehind(wait, lossy.held)
+        void this.makeLossy(lossy)
       })
-      this.roomWait = { wait, reject }
+      this.roomWait = { wait, reject, lossy: null }
     })
   }
 
+  /** Its send that waits for room goes now, ahead of its end, holding what it reserved, as the end holds what went
+   *  before it; the lossy send behind it goes too, unless the end drops lossy sends. */
+  private sendWaitingNow({ dropLossy }: { dropLossy: boolean }): void {
+    const waiting = this.roomWait
+    if (waiting === null) return
+    if (dropLossy && waiting.lossy !== null) {
+      releaseBehind(waiting.wait, waiting.lossy.held)
+      waiting.lossy = null
+    }
+    takeWait(waiting.wait)
+  }
+
   /** A send that would hold `bytes` wasn't admitted. */
-  private refuseSend(bytes: number): ChannelOverflowError {
+  private refuseSend(bytes: number, othersWait = this.roomWait !== null): ChannelOverflowError {
     if (!this.refusalWarned) {
       this.refusalWarned = true
-      const limit =
-        this.roomWait !== null
-          ? 'another `send()` of this channel already waits for room'
-          : bytes > holdsAtMost()
-            ? `it would hold more than ${holdsAtMost()} bytes, the most for one channel`
-            : `what this server's channels hold and the sends waiting for room fill \`config.channel.maxMemory\`, ${getChannelConfig().maxMemory} bytes`
+      const limit = othersWait
+        ? 'another `send()` of this channel already waits for room'
+        : bytes > holdsAtMost()
+          ? `it would hold more than ${holdsAtMost()} bytes, the most for one channel`
+          : `what this server's channels hold and the sends waiting for room fill \`config.channel.maxMemory\`, ${getChannelConfig().maxMemory} bytes`
       assertWarning(
         false,
         `A channel refused a \`send()\`: ${limit}, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
@@ -526,6 +569,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
       // Owed, the abort is so before its close callbacks run, which may need a subscriber's memory (`ServerBroadcast.shed`).
       this.onAbortOwed()
+      this.sendWaitingNow({ dropLossy: true })
       this.sendEnd((peer) => peer.sendSequenced(encode.abort, reason.serialized))
     })
   }
@@ -538,6 +582,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _sendEnding(frame: EndingFrame): void {
+    // The page reads what was sent, then the end.
+    this.sendWaitingNow({ dropLossy: false })
     switch (frame.kind) {
       case 'close':
         return this.sendEnd((peer) => peer.sendCloseRequest(frame.timeoutMs))
@@ -602,6 +648,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.sendHeldForAttach(peer)
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
+    if (this.endLost) {
+      // Lost to the page, which both ends say, as for any frame a replay couldn't keep.
+      this.endLost = false
+      this.replaceEnd(ERROR_REASON.LOST, peer)
+      this.shutdown(replayLossError('server'))
+    }
     this.sendPendingEnd(peer)
     if (live && this._phase !== 'closing') this.lifecycle.fireOpen()
   }
@@ -895,6 +947,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal The page attaches on the wire `request` opened, having received this channel's frames through
    *  `lastSeq`. */
   _onPageAttach(lastSeq: number, request: Request | undefined): void {
+    this.endLost = this._replayBuffer?.lacksEndAfter(lastSeq) ?? false
     this.onPageHas(lastSeq)
     this.wireRequest = request
   }

@@ -57,10 +57,13 @@ function rejectedFrameError(): ChannelClosedError {
   )
 }
 
-/** How a channel ends when a reconnect needs what the page's replay buffer dropped. */
-function replayLossError(): NetworkError {
+/** How a channel ends when a reconnect needs what the page's replay buffer dropped, or the end the server's had no room
+ *  to keep. */
+function replayLossError(droppedBy: 'client' | 'server' = 'client'): NetworkError {
   return new NetworkError(
-    "Channel closed: a reconnect needed messages the client's replay buffer had dropped to stay within its size. Await your sends.",
+    droppedBy === 'client'
+      ? "Channel closed: a reconnect needed messages the client's replay buffer had dropped to stay within its size. Await your sends."
+      : "Channel closed: a reconnect needed the channel's end, which the server had no room to keep within config.channel.maxMemory.",
     true,
   )
 }

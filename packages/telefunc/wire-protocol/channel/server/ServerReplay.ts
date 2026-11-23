@@ -1,7 +1,15 @@
 export { ServerReplay }
 
 import { assert } from '../../../utils/assert.js'
-import { HELD_SEND_OVERHEAD_BYTES, heldPublishBytes, hold, letGo, type MemoryHolder } from './channelMemory.js'
+import {
+  HELD_SEND_OVERHEAD_BYTES,
+  hasRoomFor,
+  heldPublishBytes,
+  hold,
+  letGo,
+  type MemoryHolder,
+} from './channelMemory.js'
+import { isClosingTag } from '../../wire/tags.js'
 import type { PublishBody } from './PublishBody.js'
 import { SeqQueue } from '../SeqQueue.js'
 
@@ -17,6 +25,8 @@ class ServerReplay {
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
+  /** The seq of an end it sent without keeping it, `maxMemory` having no room for it; 0 once its page has it. */
+  private unkeptEnd = 0
   /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
   private movedAt = 0
 
@@ -35,8 +45,20 @@ class ServerReplay {
 
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     this.pushed(seq)
+    const bytes = frame.byteLength + HELD_SEND_OVERHEAD_BYTES
+    // An end that doesn't fit goes unkept: a page that misses it gets a replay loss in its place (`lacksEndAfter`).
+    const tag = frame[0]
+    if (tag !== undefined && isClosingTag(tag) && !hasRoomFor(bytes)) {
+      this.unkeptEnd = seq
+      return
+    }
     this.frames.push(seq, frame)
-    hold(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
+    hold(this.holder, bytes)
+  }
+
+  /** Whether a page that has every frame through `lastSeq` lacks an end it didn't keep. */
+  lacksEndAfter(lastSeq: number): boolean {
+    return this.unkeptEnd > lastSeq
   }
 
   pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
@@ -53,6 +75,7 @@ class ServerReplay {
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
+    if (lastSeq >= this.unkeptEnd) this.unkeptEnd = 0
     const frames = this.frames.indexAfter(lastSeq)
     for (let i = 0; i < frames; i++) this.letFrameGo(this.frames.at(i))
     this.frames.dropOldest(frames)
@@ -89,7 +112,7 @@ class ServerReplay {
 
   /** It holds nothing: its page confirmed all it sent, or what it didn't went unsent. */
   get isEmpty(): boolean {
-    return this.frames.length === 0 && this.publishes.length === 0
+    return this.frames.length === 0 && this.publishes.length === 0 && this.unkeptEnd === 0
   }
 
   /** Whether all it holds is frames `test` passes, no publish among them. */

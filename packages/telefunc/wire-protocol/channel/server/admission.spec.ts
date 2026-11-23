@@ -102,8 +102,8 @@ const settledIn = async (promise: Promise<unknown>, ms = 50) => {
   return Promise.race([outcome, new Promise<string>((resolve) => setTimeout(() => resolve('pending'), ms))])
 }
 
-/** What the page reads of `frames`, in order, as `<channel index>:<the message's first two characters>` or
- *  `<channel index>:ABORT`, less each frame at or below the newest seq it has of that channel. */
+/** What the page reads of `frames`, in order, as `<channel index>:<the message's first two characters>`,
+ *  `<channel index>:ABORT` or `<channel index>:CLOSE`, less each frame at or below the newest seq it has of that channel. */
 function reads(frames: Iterable<Uint8Array>): string[] {
   const pair = pairPublishes()
   const newestSeq = new Map<number, number>()
@@ -119,6 +119,7 @@ function reads(frames: Iterable<Uint8Array>): string[] {
     if (decoded.tag === TAG.PUBLISH_BINARY || decoded.tag === TAG.BINARY || decoded.tag === TAG.BINARY_ACK_REQ)
       out.push(`${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}`)
     if (decoded.tag === TAG.ABORT) out.push(`${index}:ABORT`)
+    if (decoded.tag === TAG.CLOSE) out.push(`${index}:CLOSE`)
   }
   return out
 }
@@ -168,19 +169,27 @@ function overWebSocket(channels: ServerChannel[]) {
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   }
-  onTestFinished(() => {
-    for (const channel of channels) if (channel._phase === 'ended') channel._release()
-  })
-  for (const [index, channel] of channels.entries()) {
-    channel._registerChannel()
-    const replay = channel._replayBuffer!
-    channel._onPageAttach(0)
-    channel._attachPeer(new IndexedPeer({ sender, index, replay }), {
-      want: { version: 1, text: true, binary: true },
+  /** Attaches `channel` at `index` as the mux does, the page having its frames through `lastSeq`: what it lacks goes
+   *  first. */
+  const attach = (channel: ServerChannel, index: number, lastSeq = 0) => {
+    onTestFinished(() => {
+      if (channel._phase === 'ended') channel._release()
     })
+    const replay = channel._replayBuffer!
+    channel._onPageAttach(lastSeq, undefined)
+    for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
+    const peer = new IndexedPeer({ sender, index, replay })
+    channel._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
+    return peer
   }
+  const peers = channels.map((channel, index) => {
+    channel._registerChannel()
+    return attach(channel, index)
+  })
   return {
     headroom,
+    peers,
+    attach,
     /** The page reads all that waits for it, saying it took each byte it got, and returns all it read. */
     async readAll(): Promise<string[]> {
       while (headroom.sender.unhandedBytes > 0) {
@@ -420,24 +429,26 @@ test("on a WebSocket, with the ledger near full of input queues, a send that wai
   }
 })
 
-test('on a WebSocket, an abort while a send waits at the most bytes held keeps the ledger within maxMemory', async () => {
-  const channel = new ServerChannel()
-  overWebSocket([channel])
-  const free = fillTo(HELD_AT_MOST, 15)
-  try {
-    const forRoom = channel.sendBinary(new Uint8Array(2 * 1024 * 1024 - 519))
-    expect(await settledIn(forRoom, 5)).toBe('pending')
-    expect({ total: ledger().total, reserved: ledger().reserved }).toEqual({
-      total: HELD_AT_MOST,
-      reserved: 2 * 1024 * 1024,
-    })
-    channel.abort('x'.repeat(256 * 1024))
-    expect(ledger().total + ledger().reserved).toBeLessThanOrEqual(getChannelConfig().maxMemory)
-  } finally {
-    channel._onPeerGone(new Error('fixture closed'))
-    free()
-  }
-})
+for (const ending of ['close', 'abort'] as const)
+  test(`on a WebSocket, ${ending === 'close' ? 'a close' : 'an abort'} while a send waits at the most bytes held keeps the ledger within maxMemory`, async () => {
+    const channel = new ServerChannel()
+    overWebSocket([channel])
+    const free = fillTo(HELD_AT_MOST, 15)
+    try {
+      const forRoom = channel.sendBinary(new Uint8Array(2 * 1024 * 1024 - 519))
+      expect(await settledIn(forRoom, 5)).toBe('pending')
+      expect({ total: ledger().total, reserved: ledger().reserved }).toEqual({
+        total: HELD_AT_MOST,
+        reserved: 2 * 1024 * 1024,
+      })
+      if (ending === 'close') void channel.close()
+      else channel.abort('x'.repeat(256 * 1024))
+      expect(ledger().total + ledger().reserved).toBeLessThanOrEqual(getChannelConfig().maxMemory)
+    } finally {
+      channel._onPeerGone(new Error('fixture closed'))
+      free()
+    }
+  })
 
 test('on a WebSocket, a lossy send behind a send waiting for its channel to be confirmed either is refused or reaches the page', async () => {
   const channel = new ServerChannel()
@@ -574,3 +585,164 @@ for (const [when, { cause, refused }] of Object.entries(REFUSALS)) {
     }
   })
 }
+
+test('on a WebSocket, a lossy send made while a send of its channel waits for room reaches the page after it', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  const free = leaveRoomUnderMax(64 * 1024)
+  try {
+    const first = channel.send('a1' + 'x'.repeat(100 * 1024))
+    expect(await settledIn(first, 5)).toBe('pending')
+    void channel.send('l2', { lossy: true })
+    free()
+    expect(await settledIn(first)).toBe('resolved')
+    expect(await page.readAll()).toEqual(['0:a1', '0:l2'])
+  } finally {
+    channel.abort()
+    free()
+  }
+})
+
+for (const ending of ['close', 'abort'] as const)
+  test(`on a WebSocket, ${ending}() while a send waits for room sends it ahead of the ${ending === 'close' ? 'CLOSE' : 'ABORT'}`, async () => {
+    const channel = new ServerChannel()
+    const page = overWebSocket([channel])
+    const free = leaveRoomUnderMax(64 * 1024)
+    try {
+      const sending = channel.send('a1' + 'x'.repeat(100 * 1024))
+      expect(await settledIn(sending, 5)).toBe('pending')
+      if (ending === 'close') void channel.close()
+      else channel.abort()
+      expect(await settledIn(sending, 5)).toBe('resolved')
+      expect(await page.readAll()).toEqual(['0:a1', ending === 'close' ? '0:CLOSE' : '0:ABORT'])
+    } finally {
+      channel.abort()
+      free()
+    }
+  })
+
+test('on a WebSocket, abort() while an acknowledged send waits for room sends its request ahead of the ABORT, and the send rejects with the Abort', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  const free = fillTo(HELD_AT_MOST, 15)
+  try {
+    const waiting = channel.sendBinary(new TextEncoder().encode('a1' + 'x'.repeat(100 * 1024)), { ack: true })
+    expect(await settledIn(waiting, 5)).toBe('pending')
+    channel.abort()
+    await expect(waiting).rejects.toMatchObject({ isAbort: true })
+    expect(await page.readAll()).toEqual(['0:a1', '0:ABORT'])
+  } finally {
+    free()
+  }
+})
+
+test('on a WebSocket, close() delivers the lossy sends on both sides of a send that waits for room, in the order they were made', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  try {
+    await channel.send('l1', { lossy: true })
+    const free = fillTo(HELD_AT_MOST, 16)
+    try {
+      const reliable = channel.send('a2')
+      expect(await settledIn(reliable, 5)).toBe('pending')
+      const lossy = await settledIn(channel.send('l3', { lossy: true }), 5)
+      void channel.close()
+      expect({ lossy, reliable: await settledIn(reliable), read: await page.readAll() }).toEqual({
+        lossy: 'resolved',
+        reliable: 'resolved',
+        read: ['0:l1', '0:a2', '0:l3', '0:CLOSE'],
+      })
+    } finally {
+      free()
+    }
+  } finally {
+    channel._onPeerGone(new Error('fixture closed'))
+  }
+})
+
+test("on a WebSocket, a lossy send too large to go with the send of its channel that waits for room is refused, and that one goes once its page confirms the channel's earlier one", async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  try {
+    await channel.sendBinary(new Uint8Array(900 * 1024))
+    const reliable = channel.send('a2' + 'x'.repeat(1_200 * 1024))
+    expect(await settledIn(reliable, 5)).toBe('pending')
+    const lossy = await settledIn(channel.sendBinary(new Uint8Array(29 * 1024 * 1024), { lossy: true }), 5)
+    confirm(channel, 0, 2 * CREDIT_WINDOW_INITIAL_BYTES)
+    await page.readAll()
+    expect({ lossy, reliable: await settledIn(reliable) }).toEqual({ lossy: 'overflow', reliable: 'resolved' })
+  } finally {
+    channel._onPeerGone(new Error('fixture closed'))
+  }
+})
+
+for (const wakesDetached of [false, true])
+  test(`on a WebSocket, a send that waits for room ${wakesDetached ? 'and finds room while its page is away' : 'while its page is away'} reaches the page back in order, with what was sent before and after it`, async () => {
+    const channel = new ServerChannel()
+    const original = overWebSocket([channel])
+    try {
+      await channel.send('a0')
+      const free = fillTo(HELD_AT_MOST, 16)
+      const waiting = channel.send('a1')
+      expect(await settledIn(waiting, 5)).toBe('pending')
+      await channel.send('l2', { lossy: true })
+      const [peer] = original.peers
+      if (peer === undefined) throw new Error('no peer')
+      channel._onPeerDisconnect(peer, 500)
+      original.headroom.close()
+      if (wakesDetached) {
+        free()
+        await Promise.resolve()
+        expect(await settledIn(waiting, 5)).toBe('pending')
+      }
+      const back = overWebSocket([])
+      back.attach(channel, 0)
+      if (!wakesDetached) free()
+      await waiting
+      await channel.send('a3')
+      expect(await back.readAll()).toEqual(['0:a0', '0:a1', '0:l2', '0:a3'])
+      back.headroom.close()
+    } finally {
+      channel._onPeerGone(new Error('fixture closed'))
+    }
+  })
+
+test('on a WebSocket, a send waiting for room goes with the lossy send behind it once there is room for the two', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  // Room for the two, about 165 kB, and not for the lossy one twice.
+  const free = leaveRoomUnderMax(200_000)
+  const blocker: MemoryHolder = { heldBytes: 0 }
+  hold(blocker, 150_000)
+  try {
+    const waiting = channel.send('a1' + 'x'.repeat(100 * 1024))
+    expect(await settledIn(waiting, 5)).toBe('pending')
+    void channel.send('l2' + 'x'.repeat(60 * 1024), { lossy: true })
+    letGo(blocker, blocker.heldBytes)
+    releaseHolder(blocker)
+    expect(await settledIn(waiting)).toBe('resolved')
+    expect(await page.readAll()).toEqual(['0:a1', '0:l2'])
+  } finally {
+    channel.abort()
+    free()
+  }
+})
+
+test('on a WebSocket, a binary lossy send made while a send of its channel waits for room sends the bytes it was given, though the caller then writes into them', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  const free = leaveRoomUnderMax(64 * 1024)
+  try {
+    const first = channel.send('a1' + 'x'.repeat(100 * 1024))
+    expect(await settledIn(first, 5)).toBe('pending')
+    const data = new TextEncoder().encode('l2')
+    void channel.sendBinary(data, { lossy: true })
+    data.fill(0x7a)
+    free()
+    expect(await settledIn(first)).toBe('resolved')
+    expect(await page.readAll()).toEqual(['0:a1', '0:l2'])
+  } finally {
+    channel.abort()
+    free()
+  }
+})

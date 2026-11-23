@@ -90,7 +90,8 @@ const ERROR_REASON = {
   /** Its page fell behind what the server holds for it, sent more than the server holds while its listeners work on it,
    *  or the server can't hold even a refusal of its ack requests. */
   OVERFLOW: 0x01 as const,
-  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
+  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size, or an end the server's
+   *  had no room to keep. */
   LOST: 0x02 as const,
   /** A graceful close's deadline passed before both ends were done: from the end that decides the close. */
   CLOSE_TIMED_OUT: 0x04 as const,

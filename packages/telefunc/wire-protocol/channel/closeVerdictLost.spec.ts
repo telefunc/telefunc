@@ -16,7 +16,7 @@ import { ClientConnection } from './client/ClientConnection.js'
 import { SseTransport } from './client/SseTransport.js'
 import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
-import { queueMemory } from './server/channelMemory.js'
+import { hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './server/channelMemory.js'
 import { TAG } from '../wire/tags.js'
 import type { ChannelFrame } from '../wire/frame.js'
 
@@ -192,6 +192,21 @@ for (const transport of ['sse', 'ws'] as const) {
         else expect(isAbort(closed) && closed.abortValue).toBe('bye')
       })
     }
+
+    test("an abort sent while memory had no room to keep it reaches the page back as the channel's end lost", async () => {
+      const [channel, page] = await pair(transport)
+      const ledger = (globalThis as unknown as { _telefunc: Record<string, { total: number }> })._telefunc
+      const filler: MemoryHolder = { heldBytes: 0 }
+      hold(filler, MAX_MEMORY - (ledger['channelMemory.ts']?.total ?? 0))
+      network.losing = true
+      channel.abort('bye')
+      const connections = dropConnections()
+      letGo(filler, filler.heldBytes)
+      releaseHolder(filler)
+      connections.reconnect()
+      const closed = await page.closed
+      expect(closed).toHaveProperty('message', expect.stringContaining('which the server had no room to keep'))
+    })
   })
 }
 
