@@ -287,8 +287,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
-    if (transport !== this.transport || !this.sendsOpen) return
-    this.gate.sendWaiting()
+    if (transport !== this.transport || (!this.sendsOpen && !this.liveWire)) return
+    this.gate.sendRunnable()
     this.startTtlIfIdle()
   }
 
@@ -760,6 +760,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     assert(record.state.tag === 'closed')
     this.channels.serverEnded(record, record.state)
     this.gate.dropQueue(record.ix)
+    // What its frames held back may go.
+    this.gate.sendRunnable()
   }
 
   /** No wire can reach the server again: its channels' connection is lost for good. */

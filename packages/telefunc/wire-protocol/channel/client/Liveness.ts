@@ -89,6 +89,8 @@ class Liveness {
       if (lastSeq === null) this.gate.release(record)
       else this.channels.serverHas(record, record.state, this.channels.sentThrough(ix, lastSeq))
     }
+    // What the frames of one let go held back may go.
+    this.gate.sendRunnable()
   }
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */

@@ -16,6 +16,7 @@ import { TAG } from '../../wire/tags.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import { ClientConnection } from './ClientConnection.js'
 import { WireLifecycle } from './WireLifecycle.js'
+import { WsTransport } from './WsTransport.js'
 import { ClientChannel } from './ClientChannel.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
@@ -573,6 +574,90 @@ describe("a page's channels on a live WebSocket", () => {
     next.deliver(encode.attachResult(awaited!, 0))
     await vi.advanceTimersByTimeAsync(100)
     expect(next.textsOf.get(awaited!)).toEqual(['"b1"'])
+    for (const page of pages) page.abort()
+  })
+
+  test("while another channel's join waits, an open channel's send that waited for headroom goes once the wire has room", async () => {
+    const { pages, open } = pageOf()
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+    }
+    const register = vi.spyOn(WireLifecycle.prototype, 'register')
+    const a = await open()
+    const lifecycle = register.mock.contexts[0] as WireLifecycle
+    register.mockRestore()
+    await open()
+    const [socket] = ServerSocket.made
+    const headroom = vi.spyOn(WsTransport.prototype, 'headroom').mockReturnValue(0)
+    void a.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    const transport = headroom.mock.contexts[0] as WsTransport
+    headroom.mockRestore()
+    expect(socket!.textOrder).toEqual([])
+    lifecycle.onTransportHeadroom(transport)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
+    for (const page of pages) page.abort()
+  })
+
+  test("a send queued behind a joining channel's goes once the server aborts that channel, before the join's RECONCILED", async () => {
+    const { pages, add, open } = pageOf()
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+    }
+    const a = await open()
+    const c = add()
+    void c.send('c1')
+    void a.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    const [socket] = ServerSocket.made
+    expect(socket!.reconciles).toHaveLength(2)
+    expect(socket!.textOrder).toEqual([])
+    const joining = socket!.reconciles[1]!.open[0]?.ix
+    socket!.deliver(encode.abort(joining!, '"gone"', 1))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
+    for (const page of pages) page.abort()
+  })
+
+  test("a send queued behind a closed channel's goes once a PONG says the server no longer has that channel, before the RECONCILE that names it is answered", async () => {
+    const { pages, add, open } = pageOf()
+    // The server answers the first two RECONCILEs at once and the third, a join, when the row says; the follow-up that
+    // names the closed channel it doesn't answer.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length <= 2) socket.deliver(reconciledFor(reconcile))
+    }
+    const a = await open()
+    const x = await open()
+    add()
+    await vi.advanceTimersByTimeAsync(100)
+    const [socket] = ServerSocket.made
+    expect(socket!.reconciles).toHaveLength(3)
+    // Registered behind the join: its send holds the rest till a RECONCILE names it.
+    const u = add()
+    void u.send('u1')
+    void x.send('x1')
+    x.abort()
+    void a.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    socket!.deliver(reconciledFor(socket!.reconciles[2]!))
+    await vi.advanceTimersByTimeAsync(100)
+    // The follow-up names the closed channel and the one registered behind the join, which the server then ends.
+    const xEntry = socket!.reconciles[1]!.open[0]
+    const [xIx, xId] = [xEntry?.ix, xEntry?.id]
+    const followUp = socket!.reconciles[3]!.open
+    expect(followUp.map(({ id }) => id)).toContain(xId)
+    const uIx = followUp.find(({ id }) => id !== xId)!.ix
+    socket!.deliver(encode.abort(uIx, '"gone"', 1))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual([])
+    // The server no longer has the closed channel.
+    socket!.deliver(encode.pong([{ ix: xIx!, lastSeq: null }]))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
     for (const page of pages) page.abort()
   })
 })
