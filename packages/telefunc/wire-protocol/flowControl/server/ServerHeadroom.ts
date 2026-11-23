@@ -2,7 +2,6 @@ export { ServerHeadroom }
 
 import {
   WIRE_PIECES_ACK_BYTES,
-  WIRE_FLIGHT_LEAST_MS,
   WIRE_PIECES_ACK_GAP_MS,
   WIRE_PROBE_CLOCK_MS,
   WIRE_QUEUE_DELAY_MS,
@@ -19,8 +18,7 @@ import {
   type PieceSenderOwner,
   type PieceSocket,
 } from '../pieces.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, type PiecesAck } from '../../wire/frame.js'
-import { isSequencedTag } from '../../wire/tags.js'
+import { encode, type PiecesAck } from '../../wire/frame.js'
 import {
   countWaitingPublishes,
   droppingFrom,
@@ -31,10 +29,8 @@ import {
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
-/** How long a flight copy room blocked waits for its page's word before it asks. */
+/** How long a blocked window waits for its page's word before it asks. */
 const WIRE_ASK_AFTER_MS = WIRE_PIECES_ACK_GAP_MS / 5
-/** Where an unmeasured flight starts: the least send-ahead, as one message. */
-const START_FLIGHT = WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
@@ -54,45 +50,24 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly sent = new Fifo<{ end: number; at: number }>()
   /** Where the newest data handed with nothing waiting ahead ends: arrivals up to it came at the app's rate. */
   private appLimitedTo = 0
-  /** Whether the flight reached half its bound since the last ask: the next send asks. */
+  /** Whether what the page hasn't confirmed reached half the window since the last ask: the next send asks. */
   private askEarly = false
   /** Whether the sender is sending what waited for headroom. */
   private releasing = false
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
-  /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
-  private inPath = 0
-  private inPathAt = 0
+  /** Looks again for copy room, which another wire's page may free. */
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  /** When `paceTimer` fires. */
-  private paceAt = 0
-  /** Asks for the page's word once a blocked flight has heard nothing for a while (`askSoon`). */
+  /** Asks for the page's word once a blocked window has heard nothing for a while (`askSoon`). */
   private askTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
   /** Waits for an acknowledgement, a heartbeat, or room for copies, which it looks for on its own timer. */
   private awaitsCopyRoom = false
-  /** With no rate, the most the path holds of what the page hasn't said it took: it grows as slow start does. */
-  private flight = START_FLIGHT
-  /** What the sender had handed when the flight last filled, and how much of what the page took grew the flight. */
-  private filledTo = 0
-  private grownTo = 0
-  /** What the sender had handed when the flight last halved. */
-  private halvedAt = 0
-  /** Where the rate sample still open began: an answer's, when the answer came too soon to time. */
-  private sampleFrom: { bytes: number; at: number } | null = null
-  /** How long the newest report's data queued behind the least round trip. */
-  private queuedMs = 0
-  /** How long the page took to reach a request behind what it took first, past the path's round trip and queue. */
-  private turnaround = 0
-  /** When data was last handed. */
-  private dataAt = Number.NEGATIVE_INFINITY
   /** What was handed when the page was last asked what it took, the request included: open till the page took it. */
   private askedUpTo = 0
-  /** For the open ask: what the page had said it took then, and when the oldest data past it was handed. */
-  private askedFrom: { bytes: number; at: number; askedAt: number } | null = null
-  /** The newest rate an answer showed the path carried, 0 before one. */
-  private carried = 0
+  /** When the open ask went, null when none is open. */
+  private askedAt: number | null = null
 
   constructor({ socket, pingInterval }: ServerHeadroomOptions) {
     this.socket = socket
@@ -106,17 +81,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     })
   }
 
-  /** Sends `frame`, sent at `at`, through the sender. */
-  send(frame: Uint8Array<ArrayBuffer>, at: number): void {
-    // A path idle past what its flight took to cross may have changed: the flight and the rate start over.
-    if (isSequencedTag(frame[0]) && !this.sender.dataWaits && at - this.dataAt > this.idleAfter()) {
-      this.flight = START_FLIGHT
-      this.drain.reset()
-      this.askedFrom = null
-      this.sampleFrom = null
-      this.carried = 0
-    }
-    this.sender.send(frame, this.headroom(at))
+  /** Sends `frame` through the sender. */
+  send(frame: Uint8Array<ArrayBuffer>): void {
+    this.sender.send(frame, this.headroom())
     this.askIfHalf()
     this.pace()
   }
@@ -125,21 +92,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (!this.askEarly) return
     this.askEarly = false
     this.askForReport()
-  }
-
-  /** How long a report's newest data may queue behind the least round trip while the flight grows. */
-  private queueLimit(): number {
-    const rtt = Number.isFinite(this.leastRtt) ? this.leastRtt : WIRE_QUEUE_DELAY_MS
-    return Math.min(
-      WIRE_QUEUE_DELAY_MS,
-      Math.max(rtt, WIRE_PROBE_CLOCK_MS, WIRE_FLIGHT_LEAST_MS - rtt - this.turnaround),
-    )
-  }
-
-  /** How long a wire is idle before its flight starts over: the queue delay and a least round trip, or two of those. */
-  private idleAfter(): number {
-    const rtt = Number.isFinite(this.leastRtt) ? this.leastRtt : 0
-    return Math.max(WIRE_QUEUE_DELAY_MS + rtt, 2 * rtt)
   }
 
   waitingPublishes(ix: number): number {
@@ -165,13 +117,11 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return this.drain.rate
   }
 
-  /** What the path takes at `at` past what it holds. */
-  headroom(at: number): number {
-    const rate = this.pathRate()
-    // Unmeasured, the path takes the least any sender sends ahead and as much again as the page said it took, which
-    // doubles each round trip as TCP's slow start does, until acknowledgements of data that waited give the rate.
-    if (rate === 0) return this.flight - this.unconfirmed()
-    return this.window() - this.pathHolds(at)
+  /** What the path takes past what the page hasn't confirmed. */
+  headroom(): number {
+    // Unmeasured, the kernel's TCP paces what the app hands, as on main; measured, only an acknowledgement frees room.
+    if (this.pathRate() === 0) return Number.POSITIVE_INFINITY
+    return this.window() - this.unconfirmed()
   }
 
   /** `PieceSenderOwner`: the most data the path may hold. On a slow link the least round trip still spans a whole frame's
@@ -179,16 +129,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
    *  however short the round trip. */
   window(): number {
     const rate = this.pathRate()
-    if (rate === 0) return this.flight
+    if (rate === 0) return Number.POSITIVE_INFINITY
     const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
     return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * Math.min(toAck, WIRE_QUEUE_DELAY_MS))
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
   handed(bytes: number, data: boolean, copied: boolean): void {
-    const now = performance.now()
-    this.inPath = this.pathHolds(now) + bytes
-    this.inPathAt = now
     if (copied) {
       this.copied.push({ end: this.sender.transmittedBytes, bytes })
       addWireCopies(bytes)
@@ -198,14 +145,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       return
     }
     const end = this.sender.transmittedBytes
-    this.dataAt = now
     if (!this.releasing && this.socket.bufferedAmount <= this.handedSinceData && !this.sender.dataWaits)
       this.appLimitedTo = end
     this.handedSinceData = 0
-    if (acknowledges(bytes)) this.sent.push({ end, at: now })
-    // Asked at half the flight, the page's answer frees its first half while the second still crosses.
+    if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
+    // Asked at half the window, the page's answer frees its first half while the second still crosses.
     const asks = this.pieceRate.fastest > 0 && !this.sender.awaitsProbe && hasCopyRoom()
-    if (asks && this.pathRate() === 0 && this.unconfirmed() >= this.flight / 2) this.askEarly = true
+    if (asks && this.pathRate() > 0 && this.unconfirmed() >= this.window() / 2) this.askEarly = true
   }
 
   /** `PieceSenderOwner`: the most copies this wire may hold once its page took all it handed. */
@@ -220,8 +166,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
     // What this task gathered goes with its message, so it takes copy room as handed bytes do.
     const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed() - this.sender.ungivenBytes
-    // Where copy room and not the flight holds what waits, its end frees it with no word from the page: look again.
-    if (room < this.headroom(performance.now())) this.awaitsCopyRoom = true
+    // Where copy room and not the window holds what waits, its end frees it with no word from the page: look again.
+    if (room < this.headroom()) this.awaitsCopyRoom = true
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
     return 0
@@ -237,7 +183,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (!this.sender.heartbeat(bytes, at)) return false
     this.heard()
     this.measureAnswer()
-    this.fit(0)
     this.releaseCopies(this.sender.heartbeatBytes)
     // A page taking small frames says what it took mostly here, in the frames it sends anyway.
     if (this.awaitsCopyRoom || this.pathRate() === 0) this.sendWaiting()
@@ -257,7 +202,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (!this.sender.acknowledged(ack)) return false
     this.heard()
     this.measureAnswer()
-    const now = performance.now()
     const spanMs = ack.spanUs / 1000
     // When the newest data the acknowledgement covers arrived, on this clock.
     const arrived = this.sender.arrivedAt
@@ -265,51 +209,21 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
-    this.fit(newest === undefined ? 0 : arrived - newest.at - this.leastRtt)
-    // Arrivals of data handed while nothing waited came at the app's rate: they neither set the rate nor lower it.
-    if (before < this.appLimitedTo) this.drain.dropSpan()
+    const queuedMs = newest === undefined ? 0 : arrived - newest.at - this.leastRtt
+    // Data that queued in the path came at its rate; data the app handed alone that queued nowhere sets no rate.
+    if (before < this.appLimitedTo && queuedMs <= WIRE_PROBE_CLOCK_MS) this.drain.dropSpan()
     else this.drain.spanned(acknowledged - before, spanMs)
-    // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
-    this.inPath = Math.max(
-      0,
-      this.sender.transmittedBytes - acknowledged - this.pathRate() * Math.max(0, now - arrived),
-    )
-    this.inPathAt = now
     this.releaseCopies(acknowledged)
     this.sendWaiting()
     return true
   }
 
-  /** A filled flight grows by what the page took of it, or halves where its data queued past `queueLimit`. */
-  private fit(queuedMs: number): void {
-    this.queuedMs = queuedMs
-    const took = Math.min(this.sender.confirmedBytes, this.filledTo)
-    if (queuedMs > this.queueLimit()) {
-      // Once a flight: the reports on what was handed before a halving tell of the queue it already answered.
-      if (this.sender.confirmedBytes <= this.halvedAt) return
-      this.halvedAt = this.sender.transmittedBytes
-      this.flight = Math.max(START_FLIGHT, this.flight / 2)
-      this.drain.reset()
-      return
-    }
-    if (this.pathRate() === 0 && took > this.grownTo)
-      this.flight = Math.min(this.flight + took - this.grownTo, this.ceiling())
-    this.grownTo = Math.max(this.grownTo, took)
-  }
-
-  /** The most the flight grows to: what the path carries over a round trip, the turnaround and `queueLimit`. */
-  private ceiling(): number {
-    if (this.carried === 0) return Number.POSITIVE_INFINITY
-    const crossing = (Number.isFinite(this.leastRtt) ? this.leastRtt : 0) + this.turnaround + this.queueLimit()
-    return Math.max(START_FLIGHT, this.carried * crossing)
-  }
-
-  /** Asks the page soon, unless it says first: a blocked flight would otherwise wait out its acknowledgement gap. */
+  /** Asks the page soon, unless it says first: a blocked window would otherwise wait out its acknowledgement gap. */
   private askSoon(): void {
     if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
   }
 
-  /** The page said what it took: the flight it frees is the one to ask about, if it blocks again. */
+  /** The page said what it took: the window it frees is the one to ask about, if it blocks again. */
   private heard(): void {
     if (this.askTimer !== null) clearTimeout(this.askTimer)
     this.askTimer = null
@@ -329,39 +243,18 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (confirmedBytes < this.askedUpTo || confirmedBytes >= transmittedBytes) return
     // An open announcement counts every message till it closes, at the end of this task.
     if (this.sender.announcing) return void queueMicrotask(this.askIfBlocked)
-    this.askedFrom = { bytes: confirmedBytes, at: this.handedAt(confirmedBytes), askedAt: performance.now() }
+    this.askedAt = performance.now()
     this.sender.send(encode.piecesAckReq(), 0)
     this.sender.flush()
     // Both ends count the request: a report the page sent before it read the request doesn't cover it.
     this.askedUpTo = this.sender.transmittedBytes
   }
 
-  /** When the oldest data past `bytes` of all the sender handed was handed. */
-  private handedAt(bytes: number): number {
-    for (const handed of this.sent) if (handed.end > bytes) return handed.at
-    return this.dataAt
-  }
-
-  /** The page answered an ask: what it took since, over the time it took, is a rate the path carried at the least. */
+  /** The page answers an ask at once: a round trip where small frames give acknowledgements none. */
   private measureAnswer(): void {
-    const from = this.askedFrom
-    const took = this.sender.confirmedBytes
-    if (from === null || took < this.askedUpTo) return
-    this.askedFrom = null
-    const now = performance.now()
-    // The page answers at once: a round trip where small frames give acknowledgements none.
-    this.leastRtt = Math.min(this.leastRtt, now - from.askedAt)
-    // Past the round trip and the queue, the answer waited for the page to reach the request.
-    const turnaround = Math.max(0, now - from.askedAt - this.leastRtt - this.queuedMs)
-    this.turnaround = this.turnaround === 0 ? turnaround : (this.turnaround * 7 + turnaround) / 8
-    // An answer sooner than a least round trip, or than this clock can time, leaves its span open for the next.
-    const sample = (this.sampleFrom ??= from)
-    const ms = now - sample.at - (Number.isFinite(this.leastRtt) ? this.leastRtt : 0)
-    if (ms < Math.max(WIRE_PROBE_CLOCK_MS, this.leastRtt) || took <= sample.bytes) return
-    this.sampleFrom = null
-    // A newer answer replaces the older: a path that slowed shows it here, before any queue does.
-    this.carried = (took - sample.bytes) / ms
-    this.flight = Math.max(START_FLIGHT, Math.min(Math.max(this.flight, this.ceiling() / 2), this.ceiling()))
+    if (this.askedAt === null || this.sender.confirmedBytes < this.askedUpTo) return
+    this.leastRtt = Math.min(this.leastRtt, performance.now() - this.askedAt)
+    this.askedAt = null
   }
 
   /** The socket closed: pacing stops, and nothing more is handed to it. */
@@ -378,44 +271,28 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
       this.releasing = true
-      this.sender.sendWaiting(this.headroom(performance.now()))
+      this.sender.sendWaiting(this.headroom())
       this.releasing = false
     }
     this.askIfHalf()
     this.pace()
   }
 
-  /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
-  private pathHolds(now: number): number {
-    return Math.max(0, this.inPath - this.pathRate() * (now - this.inPathAt))
-  }
-
-  /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
+  /** While data waits, looks again for copy room, or asks for the page's report that frees a measured window. */
   private pace(): void {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
     if (waitingBytes === 0 || awaitsProbe) return
-    // With no rate, nothing drains on a timer: the page's report frees headroom, so a full flight asks for it.
-    if (this.awaitsCopyRoom) this.askSoon()
-    else if (this.pathRate() === 0) {
-      this.filledTo = this.sender.transmittedBytes
-      this.askForReport()
-      // What goes after this look holds room no ask covers: ask again once the page says nothing for a while.
+    if (this.awaitsCopyRoom) {
       this.askSoon()
+      // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
+      if (acknowledgedBytes > 0 && this.paceTimer === null)
+        this.paceTimer = unrefTimer(setTimeout(this.lookAgain, WIRE_PIECES_ACK_GAP_MS))
+      return
     }
-    if (this.awaitsCopyRoom && acknowledgedBytes === 0) return
-    if (!this.awaitsCopyRoom && this.pathRate() === 0) return
-    // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
-    const ms = this.awaitsCopyRoom
-      ? WIRE_PIECES_ACK_GAP_MS
-      : Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.pathRate())
-    // A rate measured since the timer was set may free the room sooner: it looks again then.
-    const at = performance.now() + ms
-    if (this.paceTimer !== null) {
-      if (at >= this.paceAt) return
-      clearTimeout(this.paceTimer)
-    }
-    this.paceAt = at
-    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
+    if (this.pathRate() === 0) return
+    this.askForReport()
+    // What goes after this look holds room no ask covers: ask again once the page says nothing for a while.
+    this.askSoon()
   }
 
   private readonly lookAgain = (): void => {

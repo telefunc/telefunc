@@ -176,7 +176,7 @@ function overWebSocket(channels: ServerChannel[]) {
   const sender: PeerSender = {
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
-      headroom.send(frame, performance.now())
+      headroom.send(frame)
     },
     carry() {},
     bufferedAmount: () => 0,

@@ -218,7 +218,7 @@ function overWebSocket(
   const sender: PeerSender = {
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
-      headroom.send(frame, performance.now())
+      headroom.send(frame)
     },
     carry() {},
     bufferedAmount: () => 0,
@@ -1496,10 +1496,11 @@ for (const [ending, end] of Object.entries(PAGE_GONE)) {
       void ended.send(message)
       void other.send(message)
     }
-    expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
+    // Of channel 0, p1 started, so p2 and p3 wait behind it; channel 1's went to the socket.
+    expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'] })
     end(ended)
     expect(ended.isClosed).toBe(true)
-    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '1:p2', '1:p3'])
+    expect(reads(page.headroom.sender.waitingFrames)).toEqual([])
     // Channel 0's p1 had started; the lanes take turns, so it and channel 1's may arrive in either order.
     const pageReads = await page.readAll()
     expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1'])

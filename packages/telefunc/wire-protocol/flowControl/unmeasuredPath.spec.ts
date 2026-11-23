@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
+import { WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
@@ -67,9 +67,11 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}
   })
   let seq = 0
   return {
-    send: (frame: (seq: number) => Uint8Array<ArrayBuffer>) => headroom.send(frame(++seq), performance.now()),
+    send: (frame: (seq: number) => Uint8Array<ArrayBuffer>) => headroom.send(frame(++seq)),
     linkBytes: () => linkBytes,
     sentBytes: () => headroom.sender.transmittedBytes,
+    unconfirmed: () => headroom.sender.transmittedBytes - headroom.sender.confirmedBytes,
+    window: () => headroom.window(),
     stop: () => clearInterval(timer),
   }
 }
@@ -79,25 +81,38 @@ describe('ServerHeadroom.headroom', () => {
     ['64 KiB', 64 * 1024],
     ['16 KiB', 16 * 1024],
     ['1 KiB', 1024],
-  ])(
-    'a download in %s frames on a link not yet measured holds on the link little more than the least send-ahead and what it drains in the queue delay',
-    async (_, frameBytes) => {
-      const wire = wireBehindSlowLink()
-      try {
-        // 2 MiB sent faster than the link takes it, in frames that go whole.
-        const download = new Uint8Array(frameBytes)
-        for (let sent = 0; sent < 2 * 1024 * 1024; sent += frameBytes)
-          wire.send((seq) => encode.binary(1, download, seq))
-        await sleep(1_000)
-        const ahead = wire.linkBytes()
-        // What the link holds is what another channel's answer sent now waits behind: the least send-ahead and what
-        // the link drains in the queue delay, not the download.
-        expect(ahead).toBeLessThan(2 * WIRE_SEND_AHEAD_MIN_BYTES + LINK_BYTES_PER_MS * WIRE_QUEUE_DELAY_MS)
-      } finally {
-        wire.stop()
+  ])('a download in %s frames on a link not yet measured goes to the socket as the app hands it', (_, frameBytes) => {
+    const wire = wireBehindSlowLink()
+    try {
+      const download = new Uint8Array(frameBytes)
+      for (let sent = 0; sent < 2 * 1024 * 1024; sent += frameBytes) wire.send((seq) => encode.binary(1, download, seq))
+      // As on a server that measures nothing: the kernel's TCP paces what the socket took.
+      expect(wire.sentBytes()).toBeGreaterThan(2 * 1024 * 1024)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it("once the page's acknowledgements measured the link, what it hasn't confirmed stays within the window", async () => {
+    const wire = wireBehindSlowLink()
+    try {
+      // 256 KiB queue on the link for 2 s, so their acknowledgements give its rate.
+      const frame = new Uint8Array(16 * 1024)
+      for (let n = 0; n < 16; n++) wire.send((seq) => encode.binary(1, frame, seq))
+      await sleep(3_000)
+      // 125 B/ms over at most the queue delay, 37.5 kB, is less than the least send-ahead.
+      expect(wire.window()).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
+      for (let n = 0; n < 64; n++) wire.send((seq) => encode.binary(1, frame, seq))
+      let most = 0
+      for (let ms = 0; ms < 4_000; ms += 5) {
+        most = Math.max(most, wire.unconfirmed())
+        await sleep(5)
       }
-    },
-  )
+      expect(most).toBeLessThanOrEqual(WIRE_SEND_AHEAD_MIN_BYTES)
+    } finally {
+      wire.stop()
+    }
+  })
 
   it('a stream on a link with a long round trip, not yet measured, keeps the link busy', async () => {
     // 50 kB/s, 450 ms each way, and 3300 B texts at 30 Hz: twice what the link carries.

@@ -59,7 +59,7 @@ function wireToPage() {
   })
   let seq = 0
   const send = (count: number, bytes: number) => {
-    for (let i = 0; i < count; i++) headroom.send(encode.text(1, 'x'.repeat(bytes), ++seq), performance.now())
+    for (let i = 0; i < count; i++) headroom.send(encode.text(1, 'x'.repeat(bytes), ++seq))
   }
   return { send, taken: () => taken, acknowledgements: () => acknowledgements }
 }

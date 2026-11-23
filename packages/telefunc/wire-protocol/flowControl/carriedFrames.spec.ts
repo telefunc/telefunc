@@ -83,16 +83,16 @@ describe('a carried frame behind a data frame that waits, after the carried fram
       try {
         // What the page hasn't said it took: nearly the wire's share of copies.
         for (let seq = 1; seq <= 4; seq++) {
-          headroom.send(encode.binary(1, new Uint8Array(15_000), seq), performance.now())
+          headroom.send(encode.binary(1, new Uint8Array(15_000), seq))
         }
         await new Promise((resolve) => setTimeout(resolve, 0))
         headroom.sender.carry(() => encode.window(1, 1_000_000, 1))
-        headroom.send(encode.binary(1, new Uint8Array(bytes), 5), performance.now())
+        headroom.send(encode.binary(1, new Uint8Array(bytes), 5))
         expect(headroom.sender.dataWaits).toBe(true)
         headroom.sender.carry(() => encode.window(1, 2_000_000, 2))
-        headroom.send(encode.text(1, 'hi', 6), performance.now())
+        headroom.send(encode.text(1, 'hi', 6))
         // The wire's next PING, which goes ahead of waiting data.
-        headroom.send(encode.ping(), performance.now())
+        headroom.send(encode.ping())
         // The task that hands what it gathered.
         await new Promise((resolve) => setTimeout(resolve, 0))
       } finally {

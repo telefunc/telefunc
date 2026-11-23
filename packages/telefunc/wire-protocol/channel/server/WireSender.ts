@@ -97,7 +97,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner {
     this.headroom -= frame.byteLength
     const at = performance.now()
     this.wait.handed(frame.byteLength, passesData(frame[0]!), at)
-    if (this.pieces) this.pieces.headroom.send(frame, at)
+    if (this.pieces) this.pieces.headroom.send(frame)
     else this.transport.sendNow(this.wire, frame)
   }
 
