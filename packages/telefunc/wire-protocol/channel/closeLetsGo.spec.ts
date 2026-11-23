@@ -46,13 +46,14 @@ function pair(transport: 'sse' | 'ws') {
   return [channel, page] as const
 }
 
-// 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
-const FITS = `${'é'.repeat(1_048_315)}x`
+// The most one channel may hold is 2 MiB less the eighth kept for waiting sends: 1,835,008 bytes, which are these 1,834,487
+// UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+const FITS = `${'é'.repeat(917_243)}x`
 
 for (const transport of ['sse', 'ws'] as const) {
   describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, once the page has the verdict of a close the server decided`, () => {
     for (const [text, sent, expected] of [
-      [FITS, 'maxMemory to the byte', 'answered'],
+      [FITS, 'the most one channel may hold', 'answered'],
       [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
     ] as const) {
       test(`the next channel's send of ${sent} is ${expected === 'answered' ? 'answered' : 'refused with ChannelOverflowError'}`, async () => {
@@ -89,7 +90,7 @@ for (const transport of ['sse', 'ws'] as const) {
     }[decider]
     describe(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, right after ${close} with no frame from the page since`, () => {
       for (const [text, sent, expected] of [
-        [FITS, 'maxMemory to the byte', 'answered'],
+        [FITS, 'the most one channel may hold', 'answered'],
         [`${FITS}x`, 'one byte more', 'ChannelOverflowError'],
       ] as const) {
         test(`a send of ${sent} on another channel of its connection is ${expected === 'answered' ? 'answered' : 'refused with ChannelOverflowError'}`, async () => {
@@ -126,14 +127,14 @@ for (const transport of ['sse', 'ws'] as const) {
           }
 
           expect(await other.send(text, { ack: true }).then(String, (err: Error) => err.name)).toBe(expected)
-          // The RECONCILE that declares one more lets go of what the close kept, so the next row has all of `maxMemory`.
+          // The RECONCILE that declares one more lets go of what the close kept, so the next row has all a channel may hold.
           const [last, lastPage] = pair(transport)
           await Promise.all([last.opened, lastPage.opened])
         })
       }
 
       if (decider === 'page')
-        test('its verdict again, as a replay after a reconnect would bring it, changes nothing: the close stays clean, and a send of maxMemory to the byte on another channel is answered', async () => {
+        test('its verdict again, as a replay after a reconnect would bring it, changes nothing: the close stays clean, and a send of the most one channel may hold on another channel is answered', async () => {
           const [first, firstPage] = pair(transport)
           const [other, otherPage] = pair(transport)
           await Promise.all([first.opened, firstPage.opened, other.opened, otherPage.opened])

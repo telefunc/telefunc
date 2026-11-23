@@ -80,6 +80,14 @@ function reads(frames: Iterable<Uint8Array>): string[] {
   return out
 }
 
+/** What waits for the wire, by channel index: each channel's frames wait in a lane of their own, in the order sent, and
+ *  the lanes take turns. */
+function byChannel(frames: Iterable<Uint8Array>): Record<number, string[]> {
+  const lanes: Record<number, string[]> = {}
+  for (const read of reads(frames)) (lanes[Number(read.slice(0, read.indexOf(':')))] ??= []).push(read)
+  return lanes
+}
+
 /** Two subscribers of one key on one page, at channel indexes 0 and 1. */
 function subscribers() {
   const key = crypto.randomUUID()
@@ -151,10 +159,15 @@ function leaveRoom(room: number): () => void {
   }
 }
 
-/** As `leaveRoom`, but `room` below `maxMemory` itself, past the shedding target. */
+/** The room `maxMemory` keeps for sends waiting to be held: the most one channel may hold, within the top eighth. */
+const WAITING_ROOM = Math.min(getChannelConfig().maxPendingBytes, getChannelConfig().maxMemory / 8)
+/** The most bytes held: `maxMemory` less that room. */
+const HELD_AT_MOST = getChannelConfig().maxMemory - WAITING_ROOM
+
+/** As `leaveRoom`, but `room` below the most bytes held, past the shedding target. */
 function leaveRoomUnderMax(room: number): () => void {
   const filler: MemoryHolder = { heldBytes: 0 }
-  hold(filler, getChannelConfig().maxMemory - ledgerTotal() - room)
+  hold(filler, HELD_AT_MOST - ledgerTotal() - room)
   return () => {
     letGo(filler, filler.heldBytes)
     releaseHolder(filler)
@@ -301,7 +314,7 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
 
     await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
     // Of channel 0, p1 started, so only p2 and p3 wait.
-    expect(reads(headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+    expect(byChannel(headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
     end(ended)
     expect(ended.isClosed).toBe(true)
     // Of channel 0, only the too-many-answers ERROR may still wait, behind the p1 its wire started.
@@ -315,7 +328,7 @@ test("on a WebSocket, the page's close keeps the publishes the wire had not star
   const page = overWebSocket([ended, other])
 
   await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
-  expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+  expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
   fromPage(ended, encode.close(0, 1_000, 1))
   expect(ended.isClosed).toBe(true)
   const pageReads = await page.readAll()
@@ -352,7 +365,7 @@ test('on a WebSocket, abort() keeps its publishes the wire had not started, and 
 
   await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
   // Of channel 0, p1 started, so only p2 and p3 wait.
-  expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+  expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
   ended.abort()
   expect(ended.isClosed).toBe(true)
   const pageReads = await page.readAll()
@@ -1150,11 +1163,17 @@ async function underPressure(stalled: ServerChannel, room: number, publish?: (da
   stalled.abort('kicked')
   const release = leaveRoom(room)
   try {
-    const admission = await other.send('q1' + 'x'.repeat(1_000_000)).then(
+    const sent = other.send('q1' + 'x'.repeat(1_000_000)).then(
       () => 'accepted',
       (err: unknown) => (err instanceof ChannelOverflowError ? 'refused' : 'other'),
     )
+    // A send that waits for room goes once the room the rows hold is let go.
+    const settled = await Promise.race([
+      sent,
+      new Promise<'waits'>((resolve) => setTimeout(() => resolve('waits'), 50)),
+    ])
     release()
+    const admission = settled === 'waits' ? `waited, ${await sent}` : settled
     return { admission, read: (await page.readAll()).filter((read) => read.startsWith('0:')) }
   } finally {
     release()
@@ -1163,10 +1182,12 @@ async function underPressure(stalled: ServerChannel, room: number, publish?: (da
 }
 
 // Short of memory, an aborted channel's page reads what an open one's would, then the abort's end.
-const NO_ROOM = 500_000 - getChannelConfig().maxMemory / 8
+// 500 kB below the most bytes held: less than the 1 MB send needs, which waits for room, and less than an aborted
+// subscriber's unstarted publishes free.
+const NO_ROOM = 500_000 - (HELD_AT_MOST - (getChannelConfig().maxMemory * 7) / 8)
 test.each([
   [300_000, 'accepted'],
-  [NO_ROOM, 'refused'],
+  [NO_ROOM, 'waited, accepted'],
 ])(
   "on a WebSocket, short of memory (%d below the target), an aborted channel's page reads every message it was sent, then the Abort, and another channel's send fares as it would beside it open",
   async (room, admission) => {
@@ -1260,7 +1281,7 @@ test("on a WebSocket, a send that an aborted subscriber's onClose makes on anoth
   overWebSocket([other])
   await new Promise((resolve) => setTimeout(resolve))
   for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
-  const release = leaveRoom(500_000 - getChannelConfig().maxMemory / 8)
+  const release = leaveRoom(NO_ROOM)
   let sent: Promise<void> | undefined
   aborted.onClose(() => {
     sent = other.send('q1' + 'x'.repeat(1_000_000))
@@ -1286,10 +1307,10 @@ test('on a WebSocket, a send its own channel can never hold is refused before an
   for (const name of ['p1', 'p2']) await Broadcast.publish(key, name + 'x'.repeat(700_000))
   void live.send('q1' + 'x'.repeat(1_500_000))
   aborted.abort()
-  // Under the budget, and past the most one channel holds: 1.5 MB and 1 MB.
+  // Under the budget, and past the most one channel holds even where it holds nothing.
   const release = leaveRoom(0)
   try {
-    await expect(live.send('q2' + 'x'.repeat(1_000_000))).rejects.toThrow(ChannelOverflowError)
+    await expect(live.send('q2' + 'x'.repeat(CREDIT_WINDOW_INITIAL_BYTES))).rejects.toThrow(ChannelOverflowError)
     release()
     expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p2', '0:ABORT'])
   } finally {
@@ -1456,7 +1477,7 @@ for (const [ending, end] of Object.entries(PAGE_GONE)) {
       void ended.send(message)
       void other.send(message)
     }
-    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+    expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
     end(ended)
     expect(ended.isClosed).toBe(true)
     expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '1:p2', '1:p3'])

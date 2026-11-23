@@ -69,6 +69,8 @@ function deafenServer() {
 }
 
 const MAX_MEMORY = 2 * 1024 * 1024
+/** The most one holder may hold: `maxMemory` less the eighth it keeps for sends waiting to be held. */
+const HOLDS_AT_MOST = MAX_MEMORY - MAX_MEMORY / 8
 
 /** A server channel and the page's end of it, both open, on a connection of their own that ends `idleTimeout` ms after
  *  its last channel does. */
@@ -144,9 +146,9 @@ for (const transport of ['sse', 'ws'] as const) {
         expect(await channel.closed).toBe(null)
         const connections = dropConnections()
 
-        // A `messages()` loop's queue needs all of `maxMemory` before the page is back, or nothing does.
+        // A `messages()` loop's queue needs all one holder may hold before the page is back, or nothing does.
         const queue = queueMemory()
-        const held = short && queue.tryHold(MAX_MEMORY)
+        const held = short && queue.tryHold(HOLDS_AT_MOST)
         connections.reconnect()
         expect(held).toBe(short)
 
@@ -177,9 +179,9 @@ for (const transport of ['sse', 'ws'] as const) {
         else channel.abort('bye')
         const connections = dropConnections()
 
-        // Holding all of `maxMemory` lets go of whatever may go; the queue then holds nothing for the rows after.
+        // Holding all one holder may hold lets go of whatever may go; the queue then holds nothing for the rows after.
         const queue = queueMemory()
-        const held = queue.tryHold(MAX_MEMORY)
+        const held = queue.tryHold(HOLDS_AT_MOST)
         queue.release()
         connections.reconnect()
         expect(held).toBe(false)
@@ -311,7 +313,7 @@ for (const transport of ['sse', 'ws'] as const) {
       const connections = dropConnections()
 
       const queue = queueMemory()
-      const held = queue.tryHold(MAX_MEMORY)
+      const held = queue.tryHold(HOLDS_AT_MOST)
       connections.reconnect()
       expect(held).toBe(false)
 

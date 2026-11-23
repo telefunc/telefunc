@@ -26,6 +26,11 @@ afterEach(() => vi.useRealTimers())
 
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+/** The most bytes held: `maxMemory` less the room it keeps for sends waiting to be held, one channel's limit at most. */
+const heldAtMost = () => {
+  const { maxMemory, maxPendingBytes } = getChannelConfig()
+  return maxMemory - Math.min(maxPendingBytes, maxMemory / 8)
+}
 
 /** The page: what it read of its channel, in order, each lossy one marked `~`, and the bytes it consumed. */
 type Page = { lastSeq: number; read: string[]; consumed: number }
@@ -490,7 +495,7 @@ describe('a large lossy send near the memory budget', () => {
   /** Holds the budget down to `room` bytes, until `free()`. */
   function leaveRoom(room: number) {
     const filler: MemoryHolder = { heldBytes: 0 }
-    hold(filler, getChannelConfig().maxMemory - ledgerTotal() - room)
+    hold(filler, heldAtMost() - ledgerTotal() - room)
     return () => {
       letGo(filler, filler.heldBytes)
       releaseHolder(filler)
@@ -729,7 +734,7 @@ describe("the server's memory after a lossy send", () => {
     const room = 256 * 1024
     void channel.send('x'.repeat(2 * room), { lossy: true })
     const filler: MemoryHolder = { heldBytes: 0 }
-    hold(filler, getChannelConfig().maxMemory - before - room)
+    hold(filler, heldAtMost() - before - room)
     channel._registerChannel()
     const page = newPage()
     wire(channel, page).attach()

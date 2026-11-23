@@ -30,6 +30,9 @@ import type { ChannelMux } from './ChannelMux.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
+  admitSend,
+  cancelWait,
+  waitForRoom,
   admit,
   fits,
   heldAnswerBytes,
@@ -38,10 +41,10 @@ import {
   holdsAtMost,
   holdsEnough,
   letGo,
-  maxPendingBytesOf,
   releaseHolder,
   tryHold,
   type MemoryHolder,
+  type RoomWait,
 } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -186,6 +189,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pageClosed = false
   /** Its lossy sends while its page is attached, from the first one on. */
   private lossySends: LossyDelivery<LossySend> | null = null
+  /** Its send that waits for room on the ledger, how its promise settles if the channel ends first, and the newest lossy
+   *  send made since, which goes right after it. */
+  private roomWait: { wait: RoomWait; reject: (err: Error) => void } | null = null
 
   // ── Wire state — channel-owned, kept across the page's attaches ────
   /** @internal Buffer of outgoing wire frames, used to replay missed frames on reconnect. Allocated in
@@ -246,10 +252,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { lossy: true; ack?: false }): Promise<void>
-  send(
-    data: ChannelData<ServerToClient>,
-    opts?: { ack?: boolean; lossy?: boolean },
-  ): Promise<ChannelAck<ServerToClient>> | Promise<void> {
+  send(data: ChannelData<ServerToClient>, opts?: { ack?: boolean; lossy?: boolean }): Promise<unknown> {
     const t0 = performance.now()
     try {
       const ret = this.sendData(data, opts) ?? Promise.resolve()
@@ -263,14 +266,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private sendData(
     data: ChannelData<ServerToClient>,
     opts?: { ack?: boolean; lossy?: boolean },
-  ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
+  ): void | Promise<unknown> {
     if (this._phase !== 'open') throw this.lifecycle.sendRefusal()
     if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) return this.sendLossy(TAG.TEXT, serialized, utf8ByteLength(serialized))
-    const refusal = this.textRefusal(serialized)
-    if (refusal) return Promise.reject<void>(refusal)
+    // A UTF-16 unit takes at most 3 UTF-8 bytes, so text that fits even at that is admitted unmeasured.
+    if (this.roomWait === null && fits(this, heldSendBytes(serialized.length * 3)))
+      return this.sendText(serialized, needsAck)
+    return this.admitted(heldSendBytes(utf8ByteLength(serialized)), () => this.sendText(serialized, needsAck))
+  }
+
+  private sendText(serialized: string, needsAck: boolean): void | Promise<unknown> {
     if (!this.peer) {
       if (needsAck) {
         return this.lifecycle.trackAck(
@@ -312,8 +320,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (opts?.lossy) assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
     const needsAck = opts?.ack === true
     if (opts?.lossy) return this.sendLossy(TAG.BINARY, data, data.byteLength)
-    const refusal = this.refusal(data.byteLength)
-    if (refusal) return Promise.reject<void>(refusal)
+    if (this.roomWait === null && fits(this, heldSendBytes(data.byteLength))) return this.sendBytes(data, needsAck)
+    let bytes = data
+    // The caller may write into its bytes once `sendBinary` returned, so a send that waits keeps a copy.
+    const keep = () => void (bytes = new Uint8Array(data))
+    return this.admitted(heldSendBytes(data.byteLength), () => this.sendBytes(bytes, needsAck), keep)
+  }
+
+  private sendBytes(data: Uint8Array, needsAck: boolean): void | Promise<unknown> | Promise<void> {
     if (!this.peer) {
       if (needsAck) {
         return this.lifecycle.trackAck(
@@ -416,18 +430,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  /** Why a text send can't go, where it isn't admitted. A UTF-16 unit takes at most 3 UTF-8 bytes, so text that fits
-   *  even at that is admitted unmeasured; other text is decided at its real size. */
-  private textRefusal(text: string): ChannelOverflowError | null {
-    if (fits(this, heldSendBytes(text.length * 3))) return null
-    return this.refusal(utf8ByteLength(text))
-  }
-
-  /** Why a send of `bytes` can't go, where it isn't admitted. It holds nothing and takes no seq, so the page sees no gap
-   *  on the wire, and later sends that fit go through. */
-  private refusal(bytes: number): ChannelOverflowError | null {
-    const held = heldSendBytes(bytes)
-    return admit(this, held) ? null : this.refuseSend(held)
+  /** Makes a send that holds `held` with `go` once the ledger admits it: at once, or when room frees, first in line
+   *  first, `keep` running as it starts to wait. A send made while one of its channel's waits, and one that can never
+   *  fit, is refused: it holds nothing and takes no seq, so the page sees no gap on the wire, and later sends that fit
+   *  go through. The returned promise settles once, with `go`'s outcome, or with the channel's end. */
+  private admitted(held: number, go: () => void | Promise<unknown>, keep?: () => void): void | Promise<unknown> {
+    if (this.roomWait !== null) return Promise.reject<void>(this.refuseSend(held))
+    const verdict = admitSend(this, held)
+    if (verdict === 'now') return go()
+    if (verdict === 'refused') return Promise.reject<void>(this.refuseSend(held))
+    keep?.()
+    return new Promise<unknown>((resolve, reject) => {
+      const wait = waitForRoom(this, held, () => {
+        this.roomWait = null
+        void settleMade(go(), resolve, reject)
+      })
+      this.roomWait = { wait, reject }
+    })
   }
 
   /** A send that would hold `bytes` wasn't admitted. */
@@ -435,9 +454,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this.refusalWarned) {
       this.refusalWarned = true
       const limit =
-        this.heldBytes + bytes > maxPendingBytesOf()
-          ? `it would hold more than ${maxPendingBytesOf()} bytes, the most for one channel`
-          : `this server's channels hold nearly \`config.channel.maxMemory\`, ${getChannelConfig().maxMemory} bytes`
+        this.roomWait !== null
+          ? 'another `send()` of this channel already waits for room'
+          : bytes > holdsAtMost()
+            ? `it would hold more than ${holdsAtMost()} bytes, the most for one channel`
+            : `what this server's channels hold and the sends waiting for room fill \`config.channel.maxMemory\`, ${getChannelConfig().maxMemory} bytes`
       assertWarning(
         false,
         `A channel refused a \`send()\`: ${limit}, so that message isn't delivered and its promise rejects with \`ChannelOverflowError\`. Later sends that fit still go. Await each \`channel.send()\` or \`channel.sendBinary()\` before the next.`,
@@ -1111,6 +1132,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.listeners.clear()
     this.binaryListeners.clear()
     this.sendCredit.shutdown(this.lifecycle.waitingSendOutcome)
+    this.endRoomWait(err)
     // Building an error captures a stack trace, so one is built only while an ack is awaited or a frame is buffered.
     if (this.pendingAcks.size > 0 || this.offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
@@ -1120,6 +1142,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this.pendingAcks.clear()
     this.letAnsweringGo()
+  }
+
+  /** Its send that waited for room is never made: an end that sends its own word made it first (`sendWaitingNow`), so
+   *  this is an end it never reached the page ahead of, and it rejects with the channel's outcome. */
+  private endRoomWait(err: Error | undefined): void {
+    const waiting = this.roomWait
+    if (waiting === null) return
+    this.roomWait = null
+    cancelWait(waiting.wait)
+    waiting.reject(this.lifecycle.waitingSendOutcome ?? err ?? this.endError())
   }
 
   /** Nothing answers its requests once it ends, so what they held goes. */
@@ -1203,4 +1235,17 @@ const Channel = ServerChannel as unknown as {
   new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
   }): Channel<ClientToServer, ServerToClient, false>
+}
+
+/** Settles a send that waited for room with the outcome of making it. */
+async function settleMade(
+  made: void | Promise<unknown>,
+  resolve: (value: unknown) => void,
+  reject: (err: unknown) => void,
+): Promise<void> {
+  try {
+    resolve(await made)
+  } catch (err) {
+    reject(err)
+  }
 }

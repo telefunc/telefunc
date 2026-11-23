@@ -3,6 +3,9 @@ export {
   addWireCopies,
   admit,
   admitPublish,
+  admitSend,
+  waitForRoom,
+  cancelWait,
   dropWireCopies,
   fits,
   fitsPublish,
@@ -19,13 +22,14 @@ export {
   releaseHolder,
   tryHold,
 }
-export type { MemoryHolder }
+export type { MemoryHolder, RoomWait }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
 import { HEADER } from '../../wire/header.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../../wire/frame.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
+import { Fifo } from '../../../utils/Fifo.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
 
@@ -57,7 +61,49 @@ const memory = getGlobalObject('channelMemory.ts', {
   maxPendingBytes: 0,
   /** What wires hold as copies, on no holder: a replay holds the same bytes. */
   wireCopies: 0,
+  /** The sends waiting for room, in the order they were made: at most one per holder (`admitSend`). */
+  waiting: new Fifo<RoomWait>(),
+  /** What the sends waiting for room will hold. Held bytes and these together never pass `maxMemory` (`heldAtMost`). */
+  reserved: 0,
+  /** Whether a look at `waiting` is queued for the end of this task. */
+  wakeQueued: false,
 })
+
+/** A send waiting for room: `go` makes it, holding its bytes, once `admit` admits them; `cancelled` takes it out of line. */
+type RoomWait = { holder: MemoryHolder; bytes: number; go: () => void; cancelled: boolean }
+
+/** Whether a send of `bytes` for `holder` is admitted now, is refused, or is to wait for room (`waitForRoom`), its
+ *  bytes reserved. Sends wait in the order they were made, so one made while others wait waits too. One is refused
+ *  where it is past what one holder may hold when it holds nothing, or where `maxMemory` has no room left for it with
+ *  what is held and what waits. */
+function admitSend(holder: MemoryHolder, bytes: number): 'now' | 'refused' | 'wait' {
+  if (bytes > holdsAtMost()) return 'refused'
+  if (memory.waiting.length === 0 && admit(holder, bytes)) return 'now'
+  return memory.total + memory.reserved + bytes <= maxMemoryOf() ? 'wait' : 'refused'
+}
+
+/** Puts a send of `bytes` for `holder` in line, its bytes reserved, which `admitSend` found room for: `go` makes it,
+ *  holding them, once room frees for it. The line is looked at once this task ends, so a send that fits already goes
+ *  then. */
+function waitForRoom(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
+  const wait: RoomWait = { holder, bytes, go, cancelled: false }
+  memory.waiting.push(wait)
+  memory.reserved += bytes
+  wakeSoon()
+  return wait
+}
+
+/** `wait` is never made: its reservation goes, and the line moves on without it. */
+function cancelWait(wait: RoomWait): void {
+  if (wait.cancelled) return
+  wait.cancelled = true
+  unreserve(wait.bytes)
+}
+
+function unreserve(bytes: number): void {
+  memory.reserved -= bytes
+  wakeSoon()
+}
 
 /** Whether `bytes` for `holder` may be held; its caller tells whoever asked when not. Near the budget, a holder past an
  *  equal share is refused, so one still under it has room. A subscriber cut to make room ends after this returns. */
@@ -67,14 +113,80 @@ function admit(holder: MemoryHolder, bytes: number): boolean {
   if (holder.heldBytes + bytes > holdsAtMost()) return false
   const target = shedTarget(maxMemory)
   if (memory.total + bytes > target) reclaim(bytes, target)
-  if (memory.total + bytes <= target) return true
-  return holder.heldBytes + bytes <= maxMemory / memory.holders.size && memory.total + bytes <= maxMemory
+  return admitsAsIs(holder, bytes, 0, maxMemory, heldAtMost(maxMemory, memory.reserved))
+}
+
+/** Whether `bytes` for `holder` fit what is held now and `ahead`, which waits ahead of them: under the target, or, near
+ *  the budget, within an equal share and `most`. */
+function admitsAsIs(holder: MemoryHolder, bytes: number, ahead: number, maxMemory: number, most: number): boolean {
+  const total = memory.total + ahead + bytes
+  if (total > most) return false
+  if (total <= shedTarget(maxMemory)) return true
+  // One holding nothing is under any share.
+  return holder.heldBytes === 0 || holder.heldBytes + bytes <= maxMemory / memory.holders.size
+}
+
+/** The room `maxMemory` keeps for sends waiting to be held: the most one channel may hold, within the top eighth. Held
+ *  bytes stop short of it, so a send made while the ledger is full can still wait; and with what waits, they never pass
+ *  `maxMemory`. */
+function waitingRoom(maxMemory: number): number {
+  return Math.min(maxPendingBytesOf(), maxMemory - shedTarget(maxMemory))
+}
+
+/** The most bytes held, where `reserved` waits: `maxMemory` less the room for waiting sends, or less what waits. */
+function heldAtMost(maxMemory: number, reserved: number): number {
+  return maxMemory - Math.max(waitingRoom(maxMemory), reserved)
+}
+
+/** Room freed: the sends in line that fit go, first in line first. One the cap holds back keeps its bytes in reserve, so
+ *  the sends behind it take only what is left past it. Room is reclaimed once a look, for the first send that needs it. */
+function wake(): void {
+  memory.wakeQueued = false
+  const maxMemory = maxMemoryOf()
+  const target = shedTarget(maxMemory)
+  // A send made from the line holds what it reserved, so it goes within the held bytes' room alone.
+  const most = maxMemory - waitingRoom(maxMemory)
+  // What waits ahead, held back by the cap, and what lossy sends behind the line reserve.
+  let ahead = memory.reserved
+  for (const wait of memory.waiting) if (!wait.cancelled) ahead -= wait.bytes
+  let reclaimed = false
+  const perHolder = holdsAtMost()
+  memory.waiting.remove((wait) => {
+    if (wait.cancelled) return true
+    // One past its channel's limit waits for its own page, and holds back no other channel.
+    if (wait.holder.heldBytes + wait.bytes > perHolder) return false
+    if (ahead + memory.total + wait.bytes > most) {
+      ahead += wait.bytes
+      return false
+    }
+    if (!reclaimed && memory.total + ahead + wait.bytes > target) {
+      reclaimed = true
+      reclaim(ahead + wait.bytes, target)
+    }
+    // One its share holds back leaves its room to the sends behind it, as one past its channel's limit does.
+    if (!admitsAsIs(wait.holder, wait.bytes, ahead, maxMemory, most)) return false
+    // Held as it goes, so the next one in line sees it.
+    wait.cancelled = true
+    memory.reserved -= wait.bytes
+    wait.go()
+    return true
+  })
+}
+
+function wakeSoon(): void {
+  if (memory.waiting.length === 0 || memory.wakeQueued) return
+  memory.wakeQueued = true
+  queueMicrotask(wake)
 }
 
 /** Whether `bytes` for `holder` may be held with nothing let go to make room for them: `admit` then admits them as well. */
 function fits(holder: MemoryHolder, bytes: number): boolean {
   const maxMemory = maxMemoryOf()
-  return holder.heldBytes + bytes <= holdsAtMost() && memory.total + bytes <= shedTarget(maxMemory)
+  return (
+    memory.waiting.length === 0 &&
+    holder.heldBytes + bytes <= holdsAtMost() &&
+    memory.total + bytes <= Math.min(shedTarget(maxMemory), heldAtMost(maxMemory, memory.reserved))
+  )
 }
 
 /** Makes room for a delivery to `owner`'s pages, which nobody can refuse. Near the budget, each page whose waiting
@@ -87,11 +199,12 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
   // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
   if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
+  const most = heldAtMost(maxMemory, memory.reserved)
   if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
   reclaim(bytes, target)
-  if (memory.total + bytes <= maxMemory) return
+  if (memory.total + bytes <= most) return
   for (const [newest, holders] of newestsThatEndingFrees()) {
-    if (memory.total + bytes <= maxMemory) return
+    if (memory.total + bytes <= most) return
     if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
   }
 }
@@ -99,7 +212,7 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
 /** Whether one more page may hold `body` within `maxMemory`, once `admitPublish` made what room it could. */
 function fitsPublish(body: PublishBody): boolean {
   const bytes = HELD_PUBLISH_OVERHEAD_BYTES + (body.refs === 0 ? body.frame.byteLength : 0)
-  return memory.total + bytes <= maxMemoryOf()
+  return memory.total + bytes <= heldAtMost(maxMemoryOf(), memory.reserved)
 }
 
 /** Fewest sharers first. A body another page has on the wire counts more references than holders here, so it's left. */
@@ -160,6 +273,7 @@ function letGo(holder: MemoryHolder, held: number | PublishBody): void {
     memory.total -= HELD_PUBLISH_OVERHEAD_BYTES + (--held.refs === 0 ? held.frame.byteLength : 0)
   }
   if (holder.heldBytes === 0) memory.holders.delete(holder)
+  wakeSoon()
 }
 
 /** Every byte held has an owner, and when that owner ends all it holds goes, wherever it was charged: what still runs
@@ -169,6 +283,7 @@ function releaseHolder(holder: MemoryHolder): void {
   holder.heldBytes = 0
   holder.released = true
   memory.holders.delete(holder)
+  wakeSoon()
 }
 
 /** Whether a wire may hand more copies: what a replay shares, a wire's socket can't. The top eighth is theirs, so the
@@ -187,7 +302,7 @@ function dropWireCopies(bytes: number): void {
 
 /** Whether the server holds enough that it grants its pages no more credit. */
 function holdsEnough(): boolean {
-  return memory.total > shedTarget(maxMemoryOf())
+  return memory.total + memory.reserved > shedTarget(maxMemoryOf())
 }
 
 /** What a `messages()` loop's queue or a stream's reader holds, on the ledger as a holder of its own: nothing else can
@@ -248,9 +363,10 @@ function maxPendingBytesOf(): number {
   return (memory.maxPendingBytes ||= getChannelConfig().maxPendingBytes)
 }
 
-/** The most one holder may ever hold: a channel's limit, within `maxMemory`. */
+/** The most one holder may ever hold: a channel's limit, within what `maxMemory` holds past the room for waiting sends. */
 function holdsAtMost(): number {
-  return Math.min(maxPendingBytesOf(), maxMemoryOf())
+  const maxMemory = maxMemoryOf()
+  return Math.min(maxPendingBytesOf(), maxMemory - waitingRoom(maxMemory))
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */
