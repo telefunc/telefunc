@@ -357,8 +357,12 @@ const type = (() => {
   }
 
   const const_ = <T extends Readonly<number> | Readonly<string> | Readonly<boolean> | undefined | null>(val: T): T => {
-    const verifier = (input: unknown, breadcrumbs: string) =>
-      input === val ? true : errorMessage(breadcrumbs, isProduction() ? getTypeName(input) : String(input), String(val))
+    const verifier = (input: unknown, breadcrumbs: string) => {
+      if (input === val) return true
+      // `String()` throws on a sent object whose `toString` isn't a function
+      const is = isProduction() || isObjectOrFunction(input) ? getTypeName(input) : String(input)
+      return errorMessage(breadcrumbs, is, String(val))
+    }
     markVerifier(verifier)
     verifier.toString = () => StringBetter(val)
     return verifier as any

@@ -1,6 +1,6 @@
 import { checkType } from '../../../utils/checkType.js'
 import { shield, shieldApply, shieldToHumandReadable } from '../shield.js'
-import { expect, describe, it } from 'vitest'
+import { expect, describe, it, vi } from 'vitest'
 
 describe('shield', () => {
   it('shield - basic', () => {
@@ -97,6 +97,19 @@ describe('shield', () => {
     {
       const telefunction = shield([{ toString: t.optional(t.string) }], (_a) => {})
       expect(shieldApply(telefunction, [{}])).toBe(true)
+    }
+  })
+
+  it('shield - literal mismatch in development', () => {
+    vi.stubGlobal('__TELEFUNC__IS_NON_RUNNABLE_DEV', true)
+    try {
+      const telefunction = shield([t.const('ready')], (_a) => {})
+      expect(shieldApply(telefunction, ['done'])).toBe('[root] > [tuple: element 0] is `done` but should be `ready`.')
+      expect(shieldApply(telefunction, [{ toString: 'label' }])).toBe(
+        '[root] > [tuple: element 0] is `object` but should be `ready`.',
+      )
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 
