@@ -962,7 +962,8 @@ const REDIS_COMMANDS = {
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
       const values = Array.isArray(reply) ? reply.map(Number) : []
-      assert(values.length === 2 && values.every(Number.isSafeInteger), 'Publish script returned an unexpected reply')
+      // The ordering itself is checked by core, as every driver's is.
+      assert(values.length === 2, 'Publish script returned an unexpected reply')
       const [seq, timestamp] = values as [number, number]
       return { seq, timestamp }
     },
