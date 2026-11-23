@@ -249,8 +249,9 @@ function verifyObject(obj: Record<string, unknown>, arg: unknown, breadcrumbs: s
   if (!isPlainObject(arg)) {
     return errorMessage(breadcrumbs, getTypeName(arg), 'object')
   }
-  for (const key of unique([...Object.keys(obj), ...Object.keys(arg)])) {
-    const res = verifyRecursive(obj[key], arg[key], `${breadcrumbs} > [object: value of key \`${key}\`]`)
+  const shieldKeys = Object.keys(obj)
+  for (const key of unique([...shieldKeys, ...Object.keys(arg)])) {
+    const res = verifyRecursive(obj[key], arg[key], `${breadcrumbs} > ${keyBreadcrumb(key, !shieldKeys.includes(key))}`)
     if (res !== true) {
       return res
     }
@@ -325,7 +326,7 @@ const type = (() => {
         return errorMessage(breadcrumbs, getTypeName(input), 'object')
       }
       const errorMessages = Object.entries(input)
-        .map(([key, val]) => verifyRecursive(objectType, val, `${breadcrumbs} > [object: value of key \`${key}\`]`))
+        .map(([key, val]) => verifyRecursive(objectType, val, `${breadcrumbs} > ${keyBreadcrumb(key, true)}`))
         .filter((res) => res !== true)
       if (errorMessages.length === 0) {
         return true
@@ -346,7 +347,7 @@ const type = (() => {
 
   const const_ = <T extends Readonly<number> | Readonly<string> | Readonly<boolean> | undefined | null>(val: T): T => {
     const verifier = (input: unknown, breadcrumbs: string) =>
-      input === val ? true : errorMessage(breadcrumbs, String(input), String(val))
+      input === val ? true : errorMessage(breadcrumbs, isProduction() ? getTypeName(input) : String(input), String(val))
     markVerifier(verifier)
     verifier.toString = () => StringBetter(val)
     return verifier as any
@@ -455,6 +456,11 @@ function registerShieldType(name: string, verify: (input: unknown) => boolean) {
   verifier.toString = () => name
   const typeBag: Record<string, unknown> = type
   typeBag[name] = verifier
+}
+
+// Keys and values sent by the client can hold secrets such as passwords, so production messages leave them out
+function keyBreadcrumb(key: string, isInputKey: boolean): string {
+  return isInputKey && isProduction() ? '[object: value of a key]' : `[object: value of key \`${key}\`]`
 }
 
 function errorMessage(breadcrumbs: string, is: string, should: string) {
