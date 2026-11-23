@@ -52,7 +52,7 @@ import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle, type Session } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
-import type { ServerChannel } from './ServerChannel.js'
+import type { PageSign, ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -215,12 +215,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── ServerChannel registry ──────────────────────────────────────────
 
-  /** Callers must not invoke `channel._registerChannel()` directly. `attachable`: settles once a page can attach, as a
-   *  browser can only once it has sent the call's whole body; the channel's connect window counts from then
+  /** Callers must not invoke `channel._registerChannel()` directly. `pageSign`: when the page last showed it is on
+   *  its way, as a browser does while it sends the call's body; the channel's connect window counts from then
    *  (`ATTACHABLE_NOW` where nothing is on its way). */
-  registerChannel(channel: ServerChannel<any, any>, attachable: Promise<void>): void {
+  registerChannel(channel: ServerChannel<any, any>, pageSign: PageSign): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
-    channel._registerChannel(attachable, this)
+    channel._registerChannel(pageSign, this)
     this.channels.set(channel.id, channel)
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)

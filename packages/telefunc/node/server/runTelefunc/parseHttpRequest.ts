@@ -200,8 +200,14 @@ async function readBody(
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
     const { clientGone } = runContext
-    // A page attaches to a channel the call returns once its upload is over: the body read off, or its client gone.
     runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(clientGone)])
+    // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
+    // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign.
+    let lastByteAt = performance.now()
+    reader.onChunk = () => {
+      lastByteAt = performance.now()
+    }
+    runContext.requestContext.pageSign = () => lastByteAt
     runContext.requestContext.onAnswered(() => {
       reader.keepRest(queueMemory())
       // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):

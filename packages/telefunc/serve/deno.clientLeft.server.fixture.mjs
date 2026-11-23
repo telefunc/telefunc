@@ -6,11 +6,14 @@
 // - `string`: `serve({ request })`, answered with `httpResponse.body`, as examples/cloudflare-workers and examples/next.
 // And on a server of its own, Deno's `node:http`:
 // - `node`: `serve({ url, method, readable, headers })`, answered with `httpResponse.body`, as an Express app does under
-//   Deno (examples/babel).
+//   Deno (examples/babel);
+// - `framework`: `serve({ request })` with a `Request` a framework built of it (its body `Readable.toWeb(req)`, its
+//   signal the framework's own, aborted as the socket closes), answered with `httpResponse.body`.
 // `/leave?entry=<entry>&row=<row>` makes a call whose client leaves after the answer, from this process
 // (`callAndLeave`). It prints `LISTENING <port> <node:http port>` once both listen.
 
 import { createServer } from 'node:http'
+import { Readable } from 'node:stream'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
@@ -25,7 +28,10 @@ config.channel = { connectTtl: 1000 }
 
 const telefunc = new Telefunc()
 const nodeServer = createServer(async (req, res) => {
-  const httpResponse = await serve({ url: req.url, method: req.method, readable: req, headers: req.headers })
+  const httpResponse =
+    req.headers['x-entry'] === 'framework'
+      ? await serve({ request: frameworkRequest(req) })
+      : await serve({ url: req.url, method: req.method, readable: req, headers: req.headers })
   for (const [key, value] of httpResponse.headers) res.setHeader(key, value)
   res.writeHead(httpResponse.statusCode)
   res.end(httpResponse.body)
@@ -50,8 +56,29 @@ const server = Deno.serve(
  *  first 64 KiB; leaves 160 ms after the answer begins. Its client is this process: where the client is another
  *  process, Deno at times fails the read on its own as the client leaves, which hides a read left pending. */
 async function callAndLeave(entry, row) {
-  const socket = await startCall(entry === 'node' ? nodePort : server.addr.port, entry, row, 8, 120)
+  const socket = await startCall(
+    entry === 'node' || entry === 'framework' ? nodePort : server.addr.port,
+    entry,
+    row,
+    8,
+    120,
+  )
   await new Promise((resolve) => setTimeout(resolve, 160))
   socket.destroy()
   return 'left'
+}
+
+/** The `Request` a framework builds of Deno's `node:http` request `req`, with its own signal. */
+function frameworkRequest(req) {
+  const gone = new AbortController()
+  req.socket.once('close', () => gone.abort())
+  return new Request(`http://127.0.0.1${req.url}`, {
+    method: req.method,
+    headers: Object.entries(req.headers).flatMap(([name, value]) =>
+      value === undefined ? [] : [[name, String(value)]],
+    ),
+    body: Readable.toWeb(req),
+    signal: gone.signal,
+    duplex: 'half',
+  })
 }

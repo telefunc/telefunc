@@ -1,4 +1,5 @@
 export { ATTACHABLE_NOW, Channel, ServerChannel }
+export type { PageSign }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -113,8 +114,13 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
  *  while it waits. */
 type LossySend = { data: EntryData; held: number }
 
+/** When the page that is to attach to a channel last showed it is on its way (a `performance.now()` time): a browser
+ *  attaches to a channel its call returned only once it has sent the call's whole body, so each byte of that upload is
+ *  such a sign. The channel's connect window counts from the later of it and the channel's registration. */
+type PageSign = () => number
+
 /** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
-const ATTACHABLE_NOW: Promise<void> = Promise.resolve()
+const ATTACHABLE_NOW: PageSign = () => Number.NEGATIVE_INFINITY
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -545,9 +551,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
-   *  `ChannelMux.registerChannel`; external code should call that instead. `attachable`: settles once a page can
-   *  attach, from when the channel's connect window counts. */
-  _registerChannel(attachable: Promise<void>, mux?: ChannelMux): void {
+   *  `ChannelMux.registerChannel`; external code should call that instead. `pageSign`: when the page last showed it
+   *  is on its way, from when the channel's connect window counts. */
+  _registerChannel(pageSign: PageSign, mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
@@ -563,22 +569,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       (held) => this.refuseSend(held),
     )
     if (this._phase === 'ended') return // the mux lets an ended channel go
-    const startTtl = () => {
+    const { connectTtl } = getChannelConfig()
+    const registeredAt = performance.now()
+    // Each time it runs out, the window counts again from the page's last sign, until a whole one passed without any.
+    const waitForPage = (ms: number) => {
       this.ttlTimer = unrefTimer(
         setTimeout(() => {
           this.ttlTimer = null
+          const waited = performance.now() - Math.max(registeredAt, pageSign())
+          if (waited < connectTtl) return waitForPage(connectTtl - waited)
           this.shutdown(
             new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
             { pageGone: true },
           )
-        }, getChannelConfig().connectTtl),
+        }, ms),
       )
     }
-    if (attachable === ATTACHABLE_NOW) return startTtl()
-    // A page that attached meanwhile, or a channel that ended, leaves no wait for a page to time.
-    void attachable.then(() => {
-      if (this.peer === null && this.reconnectTimer === null && this._phase !== 'ended') startTtl()
-    })
+    waitForPage(connectTtl)
   }
 
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;

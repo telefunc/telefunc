@@ -1,15 +1,16 @@
 // On Deno, a call that returns a Channel answers while its body is still being sent, and Telefunc reads the rest of that
 // body on past the answer. These rows run such calls on real Deno, in both of its signal modes: without
 // `--unstable-no-legacy-abort`, Deno aborts `request.signal` at every response; with it, only once the client left.
-// Through `telefunc/deno`, through `serve({ request })` (answered with its stream, or with its string body), and through
-// `serve({ readable })` on Deno's `node:http` (answered with its string body, as an Express app under Deno):
+// Through `telefunc/deno`, through `serve({ request })` (answered with its stream, or with its string body), and on Deno's
+// `node:http` through `serve({ readable })` (as an Express app under Deno) and through `serve({ request })` with a
+// framework's own `Request`, both answered with their string body:
 // - a File sent on after the answer and read later is read whole;
 // - a 32 MiB File left unread is taken whole, so that a browser gets the answer, and the channel closes by its connect
 //   window;
 // - a File sent whole and read once its channel closed, while its client is still there, fails as the server having
 //   answered before reading it, not as its client leaving;
-// - where the client leaves after the answer, the File's read fails as its client's leaving, and the channel closes by
-//   its connect window (`config.channel.connectTtl`, 1 s here).
+// - where the client leaves after the answer, the channel closes by its connect window (`config.channel.connectTtl`,
+//   1 s here), and the File's read fails as its client's leaving, or, where nothing says it left, as the channel closes.
 // The server is deno.clientLeft.server.fixture.mjs, the call deno.clientLeft.call.ts; CI's Vitest job has Deno.
 
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from 'vitest'
@@ -94,9 +95,10 @@ const entries = {
   stream: 'serve({ request }) and its stream',
   string: 'serve({ request }) and its string body',
   node: "serve({ readable }) on Deno's node:http and its string body",
+  framework: "serve({ request }) with a framework's Request on Deno's node:http and its string body",
 }
 /** The port a call through `entry` goes to. */
-const portOf = (served: Ports, entry: string) => (entry === 'node' ? served.node : served.deno)
+const portOf = (served: Ports, entry: string) => (entry === 'node' || entry === 'framework' ? served.node : served.deno)
 
 for (const mode of ['legacy', 'modern'] as const) {
   describe(`Deno, ${mode === 'legacy' ? 'its signal aborted at every response' : '`--unstable-no-legacy-abort`'}`, () => {
@@ -151,7 +153,12 @@ for (const mode of ['legacy', 'modern'] as const) {
         await pause(2000)
         expect({ leaving, ...(await rowState(own.ports.deno, row)) }).toEqual({
           leaving: 'left',
-          read: 'failed: The client disconnected before the end of the request body',
+          // A framework's own `Request` says nothing Telefunc can tell from Deno's end of the response, so its read ends
+          // as the channel closes and the server lets the body go.
+          read:
+            entry === 'framework'
+              ? 'failed: The server answered before reading the request body to its end'
+              : 'failed: The client disconnected before the end of the request body',
           closed: closedByTtl,
         })
       }, 15_000)
