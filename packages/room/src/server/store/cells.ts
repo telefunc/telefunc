@@ -45,7 +45,7 @@ function memberIdOfCellKey(key: string): string {
   return key.slice(MEMBER_CELL_PREFIX.length)
 }
 /** The id of the lease a member joined under, as text: written and removed with its record, so a read of the record
- *  reads its lease beside it, by `MEMBER_LEASE_BESIDE`. A member written before it has none. */
+ *  reads its lease beside it, by `MEMBER_LEASE_BESIDE`. */
 const MEMBER_LEASE_CELL_PREFIX = 'ml:'
 function memberLeaseCellKey(memberId: string): string {
   return MEMBER_LEASE_CELL_PREFIX + memberId

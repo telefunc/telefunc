@@ -29,12 +29,11 @@ import { leaseCanHost, reapLeases } from './lease.js'
 /** The members that host, and the ids of those a read left out as their lease can't: their removal is under way. */
 type Roster = { members: MemberSnapshot[]; leaving: ReadonlySet<string> }
 
-/** Whether the member whose record is `key` in `read` hosts: the lease read beside it can host. A member with no lease
- *  reference was written by a server from before members had one; it is read as it is, and once that server stopped,
- *  its lease lapses within `ROOM_LEASE_TTL_MS` and the next read's reap ends it. */
+/** Whether the member whose record is `key` in `read` hosts: the lease read beside it can host. A member is written
+ *  and removed with its lease's reference, so a record read without one is a bug. */
 function hosts(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean {
   const lease = read.beside?.get(key)
-  if (lease === undefined) return true
+  if (lease === undefined) assert(false, `the member record ${key} was read without its lease reference`)
   return lease !== null && leaseCanHost(key, lease, read.now)
 }
 

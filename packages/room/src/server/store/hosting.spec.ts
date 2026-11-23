@@ -206,27 +206,20 @@ describe('a lease id that its server reused after the lease was removed', () => 
   })
 })
 
-describe('a member written before members had a lease reference', () => {
-  it('is listed as before, and reaped with its lease once it lapses', async () => {
-    const room = await openRoom('hosting-old-form')
-    const lease = new RoomLease()
-    const member = await joinUnder(room, lease)
-    const { direct } = getRoomPlane()
-    // The member as an older server wrote it: its record alone.
-    await direct.compareExchangeCells(room.id, room.inc, {
+describe('a member record without its lease reference', () => {
+  it('is a bug a read names', async () => {
+    const room = await openRoom('hosting-no-reference')
+    const member = await joinUnder(room, new RoomLease())
+    await getRoomPlane().direct.compareExchangeCells(room.id, room.inc, {
       expect: [],
       mutations: [{ key: `ml:${member}`, bytes: null }],
     })
-    const before = (await Room.getParticipants(room.id)).map((each) => each.id)
-    await writeLease(room, lease.id, { until: 0 })
-    const after = (await Room.getParticipants(room.id)).map((each) => each.id)
-    const cells = await direct.reads.readCells(room.id, room.inc, { keys: [`${MEMBER_CELL_PREFIX}${member}`] })
+    const told = await Room.getParticipants(room.id).then(
+      () => 'listed',
+      (error: unknown) => (error instanceof Error ? error.message : typeof error),
+    )
 
-    expect({
-      before: before.includes(member),
-      after: after.includes(member),
-      record: cells.kind === 'read' && cells.cells.size,
-    }).toEqual({ before: true, after: false, record: 0 })
+    expect(told).toContain(`the member record ${MEMBER_CELL_PREFIX}${member} was read without its lease reference`)
   })
 })
 

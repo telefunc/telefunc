@@ -187,27 +187,22 @@ describe.runIf(runs)('a lease id that its server reused after the lease was remo
   }
 })
 
-describe.runIf(runs)('a member written before members had a lease reference', () => {
+describe.runIf(runs)('a member record without its lease reference', () => {
   for (const [i, store] of STORES.entries()) {
-    it(`${store.name}: is listed as before, and reaped with its lease once it lapses`, async () => {
+    it(`${store.name}: is a bug a read names`, async () => {
       const admin = await reached(store)
-      const id = `hosting-old-form-${i}`
+      const id = `hosting-no-reference-${i}`
       await Room.create(id)
       const member = await joinedByAnotherServer(String(admin.options.host), id)
-      const { values, lease } = await hostingLease(admin, id, member)
-      // The member as an older server wrote it: its record alone.
+      const { values } = await hostingLease(admin, id, member)
       await removeCell(admin, values, `ml:${member}`)
-      const before = (await Room.getParticipants(id)).map((each) => each.id)
-      await writeLease(admin, values, lease, { until: 0 })
-      const after = (await Room.getParticipants(id)).map((each) => each.id)
-      const record = await admin.hexists(values, `m:${member}`)
+      const told = await Room.getParticipants(id).then(
+        () => 'listed',
+        (error: unknown) => (error instanceof Error ? error.message : typeof error),
+      )
       admin.disconnect()
 
-      expect({ before: before.includes(member), after: after.includes(member), record }).toEqual({
-        before: true,
-        after: false,
-        record: 0,
-      })
+      expect(told).toContain(`the member record m:${member} was read without its lease reference`)
     }, 60_000)
   }
 })
