@@ -3,8 +3,9 @@
 // the connection only once the first call's body is read to its end. Both calls are sent at once. The row waits for the
 // first call's answer to finish, then lets the event loop run a counted number of turns (`settle`, no clock) and reads
 // which calls the server took and answered. Then a call whose returned Channel holds it on (node.heldUpload.spec.ts has
-// its body read at its answer): once the channel ends, the call is done, and the Blob it handed on fails its read. Then
-// the bound: a client that keeps sending a body nobody reads holds its connection only until the host's request timeout.
+// its body read at its answer): once the channel ends, the call is done, and the Blob it handed on is read whole, as a
+// Blob keeps its bytes past its call (node.uploadBody.spec.ts has a plain call's). Then the bound: a client that keeps sending a body nobody reads holds its
+// connection only until the host's request timeout.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -152,7 +153,7 @@ const channelEnds: [string, (channel: Channel) => void][] = [
 ]
 
 test.each(channelEnds)(
-  'a call that returns a Channel and hands its Blob on to be read once the call is done: once the channel ends by %s, no page having attached it, the call is done, and a read of the Blob fails (Telefunc given a Node request)',
+  'a call that returns a Channel and hands its Blob on to be read once the call is done: once the channel ends by %s, no page having attached it, the call is done, and the Blob is read whole (Telefunc given a Node request)',
   async (_end, endChannel) => {
     const listening = ports.get('Node request')
     if (!listening) throw new Error('no server')
@@ -185,7 +186,7 @@ test.each(channelEnds)(
       (text) => `read ${text.length} bytes`,
       (err: Error) => err.message,
     )
-    expect(read).toBe('The server answered before reading the request body to its end')
+    expect(read).toBe(`read ${512 * 1024} bytes`)
     socket.destroy()
   },
 )

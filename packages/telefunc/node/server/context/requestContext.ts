@@ -7,7 +7,7 @@ import type { AbortError } from '../Abort.js'
 import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { ATTACHABLE_NOW, type PageSign } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import { ATTACHABLE_NOW, type CallPage } from '../../../wire-protocol/channel/server/ServerChannel.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 /** A call with no body to read off: its upload is over. */
@@ -48,9 +48,9 @@ type RequestContext = {
   /** Settles once the call's body has been read to its end, or its client left: the client's upload is over. Set by the
    *  binary call's reader; at once otherwise. */
   bodyRead: Promise<void>
-  /** When the page this call answers last showed it is on its way to attach to a channel the call returned: each byte of
-   *  its upload, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
-  pageSign: PageSign
+  /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
+   *  is on its way, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
+  page: CallPage
   /** Take a hold (a channel, a stream pump, an inline body) and return its one-shot release.
    *  onClose callbacks fire once no hold is left. */
   trackPending: () => () => void
@@ -135,7 +135,7 @@ function createRequestContext(request: Request): RequestContext {
     },
     markComplete,
     bodyRead: BODY_READ,
-    pageSign: ATTACHABLE_NOW,
+    page: ATTACHABLE_NOW,
     trackPending,
   }
 

@@ -87,17 +87,17 @@ const B = 'b'.repeat(10)
 const C = 'c'.repeat(10)
 
 /** A reader of a body of `{}` and files of `sizes` (a, b and c), its metadata read; `file(i)` is file `i`'s stream, as
- *  the File reviver's getter gives it. */
+ *  the File reviver gives it. */
 async function setup(kind: Kind, sizes = [10, 10, 10], clientLeft = false) {
   const source = sourceOf(kind)
   source.push('\0\0\0\x02{}')
   const reader = new BodyReader(source.body, () => clientLeft)
   await reader.readFrame(1024)
-  const getters = sizes.map((size, index) => reader.registerFile(index, size))
+  const files = sizes.map((size, index) => reader.registerFile(index, size))
   const file = (index: number) => {
-    const getStream = getters[index]
-    if (!getStream) throw new Error(`no file ${index}`)
-    return getStream()
+    const registered = files[index]
+    if (!registered) throw new Error(`no file ${index}`)
+    return registered.stream()
   }
   return { source, reader, file }
 }

@@ -5,6 +5,7 @@
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
 import { BodyReader } from './BodyReader.js'
+import type { RequestFile } from '../values/types.js'
 
 type Kind = 'node' | 'web'
 
@@ -48,10 +49,10 @@ const META = '\0\0\0\x02{}'
 const A = 'a'.repeat(10)
 const B = 'b'.repeat(10)
 
-async function textOf(getStream: (() => ReadableStream<Uint8Array<ArrayBuffer>>) | undefined) {
-  if (!getStream) throw new Error('no such file')
+async function textOf(file: RequestFile | undefined) {
+  if (!file) throw new Error('no such file')
   try {
-    return await new Response(getStream()).text()
+    return await new Response(file.stream()).text()
   } catch (error) {
     return `failed: ${error instanceof Error ? error.message : String(error)}`
   }
@@ -61,20 +62,26 @@ for (const kind of ['node', 'web'] as const) {
   test(`${kind}: file 0's chunk transferred, file 1's bytes in the same chunk as it and the metadata: file 1 reads its own bytes`, async () => {
     const [first, second] = await setup(kind, [META + A + B], [10, 10])
     if (!first) throw new Error('no file 0')
-    expect({ first: await readTransferring(first()), second: await textOf(second) }).toEqual({ first: A, second: B })
+    expect({ first: await readTransferring(first.stream()), second: await textOf(second) }).toEqual({
+      first: A,
+      second: B,
+    })
   })
 
   test(`${kind}: file 0's chunk transferred, file 1's bytes in the chunk it was read from: file 1 reads its own bytes`, async () => {
     const [first, second] = await setup(kind, [META, A + B], [10, 10])
     if (!first) throw new Error('no file 0')
-    expect({ first: await readTransferring(first()), second: await textOf(second) }).toEqual({ first: A, second: B })
+    expect({ first: await readTransferring(first.stream()), second: await textOf(second) }).toEqual({
+      first: A,
+      second: B,
+    })
   })
 
   // A chunk inside a file is handed on whole, and the reader keeps no other view of it.
   test(`${kind}: a chunk inside file 0 transferred: the rest of file 0 and file 1 read their own bytes`, async () => {
     const [first, second] = await setup(kind, [META, A, A, B], [20, 10])
     if (!first) throw new Error('no file 0')
-    expect({ first: await readTransferring(first()), second: await textOf(second) }).toEqual({
+    expect({ first: await readTransferring(first.stream()), second: await textOf(second) }).toEqual({
       first: A + A,
       second: B,
     })

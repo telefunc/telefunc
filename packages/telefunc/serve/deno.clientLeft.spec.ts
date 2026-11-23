@@ -7,10 +7,11 @@
 // - a File sent on after the answer and read later is read whole;
 // - a 32 MiB File left unread is taken whole, so that a browser gets the answer, and the channel closes by its connect
 //   window;
-// - a File sent whole and read once its channel closed, while its client is still there, fails as the server having
-//   answered before reading it, not as its client leaving;
+// - a File sent whole and read once its channel closed, while its client is still there, is read whole, and so is one a
+//   plain call reads after it returned: a File keeps its bytes past its call;
 // - where the client leaves after the answer, the channel closes by its connect window (`config.channel.connectTtl`,
-//   1 s here), and the File's read fails as its client's leaving, or, where nothing says it left, as the channel closes.
+//   1 s here), and the File's read fails as its client's leaving: where nothing says it left, its upload, stopped short
+//   for a whole window, is given up on as the channel closes.
 // Each row is one call, which the spec hands as data to the Deno server (`run`). Its client there (`startCall`,
 // deno.clientLeft.client.fixture.ts) sends it to its entry's own port, and the server answers with what the row's
 // telefunction saw once its File's read and its channel ended (`seen`, deno.clientLeft.telefunc.js). The server is
@@ -125,7 +126,7 @@ for (const mode of ['legacy', 'modern'] as const) {
         expect(seen).toEqual({ sent: 'all sent', read: 'not read', closed: closedByTtl })
       }, 15_000)
 
-      test(`a call that returns a Channel and keeps its File, sent whole, read once its channel closed, its client still there: the read fails as the server having answered first, not as its client leaving (${through})`, async () => {
+      test(`a call that returns a Channel and keeps its File, sent whole, read once its channel closed, its client still there: the File is read whole (${through})`, async () => {
         const seen = await run(served[mode], entry, {
           telefunction: 'keepsFile',
           row: `${mode}-${entry}-kept`,
@@ -133,11 +134,18 @@ for (const mode of ['legacy', 'modern'] as const) {
           readAfterMs: 2 * WINDOW_MS,
           rest: { pacedMs: 0 },
         })
-        expect(seen).toEqual({
-          sent: 'all sent',
-          read: 'failed: The server answered before reading the request body to its end',
-          closed: closedByTtl,
+        expect(seen).toEqual({ sent: 'all sent', read: `read ${8 * PART} bytes`, closed: closedByTtl })
+      }, 15_000)
+
+      test(`a plain call whose File, sent whole, it reads 1 s after it returned: the File is read whole (${through})`, async () => {
+        const seen = await run(served[mode], entry, {
+          telefunction: 'readsFileLater',
+          row: `${mode}-${entry}-plain`,
+          parts: 8,
+          readAfterMs: WINDOW_MS,
+          rest: { pacedMs: 0 },
         })
+        expect(seen).toEqual({ sent: 'all sent', read: `read ${8 * PART} bytes`, closed: 'no channel' })
       }, 15_000)
 
       test(`a call that returns a Channel and reads its File, whose client leaves after the answer: the read fails as its client left, and the channel closes by its connect window (${through})`, async () => {
@@ -154,13 +162,7 @@ for (const mode of ['legacy', 'modern'] as const) {
         })
         expect(seen).toEqual({
           sent: 'left',
-          // Telefunc's hold of a Deno `Request`'s signal (`heldClientGone`) takes in a framework's own `Request` too, as
-          // its signal is its own as Deno.serve's is, and drops its abort once the answer is out: nothing then says its
-          // client left, so its read ends as the channel closes and the server lets the body go.
-          read:
-            entry === 'framework'
-              ? 'failed: The server answered before reading the request body to its end'
-              : 'failed: The client disconnected before the end of the request body',
+          read: 'failed: The client disconnected before the end of the request body',
           closed: closedByTtl,
         })
       }, 15_000)

@@ -6,6 +6,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { concatAll, decodeU32 } from './envelope.js'
 import { ProtocolViolationError } from './protocolViolation.js'
 import type { QueueMemory } from '../channel/channelMessages.js'
+import type { RequestFile } from '../values/types.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -75,6 +76,9 @@ class BodyReader {
   private readonly source: ChunkSource
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
   private readonly fileSizes = new Map<number, number>()
+  /** The files whose bytes a File can still read: neither read to their end, cancelled or failed, nor let go of. Each
+   *  one's callbacks run once it leaves. */
+  private readonly unread = new Map<number, Array<() => void>>()
   /** Each file's stream, the latest one where a file's stream was asked for more than once. */
   private readonly files = new Map<number, FileRead>()
   /** The position: the file the next byte of the body belongs to, and its bytes not yet read (unset until it is first
@@ -94,8 +98,9 @@ class BodyReader {
   /** The read-off of the rest of the body, once it began: from then on it alone reads the source. */
   private readOff: Promise<void> | null = null
   private readOffDone = false
-  /** What the read-off keeps for the file reads, where it began at the call's answer (`keepRest`): the chunks it read,
-   *  in order, each held on `keeping` until a file read takes it. Null where it drops what it reads. */
+  /** What the read-off keeps for the file reads, from the call's answer or end on (`keepRest`), while a file is left to
+   *  read: the chunks it read, in order, each held on `keeping` until a file read takes it. Null where it drops what it
+   *  reads. */
   private keeping: QueueMemory | null = null
   private kept: Uint8Array<ArrayBuffer>[] = []
   /** Whether `keeping` refused a chunk: that chunk and every one after it were dropped. */
@@ -160,32 +165,44 @@ class BodyReader {
     return this.readExact(length)
   }
 
-  /** Ends the file reads, lets go of what the read-off kept for them, then reads the rest of the body and drops it, a
-   *  chunk at a time, to its end or its client's leaving. A read of the body under way finishes first, and every read but
-   *  this one ends as at the body's end. A body whose reads stopped already has no rest: an app's error that stopped them
-   *  went to the read it failed. `endedBy`: who ended the request, as the file reads say it where nothing stopped the
-   *  body. */
+  /** Ends the file reads, which lets go of what the read-off kept for them, then reads the rest of the body and drops it,
+   *  a chunk at a time, to its end or its client's leaving. A read of the body under way finishes first, and every read
+   *  but this one ends as at the body's end. A body whose reads stopped already has no rest: an app's error that stopped
+   *  them went to the read it failed. `endedBy`: who ended the request, as the file reads say it where nothing stopped
+   *  the body. */
   async discardRest(endedBy: 'client' | 'server'): Promise<void> {
     this.endFiles(endedBy)
-    this.keeping?.release()
-    this.keeping = null
-    this.kept = []
     this.buffer = EMPTY
-    this.wakeKept()
     await (this.readOff ??= this.readRest())
   }
 
-  /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, keeping each
-   *  chunk on `memory` for the file reads, which take them in order as they read: the client's upload ends, so that a
-   *  browser, which delivers an answer only once it has sent the whole body, gets it. A chunk `memory` refuses is
-   *  dropped, and so is every one after it: a file read that reaches them fails, saying why. `discardRest`, at the end
-   *  of the call's holds, lets go of what is kept and drops the rest. */
-  keepRest(memory: QueueMemory): void {
+  /** At the call's end: each File the app can still read keeps its bytes, kept from the answer on (`keepRest`) or from
+   *  now, until it reads them or lets go of the File, and the rest of the body is read off and dropped, to its end or its
+   *  client's leaving. Where no File is left to read, as `discardRest`. */
+  async endCall(endedBy: 'client' | 'server', memory: () => QueueMemory): Promise<void> {
+    if (this.unread.size === 0) return this.discardRest(endedBy)
+    this.keepRest(memory)
+    await this.readOff
+  }
+
+  /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, or at the
+   *  call's end (`endCall`): the client's upload ends, so that a browser, which delivers an answer only once it has sent
+   *  the whole body, gets it. While a file is left to read, each chunk is kept on `memory` for the file reads, which take
+   *  them in order as they read; a chunk `memory` refuses is dropped, and so is every one after it: a file read that
+   *  reaches them fails, saying why. What is kept goes once no file is left to read. */
+  keepRest(memory: () => QueueMemory): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
-    this.keeping = memory
+    if (this.unread.size > 0) this.keeping = memory()
     this.readOff = this.readRest()
-    // A failure, the app's own error, goes to `discardRest`, which awaits the same read-off.
+    // A failure, the app's own error, goes to `endCall` or `discardRest`, which await the same read-off.
     this.readOff.catch(() => {})
+  }
+
+  /** The client that sends the body isn't coming for the call's answer (the connect window of a channel the call returned
+   *  ran out, with no byte of the body for a whole window): where the body stopped short of its end, the file reads end
+   *  as at its client's leaving, and what is kept for them goes. A body read to its end keeps its files' bytes. */
+  clientGaveUp(): void {
+    if (this.stop === null) this.endFiles('client')
   }
 
   /** The read-off: the source's chunks to its end or its client's leaving, each kept or dropped. A read of the body
@@ -227,6 +244,14 @@ class BodyReader {
     }
   }
 
+  /** Lets go of what the read-off keeps: no file is left to read it. From then on it drops what it reads. */
+  private dropKept(): void {
+    this.keeping?.release()
+    this.keeping = null
+    this.kept = []
+    this.wakeKept()
+  }
+
   private wakeKept(): void {
     const keptMore = this.keptMore
     if (keptMore === null) return
@@ -256,11 +281,30 @@ class BodyReader {
     if (this.reading !== null) await this.reading.catch(() => {})
   }
 
-  /** Registers a file's size, as the call's metadata declares it, while the call is revived, and returns the getter of
-   *  the file's stream. */
-  registerFile(index: number, size: number): () => ReadableStream<Uint8Array<ArrayBuffer>> {
+  /** Registers a file's size, as the call's metadata declares it, while the call is revived: the file, as its File reads
+   *  it. */
+  registerFile(index: number, size: number): RequestFile {
     this.fileSizes.set(index, size)
-    return () => this.fileStream(index)
+    this.unread.set(index, [])
+    return {
+      stream: () => this.fileStream(index),
+      letGo: () => this.fileGone(index),
+      onGone: (callback) => {
+        const onGone = this.unread.get(index)
+        if (onGone) onGone.push(callback)
+        else callback()
+      },
+    }
+  }
+
+  /** No File reads the file at `index` anymore: its end's callbacks run, and once no file is left to read, what is kept
+   *  goes. */
+  private fileGone(index: number): void {
+    const onGone = this.unread.get(index)
+    if (onGone === undefined) return
+    this.unread.delete(index)
+    for (const callback of onGone) callback()
+    if (this.unread.size === 0) this.dropKept()
   }
 
   /**
@@ -272,7 +316,7 @@ class BodyReader {
    * passes them.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
-    const file = new FileRead(index, this.pullFile, this.cancelFile)
+    const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver)
     this.files.set(index, file)
     if (this.filesEndedBy !== null) file.fail(this.stopped())
     return file.stream
@@ -300,7 +344,7 @@ class BodyReader {
       if (!file.over) file.enqueue(chunk)
       if (this.left === 0) this.fileDone(file)
     } catch (error) {
-      file.over = true
+      file.markOver()
       throw error
     } finally {
       this.release()
@@ -321,7 +365,7 @@ class BodyReader {
   }
 
   private readonly cancelFile = (file: FileRead): void => {
-    file.over = true
+    file.markOver()
     // A pull of it under way sees the cancel once its read is done, and wakes the waiting reads then.
     if (this.holder !== file) this.wake()
   }
@@ -364,6 +408,8 @@ class BodyReader {
         { onlyOnce: true },
       )
       await this.skipBytes(this.leftOfNext(), by)
+      // Its bytes are dropped: no File reads it anymore.
+      this.fileGone(this.next)
       this.next++
       this.left = undefined
     } finally {
@@ -384,11 +430,14 @@ class BodyReader {
     this.left = undefined
   }
 
+  private readonly fileOver = (file: FileRead): void => this.fileGone(file.index)
+
   /** Errors every open file stream, and every one asked for later, with the stop's own error; the reads that wait wake and
-   *  throw it. A file's pull under way finishes its read of the body, and drops it. */
+   *  throw it. A file's pull under way finishes its read of the body, and drops it. No file is left to read. */
   private endFiles(by: 'client' | 'server'): void {
     this.filesEndedBy ??= by
     for (const file of this.files.values()) file.fail(this.stopped())
+    for (const index of this.unread.keys()) this.fileGone(index)
     this.wake()
   }
 
@@ -517,15 +566,23 @@ class BodyReader {
   }
 }
 
-/** A file's stream, as the reader serves it. `over`: it reads no more, ended, cancelled or failed. */
+/** A file's stream, as the reader serves it. `over`: it reads no more, ended, cancelled or failed (`markOver`), which
+ *  `onOver` is told. */
 class FileRead {
   readonly index: number
   readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>
   over = false
   private controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null = null
+  private readonly onOver: (file: FileRead) => void
 
-  constructor(index: number, pull: (file: FileRead) => Promise<void>, cancel: (file: FileRead) => void) {
+  constructor(
+    index: number,
+    pull: (file: FileRead) => Promise<void>,
+    cancel: (file: FileRead) => void,
+    onOver: (file: FileRead) => void,
+  ) {
     this.index = index
+    this.onOver = onOver
     this.stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
       {
         start: (controller) => void (this.controller = controller),
@@ -540,15 +597,21 @@ class FileRead {
     this.controller?.enqueue(chunk)
   }
 
-  close(): void {
+  markOver(): void {
     if (this.over) return
     this.over = true
+    this.onOver(this)
+  }
+
+  close(): void {
+    if (this.over) return
+    this.markOver()
     this.controller?.close()
   }
 
   fail(error: unknown): void {
     if (this.over) return
-    this.over = true
+    this.markOver()
     this.controller?.error(error)
   }
 }

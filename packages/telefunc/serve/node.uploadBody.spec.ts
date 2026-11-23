@@ -362,7 +362,7 @@ test.each(vias)(
 )
 
 test.each(vias)(
-  'a telefunction that starts reading its Blob and answers, its client still sending: that read fails with a truncation once the call is answered, and nothing is printed (Telefunc given a %s)',
+  'a telefunction that starts reading its Blob and answers, its client still sending: that read goes on past the answer and reads the Blob whole, and nothing is printed (Telefunc given a %s)',
   async (via) => {
     const { printed, bugs } = recordErrors()
     const readEnded: { now: string } = { now: 'pending' }
@@ -371,9 +371,11 @@ test.each(vias)(
     onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
     const { socket, answered } = await startUpload('binary', readStartedStart, via)
     expect(await answered).toBe(200)
-    await settle()
+    // The rest of the Blob, after the answer.
+    socket.write(encoder.encode('x'.repeat(FILE_SIZE - 10)))
+    await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
     expect({ readEnded: readEnded.now, printed, bugs }).toEqual({
-      readEnded: `failed: ${new StreamTruncatedError('server').message}`,
+      readEnded: `read ${FILE_SIZE} bytes`,
       printed: [],
       bugs: [],
     })
@@ -382,7 +384,7 @@ test.each(vias)(
 )
 
 test.each(vias)(
-  "a Blob its telefunction keeps and reads once the call is answered and its body read off to the end: the read fails with the server's truncation (Telefunc given a %s)",
+  'a Blob its telefunction keeps and reads once the call is answered and its body read off to the end: the Blob is read whole (Telefunc given a %s)',
   async (via) => {
     const { printed, bugs } = recordErrors()
     const kept = new Promise<Blob>((resolve) => process.once('requestBody.telefunc:kept', resolve))
@@ -394,11 +396,7 @@ test.each(vias)(
       (text) => `read ${text.length} bytes`,
       (err: unknown) => `failed: ${err instanceof Error ? err.message : String(err)}`,
     )
-    expect({ read, printed, bugs }).toEqual({
-      read: `failed: ${new StreamTruncatedError('server').message}`,
-      printed: [],
-      bugs: [],
-    })
+    expect({ read, printed, bugs }).toEqual({ read: `read ${FILE_SIZE} bytes`, printed: [], bugs: [] })
     socket.destroy()
   },
 )

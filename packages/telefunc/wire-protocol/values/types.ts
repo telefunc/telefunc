@@ -8,6 +8,7 @@ export type {
   // ===== Contexts =====
   ClientReviverContext,
   ServerReviverContext,
+  RequestFile,
   ClientReplacerContext,
   ServerReplacerContext,
   StreamSource,
@@ -157,10 +158,21 @@ type ClientReviverContext = {
   receiveStream(metadata: StreamingMetadata): StreamSource
 }
 
+/** A file of the call's body, as its File reads it: its bytes are kept for it until it reads them or is let go of, past
+ *  its call too. */
+type RequestFile = {
+  /** Its bytes' stream: a File is read once. */
+  stream: () => ReadableStream<Uint8Array<ArrayBuffer>>
+  /** No File reads it anymore (collected, or its call failed): its bytes aren't kept for it. */
+  letGo: () => void
+  /** Takes what runs once its bytes are gone: read, let go of, or ended with the body. */
+  onGone: (callback: () => void) => void
+}
+
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
-  /** Registers a file of the call's body, and returns the getter of its stream. */
-  registerFile(index: number, size: number): () => ReadableStream<Uint8Array<ArrayBuffer>>
+  /** Registers a file of the call's body. */
+  registerFile(index: number, size: number): RequestFile
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean

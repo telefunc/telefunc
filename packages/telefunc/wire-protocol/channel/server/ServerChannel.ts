@@ -1,5 +1,5 @@
 export { ATTACHABLE_NOW, Channel, ServerChannel }
-export type { PageSign }
+export type { CallPage }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -114,13 +114,18 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
  *  while it waits. */
 type LossySend = { data: EntryData; held: number }
 
-/** When the page that is to attach to a channel last showed it is on its way (a `performance.now()` time): a browser
- *  attaches to a channel its call returned only once it has sent the call's whole body, so each byte of that upload is
- *  such a sign. The channel's connect window counts from the later of it and the channel's registration. */
-type PageSign = () => number
+/** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
+ *  attaches only once it has sent the call's whole body. */
+type CallPage = {
+  /** When the page last showed it is on its way (a `performance.now()` time): each byte of the call's upload is such a
+   *  sign. The window counts from the later of it and the channel's registration. */
+  lastSign: () => number
+  /** The window ran out: the page isn't coming, and what its call's upload still owes is given up on. */
+  neverCame: () => void
+}
 
 /** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
-const ATTACHABLE_NOW: PageSign = () => Number.NEGATIVE_INFINITY
+const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -551,9 +556,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
-   *  `ChannelMux.registerChannel`; external code should call that instead. `pageSign`: when the page last showed it
-   *  is on its way, from when the channel's connect window counts. */
-  _registerChannel(pageSign: PageSign, mux?: ChannelMux): void {
+   *  `ChannelMux.registerChannel`; external code should call that instead. `page`: the page the channel's connect
+   *  window waits for. */
+  _registerChannel(page: CallPage, mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
@@ -576,8 +581,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.ttlTimer = unrefTimer(
         setTimeout(() => {
           this.ttlTimer = null
-          const waited = performance.now() - Math.max(registeredAt, pageSign())
+          const waited = performance.now() - Math.max(registeredAt, page.lastSign())
           if (waited < connectTtl) return waitForPage(connectTtl - waited)
+          page.neverCame()
           this.shutdown(
             new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
             { pageGone: true },

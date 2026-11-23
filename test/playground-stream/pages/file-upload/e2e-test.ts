@@ -285,12 +285,13 @@ function testFileUpload() {
     )
   })
 
-  test("file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end fails with the server's truncation", async () => {
+  test('file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end is read whole', async () => {
     expect((await post('bin', binaryCall('onKeepFile', 1000))).status).toBe(200)
-    // The whole body came with the call, so the read-off that follows its answer has read it to the end.
+    // The whole body came with the call, so the read-off that follows its answer has read it to the end: the File keeps
+    // its bytes past its call.
     await sleep(500)
     const read = await post('txt', JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }))
-    expect(read.text).toContain('failed: The server answered before reading the request body to its end')
+    expect(read.text).toContain('read 1000 bytes')
   })
 
   // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing); Node's adapters have

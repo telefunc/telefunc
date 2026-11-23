@@ -6,10 +6,10 @@ import { LazyFile } from '../../LazyFile.js'
 
 const fileReviver: ReviverType<FileRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
-  // The file's bytes are the request body's, read as its stream is read: nothing of the file's own to close.
+  // The file's bytes are the request body's, kept for it until it reads them: closing it lets go of them.
   revive: (metadata, context) => {
-    const getStream = context.registerFile(metadata.index, metadata.size)
-    const lazyFile = new LazyFile(metadata.size, metadata.type, metadata.name, metadata.lastModified, getStream)
-    return { value: lazyFile, close() {}, abort() {} }
+    const file = context.registerFile(metadata.index, metadata.size)
+    const lazyFile = new LazyFile(metadata.size, metadata.type, metadata.name, metadata.lastModified, file.stream)
+    return { value: lazyFile, close: file.letGo, abort() {}, onEnd: file.onGone }
   },
 }
