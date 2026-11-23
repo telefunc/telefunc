@@ -5,6 +5,8 @@
 // - A `Room.publish()`, a `Room.send()` or a participant's `send()` of data, or a `Room.removeParticipant()` with a
 //   reason, over the size the store commits: refused before the call's first write, also where finding the participant
 //   would reap a lapsed lease.
+// - A participant's `send()` delivers the message its send guard let through; one the guard made over the size is
+//   refused before its commit's first write.
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Abort } from 'telefunc'
@@ -323,6 +325,59 @@ describe.runIf(runs)("a participant's send() over the size, refused by its send 
         guardedBefore: 0,
         fitting: { name: 'Abort', code: 'none', outcome: 'none' },
         guarded: 1,
+      })
+    }, 60_000)
+  }
+})
+
+describe.runIf(runs)("a participant's send() whose send guard changes the message", () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: delivers the message the guard let through`, async () => {
+      const admin = await reached(store)
+      const id = `participant-send-redacted-${i}`
+      const room = await Room.create(id)
+      Room.guard(room, {
+        anyoneCanJoin: true,
+        onBeforeSend: (_from, _to, data) => {
+          if (typeof data === 'object' && data !== null && 'text' in data) data.text = 'redacted'
+        },
+      })
+      const sender = await room.join()
+      const recipient = await room.join()
+      recipient.listen((data) => data)
+      const read = await sender.send(recipient.id, { text: 'private' }, { ack: true })
+      await Room.close(id)
+      admin.disconnect()
+
+      expect(read).toEqual({ text: 'redacted' })
+    }, 60_000)
+
+    it(`${store.name}: one the guard made over the size is refused before its commit's first write, and delivers nothing`, async () => {
+      const admin = await reached(store)
+      const id = `participant-send-grown-${i}`
+      const room = await Room.create(id)
+      Room.guard(room, {
+        anyoneCanJoin: true,
+        onBeforeSend: (_from, _to, data) => {
+          if (typeof data === 'object' && data !== null && 'text' in data) data.text = LARGE
+        },
+      })
+      const sender = await room.join()
+      const recipient = await room.join()
+      const delivered: unknown[] = []
+      recipient.listen((data) => void delivered.push(data))
+      const held = await snapshot(admin)
+      const grown = await sender.send(recipient.id, { text: 'small' }).then(() => 'resolved', told)
+      const changed = changedKeys(held, await snapshot(admin))
+      // The recipient answers a later send once it read it, after the refused one had it been delivered.
+      await sender.send(recipient.id, 'later', { ack: true })
+      await Room.close(id)
+      admin.disconnect()
+
+      expect({ grown, changed, delivered }).toEqual({
+        grown: { name: 'ChannelOverflowError', code: 'none', outcome: 'none' },
+        changed: [],
+        delivered: ['later'],
       })
     }, 60_000)
   }

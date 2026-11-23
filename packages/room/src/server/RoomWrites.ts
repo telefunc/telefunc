@@ -291,15 +291,19 @@ class RoomWrites {
         }
         if (ackId) envelope.ackId = ackId
         if (field !== undefined) envelope.field = field
-        return encodeRoomRecord(envelope)
+        return envelope
       })
       const target = await this.resolveMember(to, store, commitFitsBeforeWriting(store, dm))
       if (!target) throw participantGoneError(to)
       // Its size is checked before the guard, whether the view or the store listed the recipient.
-      const payload = dm.checked(store)
+      dm.checked(store)
       const sender = this.memberSender(from)
       const onBeforeSend = this.owner.guards?.onBeforeSend
-      if (onBeforeSend) await onBeforeSend(sender, target, data)
+      if (onBeforeSend) {
+        await onBeforeSend(sender, target, data)
+        dm.guarded()
+      }
+      const payload = dm.bytes()
       const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
       const committed = await commitLane(store, inbox, payload, { requiredCellKeys })
       const receipt = acceptedOrThrow(this.incarnation.id, committed)
@@ -333,32 +337,41 @@ class RoomWrites {
   }
 }
 
-/** A participant's DM to one member, encoded once and checked for its size before the send guard runs: by the lookup
- *  that finds the member in the store, before that lookup's reap, or else by `checked()` once the view lists it. */
+/** A participant's DM to one member, checked for its size before the send guard runs: by the lookup that finds the
+ *  member in the store, before that lookup's reap, or else by `checked()` once the view lists it. A guard may change
+ *  the message it is given, so where one ran, the message it let through is encoded again, and its commit applies the
+ *  store's size rule to it; else the bytes checked are the bytes committed. */
 class ParticipantDm implements CommitsOf {
+  private message: RoomDmEnvelope | null = null
   private encoded: Uint8Array | null = null
   private sized = false
 
+  /** `envelope` is made once, with the sender as it is before the guard waits. */
   constructor(
     private readonly lane: LaneId,
-    private readonly encode: () => Uint8Array,
+    private readonly envelope: () => RoomDmEnvelope,
   ) {}
 
   commits(members: readonly MemberSnapshot[]): SizedCommit[] {
     if (members.length === 0) return []
     this.sized = true
-    return [{ lane: this.lane, payload: this.envelope(), kept: 'delivered' }]
+    return [{ lane: this.lane, payload: this.bytes(), kept: 'delivered' }]
   }
 
-  /** The envelope, checked against `store`'s size rule unless a lookup checked it. */
-  checked(store: RoomStore): Uint8Array {
-    if (!this.sized) store.assertCommittable(this.lane, this.envelope(), 'delivered')
+  /** Checks the envelope against `store`'s size rule unless the lookup did. */
+  checked(store: RoomStore): void {
+    if (!this.sized) store.assertCommittable(this.lane, this.bytes(), 'delivered')
     this.sized = true
-    return this.envelope()
   }
 
-  private envelope(): Uint8Array {
-    this.encoded ??= this.encode()
+  /** The send guard ran on the message the envelope holds: it is encoded again. */
+  guarded(): void {
+    this.encoded = null
+  }
+
+  bytes(): Uint8Array {
+    this.message ??= this.envelope()
+    this.encoded ??= encodeRoomRecord(this.message)
     return this.encoded
   }
 }

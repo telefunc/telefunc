@@ -13,7 +13,7 @@ import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
 import { RoomStore } from '../backend/RoomStore.js'
 import type { CommitOptions, CommitResult, CommitTarget, LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
-import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
+import { configFromHead, decodeRoomRecord, encodeRoomRecord } from './lanes/lanes.js'
 import { LEASE_CELL_PREFIX, leaseCellKey, memberCellKey } from './store/cells.js'
 import { RoomLease } from './store/lease.js'
 import { joinMember } from './store/members.js'
@@ -310,3 +310,84 @@ for (const listed of ['in the view', 'only in the store'] as const) {
     await Room.close(id)
   })
 }
+
+/** A send guard that redacts a message's `text`, as an app may, and what `onAfterSend()` was given. */
+function redactingGuard(room: Parameters<typeof Room.guard>[0]): unknown[] {
+  const audited: unknown[] = []
+  Room.guard(room, {
+    anyoneCanJoin: true,
+    onBeforeSend: (_from, _to, data) => {
+      if (typeof data === 'object' && data !== null && 'text' in data) data.text = 'redacted'
+    },
+    onAfterSend: (_from, _to, data) => void audited.push(data),
+  })
+  return audited
+}
+
+it("a participant's send() to a participant in the view delivers the message its send guard changed", async () => {
+  const id = `participant-send-redacted-view-${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  const audited = redactingGuard(room)
+  const sender = await room.join()
+  const recipient = await room.join()
+  recipient.listen((data) => data)
+  const original = { text: 'private' }
+  const read = await sender.send(recipient.id, original, { ack: true })
+
+  expect({ read, audited, original }).toEqual({
+    read: { text: 'redacted' },
+    audited: [{ text: 'redacted' }],
+    original: { text: 'private' },
+  })
+  await Room.close(id)
+})
+
+it("a participant's send() to a participant only in the store, found by its lookup there, commits the message its send guard changed", async () => {
+  const id = `participant-send-redacted-store-${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  const audited = redactingGuard(room)
+  const { member: recipient } = await joinedElsewhere(id)
+  const sender = await room.join()
+  const committed: unknown[] = []
+  const { commitLane } = RoomStore.prototype
+  vi.spyOn(RoomStore.prototype, 'commitLane').mockImplementation(async function (
+    this: RoomStore,
+    target,
+    payload,
+    opts,
+  ) {
+    const record = decodeRoomRecord<{ __r: string; to?: string; data?: unknown }>(payload)
+    if (record.__r === 'dm' && record.to === recipient) committed.push(record.data)
+    return await commitLane.bind(this)(target, payload, opts)
+  })
+  await sender.send(recipient, { text: 'private' })
+  vi.restoreAllMocks()
+
+  expect({ committed, audited }).toEqual({ committed: [{ text: 'redacted' }], audited: [{ text: 'redacted' }] })
+  await Room.close(id)
+})
+
+it("a participant's send() that its send guard makes over the size is refused before its commit, and delivers nothing", async () => {
+  const id = `participant-send-grown-${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  let after = 0
+  Room.guard(room, {
+    anyoneCanJoin: true,
+    onBeforeSend: (_from, _to, data) => {
+      if (typeof data === 'object' && data !== null && 'text' in data) data.text = LARGE
+    },
+    onAfterSend: () => void after++,
+  })
+  const sender = await room.join()
+  const recipient = await room.join()
+  const delivered: unknown[] = []
+  recipient.listen((data) => void delivered.push(data))
+  withSizeRule()
+  const grown = await sender.send(recipient.id, { text: 'small' }).then(() => 'resolved', told)
+  vi.restoreAllMocks()
+  // The recipient answers a later send once it read it, after the refused one had it been delivered.
+  await sender.send(recipient.id, 'later', { ack: true })
+
+  expect({ grown, delivered, after }).toEqual({ grown: 'ChannelOverflowError', delivered: ['later'], after: 1 })
+  await Room.close(id)
+})
