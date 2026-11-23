@@ -51,7 +51,11 @@ function pullImage(image: string): void {
   }
 }
 
-const containers: string[] = []
+/** The stores this process started and hasn't removed, each with the admin client `startStore()` made of it. */
+const containers: { name: string; admin: Redis }[] = []
+
+/** The forwarders this process made and hasn't closed: `removeStores()` points them nowhere. */
+const forwarders = new Set<{ to: (host: string) => void }>()
 
 /** The store in a container of its own, once it answers; the container's name, its address, and an admin client of it. */
 async function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
@@ -74,10 +78,10 @@ async function startStore(store: Store, ...options: string[]): Promise<{ name: s
     'no',
     ...options,
   )
-  containers.push(name)
   const host = hostOf(name)
   const admin = new Redis({ host, retryStrategy: () => 50, maxRetriesPerRequest: null })
   admin.on('error', () => {})
+  containers.push({ name, admin })
   for (let tries = 0; (await admin.ping().catch(() => null)) !== 'PONG'; tries++) {
     if (tries > 200) throw new Error(`${store.name} never answered`)
     await sleep(25)
@@ -100,15 +104,21 @@ function storeSpecsRun(): string {
   return run
 }
 
-/** Removes the stores this process started so far, as a row does before it starts its own. Those a spec file leaves
- *  at its end go with the run's global teardown. */
+/** Removes the stores this process started so far, as a row does before it starts its own. First their admin clients
+ *  end and every forwarder points nowhere, as Docker gives a removed container's address to the next container it
+ *  starts, another spec file's too: a client that reconnected to it would reach that store. Those a spec file leaves at
+ *  its end go with the run's global teardown. */
 function removeStores(): void {
-  for (const name of containers.splice(0)) docker('rm', '--force', name)
+  for (const proxy of forwarders) proxy.to('')
+  for (const { name, admin } of containers.splice(0)) {
+    admin.disconnect()
+    docker('rm', '--force', name)
+  }
 }
 
 /** The one place the app's client connects: a forwarder to the store under test, as the backend installs once per
- *  process. Pointing it at another store drops the connections to the last one, which the client then makes again.
- *  `connections` counts the connections made through it. */
+ *  process. Pointing it at another store drops the connections to the last one, which the client then makes again;
+ *  pointed nowhere (`''`), it ends each connection it takes. `connections` counts the connections made through it. */
 async function forwarder(): Promise<{
   port: number
   connections: () => number
@@ -120,6 +130,10 @@ async function forwarder(): Promise<{
   const sockets = new Set<Socket>()
   const server = createServer((client) => {
     connections++
+    if (upstream === '') {
+      client.destroy()
+      return
+    }
     const store = connect(6379, upstream)
     for (const socket of [client, store]) {
       sockets.add(socket)
@@ -135,18 +149,21 @@ async function forwarder(): Promise<{
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('the forwarder has no port')
-  return {
+  const made = {
     port: address.port,
     connections: () => connections,
-    to: (host) => {
+    to: (host: string) => {
       upstream = host
       for (const socket of sockets) socket.destroy()
     },
     close: () => {
+      forwarders.delete(made)
       for (const socket of sockets) socket.destroy()
       server.close()
     },
   }
+  forwarders.add(made)
+  return made
 }
 
 /** The app's client a spec file's backend is installed on, and the forwarder it reaches each row's store through: made
