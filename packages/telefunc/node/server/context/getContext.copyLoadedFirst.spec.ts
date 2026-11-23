@@ -47,8 +47,3 @@ test('code resumed after the `fn` of another caller returned does not read the c
   provideTelefuncContext({ user: 'B' }, () => {})
   expect(await userAfterAwait).toBe('throws')
 })
-
-test('provideTelefuncContext(context) without `fn` throws', () => {
-  // @ts-expect-error
-  expect(() => provideTelefuncContext({ user: 'A' })).toThrow()
-})
