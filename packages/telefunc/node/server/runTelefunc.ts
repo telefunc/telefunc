@@ -85,17 +85,17 @@ type HttpResponseParts = {
   err?: unknown
 }
 
-/** The response. Where `bodyOver` is given, what its accessors send ends only once it settles, but for `body`, which is
- *  the string as it is. */
+/** The response. Where it is `hold`'s, what its accessors send ends only once `hold.over` settles, but for `body`, the
+ *  string as it is, which `hold.unheld` is told of. */
 function createHttpResponse(
   { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
-  bodyOver: Promise<void> | null,
+  hold: { over: Promise<void>; unheld: () => void } | null,
 ): HttpResponse {
   const sent = (): ResponseBody =>
-    bodyOver === null
+    hold === null
       ? responseBody
       : getStreamReadableWeb(responseBody).pipeThrough(
-          new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => bodyOver }),
+          new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => hold.over }),
         )
   return {
     statusCode,
@@ -121,6 +121,7 @@ function createHttpResponse(
         typeof responseBody === 'string',
         "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
       )
+      hold?.unheld()
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
@@ -274,9 +275,13 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
+  const held = isDeno() ? heldClientGone(httpRequestResolved.clientGone) : null
   let response: HttpResponseParts | undefined
   try {
-    response = await runTelefunc_(httpRequestResolved, requestContext)
+    response = await runTelefunc_(
+      held ? { ...httpRequestResolved, clientGone: held.signal } : httpRequestResolved,
+      requestContext,
+    )
   } catch (err: unknown) {
     handleTelefunctionBug(err)
     response = { ...serverError, err }
@@ -289,7 +294,26 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
   // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
   // at every response's end. So on Deno the response ends once the call's body is over.
-  return createHttpResponse(response, isDeno() ? requestContext.bodyRead : null)
+  return createHttpResponse(response, held && { over: requestContext.bodyRead, unheld: held.unheld })
+}
+
+/** On Deno, the entry's `clientGone` while the response holds it: Deno's `request.signal` says the client left only while
+ *  the response is open. Once the answer goes out as a string (`httpResponse.body`), which nothing holds open, its later
+ *  aborts don't count (Deno also aborts it at every response's end), and a failed read of the body says it. */
+function heldClientGone(clientGone: AbortSignal): { signal: AbortSignal; unheld: () => void } {
+  const gone = new AbortController()
+  let held = true
+  const abort = () => {
+    if (held) gone.abort(clientGone.reason)
+  }
+  if (clientGone.aborted) abort()
+  else clientGone.addEventListener('abort', abort, { once: true })
+  return {
+    signal: gone.signal,
+    unheld: () => {
+      held = false
+    },
+  }
 }
 
 /** Whether this runs on Deno: `globalThis.Deno`, which isn't typed here. */

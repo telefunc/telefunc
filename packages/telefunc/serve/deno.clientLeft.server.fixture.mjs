@@ -2,7 +2,8 @@
 // their `.js` specifiers to the `.ts` files, as Vitest does) in either of Deno's signal modes. Each request names the
 // entry it goes through (`x-entry`):
 // - `adapter`: `telefunc/deno`, as docs/pages/Telefunc shows it;
-// - `stream`: `serve({ request })`, answered with `httpResponse.getReadableWebStream()`, as docs/pages/serve shows it.
+// - `stream`: `serve({ request })`, answered with `httpResponse.getReadableWebStream()`, as docs/pages/serve shows it;
+// - `string`: `serve({ request })`, answered with `httpResponse.body`, as examples/cloudflare-workers and examples/next.
 // `/leave?entry=<entry>&row=<row>` makes a call whose client leaves after the answer, from this process
 // (`callAndLeave`). It prints `LISTENING <port>` once it listens.
 
@@ -32,7 +33,7 @@ const server = Deno.serve(
     if (entry === 'adapter') return (await telefunc.serve({ request, info })) ?? new Response(null, { status: 404 })
     const httpResponse = await serve({ request })
     const init = { status: httpResponse.statusCode, headers: httpResponse.headers }
-    return new Response(httpResponse.getReadableWebStream(), init)
+    return new Response(entry === 'string' ? httpResponse.body : httpResponse.getReadableWebStream(), init)
   },
 )
 
