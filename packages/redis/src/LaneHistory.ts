@@ -41,9 +41,9 @@ const REORDER_WAIT_MS = 1_000
 const NO_START: LaneStart = { place: 0, id: NO_ID }
 
 /**
- * One lane's order across every subscription on the connection that carries it. Redis pub/sub keeps no log and a
- * failover may promote a replica that lacks the last commits, so a frame's place alone can't tell a copy or a late frame
- * from the history that replaced the delivered one. Each frame names its commit and the one before it, and the lane
+ * One lane's order for one consumer, across its subscriptions on the connection that carry it. Redis pub/sub keeps no
+ * log and a failover may promote a replica that lacks the last commits, so a frame's place alone can't tell a copy or a
+ * late frame from the history that replaced the delivered one. Each frame names its commit and the one before it, and the lane
  * remembers its last `RING_SIZE` deliveries: a frame it can tell is a copy or a counted hole's late original is dropped,
  * a frame that continues what it delivered is delivered, and where it can't tell which history a frame belongs to it
  * reports one loss of an unknown number, then delivers and follows the frame. It never picks one history over another.
