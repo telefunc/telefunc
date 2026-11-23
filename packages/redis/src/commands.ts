@@ -369,19 +369,14 @@ local function tf_authority()
     return nil, redis.error_reply("TFSTALE a subscription's start reached a replica")
   end
   local authority = string.match(info, 'master_replid:(%x+)')
+  -- Only a Cluster has a config epoch, which only CLUSTER INFO tells.
+  if not string.find(redis.call('INFO', 'cluster'), 'cluster_enabled:1', 1, true) then return authority end
   if redis.acl_check_cmd and not redis.acl_check_cmd('CLUSTER', 'INFO') then
-    -- Only a Cluster needs it: a standalone Redis answers CLUSTER INFO with an error.
-    local cluster = redis.pcall('INFO', 'cluster')
-    if string.find(cluster, 'cluster_enabled:1', 1, true) then return nil, redis.error_reply("TFINFO CLUSTER INFO") end
-    return authority
+    return nil, redis.error_reply("TFINFO CLUSTER INFO")
   end
   local cluster = redis.pcall('CLUSTER', 'INFO')
-  if type(cluster) == 'table' and cluster.err then
-    if not string.find(cluster.err, 'cluster support disabled', 1, true) then return nil, cluster end
-  else
-    authority = authority .. ':' .. string.match(cluster, 'cluster_my_epoch:(%d+)')
-  end
-  return authority
+  if type(cluster) == 'table' and cluster.err then return nil, cluster end
+  return authority .. ':' .. string.match(cluster, 'cluster_my_epoch:(%d+)')
 end
 `
 
