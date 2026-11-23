@@ -44,11 +44,24 @@ async function link() {
   /** `from`'s bytes to `to`, in order, each way's link busy while one is under way. */
   const carry = (from: Socket, to: Socket) => {
     let free = 0
+    // One timer writes what is due, in order: Node dates a timer from the loop's cached time, so one each may reorder.
+    const queue: { chunk: Buffer; due: number }[] = []
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const writeDue = () => {
+      timer = null
+      for (let next = queue[0]; next !== undefined && next.due <= performance.now(); next = queue[0]) {
+        queue.shift()
+        if (!to.destroyed) to.write(next.chunk)
+      }
+      const [next] = queue
+      if (next !== undefined) timer = setTimeout(writeDue, Math.max(0, next.due - performance.now()))
+    }
     from.on('data', (chunk: Buffer) => {
       if (slowSince === null) return void to.write(chunk)
       const now = performance.now()
       free = Math.max(free, now) + (chunk.byteLength * 1000) / BYTES_PER_S
-      setTimeout(() => void (to.destroyed || to.write(chunk)), free + ONE_WAY_MS - now)
+      queue.push({ chunk, due: free + ONE_WAY_MS })
+      timer ??= setTimeout(writeDue, free + ONE_WAY_MS - now)
     })
   }
   const forwarder = net.createServer((page) => {
