@@ -319,15 +319,16 @@ function clusterReady(cluster: Cluster): Promise<void> {
   return wait
 }
 
-/** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */
+/** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. Its
+ *  arguments are `parts`, in order. */
 function callDefinedCommand(
   redis: RedisClient,
   command: string,
-  keysAndArgs: ReadonlyArray<string | Uint8Array>,
+  ...parts: ReadonlyArray<string | Uint8Array>[]
 ): Promise<unknown> {
   const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
   assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
-  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
+  // Each part an array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
   // arguments.
-  return fn.call(redis, keysAndArgs)
+  return fn.apply(redis, parts)
 }

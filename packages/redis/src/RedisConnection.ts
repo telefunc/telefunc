@@ -100,9 +100,9 @@ class RedisConnection {
   async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
-    const keysAndArgs = command.numberOfKeys === null ? [String(keys.length), ...keys, ...argv] : [...keys, ...argv]
+    const parts = command.numberOfKeys === null ? [[String(keys.length)], keys, argv] : [keys, argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    return command.parse(await this.send((client) => callDefinedCommand(client, name, keysAndArgs)), input)
+    return command.parse(await this.send((client) => callDefinedCommand(client, name, ...parts)), input)
   }
 }
 
