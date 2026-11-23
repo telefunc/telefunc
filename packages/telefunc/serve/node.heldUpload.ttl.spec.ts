@@ -1,6 +1,7 @@
 // A browser can attach to a channel a call returned only once it has sent the call's whole body, so the channel's
 // connect window counts from the end of that upload, not from the answer. The row sends a call that returns a Channel and
 // paces its File's upload past `config.channel.connectTtl` (1 s here); once the upload ends, a page attaches over SSE.
+// Then a page that attaches mid-upload: the upload's end starts no connect window for its channel.
 // `config.channel` can't change once a channel used it, so the row has a file of its own.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
@@ -92,4 +93,56 @@ test('a call that returns a Channel and leaves its File unread, whose upload tak
   channel.abort()
   socket.destroy()
   expect(opened).toBe('opened')
+})
+
+test('a call that returns a Channel and leaves its File unread, whose page attaches mid-upload: the channel is still open a connect window after the upload has ended (Telefunc given a Node request)', async () => {
+  const made: Channel[] = []
+  const onChannel = (holder: { channel?: Channel }) => {
+    holder.channel = new Channel()
+    made.push(holder.channel)
+  }
+  process.on('requestBody.telefunc:channel', onChannel)
+  const size = 8 * 64 * 1024
+  const metadata = encoder.encode(
+    JSON.stringify({
+      file,
+      name: 'returnsChannelIgnoringBlob',
+      args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size, type: '' })}`],
+    }),
+  )
+  const start = new Uint8Array(4 + metadata.length)
+  new DataView(start.buffer).setUint32(0, metadata.length)
+  start.set(metadata, 4)
+  const socket = connect(port, '127.0.0.1')
+  socket.on('error', () => {})
+  socket.resume()
+  await once(socket, 'connect')
+  socket.write(
+    `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${start.length + size}\r\n\r\n`,
+  )
+  const answered = once(socket, 'data')
+  socket.write(start)
+  await answered
+  const channel = made[0]
+  if (!channel) throw new Error('no channel')
+  let closed = 'open'
+  channel.onClose((err) => void (closed = err?.message ?? 'closed'))
+  const page = new ClientChannel<string, string>({
+    channelId: channel.id,
+    connection: {
+      telefuncUrl: `http://127.0.0.1:${port}/_telefunc`,
+      transports: ['sse'],
+      idleTimeout: 0,
+      connectionKey: crypto.randomUUID(),
+    },
+  })
+  await page.opened
+  for (let part = 0; part < 8; part++) socket.write(new Uint8Array(64 * 1024).fill(120))
+  await new Promise((resolve) => setTimeout(resolve, CONNECT_TTL_MS * 1.5))
+  const after = closed
+  process.off('requestBody.telefunc:channel', onChannel)
+  page.abort()
+  channel.abort()
+  socket.destroy()
+  expect(after).toBe('open')
 })
