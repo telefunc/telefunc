@@ -7,14 +7,14 @@
 // And on Deno's `node:http`:
 // - `node`: `serve({ url, method, readable, headers })`, answered with `httpResponse.body`, as an Express app does under
 //   Deno (examples/babel);
-// - `framework`: `serve({ request })` with a `Request` a framework built of it (its body `Readable.toWeb(req)`, its
-//   signal the framework's own, aborted as the socket closes), answered with `httpResponse.body`.
+// - `framework`: `serve({ request })` with a `Request` a framework built of it (frameworkRequest.fixture.ts, as Hono's
+//   and srvx's Node servers build one: its body `Readable.toWeb(req)`, its signal the framework's own), answered with
+//   `httpResponse.body`.
 // Its control route, `POST /run {entry, row}` on a port of its own, runs a row's call through an entry from this process
 // (deno.clientLeft.client.fixture.ts), and answers with how its client's rest went and what its telefunction saw once
 // that settled. It prints `READY {"control":<port>,"entries":{<entry>:<port>,…}}` once every entry listens.
 
 import { createServer } from 'node:http'
-import { Readable } from 'node:stream'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
@@ -22,6 +22,7 @@ import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
 import { TELEFUNC_FILE, WINDOW_MS, sendRest, startCall } from './deno.clientLeft.client.fixture.js'
 import { seen } from './deno.clientLeft.telefunc.js'
+import { frameworkRequest } from './frameworkRequest.fixture.js'
 
 config.root = dirname(fileURLToPath(import.meta.url))
 config.telefuncFiles = [`${config.root}${TELEFUNC_FILE}`]
@@ -47,7 +48,7 @@ const entries = {
     return new Response(httpResponse.body, responseInit(httpResponse))
   }),
   node: await listenNode((req) => serve({ url: req.url, method: req.method, readable: req, headers: req.headers })),
-  framework: await listenNode((req) => serve({ request: frameworkRequest(req) })),
+  framework: await listenNode((req) => serve({ request: frameworkRequest(req, `http://127.0.0.1${req.url}`) })),
 }
 const control = await listenDeno(async (request) => {
   const { entry, row } = await request.json()
@@ -82,19 +83,4 @@ async function listenNode(answer) {
 /** The status and headers of Telefunc's `httpResponse`, as a `Response` takes them. */
 function responseInit(httpResponse) {
   return { status: httpResponse.statusCode, headers: httpResponse.headers }
-}
-
-/** The `Request` a framework builds of Deno's `node:http` request `req`, with its own signal. */
-function frameworkRequest(req) {
-  const gone = new AbortController()
-  req.socket.once('close', () => gone.abort())
-  return new Request(`http://127.0.0.1${req.url}`, {
-    method: req.method,
-    headers: Object.entries(req.headers).flatMap(([name, value]) =>
-      value === undefined ? [] : [[name, String(value)]],
-    ),
-    body: Readable.toWeb(req),
-    signal: gone.signal,
-    duplex: 'half',
-  })
 }
