@@ -6,6 +6,8 @@
 // - a File sent on after the answer and read later is read whole;
 // - a 32 MiB File left unread is taken whole, so that a browser gets the answer, and the channel closes by its connect
 //   window;
+// - a File sent whole and read once its channel closed, while its client is still there, fails as the server having
+//   answered before reading it, not as its client leaving;
 // - where the client leaves after the answer, the File's read fails as its client's leaving, and the channel closes by
 //   its connect window (`config.channel.connectTtl`, 1 s here).
 // The server is deno.clientLeft.server.fixture.mjs; CI's Vitest job has Deno.
@@ -155,6 +157,20 @@ for (const mode of ['legacy', 'modern'] as const) {
         const state = await rowState(ports[mode].deno, row)
         socket.destroy()
         expect({ sent, ...state }).toEqual({ sent: 'all sent', read: 'not read', closed: closedByTtl })
+      }, 15_000)
+
+      test(`a call that returns a Channel and keeps its File, sent whole, read once its channel closed, its client still there: the read fails as the server having answered first, not as its client leaving (${through})`, async () => {
+        const row = `${mode}-${entry}-kept`
+        const socket = await startCall(portOf(ports[mode], entry), entry, row, 8, 2000)
+        const sent = await sendAll(socket, 7)
+        await pause(3000)
+        const state = await rowState(ports[mode].deno, row)
+        socket.destroy()
+        expect({ sent, ...state }).toEqual({
+          sent: 'all sent',
+          read: 'failed: The server answered before reading the request body to its end',
+          closed: closedByTtl,
+        })
       }, 15_000)
 
       test(`a call that returns a Channel and reads its File, whose client leaves after the answer: the read fails as its client left, and the channel closes by its connect window (${through})`, async () => {

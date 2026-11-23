@@ -296,13 +296,16 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   }
   // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
   // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
-  // at every response's end. So on Deno the response to a `Request` ends once the call's body is over.
+  // at every response's end. So on Deno the response to a `Request` ends once the call's body is over, and from then on
+  // nothing is read from the body: Deno's abort at that response's end isn't taken for the client leaving.
+  if (held) void requestContext.bodyRead.then(held.unheld)
   return createHttpResponse(response, held && { over: requestContext.bodyRead, unheld: held.unheld })
 }
 
 /** On Deno, a `Request`'s `signal` while the response holds it: Deno's `request.signal` says the client left only while
- *  the response is open. Once the answer goes out as a string (`httpResponse.body`), which nothing holds open, its later
- *  aborts don't count (Deno also aborts it at every response's end), and a failed read of the body says it. */
+ *  the response is open, and Deno also aborts it at every response's end. Its aborts stop counting once the call's body
+ *  is over, which is where a held response ends, or once the answer goes out as a string (`httpResponse.body`), which
+ *  nothing holds open; after a string answer, a failed read of the body says the client left. */
 function heldClientGone(clientGone: AbortSignal): { signal: AbortSignal; unheld: () => void } {
   const gone = new AbortController()
   let held = true
