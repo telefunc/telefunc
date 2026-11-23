@@ -291,3 +291,58 @@ test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages
     network.close()
   }
 }, 90_000)
+
+test("over a WebSocket at 400 kbit/s, a page whose wire drops while the server sends 1 MB on one of its 1,000 channels and 1 kB on each other gets all of it on the next wire, within half again the link's time for it", async () => {
+  const network = await link()
+  const register = vi.spyOn(WireLifecycle.prototype, 'register')
+  const pages: ClientChannel<string, string>[] = []
+  try {
+    const connection = {
+      telefuncUrl: network.telefuncUrl,
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const ends = Array.from({ length: 1_000 }, () => {
+      const channel = new ServerChannel<string, string>()
+      getChannelMux().registerChannel(channel)
+      pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+      return channel
+    })
+    const lifecycle = register.mock.contexts.at(-1)
+    register.mockRestore()
+    await Promise.all([...ends.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
+    const [lead, ...others] = ends
+    const [first, ...rest] = pages
+    if (!lead || !first) throw new Error('no channel')
+    const LARGE = 1_000_000
+    const SMALL = 1_024
+    let unread = LARGE + others.length * SMALL
+    const allRead = Promise.withResolvers<void>()
+    const read = (bytes: number) => {
+      unread -= bytes
+      if (unread === 0) allRead.resolve()
+    }
+    first.listenBinary((data) => read(data.byteLength))
+    for (const page of rest) page.listenBinary((data) => read(data.byteLength))
+    const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    try {
+      network.slow()
+      void lead.sendBinary(new Uint8Array(LARGE), { ack: false })
+      for (const end of others) void end.sendBinary(new Uint8Array(SMALL), { ack: false })
+      network.drop()
+      const linkMs = (unread * 1_000) / BYTES_PER_S
+      await Promise.race([allRead.promise, new Promise((resolve) => setTimeout(resolve, 1.5 * linkMs))])
+      // What the page has yet to read at the deadline, and the wires it lost: the drop alone.
+      expect({ unread, losses: lost.mock.contexts.filter((context) => context === lifecycle).length }).toEqual({
+        unread: 0,
+        losses: 1,
+      })
+    } finally {
+      lost.mockRestore()
+    }
+  } finally {
+    register.mockRestore()
+    for (const page of pages) page.abort()
+    network.close()
+  }
+}, 90_000)

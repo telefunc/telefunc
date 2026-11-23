@@ -24,7 +24,6 @@ import {
   droppingFrom,
   droppingLossy,
   droppingPublishes,
-  overtakes,
   type WireQueue,
 } from './waitingPublishes.js'
 import { Fifo } from '../../../utils/Fifo.js'
@@ -56,6 +55,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private inPath = 0
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
+  /** When `paceTimer` fires. */
+  private paceAt = 0
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
   /** Waits for an acknowledgement, a heartbeat, or room for copies, which it looks for on its own timer. */
@@ -68,14 +69,14 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       pingInterval,
       pieceRate: this.pieceRate,
       cuts: 'whole',
-      overtakes,
+      lanes: true,
       owner: this,
     })
   }
 
   /** Sends `frame`, sent at `at`, through the sender. */
   send(frame: Uint8Array<ArrayBuffer>, at: number): void {
-    this.sender.send(frame, isSequencedTag(frame[0]!) && !this.sender.dataWaits ? this.headroom(at) : 0)
+    this.sender.send(frame, this.headroom(at))
     this.pace()
   }
 
@@ -107,12 +108,18 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const rate = this.pathRate()
     // Unmeasured, the path takes the least any sender sends ahead and as much again as the page said it took, which
     // doubles each round trip as TCP's slow start does, until acknowledgements of data that waited give the rate.
-    if (rate === 0) return WIRE_SEND_AHEAD_MIN_BYTES + this.sender.confirmedBytes - this.unconfirmed()
-    // On a slow link the least round trip still spans a whole frame's arrival, and what goes ahead is copied pieces.
-    // The rate's rise waits for acknowledgements, which go a gap apart however short the round trip.
+    if (rate === 0) return this.window() - this.unconfirmed()
+    return this.window() - this.pathHolds(at)
+  }
+
+  /** `PieceSenderOwner`: the most data the path may hold. On a slow link the least round trip still spans a whole frame's
+   *  arrival, and what goes ahead is copied pieces. The rate's rise waits for acknowledgements, which go a gap apart
+   *  however short the round trip. */
+  window(): number {
+    const rate = this.pathRate()
+    if (rate === 0) return WIRE_SEND_AHEAD_MIN_BYTES + this.sender.confirmedBytes
     const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
-    const ahead = Math.min(toAck, WIRE_QUEUE_DELAY_MS)
-    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * ahead) - this.pathHolds(at)
+    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * Math.min(toAck, WIRE_QUEUE_DELAY_MS))
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
@@ -135,12 +142,20 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
+  /** `PieceSenderOwner`: the most copies this wire may hold once its page took all it handed. */
+  copyAllowance(): number {
+    return hasCopyRoom() ? Number.POSITIVE_INFINITY : WIRE_SEND_AHEAD_MIN_BYTES
+  }
+
   /** `PieceSenderOwner`: past what copies may hold, stalled wires hold that till their ping deadline, so each wire keeps
    *  the least any sender sends ahead of what its page said it took. One whose page never said waits for that to arrive:
    *  room freed by a stalled wire's close would otherwise go to the next stalled wire. */
   copyRoom(): number {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
-    const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed()
+    // What this task gathered goes with its message, so it takes copy room as handed bytes do.
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed() - this.sender.ungivenBytes
+    // Where copy room and not the flight holds what waits, its end frees it with no word from the page: look again.
+    if (room < this.headroom(performance.now())) this.awaitsCopyRoom = true
     if (room >= WIRE_PIECES_ACK_BYTES) return room
     this.awaitsCopyRoom = true
     return 0
@@ -220,7 +235,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** While data waits for headroom, looks again once the rate freed what a piece takes (see `PieceSender.cut`). */
   private pace(): void {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
-    if (this.paceTimer !== null || waitingBytes === 0 || awaitsProbe) return
+    if (waitingBytes === 0 || awaitsProbe) return
     if (this.awaitsCopyRoom && acknowledgedBytes === 0) return
     // With no rate, nothing drains on a timer: what the page says it took frees headroom.
     if (!this.awaitsCopyRoom && this.pathRate() === 0) return
@@ -228,6 +243,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const ms = this.awaitsCopyRoom
       ? WIRE_PIECES_ACK_GAP_MS
       : Math.max(1, (WIRE_PIECES_ACK_BYTES - this.headroom(performance.now())) / this.pathRate())
+    // A rate measured since the timer was set may free the room sooner: it looks again then.
+    const at = performance.now() + ms
+    if (this.paceTimer !== null) {
+      if (at >= this.paceAt) return
+      clearTimeout(this.paceTimer)
+    }
+    this.paceAt = at
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 

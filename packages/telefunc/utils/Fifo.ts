@@ -17,6 +17,11 @@ class Fifo<T> {
     return this.items[this.head]
   }
 
+  /** The item `index` places from the oldest. */
+  at(index: number): T | undefined {
+    return this.head + index < this.items.length ? this.items[this.head + index] : undefined
+  }
+
   *[Symbol.iterator](): Iterator<T> {
     for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
   }

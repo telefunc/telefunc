@@ -120,12 +120,13 @@ function isChannelCtrlTag(tag: number): boolean {
   return tag >= CHANNEL_CTRL_TAG_MIN
 }
 
-function isSequencedTag(tag: number): boolean {
-  return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
+/** `tag` may be read straight off a frame: an empty one has none, and isn't sequenced. */
+function isSequencedTag(tag: number | undefined): boolean {
+  return tag !== undefined && ((tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag))
 }
 
 /** A publish's body, which follows its head and names no channel. */
-function isPublishBody(tag: number): boolean {
+function isPublishBody(tag: number | undefined): boolean {
   return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 

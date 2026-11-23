@@ -25,7 +25,16 @@ import { SseEvents } from '../../wire/SseEvents.js'
 import { ChannelStreamSource } from '../../values/ChannelStreamSource.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { getChannelMux } from './ChannelMux.js'
-import { admit, hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import {
+  addWireCopies,
+  admit,
+  dropWireCopies,
+  hold,
+  letGo,
+  queueMemory,
+  releaseHolder,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ServerChannel } from './ServerChannel.js'
@@ -34,6 +43,9 @@ import { handleSseChannelRequest } from './sse.js'
 // The least it may be, the credit window a channel starts with: a test can bring one channel to hold the most it may. The
 // server may hold 32 MiB in all, far more than these tests leave held.
 config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m' }
+
+/** More copies than any wire's allowance: the ledger every wire shares has no copy room left. */
+const ALL_COPIES = 2 ** 40
 
 /** Three messages, each larger than what a wire sends before its page says it took some. */
 const MESSAGES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
@@ -201,6 +213,8 @@ function overWebSocket(
     bufferedAmount: 0,
   }
   const headroom = new ServerHeadroom({ socket, pingInterval: 5_000 })
+  // Its copies count on the ledger every wire shares, so they go with the row.
+  onTestFinished(() => headroom.close())
   const sender: PeerSender = {
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
@@ -1006,19 +1020,24 @@ for (const [
     reads: [published, sent],
   },
 ] of Object.entries(AFTER_A_PUBLISH)) {
-  test(`on a WebSocket, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
-    const key = crypto.randomUUID()
-    const channel = create(key)
-    const other = new ServerChannel()
-    const page = overWebSocket([channel, other])
-    publish(channel, key)
-    expect(await page.readAll()).toEqual([published])
-    for (const message of MESSAGES) void other.send(message)
-    small(channel)
-    // Of the other channel, p1 started and its rest waits.
-    expect(await page.readAll()).toEqual([published, sent, '1:p1', '1:p2', '1:p3'])
-    other.abort()
-  })
+  for (const pressed of [false, true])
+    test(`on a WebSocket, once the page read a publish${pressed ? ', while other wires hold all the copies the server allows' : ''}, ${name} goes ahead of what of another channel waits`, async () => {
+      if (pressed) {
+        addWireCopies(ALL_COPIES)
+        onTestFinished(() => dropWireCopies(ALL_COPIES))
+      }
+      const key = crypto.randomUUID()
+      const channel = create(key)
+      const other = new ServerChannel()
+      const page = overWebSocket([channel, other])
+      publish(channel, key)
+      expect(await page.readAll()).toEqual([published])
+      for (const message of MESSAGES) void other.send(message)
+      small(channel)
+      // Of the other channel, p1 started and its rest waits.
+      expect(await page.readAll()).toEqual([published, sent, '1:p1', '1:p2', '1:p3'])
+      other.abort()
+    })
 
   test(`on SSE, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
     const key = crypto.randomUUID()
@@ -1481,8 +1500,10 @@ for (const [ending, end] of Object.entries(PAGE_GONE)) {
     end(ended)
     expect(ended.isClosed).toBe(true)
     expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '1:p2', '1:p3'])
-    // Channel 0's p1 had started.
-    expect(await page.readAll()).toEqual(['0:p1', '1:p1', '1:p2', '1:p3'])
+    // Channel 0's p1 had started; the lanes take turns, so it and channel 1's may arrive in either order.
+    const pageReads = await page.readAll()
+    expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1'])
+    expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
     other.abort()
   })
 }
