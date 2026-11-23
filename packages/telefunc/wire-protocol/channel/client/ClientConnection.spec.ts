@@ -159,9 +159,10 @@ class ServerSocket {
   bufferedAmount = 0
   /** Whether it answers the page's PINGs. */
   answers = true
-  /** The RECONCILEs the page sent on it, the seqs of its TEXT frames, and their texts in order. */
+  /** The RECONCILEs the page sent on it, the seqs of its TEXT frames, and their texts by channel index. */
   readonly reconciles: ReconcilePayload[] = []
   readonly texts: number[] = []
+  readonly textsOf = new Map<number, string[]>()
   readonly textOrder: string[] = []
 
   constructor() {
@@ -174,6 +175,7 @@ class ServerSocket {
       if (frame.tag === TAG.PING && this.answers) queueMicrotask(() => this.deliver(encode.pong([])))
       if (frame.tag === TAG.TEXT) {
         this.texts.push(frame.seq)
+        this.textsOf.set(frame.index, [...(this.textsOf.get(frame.index) ?? []), frame.text])
         this.textOrder.push(frame.text)
       }
       if (frame.tag !== TAG.RECONCILE) continue
@@ -368,6 +370,73 @@ describe("a page's channels on a live WebSocket", () => {
     ServerSocket.onReconcile = () => {}
   })
 
+  test("while another channel's join waits for its RECONCILED, a channel already open sends and receives on the wire", async () => {
+    vi.useFakeTimers()
+    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    // The server answers the first RECONCILE at once, and takes the join's without answering it.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+    }
+    const connection = {
+      telefuncUrl: 'http://test.local/_telefunc',
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const open = new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })
+    const received: string[] = []
+    open.listen((message) => void received.push(message))
+    await vi.advanceTimersByTimeAsync(100)
+    const [socket] = ServerSocket.made
+    const ix = socket!.reconciles[0]!.open[0]?.ix
+    const joining = new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.reconciles).toHaveLength(2)
+
+    void open.send('during')
+    socket!.deliver(encode.text(ix!, '"back"', 1))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.texts).toEqual([1])
+    expect(received).toEqual(['back'])
+    expect(ServerSocket.made).toHaveLength(1)
+    open.abort()
+    joining.abort()
+  })
+
+  test("a channel the server awaited sends what it queued, then what it sends next, in order, once its ATTACH_RESULT comes during another channel's join", async () => {
+    vi.useFakeTimers()
+    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    // The server answers the first two RECONCILEs at once, the second awaiting its channel, and takes the third without
+    // answering it.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+      if (socket.reconciles.length === 2) socket.deliver(reconciledFor({ ...reconcile, open: [] }))
+    }
+    const connection = {
+      telefuncUrl: 'http://test.local/_telefunc',
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const pages = [new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })]
+    await vi.advanceTimersByTimeAsync(100)
+    pages.push(new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection }))
+    await vi.advanceTimersByTimeAsync(100)
+    const [socket] = ServerSocket.made
+    const awaited = socket!.reconciles[1]!.open[0]?.ix
+    void pages[1]!.send('queued')
+    pages.push(new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection }))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.reconciles).toHaveLength(3)
+
+    socket!.deliver(encode.attachResult(awaited!, 0))
+    void pages[1]!.send('next')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textsOf.get(awaited!)).toEqual(['"queued"', '"next"'])
+    expect(ServerSocket.made).toHaveLength(1)
+    for (const page of pages) page.abort()
+  })
+
   /** A page's channels on one connection, over `ServerSocket`s: `add()` registers one, `open()` also runs the timers a
    *  while. */
   function pageOf() {
@@ -392,6 +461,31 @@ describe("a page's channels on a live WebSocket", () => {
     return { pages, add, open }
   }
 
+  test("while a channel's join waits, an open channel's sends go at once until the joining channel sends, and then wait behind its send", async () => {
+    const { pages, add, open } = pageOf()
+    // The server answers every RECONCILE at once but the join's, which it answers when the row says.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (socket.reconciles.length !== 2) socket.deliver(reconciledFor(reconcile))
+    }
+    const a = await open()
+    const c = add()
+    await vi.advanceTimersByTimeAsync(100)
+    const [socket] = ServerSocket.made
+    expect(socket!.reconciles).toHaveLength(2)
+    void a.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
+    void c.send('c1')
+    void a.send('a2')
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"'])
+    socket!.deliver(reconciledFor(socket!.reconciles[1]!))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(socket!.textOrder).toEqual(['"a1"', '"c1"', '"a2"'])
+    for (const page of pages) page.abort()
+  })
+
   test('the unacknowledged sends of two channels go again on the next wire in the order they were made', async () => {
     const { pages, open } = pageOf()
     ServerSocket.onReconcile = (socket, reconcile) => {
@@ -407,6 +501,78 @@ describe("a page's channels on a live WebSocket", () => {
     await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
     expect(ServerSocket.made).toHaveLength(2)
     expect(ServerSocket.made[1]!.textOrder).toEqual(['"21"', '"11"'])
+    for (const page of pages) page.abort()
+  })
+
+  test("sends two open channels make while a third channel's join waits, and that the next wire replays, reach it in the order they were made", async () => {
+    const { pages, open } = pageOf()
+    // On the first wire the server answers the first two RECONCILEs, and takes the join's without answering it; the
+    // next wire's it answers at once.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      if (ServerSocket.made.indexOf(socket) > 0 || socket.reconciles.length < 3)
+        socket.deliver(reconciledFor(reconcile))
+    }
+    const [a, b] = [await open(), await open()]
+    await open()
+    void b!.send('21')
+    void a!.send('11')
+    // A deadline from the receipt, the page gives the join up, and the next wire's RECONCILED takes the replay.
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS)
+    expect(ServerSocket.made).toHaveLength(2)
+    expect(ServerSocket.made[1]!.textOrder).toEqual(['"21"', '"11"'])
+    for (const page of pages) page.abort()
+  })
+
+  test('on a resumed wire, a send that a channel the server left out makes from its close callback goes behind the replay of what the page sent before', async () => {
+    const { pages, open } = pageOf()
+    // The next wire's RECONCILED leaves out the channel opened second.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      const [first] = ServerSocket.made
+      const leftOut = first!.reconciles[1]?.open[0]?.ix
+      if (socket === first) socket.deliver(reconciledFor(reconcile))
+      else socket.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== leftOut) }))
+    }
+    const [a, b] = [await open(), await open()]
+    b!.onClose(() => void a!.send('a2'))
+    void a!.send('a1')
+    await vi.advanceTimersByTimeAsync(100)
+    ServerSocket.made[0]!.drop()
+    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
+    expect(ServerSocket.made).toHaveLength(2)
+    expect(ServerSocket.made[1]!.textOrder).toEqual(['"a1"', '"a2"'])
+    for (const page of pages) page.abort()
+  })
+
+  test("a channel the next wire's server awaits stays held there, though the wire the page gave up delivers that channel's ATTACH_RESULT before the next wire's RECONCILED", async () => {
+    const { pages, open } = pageOf()
+    // The first wire's server awaits the channel opened second and takes the third one's join without answering it. The
+    // next wire's awaits that channel too, and answers once the first wire delivered its ATTACH_RESULT.
+    ServerSocket.onReconcile = (socket, reconcile) => {
+      socket.deliver(encode.reconcileTaken())
+      const [first] = ServerSocket.made
+      const awaited = first!.reconciles[1]?.open[0]?.ix
+      if (socket === first) {
+        if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
+        if (socket.reconciles.length === 2) socket.deliver(reconciledFor({ ...reconcile, open: [] }))
+        return
+      }
+      first!.deliver(encode.attachResult(awaited!, 0))
+      socket.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== awaited) }))
+    }
+    await open()
+    const b = await open()
+    const awaited = ServerSocket.made[0]!.reconciles[1]!.open[0]?.ix
+    void b.send('b1')
+    await open()
+    await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS)
+    expect(ServerSocket.made).toHaveLength(2)
+    const next = ServerSocket.made[1]!
+    expect(next.textsOf.get(awaited!)).toBeUndefined()
+    next.deliver(encode.attachResult(awaited!, 0))
+    await vi.advanceTimersByTimeAsync(100)
+    expect(next.textsOf.get(awaited!)).toEqual(['"b1"'])
     for (const page of pages) page.abort()
   })
 })

@@ -43,6 +43,12 @@ function connect(carriesReconcileInOpen: boolean) {
     get sendsOpen() {
       return !exchange.reconciling && !exchange.reconcileOwed
     },
+    get liveWire() {
+      return exchange.liveWire
+    },
+    takesLive(record: ChannelRecord) {
+      return exchange.takesLive(record)
+    },
     reconnecting: false,
   }
   const gate = new SendGate({ owner, channels })
@@ -72,6 +78,7 @@ function connect(carriesReconcileInOpen: boolean) {
       const ctrl = { sessionId: 'session', open: ixes.map((ix) => ({ ix, lastSeq: 0 })) } as ReconciledPayload
       const { frames } = exchange.applyReconciled(ctrl, { deferOmitted: false, upgradeReady: false })
       for (const frame of frames) wire.push(label(frame))
+      exchange.batchHanded()
     },
   }
 }

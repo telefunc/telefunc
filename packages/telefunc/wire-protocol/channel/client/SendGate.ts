@@ -23,6 +23,10 @@ function limitKey({ frame, channelIx }: BufferedFrame): number | null {
 interface SendGateOwner {
   /** False while a RECONCILE or an upgrade holds sends back. */
   readonly sendsOpen: boolean
+  /** While a RECONCILE is out, the wire still takes new frames of the channels its session has (see `takesLive`). */
+  readonly liveWire: boolean
+  /** Whether, while a RECONCILE is out, the wire takes `record`'s new frames: the server has its channel. */
+  takesLive(record: ChannelRecord): boolean
   /** The page lost its wire and has none yet. */
   readonly reconnecting: boolean
   readonly transport: ClientChannelTransport
@@ -33,12 +37,16 @@ type SendGateOptions = {
   channels: ChannelTable
 }
 
-/** What the page's channels send: at once while sends are open and the transport has headroom, else queued, in order. */
+/** What the page's channels send: at once while sends are open, or while a RECONCILE is out the wire takes the
+ *  channel's frames and nothing ahead holds them back, and the transport has headroom; else queued, in order. */
 class SendGate {
   private readonly owner: SendGateOwner
   private readonly channels: ChannelTable
   /** Frames held in order while sends are held back, or till the server attaches their channel (ATTACH_RESULT). */
   private sendBuffer: BufferedFrame[] = []
+  /** How many frames at the front of `sendBuffer` are known to be of channels the server awaits, which hold nothing
+   *  back; any change to the buffer but a push, and an attachment's drain, starts it over. */
+  private awaitedPrefix = 0
   /** Sequenced frames waiting only for the transport's headroom, in order: a channel's next send waits behind them. */
   private waitingForHeadroom = new Fifo<HeldFrame>()
   private waitingForHeadroomBytes = 0
@@ -152,8 +160,9 @@ class SendGate {
     return this.drain(this.isSendable)
   }
 
-  /** Takes out what `releasable` channels held, in order: from a held frame of a channel no RECONCILE named yet, every
-   *  frame stays for the RECONCILE that names it. Past the headroom, the sequenced frames join those waiting for it. */
+  /** Takes out what `releasable` channels held, in order: from a held frame of a channel no RECONCILE named yet, or one
+   *  a live wire doesn't take yet (`holdsBack`), every frame stays. Past the headroom, the sequenced frames join those
+   *  waiting for it. */
   drain(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.settleQueue()
@@ -165,12 +174,12 @@ class SendGate {
     }
     let headroom = this.owner.transport.headroom()
     let writeIx = 0
-    let behindUndeclared = false
+    let behind = false
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
       const { frame, channelIx, seq } = entry
-      if (behindUndeclared || !releasable(channelIx)) {
-        behindUndeclared ||= this.channels.isUndeclared(channelIx)
+      if (behind || !releasable(channelIx)) {
+        behind ||= this.channels.isUndeclared(channelIx) || this.holdsBack(channelIx)
         sendBuffer[writeIx++] = entry
         continue
       }
@@ -187,11 +196,13 @@ class SendGate {
       frames.push({ kind: 'released', frame })
     }
     sendBuffer.length = writeIx
+    this.awaitedPrefix = 0
     return frames
   }
 
   /** Drops the `wanting` channels' held WANT frames: the wants a RECONCILE declares supersede them. */
   dropWantFrames(wanting: Set<number>): void {
+    this.awaitedPrefix = 0
     this.sendBuffer = this.settleQueue().filter(
       ({ channelIx, frame }) => !wanting.has(channelIx) || frame[0] !== TAG.WANT,
     )
@@ -220,6 +231,7 @@ class SendGate {
 
   clear(): void {
     this.sendBuffer = []
+    this.awaitedPrefix = 0
     this.waitingForHeadroom = new Fifo()
     this.waitingForHeadroomBytes = 0
     this.droppedQueues.clear()
@@ -230,21 +242,57 @@ class SendGate {
   }
 
   private canSendImmediately(record: ChannelRecord): boolean {
-    return this.owner.sendsOpen && !record.awaited
+    if (this.owner.sendsOpen) return !record.awaited
+    return this.owner.takesLive(record) && !this.holdsAhead()
+  }
+
+  /** Whether a frame waits that a later one must not pass: any but one of a channel the server awaits. */
+  private holdsAhead(): boolean {
+    const sendBuffer = this.settleQueue()
+    for (; this.awaitedPrefix < sendBuffer.length; this.awaitedPrefix++) {
+      const entry = sendBuffer[this.awaitedPrefix]
+      if (entry === undefined || this.channels.get(entry.channelIx)?.awaited !== true) return true
+    }
+    return false
   }
 
   private readonly isSendable = (ix: number): boolean => this.channels.get(ix)?.awaited !== true
+
+  /** Whether a held frame of channel `ix` may go now. */
+  private readonly isRunnable = (ix: number): boolean => {
+    const record = this.channels.get(ix)
+    if (record === undefined || record.awaited) return false
+    return this.owner.sendsOpen || this.owner.takesLive(record)
+  }
+
+  /** Sends what waits that may go now, in order: at an attachment, once a frame that held the rest back went, and once
+   *  headroom returns. */
+  sendRunnable(): void {
+    this.awaitedPrefix = 0
+    if (!this.owner.sendsOpen && !this.owner.liveWire) return
+    this.sendWaiting()
+    const { transport } = this.owner
+    for (const frame of this.drain(this.isRunnable)) transport.sendFrame(frame)
+  }
 
   private waitForHeadroom(entry: HeldFrame): void {
     this.waitingForHeadroom.push(entry)
     this.waitingForHeadroomBytes += entry.frame.byteLength
   }
 
-  /** `sendBuffer`; while sends are held back, the frames waiting for headroom move to its front, keeping seq order. */
+  /** While a RECONCILE is out on a live wire, whether channel `ix`'s held frame holds back the frames behind it. */
+  private holdsBack(ix: number): boolean {
+    if (this.owner.sendsOpen || !this.owner.liveWire) return false
+    const record = this.channels.get(ix)
+    return record !== undefined && !record.awaited && !this.owner.takesLive(record)
+  }
+
+  /** `sendBuffer`; while the wire takes no sends, the frames waiting for headroom move to its front, in seq order. */
   private settleQueue(): BufferedFrame[] {
     this.dropQueues()
-    if (!this.owner.sendsOpen && this.waitingForHeadroom.length > 0) {
+    if (!this.owner.sendsOpen && !this.owner.liveWire && this.waitingForHeadroom.length > 0) {
       this.sendBuffer = [...this.waitingForHeadroom, ...this.sendBuffer]
+      this.awaitedPrefix = 0
       this.waitingForHeadroom = new Fifo()
       this.waitingForHeadroomBytes = 0
     }
@@ -255,6 +303,7 @@ class SendGate {
     if (this.droppedQueues.size === 0) return
     const dropped = this.droppedQueues
     this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !dropped.has(channelIx))
+    this.awaitedPrefix = 0
     if (this.waitingForHeadroom.length > 0) {
       const kept = new Fifo<HeldFrame>()
       for (const entry of this.waitingForHeadroom) {

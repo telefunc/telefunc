@@ -218,3 +218,63 @@ test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 
     network.close()
   }
 }, 60_000)
+
+test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages both ways while 1,000 channels of 256-byte ids join, and whose wire drops before their RECONCILED, gets each message once and in order at both ends', async () => {
+  const network = await link()
+  const register = vi.spyOn(WireLifecycle.prototype, 'register')
+  const pages: ClientChannel<string, string>[] = []
+  try {
+    const connection = {
+      telefuncUrl: network.telefuncUrl,
+      transports: ['ws' as const],
+      connectionKey: crypto.randomUUID(),
+    }
+    const lead = new ServerChannel<string, string>()
+    getChannelMux().registerChannel(lead)
+    pages.push(new ClientChannel<string, string>({ channelId: lead.id, connection }))
+    const lifecycle = register.mock.contexts.at(-1)
+    register.mockRestore()
+    await Promise.all([lead.opened, pages[0]!.opened])
+    const [byServer, byPage] = [[] as string[], [] as string[]]
+    const pageGotOne = Promise.withResolvers<void>()
+    lead.listen((message) => void byServer.push(message))
+    pages[0]!.listen((message) => {
+      byPage.push(message)
+      pageGotOne.resolve()
+    })
+    network.slow()
+    const joined = Array.from({ length: 1_000 }, (_, ix) => {
+      const channel = new ServerChannel<string, string>({ id: `${crypto.randomUUID()}-${ix}`.padEnd(256, 'x') })
+      getChannelMux().registerChannel(channel)
+      pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
+      return channel
+    })
+    let joinedOpen = 0
+    for (const channel of joined) void channel.opened.then(() => joinedOpen++)
+    const numbers = Array.from({ length: 20 }, (_, n) => String(n + 1))
+    for (const n of numbers) {
+      void pages[0]!.send(n)
+      void lead.send(n)
+    }
+    const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
+    try {
+      // The join's RECONCILE, some 300 kB, is still going up: the wire drops while what the server sent comes down.
+      await pageGotOne.promise
+      expect(joinedOpen).toBe(0)
+      network.drop()
+      await Promise.all([...joined.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
+      // A stuck row ends at the harness's timeout.
+      while (byServer.length < numbers.length || byPage.length < numbers.length)
+        await new Promise((r) => setTimeout(r, 50))
+      expect(lost.mock.contexts.filter((context) => context === lifecycle)).toHaveLength(1)
+    } finally {
+      lost.mockRestore()
+    }
+    expect(byServer).toEqual(numbers)
+    expect(byPage).toEqual(numbers)
+  } finally {
+    register.mockRestore()
+    for (const page of pages) page.abort()
+    network.close()
+  }
+}, 90_000)

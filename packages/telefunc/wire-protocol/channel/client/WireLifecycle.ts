@@ -229,6 +229,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return this.connected && !this.exchange.reconciling && !this.upgrade.gatesSends && !this.exchange.reconcileOwed
   }
 
+  get liveWire(): boolean {
+    return this.connected && !this.upgrade.gatesSends && this.exchange.liveWire
+  }
+
+  takesLive(record: ChannelRecord): boolean {
+    return this.liveWire && this.exchange.takesLive(record)
+  }
+
   /** The wire can't take a RECONCILE now: it isn't open, or an upgrade is between its READY and its handoff. */
   private get reconcileHeld(): boolean {
     return !this.connected || this.upgrade.holdsReconcile
@@ -483,6 +491,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
+    this.exchange.batchHanded()
     for (const channel of outcome.channelsToOpen) {
       channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
     }

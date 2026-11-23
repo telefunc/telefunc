@@ -82,6 +82,8 @@ class AttachExchange {
   private session: string | null = null
   /** The wire the last RECONCILED came on. */
   private reconciledWire = -1
+  /** From a RECONCILED until what it releases is handed to the transport (`batchHanded`). */
+  private committing = false
 
   constructor({ owner, channels, gate }: AttachExchangeOptions) {
     this.owner = owner
@@ -100,6 +102,29 @@ class AttachExchange {
   /** The server's, from the last RECONCILED. */
   get sessionId(): string | null {
     return this.session
+  }
+
+  /** While a RECONCILE is out, the wire takes new frames of the channels its session has: it has had a RECONCILED, and
+   *  what that released went. */
+  get liveWire(): boolean {
+    return this.reconciledWire === this.owner.wire && !this.committing
+  }
+
+  /** Whether `liveWire` takes `record`'s new frames: the server has its channel, and no RECONCILE out names it. */
+  takesLive(record: ChannelRecord): boolean {
+    const { ix } = record
+    return (
+      this.liveWire &&
+      record.state.tag !== 'pending' &&
+      !record.awaited &&
+      !this.channels.isUndeclared(ix) &&
+      !this.inFlight.ixes.has(ix)
+    )
+  }
+
+  /** What the RECONCILED released went to the transport: new frames may go past what waits. */
+  batchHanded(): void {
+    this.committing = false
   }
 
   /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
@@ -178,6 +203,7 @@ class AttachExchange {
     { deferOmitted, upgradeReady }: { deferOmitted: boolean; upgradeReady: boolean },
   ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
+    this.committing = true
     this.session = ctrl.sessionId
     const inFlight = this.inFlight
     this.inFlight = reconcileInFlight()
@@ -272,11 +298,10 @@ class AttachExchange {
     const opened = record.state.tag === 'pending'
     if (opened) this.channels.open(record)
     else if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
-    // As `applyReconciled` does: its replay, then what it queued, which a RECONCILE out lets go at its RECONCILED, in
-    // order with what the other channels queued meanwhile.
+    // As `applyReconciled` does: its replay, then what it queued, in order with what other channels queued meanwhile.
     const { transport } = this.owner
     for (const { frame } of this.replayTo(record, lastSeq)) transport.sendFrame(frame)
-    if (!this.isReconciling) for (const frame of this.gate.drain((i) => i === ix)) transport.sendFrame(frame)
+    this.gate.sendRunnable()
     if (opened && record.state.tag === 'open') {
       record.channel._onTransportOpen(transport.batched, transport.uplink, transport.downlink)
     }
