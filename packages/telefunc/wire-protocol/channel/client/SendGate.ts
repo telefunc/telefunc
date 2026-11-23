@@ -268,7 +268,6 @@ class SendGate {
   /** Sends what waits that may go now, in order: at an attachment, once a frame that held the rest back went, and once
    *  headroom returns. */
   sendRunnable(): void {
-    this.awaitedPrefix = 0
     if (!this.owner.sendsOpen && !this.owner.liveWire) return
     this.sendWaiting()
     const { transport } = this.owner
