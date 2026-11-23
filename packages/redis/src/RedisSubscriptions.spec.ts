@@ -114,11 +114,16 @@ function setup(
 
 /** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
  *  `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its predecessor's, and the payload. Its id is
- *  its place, so a lane's frames name the one before them. */
+ *  its place unless given, and so is the one before it, so a lane's frames name the one before them. */
 function frameOf(
   place: number,
   text: string,
-  { lane, seq = place, id = BigInt(place) }: { lane?: string; seq?: number; id?: bigint } = {},
+  {
+    lane,
+    seq = place,
+    id = BigInt(place),
+    prev = BigInt(Math.max(place - 1, 0)),
+  }: { lane?: string; seq?: number; id?: bigint; prev?: bigint } = {},
 ): Buffer {
   const header = Buffer.alloc(40)
   header.writeBigUInt64BE(BigInt(place), 0)
@@ -127,7 +132,7 @@ function frameOf(
   header.writeUInt32BE(0, 16)
   header.writeUInt32BE(1_700_000_000, 20)
   header.writeBigUInt64BE(id, 24)
-  header.writeBigUInt64BE(BigInt(Math.max(place - 1, 0)), 32)
+  header.writeBigUInt64BE(prev, 32)
   const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
   if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
   return Buffer.concat([laneKey, header, Buffer.from(text)])
@@ -220,6 +225,58 @@ describe('a Cluster slot whose master changed', () => {
       await subscriptions.followMoves(moved, async () => view)
       await expect.poll(() => missed).toEqual([null])
       expect(attempt.state()).toBe('ready')
+    }
+  })
+
+  it('resumes without a second report where its lane met the new history in its frames, and reports where it went on', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    const states: string[] = []
+    attempt.onStateChange((state) => states.push(state))
+    publish(TEXT, frameOf(4, 'm4'))
+    // The new master's first frame takes m4's place: the lane tells, reports, and follows it.
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    expect(missed).toEqual([null])
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => states).toEqual(['lost', 'ready'])
+    expect(missed).toEqual([null])
+    // y5 goes on from y4, and another failover's master stands at y5: nothing in the frames told the lane of it.
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    start = { authority: 'c', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => states).toEqual(['lost', 'ready', 'lost', 'ready'])
+    expect(missed).toEqual([null, null])
+    expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('reports where the lane went on, as next, from the start of the last switch or resharding into a failover', async () => {
+    for (const first of ['switch', 'resharding'] as const) {
+      const { subscriptions, listen, publish, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      // Where the other history stands, a commit with id 100 + its place.
+      let place = 3
+      if (first === 'switch') {
+        // A reported failover to a master at another commit in place 3.
+        start = { authority: 'b', starts: new Map([['', { place, id: BigInt(103) }]]) }
+        await subscriptions.followMoves(moved, async () => null)
+        await expect.poll(() => missed).toEqual([null])
+      } else {
+        // A reported fork, y4 replacing m4, then a resharding.
+        publish(TEXT, frameOf(4, 'm4'))
+        publish(TEXT, frameOf(++place, 'y4', { id: BigInt(104) }))
+        expect(missed).toEqual([null])
+        start = { authority: 'b', starts: new Map([['', { place, id: BigInt(104) }]]) }
+        await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+      }
+      publish(TEXT, frameOf(++place, 'z', { id: BigInt(100 + place), prev: BigInt(99 + place) }))
+      start = { authority: 'c', starts: new Map([['', { place, id: BigInt(100 + place) }]]) }
+      await subscriptions.followMoves(moved, async () => null)
+      await expect.poll(() => missed).toEqual([null, null])
     }
   })
 

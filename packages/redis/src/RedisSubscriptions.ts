@@ -572,16 +572,19 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
 
   /** Its key's history goes on under `authority`, a master its key moved to by resharding. */
   followHistory(authority: string): void {
-    if (this.state() === 'ready') this.authority = authority
+    if (this.state() !== 'ready') return
+    this.authority = authority
+    for (const { history } of this.lanes.values()) history.anchor(this)
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
    *  before it is ready; on a resume, each lane it carried compares its start with what it delivered, unless the start
-   *  came from another history than its last: then it reports once that it doesn't know what it missed. */
+   *  came from another history than its last: then it reports once that it doesn't know what it missed, unless each
+   *  lane already met that history in its frames and decided on it there. */
   markReady({ authority, starts }: Starts): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
-    const switched = resuming && this.authority !== authority
+    const changed = resuming && this.authority !== authority
     this.authority = authority
     const early = new Map<string, LaneFrame[]>()
     for (const message of this.early) {
@@ -600,6 +603,10 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
         this.lanes.delete(laneKey)
       }
     }
+    const met =
+      lanes.size > 0 &&
+      [...lanes].every((laneKey) => this.lanes.get(laneKey)?.history.metSince(this, starts.get(laneKey)))
+    const switched = changed && !met
     this.transition('ready')
     if (switched) this.reportMissed(null)
     for (const laneKey of lanes) {
