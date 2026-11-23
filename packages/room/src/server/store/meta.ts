@@ -37,6 +37,7 @@ import {
   MEMBER_META_CELL_PREFIX,
   META_CELL_PREFIX,
   META_DROP_CELL_PREFIX,
+  META_DROP_PENDING_CELL_KEY,
   META_GEN_CELL_KEY,
   META_SEQ_CELL_KEY,
   memberCellKey,
@@ -208,17 +209,26 @@ async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | nu
  *    changes, so merges never conflict with each other (a key two of them write ends as the later commit wrote it), and
  *    one that a replace overtook retries on the new meta. A key already there keeps its place; a new one is placed at
  *    the `meta:seq` the merge read.
- *  - Replace: writes the whole meta as a new generation and marks the old one to drop. It also expects `meta:gen`
- *    unchanged: one that another replace overtook counts as the earlier of the two, and writes nothing. */
+ *  - Replace: writes the whole meta as a new generation, marks the old one to drop and flags a drop pending, then drops
+ *    the marked generations in the same call. It also expects `meta:gen` unchanged: one that another replace overtook
+ *    counts as the earlier of the two, and writes nothing.
+ *  Returns whether a drop is left to the caller: one the merge read pending, or any for a replace another replace
+ *  overtook, whose read may predate that replace's mark (`writeMeta()` in roomStatics.ts runs it). */
 async function writeRoomMeta(
   store: RoomStore,
   roomId: string,
   config: RoomConfigRecord,
   write: RoomMetaWrite,
-): Promise<void> {
+): Promise<boolean> {
   const { inc } = config
+  let dropPending = false
   const update = await retryCompareExchange(async (): Promise<Uint8Array | null | typeof EXCHANGE_CONFLICT> => {
-    const read = await readOpenCells(store, roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
+    const read = await readOpenCells(store, roomId, inc, [
+      META_SEQ_CELL_KEY,
+      META_GEN_CELL_KEY,
+      META_DROP_PENDING_CELL_KEY,
+    ])
+    dropPending = read.cells.has(META_DROP_PENDING_CELL_KEY)
     const seq = read.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) {
       const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
@@ -244,7 +254,8 @@ async function writeRoomMeta(
       const meta = metaEntriesAt(write.replace, count)
       const prefix = roomMetaGenPrefix(count)
       const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
-      const mutations = [genMutation(count), drop, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
+      const pending = { key: META_DROP_PENDING_CELL_KEY, bytes: encodeRoomRecord(gen) }
+      const mutations = [genMutation(count), drop, pending, ...meta.map((entry) => metaKeyMutation(prefix, entry))]
       const sized = sizedUpdate(roomId, count + 1, (seq) => ({ __r: 'update', seq, meta }))
       const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
       return result.kind === 'conflict' ? null : sized.committed(result)
@@ -258,7 +269,7 @@ async function writeRoomMeta(
     const result = await store.compareExchangeCells(roomId, inc, { expect, mutations, counts }, sized.record)
     return sized.committed(result)
   })
-  if (update === null) return
+  if (update === null) return true
   // A failed drop is told once the commit, which waits for its handoff, settled.
   const committing = commitLane(store, controlLane(roomId, inc), update)
   const [commit] = await Promise.all([
@@ -266,6 +277,7 @@ async function writeRoomMeta(
     'replace' in write && failingAfter(committing, dropReplacedMetaGenerations(store, roomId, inc)),
   ])
   acceptedOrThrow(roomId, commit)
+  return 'merge' in write && dropPending
 }
 
 /** An update as the control record of its exchange's count of `meta:seq`, and the update's bytes once the exchange
@@ -294,25 +306,47 @@ function sizedUpdate(
 }
 
 /** Each generation a replace marked, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, its mark going with
- *  its last page. A marked generation stopped being `meta:gen` in the exchange that marked it, so whoever finishes a
- *  mark, a later replace or the heartbeat, drops no live key. */
+ *  its last page, and the pending flag with the last mark's, at the version read with the marks. A marked generation
+ *  stopped being `meta:gen` in the exchange that marked it, so whoever finishes a mark, a meta write or the heartbeat,
+ *  drops no live key. */
 async function dropReplacedMetaGenerations(store: RoomStore, roomId: string, inc: string): Promise<void> {
   // A page read that fails after a page's delete fails the drop as the delete may have.
-  const marks = await store.reads.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
-  if (marks.kind === 'stale-incarnation') return
+  const read = await store.reads.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  if (read.kind === 'stale-incarnation') return
   const slice = new Slice()
-  for (const [mark, raw] of marks.cells) {
-    let held: string[] = []
+  // Each exchange's deletes wait for the next page, so a generation's last page goes with its mark.
+  let held: string[] = []
+  for (const [mark, raw] of read.cells) {
+    if (mark === META_DROP_PENDING_CELL_KEY) continue
     for await (const page of store.reads.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
       if (page.kind === 'stale-incarnation') return
-      const dropping = held
-      if (dropping.length > 0 && !(await deleteCells(store, roomId, inc, dropping))) return
+      if (held.length > 0 && !(await deleteCells(store, roomId, inc, held))) return
       held = [...page.cells.keys()]
       if (slice.over) await slice.next()
     }
-    const dropping = [...held, mark]
-    if (!(await deleteCells(store, roomId, inc, dropping))) return
+    held.push(mark)
   }
+  await retirePendingDrop(store, roomId, inc, held, read.versions.get(META_DROP_PENDING_CELL_KEY))
+}
+
+/** The drop's last exchange: `keys`, and the pending flag where it is still at `pending`, the version read with the
+ *  marks the drop finished. A replace that marked meanwhile wrote the flag again: the exchange conflicts, `keys` go
+ *  alone, and the flag stays for that replace's drop or the next meta write. */
+async function retirePendingDrop(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  keys: string[],
+  pending: string | undefined,
+): Promise<void> {
+  if (pending !== undefined) {
+    const result = await store.compareExchangeCells(roomId, inc, {
+      expect: [{ key: META_DROP_PENDING_CELL_KEY, version: pending }],
+      mutations: [...keys, META_DROP_PENDING_CELL_KEY].map((key) => ({ key, bytes: null })),
+    })
+    if (result.kind !== 'conflict') return
+  }
+  if (keys.length > 0) await deleteCells(store, roomId, inc, keys)
 }
 
 function genMutation(gen: number): CellMutation {

@@ -62,7 +62,14 @@ import {
 } from './lanes/lanes.js'
 import { ServerRoom, handleOf } from './room.js'
 import { RoomReplica } from './RoomReplica.js'
-import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './store/meta.js'
+import {
+  dropReplacedMetaGenerations,
+  readRoomMeta,
+  writeRoomMeta,
+  type RoomMetaWrite,
+  type StoredRoomMeta,
+} from './store/meta.js'
+import { reportRoomError } from './reportRoomError.js'
 import { metaObject } from '../shared/RoomMetaState.js'
 import { closeIncarnation } from './lifecycle/close.js'
 import { cancelClose } from './lifecycle/hold.js'
@@ -318,13 +325,26 @@ async function countListedRoom(store: RoomStore, roomId: string, config: RoomCon
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isRecord(meta), 'Room.setMeta() meta should be an object')
   const owned = ownMetadata(meta)
-  await getRoomPlane().call(async (store) => writeRoomMeta(store, id, await requireRoom(store, id), { replace: owned }))
+  await writeMeta(id, { replace: owned })
 }
 
 async function updateRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isRecord(meta), 'Room.updateMeta() meta should be an object')
   const owned = ownMetadata(meta)
-  await getRoomPlane().call(async (store) => writeRoomMeta(store, id, await requireRoom(store, id), { merge: owned }))
+  await writeMeta(id, { merge: owned })
+}
+
+/** The room's meta written in a call of its own, then the drop it left (`writeRoomMeta()`) in another: the write answers
+ *  for its own commit, and a drop that fails is reported and stays pending for the next meta write or the heartbeat. */
+async function writeMeta(id: string, write: RoomMetaWrite): Promise<void> {
+  const { inc, dropLeft } = await getRoomPlane().call(async (store) => {
+    const room = await requireRoom(store, id)
+    return { inc: room.inc, dropLeft: await writeRoomMeta(store, id, room, write) }
+  })
+  if (dropLeft)
+    await getRoomPlane()
+      .call((store) => dropReplacedMetaGenerations(store, id, inc))
+      .catch(reportRoomError)
 }
 
 async function closeRoom(id: string): Promise<void> {

@@ -20,6 +20,7 @@ export {
   META_SEQ_CELL_KEY,
   META_GEN_CELL_KEY,
   META_DROP_CELL_PREFIX,
+  META_DROP_PENDING_CELL_KEY,
   metaDropCellKey,
   roomMetaGenPrefix,
   MEMBER_META_CELL_PREFIX,
@@ -96,11 +97,15 @@ function viewCellKey(lease: string, viewId: string): string {
   return leaseViewCellPrefix(lease) + viewId
 }
 /** The room's meta once first written (see `meta.ts`): a counter of the writes, the generation the last replace
- *  started, a cell per top-level key in that generation, and a mark per generation a replace left to drop. */
+ *  started, a cell per top-level key in that generation, a mark per generation a replace left to drop, and beside the
+ *  marks the flag that a drop is pending. */
 const META_CELL_PREFIX = 'meta:'
 const META_SEQ_CELL_KEY = 'meta:seq'
 const META_GEN_CELL_KEY = 'meta:gen'
 const META_DROP_CELL_PREFIX = 'meta:drop:'
+/** Written by each replace with its mark, under the marks' prefix, so a read of the marks reads it at the version that
+ *  covers them; retired by the drop that finished them. A meta write reads it to take a pending drop forward. */
+const META_DROP_PENDING_CELL_KEY = 'meta:drop:pending'
 function metaDropCellKey(gen: number): string {
   return META_DROP_CELL_PREFIX + gen
 }

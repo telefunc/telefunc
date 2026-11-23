@@ -18,7 +18,7 @@ import type {
 import { getRoomPlane } from '../backend/plane.js'
 import { Room } from '../index.js'
 import { decodeRoomRecord } from './lanes/lanes.js'
-import { META_DROP_CELL_PREFIX, roomMetaGenPrefix } from './store/cells.js'
+import { metaDropCellKey, roomMetaGenPrefix } from './store/cells.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -49,9 +49,7 @@ async function roomWithTwoPagesOfMeta(): Promise<{ id: string; inc: string }> {
 /** What the store keeps of generation 0: its marker and its key cells. */
 async function generationZero(id: string, inc: string): Promise<{ marks: number; cells: number }> {
   const { reads } = getRoomPlane().direct
-  const marks = await reads.readCells(id, inc, {
-    prefix: META_DROP_CELL_PREFIX,
-  })
+  const marks = await reads.readCells(id, inc, { keys: [metaDropCellKey(0)] })
   const cells = await reads.readCells(id, inc, {
     prefix: roomMetaGenPrefix(0),
   })
