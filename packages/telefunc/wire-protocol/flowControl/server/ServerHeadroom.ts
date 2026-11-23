@@ -18,7 +18,7 @@ import {
   type PieceSenderOwner,
   type PieceSocket,
 } from '../pieces.js'
-import { encode, type PiecesAck } from '../../wire/frame.js'
+import { encode, MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type PiecesAck } from '../../wire/frame.js'
 import {
   countWaitingPublishes,
   droppingFrom,
@@ -31,6 +31,8 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 
 /** How long a blocked window waits for its page's word before it asks. */
 const WIRE_ASK_AFTER_MS = WIRE_PIECES_ACK_GAP_MS / 5
+/** A message of the least send-ahead, with the most its frame adds. */
+const MESSAGE_BYTES = WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
@@ -121,7 +123,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   headroom(): number {
     // Unmeasured, the kernel's TCP paces what the app hands, as on main; measured, only an acknowledgement frees room.
     if (this.pathRate() === 0) return Number.POSITIVE_INFINITY
-    return this.window() - this.unconfirmed()
+    // A message may cross the window: on a slow link the next is on its way while the page acknowledges the last.
+    const room = this.window() - this.unconfirmed()
+    return room > 0 ? room + MESSAGE_BYTES : 0
   }
 
   /** `PieceSenderOwner`: the most data the path may hold. On a slow link the least round trip still spans a whole frame's
@@ -131,7 +135,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const rate = this.pathRate()
     if (rate === 0) return Number.POSITIVE_INFINITY
     const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
-    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, rate * Math.min(toAck, WIRE_QUEUE_DELAY_MS))
+    return Math.max(2 * MESSAGE_BYTES, rate * Math.min(toAck, WIRE_QUEUE_DELAY_MS))
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */

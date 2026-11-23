@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
@@ -93,22 +92,24 @@ describe('ServerHeadroom.headroom', () => {
     }
   })
 
-  it("once the page's acknowledgements measured the link, what it hasn't confirmed stays within the window", async () => {
+  it("once the page's acknowledgements measured the link, what it hasn't confirmed stays within the window and a message across it", async () => {
     const wire = wireBehindSlowLink()
     try {
       // 256 KiB queue on the link for 2 s, so their acknowledgements give its rate.
       const frame = new Uint8Array(16 * 1024)
       for (let n = 0; n < 16; n++) wire.send((seq) => encode.binary(1, frame, seq))
       await sleep(3_000)
-      // 125 B/ms over at most the queue delay, 37.5 kB, is less than the least send-ahead.
-      expect(wire.window()).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
+      // 125 B/ms over at most the queue delay, 37.5 kB, is less than two 64 KiB messages with their frames' 16 B each.
+      expect(wire.window()).toBe(131_104)
       for (let n = 0; n < 64; n++) wire.send((seq) => encode.binary(1, frame, seq))
       let most = 0
       for (let ms = 0; ms < 4_000; ms += 5) {
         most = Math.max(most, wire.unconfirmed())
         await sleep(5)
       }
-      expect(most).toBeLessThanOrEqual(WIRE_SEND_AHEAD_MIN_BYTES)
+      // A message may cross the window, and does: the link holds the next while the page acknowledges the last.
+      expect(most).toBeGreaterThan(131_104)
+      expect(most).toBeLessThanOrEqual(131_104 + 65_552)
     } finally {
       wire.stop()
     }
