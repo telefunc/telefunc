@@ -41,6 +41,7 @@ function readUser(): string {
 
 test('code resumed after the `fn` of another caller returned does not read the context provided to that `fn`', async () => {
   const userAfterAwait = provideTelefuncContext({ user: 'A' }, async () => {
+    expect(readUser()).toBe('A')
     await Promise.resolve()
     return readUser()
   })
