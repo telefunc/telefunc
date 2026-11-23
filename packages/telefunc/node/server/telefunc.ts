@@ -65,7 +65,7 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertRequestSignalFlag()
   const httpRequestResolved = await resolveHttpRequest(httpRequest)
   try {
-    return (await runTelefunc(httpRequestResolved)).httpResponse
+    return await runTelefunc(httpRequestResolved)
   } finally {
     // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
     httpRequestResolved.unwatch?.()
@@ -89,17 +89,17 @@ async function serveNode(
 ): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, 1)
   const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
-  const { httpResponse } = await runTelefunc(httpRequestResolved)
+  const httpResponse = await runTelefunc(httpRequestResolved)
   return httpResponse
 }
 
 /** `serve()` for the adapters of a runtime's own server (`Bun.serve`, `Deno.serve`), which pass how that server shows its
- *  client left. With the response: when the call's body is over. */
+ *  client left. */
 async function serveRuntimeRequest(
   httpRequest: Extract<HttpRequest, { request: Request }>,
   clientLeft: ClientLeft,
   clientGone: AbortSignal,
-): Promise<{ httpResponse: HttpResponse; bodyRead: Promise<void> }> {
+): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, 1)
   return runTelefunc({ request: httpRequest.request, context: httpRequest.context, clientLeft, clientGone })
 }

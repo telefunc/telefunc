@@ -70,7 +70,7 @@ function telefunc(): TelefuncServe {
       // closed.").
       const clientLeft = (err: unknown) =>
         request.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')
-      const { httpResponse } = await serveRuntimeRequest(
+      const httpResponse = await serveRuntimeRequest(
         context ? { request, context } : { request },
         clientLeft,
         request.signal,

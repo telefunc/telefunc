@@ -76,19 +76,27 @@ type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-strea
  *  middleman on the hot path. */
 type ResponseBody = string | StreamReadableNode | ReadableStream<Uint8Array<ArrayBuffer>>
 
-function createHttpResponse({
-  statusCode,
-  contentType,
-  headers,
-  body: responseBody,
-  err,
-}: {
+/** What a response is made of, as the call ends. */
+type HttpResponseParts = {
   statusCode: HttpResponse['statusCode']
   contentType: ContentType
   headers: [string, string][]
   body: ResponseBody
   err?: unknown
-}): HttpResponse {
+}
+
+/** The response. Where `bodyOver` is given, what its accessors send ends only once it settles, but for `body`, which is
+ *  the string as it is. */
+function createHttpResponse(
+  { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
+  bodyOver: Promise<void> | null,
+): HttpResponse {
+  const sent = (): ResponseBody =>
+    bodyOver === null
+      ? responseBody
+      : getStreamReadableWeb(responseBody).pipeThrough(
+          new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => bodyOver }),
+        )
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -116,26 +124,27 @@ function createHttpResponse({
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
-      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(responseBody, writable)
-      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(responseBody, writable)
+      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(sent(), writable)
+      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(sent(), writable)
       assertUsage(
         false,
         "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
       )
     },
     getReadableWebStream() {
-      return getStreamReadableWeb(responseBody)
+      return getStreamReadableWeb(sent())
     },
     getReadableNodeStream() {
-      return getStreamReadableNode(responseBody)
+      return getStreamReadableNode(sent())
     },
     async getBody() {
-      if (typeof responseBody === 'string') return responseBody
+      const body = sent()
+      if (typeof body === 'string') return body
       const decoder = new TextDecoder()
       let result = ''
       // A `ReadableStream` is iterable on modern runtimes; the cast is just to
       // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of responseBody as AsyncIterable<Uint8Array<ArrayBuffer>>) {
+      for await (const chunk of body as AsyncIterable<Uint8Array<ArrayBuffer>>) {
         result += decoder.decode(chunk, { stream: true })
       }
       result += decoder.decode()
@@ -258,32 +267,34 @@ const malformedRequest = {
   headers: [] as [string, string][],
 } as const
 
-/** The call's response, and when its body is over: read to its end, or its client gone (`RequestContext.bodyRead`). */
-async function runTelefunc(
-  httpRequestResolved: Parameters<typeof runTelefunc_>[0],
-): Promise<{ httpResponse: HttpResponse; bodyRead: Promise<void> }> {
+async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[0]): Promise<HttpResponse> {
   // Eagerly load `node:stream` so all downstream code (`createPushReadable`,
   // pipe/get helpers, `getStreamReadableNode`) can read it synchronously.
   // No-op on subsequent calls and a silent no-op on Workers (load fails,
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
-  let httpResponse: HttpResponse | undefined
+  let response: HttpResponseParts | undefined
   try {
-    httpResponse = await runTelefunc_(httpRequestResolved, requestContext)
+    response = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    httpResponse = createHttpResponse({
-      ...serverError,
-      err,
-    })
+    response = { ...serverError, err }
   } finally {
     // A call that answers without a value ends the live values it was passed as arguments.
-    if (httpResponse?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
+    if (response?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
-  return { httpResponse, bodyRead: requestContext.bodyRead }
+  // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
+  // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
+  // at every response's end. So on Deno the response ends once the call's body is over.
+  return createHttpResponse(response, isDeno() ? requestContext.bodyRead : null)
+}
+
+/** Whether this runs on Deno: `globalThis.Deno`, which isn't typed here. */
+function isDeno(): boolean {
+  return hasProp(globalThis, 'Deno', 'object')
 }
 
 async function runTelefunc_(
@@ -301,7 +312,7 @@ async function runTelefunc_(
     clientGone: AbortSignal
   },
   requestContext: RequestContext,
-): Promise<HttpResponse> {
+): Promise<HttpResponseParts> {
   const runContext = { requestContext }
 
   {
@@ -333,10 +344,10 @@ async function runTelefunc_(
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
       const contentType = parsed.refusal ? refusalContentType(parsed.refusal) : malformedRequest.contentType
-      return createHttpResponse({ ...malformedRequest, contentType })
+      return { ...malformedRequest, contentType }
     }
     if (parsed.isSseRequest) {
-      return createHttpResponse(parsed.sseResponse)
+      return parsed.sseResponse
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -357,7 +368,7 @@ async function runTelefunc_(
   {
     const telefunction = await findTelefunction(runContext)
     if (!telefunction) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     objectAssign(runContext, { telefunction })
   }
@@ -367,7 +378,7 @@ async function runTelefunc_(
   {
     const resolved = runContext.resolveRequest(runContext.telefunction)
     if (resolved.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     const { telefunctionArgs, streamTransport, requestExtensions } = resolved
     objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
@@ -381,7 +392,7 @@ async function runTelefunc_(
         telefunctionAborted: true,
         telefunctionReturn: undefined,
       })
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
   }
 
@@ -409,7 +420,7 @@ async function runTelefunc_(
 
   if (runContext.telefunctionHasErrored) {
     if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
     throw runContext.telefunctionTopLevelError
   }
@@ -421,7 +432,7 @@ async function runTelefunc_(
     if (result.type === 'streaming') {
       const contentType =
         result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
-      return createHttpResponse({
+      return {
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
         contentType,
         headers: [
@@ -429,16 +440,16 @@ async function runTelefunc_(
           ['X-Accel-Buffering', 'no'],
         ],
         body: result.body,
-      })
+      }
     }
 
     objectAssign(runContext, { httpResponseBody: result.body })
   }
 
-  return createHttpResponse({
+  return {
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
     contentType: 'text/plain',
     headers: [],
     body: runContext.httpResponseBody,
-  })
+  }
 }
