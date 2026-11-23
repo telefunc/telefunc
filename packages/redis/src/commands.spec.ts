@@ -1,5 +1,6 @@
 import { hasFlag } from '@ioredis/commands'
 import { describe, expect, it } from 'vitest'
+import { isBug } from './assert.js'
 import { REDIS_COMMANDS } from './commands.js'
 
 /** Whether a script marked as only reading may make the call `name`: a failure of such a script is told it didn't run.
@@ -150,5 +151,25 @@ describe("the cells exchange's control record", () => {
     expect(String(await parsed(['record-unnumbered']))).toMatch(
       /\[Bug\].*cells exchange: its control record is numbered by a counter it leaves absent/,
     )
+  })
+})
+
+describe('a cells read script reply of another shape', () => {
+  const input = { roomId: 'r', inc: 'i', sel: { keys: ['k'] } }
+  const told = (reply: unknown) =>
+    Promise.resolve()
+      .then(() => REDIS_COMMANDS.readCells.parse(reply, input))
+      .then(
+        () => 'parsed',
+        (error: unknown) => (isBug(error) ? 'a bug' : String(error)),
+      )
+  const bytes = (...items: string[]) => items.map((item) => Buffer.from(item))
+
+  it.each([
+    ['a cell without whether it lapsed', bytes('cells', '1', 'k', 'v', 'version')],
+    ['a cell without the cell its reference names', [...bytes('cells:beside', '1', 'k', 'v', 'version', '0', 'cell')]],
+    ['an item that is no bytes', [...bytes('cells', '1', 'k', 'v', 'version'), 0]],
+  ])('with %s is a bug', async (_, reply) => {
+    expect(await told(reply)).toBe('a bug')
   })
 })

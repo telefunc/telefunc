@@ -1360,9 +1360,10 @@ const REDIS_COMMANDS = {
       argv: [inc, ...besideArgv(sel.beside), ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
     }),
     parse: (reply): CellsRead => {
-      const [tag, now, ...found] = reply as Buffer[]
-      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
-      return parseCells(now!, found, tag!.toString().endsWith(':beside'))
+      const [tag, now, ...found] = cellsReply(reply)
+      if (tag === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      assert(now !== undefined, 'Cells read script returned no time')
+      return parseCells(now, found, tag.endsWith(':beside'))
     },
   }),
   readExpiringCells: command({
@@ -1416,11 +1417,14 @@ const REDIS_COMMANDS = {
       ],
     }),
     parse: (reply): CellsRead & { after?: string } => {
-      const [tag, now, ...found] = reply as Buffer[]
-      const [kind, withBeside] = tag!.toString().split(':')
+      const [tag, now, ...found] = cellsReply(reply)
+      const [kind, withBeside] = tag.split(':')
       if (kind === 'stale-incarnation') return { kind: 'stale-incarnation' }
-      if (kind === 'cells') return parseCells(now!, found, withBeside !== undefined)
-      return { ...parseCells(now!, found.slice(1), withBeside !== undefined), after: found[0]!.toString() }
+      assert(now !== undefined, 'Cells page script returned no time')
+      if (kind === 'cells') return parseCells(now, found, withBeside !== undefined)
+      const [after, ...cells] = found
+      assert(after !== undefined, 'Cells page script returned no last key')
+      return { ...parseCells(now, cells, withBeside !== undefined), after: after.toString() }
     },
   }),
   laneStart: command({
@@ -1741,6 +1745,17 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
+/** A cells read script's reply (`CELLS_REPLY_LUA`): its tag, then its items. */
+function cellsReply(reply: unknown): [string, ...Buffer[]] {
+  assert(Array.isArray(reply), 'Cells read script returned no array')
+  const items: unknown[] = reply
+  const buffers = items.filter((item): item is Buffer => Buffer.isBuffer(item))
+  assert(buffers.length === items.length, 'Cells read script returned an item that is no bytes')
+  const [tag, ...rest] = buffers
+  assert(tag !== undefined, 'Cells read script returned no tag')
+  return [tag.toString(), ...rest]
+}
+
 /** A read's cells, each its key, value, version and whether it lapsed (`CELLS_REPLY_LUA`); with `withBeside`, each
  *  followed by what its reference names. */
 function parseCells(now: Buffer, found: Buffer[], withBeside: boolean): Extract<CellsRead, { kind: 'read' }> {
@@ -1748,14 +1763,19 @@ function parseCells(now: Buffer, found: Buffer[], withBeside: boolean): Extract<
   const versions = new Map<string, string>()
   const lapsed = new Set<string>()
   const beside = new Map<string, Uint8Array | null>()
-  for (let i = 0; i < found.length; i += withBeside ? 6 : 4) {
-    const key = found[i]!.toString()
-    cells.set(key, Uint8Array.from(found[i + 1]!))
-    versions.set(key, found[i + 2]!.toString())
-    if (found[i + 3]!.toString() === '1') lapsed.add(key)
+  const stride = withBeside ? 6 : 4
+  assert(found.length % stride === 0, 'Cells read script returned an unexpected reply')
+  for (let i = 0; i < found.length; i += stride) {
+    const [key, value, version, lapse, named, target] = found.slice(i, i + stride)
+    assert(key !== undefined && value !== undefined && version !== undefined && lapse !== undefined)
+    const name = key.toString()
+    cells.set(name, Uint8Array.from(value))
+    versions.set(name, version.toString())
+    if (lapse.toString() === '1') lapsed.add(name)
     if (!withBeside) continue
-    const named = found[i + 4]!.toString()
-    if (named !== 'none') beside.set(key, named === 'cell' ? Uint8Array.from(found[i + 5]!) : null)
+    assert(named !== undefined && target !== undefined)
+    const tag = named.toString()
+    if (tag !== 'none') beside.set(name, tag === 'cell' ? Uint8Array.from(target) : null)
   }
   const read: Extract<CellsRead, { kind: 'read' }> = {
     kind: 'read',
