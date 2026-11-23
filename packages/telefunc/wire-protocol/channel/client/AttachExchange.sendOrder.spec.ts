@@ -76,7 +76,7 @@ function connect(carriesReconcileInOpen: boolean) {
     /** The server's RECONCILED, attaching `ixes`; what it releases goes on the wire, as `handleReconciled` sends it. */
     reconciled(ixes: number[]) {
       const ctrl = { sessionId: 'session', open: ixes.map((ix) => ({ ix, lastSeq: 0 })) } as ReconciledPayload
-      const { frames } = exchange.applyReconciled(ctrl, { deferOmitted: false, upgradeReady: false })
+      const { frames } = exchange.applyReconciled(ctrl, { deferOmitted: false, holdsReconcile: false })
       for (const frame of frames) wire.push(label(frame))
       exchange.batchHanded()
     },

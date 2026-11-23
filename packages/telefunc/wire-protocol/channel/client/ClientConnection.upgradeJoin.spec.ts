@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection, type MuxChannel } from './ClientConnection.js'
-import { decode, encode } from '../../wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/frame.js'
 import { decodeU32 } from '../../wire/envelope.js'
@@ -57,9 +57,12 @@ class FakeWebSocket {
     queueMicrotask(() => this.onopen?.())
   }
   send(data: ArrayBuffer | Uint8Array): void {
-    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)))
-    this.sent.push(frame)
-    this.onSent?.(frame)
+    const message = bytes(data instanceof Uint8Array ? data : new Uint8Array(data))
+    for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
+      const frame = decode(raw)
+      this.sent.push(frame)
+      this.onSent?.(frame)
+    }
   }
   close(): void {
     if (this.readyState === 3) return
@@ -124,6 +127,8 @@ type Harness = {
   dispatched: DecodedFrame[]
   connection: ClientConnection
   channel: MuxChannel
+  /** Registers `other` on the same connection. */
+  register: (other: MuxChannel) => void
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
@@ -196,11 +201,10 @@ async function upgradeToBarrier(): Promise<Harness> {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
-    transports: ['sse', 'ws'],
-    fetchImpl,
-    connectionKey: crypto.randomUUID(),
-  })
+  const options = { transports: ['sse' as const, 'ws' as const], fetchImpl, connectionKey: crypto.randomUUID() }
+  const register = (other: MuxChannel) =>
+    void ClientConnection.getOrCreate('http://test.local/_telefunc', other, options)
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, options)
 
   await settle()
   const probe = FakeWebSocket.last
@@ -216,7 +220,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   const barrier = await Promise.race([barrierSent, settle().then(() => null)])
   expect(barrier, 'the client should have emitted its barrier').not.toBeNull()
 
-  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel }
+  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel, register }
 }
 
 const realWebSocket = globalThis.WebSocket
@@ -262,6 +266,64 @@ describe('SSE→WS handoff join', () => {
     h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
+  })
+
+  test("a channel registered after the barrier and one registered while it joins open on the WebSocket, which the page keeps though the server takes the second's RECONCILE only after a deadline's worth of upload", async () => {
+    const h = await upgradeToBarrier()
+    const { upgradeId } = await h.barrierSent
+    vi.useFakeTimers()
+    try {
+      const opened: string[] = []
+      const made = (): MuxChannel => {
+        const channel = fakeMuxChannel()
+        channel._onTransportOpen = () => void opened.push(channel.id)
+        return channel
+      }
+      const late = made()
+      const later = made()
+      const answer = (open: { ix: number }[]) =>
+        encode.reconciled({
+          sessionId: 'session',
+          open: open.map(({ ix }) => ({ ix, lastSeq: 0 })),
+          reconnectTimeout: 60_000,
+          idleTimeout: 60_000,
+          pingInterval: 10_000,
+          maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+          creditWindow: 1_000_000,
+          sseFlushThrottle: 300,
+          ssePostIdleFlushDelay: 50,
+          transports: ['sse', 'ws'],
+        })
+      let reconciles = 0
+      h.probe.answer((frame) => {
+        if (frame.tag === TAG.PING) h.probe.deliver(encode.pong())
+        if (frame.tag !== TAG.RECONCILE) return
+        const { open } = frame.payload
+        // The first join's RECONCILE is taken and answered at once, and another channel registers meanwhile.
+        if (++reconciles === 1)
+          return queueMicrotask(() => {
+            h.probe.deliver(encode.reconcileTaken())
+            h.register(later)
+            h.probe.deliver(answer(open))
+          })
+        // The second's takes longer to arrive than a RECONCILE's deadline.
+        setTimeout(() => {
+          h.probe.deliver(encode.reconcileTaken())
+          h.probe.deliver(answer(open))
+        }, 90_000)
+      })
+      h.register(late)
+      await vi.advanceTimersByTimeAsync(100)
+      h.probe.deliver(reconciled({ ix: h.ix, sessionId: 'session', upgradeId, pingInterval: 10_000 }))
+      await vi.advanceTimersByTimeAsync(100)
+      h.pushOld(encode.fin())
+      await vi.advanceTimersByTimeAsync(100_000)
+      expect(FakeWebSocket.last, 'the page kept its WebSocket').toBe(h.probe)
+      expect(h.probe.readyState).toBe(1)
+      expect(opened.sort()).toEqual([late.id, later.id].sort())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test("a RECONCILED for another upgrade's id does not settle this one", async () => {

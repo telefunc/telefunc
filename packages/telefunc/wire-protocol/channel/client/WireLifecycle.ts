@@ -244,8 +244,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** Sends the RECONCILE a registration owes, where the wire takes one; no-op when none is owed. While the wire can't
    *  (connecting, awaiting a RECONCILED, from an upgrade's READY until its handoff) it stays owed: `reconcileOwed` keeps
-   *  `sendsOpen` false, so data frames buffer behind it, and the wire's open and an upgrade attempt's end call this
-   *  again. A RECONCILED, the handoff's too, names what registered meanwhile in its follow-up. */
+   *  `sendsOpen` false, so data frames buffer behind it, and the wire's open, an upgrade attempt's end and its join's end
+   *  call this again. A RECONCILED names what registered meanwhile in its follow-up, but the handoff's leaves that to the
+   *  join's end. */
   onReconcileDue(): void {
     if (!this.exchange.reconcileOwed || this.reconcileHeld || this.exchange.reconciling) return
     this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
@@ -485,7 +486,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
       deferOmitted: this.upgrade.handingOff,
-      upgradeReady: this.upgrade.ready,
+      holdsReconcile: this.upgrade.holdsReconcile,
     })
     this.upgrade.deferOmitted(outcome.omitted)
     this.liveness.install(this.transport, ctrl.pingInterval)
@@ -581,6 +582,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     for (const frame of release.new) this.dispatchFrame(frame)
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._attach.onUpgradeJoined()
     this.startTtlIfIdle()
+    this.onReconcileDue()
   }
 
   onHandoffFailed(): void {

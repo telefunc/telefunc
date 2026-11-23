@@ -197,10 +197,11 @@ class AttachExchange {
   }
 
   /** `deferOmitted`: in an upgrade's handoff, the channels the RECONCILED left out close once its join ends, so they are
-   *  returned, not closed; `upgradeReady`: an upgrade's READY came, so its barrier, a RECONCILE too, goes next. */
+   *  returned, not closed; `holdsReconcile`: an upgrade is between its READY and its join's end, so a follow-up waits
+   *  for that end, as a receipt the join holds back would be taken for the follow-up's. */
   applyReconciled(
     ctrl: ReconciledPayload,
-    { deferOmitted, upgradeReady }: { deferOmitted: boolean; upgradeReady: boolean },
+    { deferOmitted, holdsReconcile }: { deferOmitted: boolean; holdsReconcile: boolean },
   ): ReconcileOutcome {
     this.reconciledWire = this.owner.wire
     this.committing = true
@@ -222,7 +223,7 @@ class AttachExchange {
     }
     for (const frame of this.gate.drain(attached)) frames.push(frame)
 
-    if (hasNewChannels && !upgradeReady) {
+    if (hasNewChannels && !holdsReconcile) {
       appendReconcileBatch(frames, this.stageReconcileBatch())
     } else {
       this.exitReconciling()
