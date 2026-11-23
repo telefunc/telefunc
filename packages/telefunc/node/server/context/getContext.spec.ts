@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 
+import { createDeferred } from '../../../utils/createDeferred.js'
 import { assertTelefunction } from '../runTelefunc/assertTelefunction.js'
 import { decorateTelefunction } from '../runTelefunc/decorateTelefunction.js'
 import { serve } from '../telefunc.js'
@@ -35,6 +36,14 @@ async function* onReadAfterYield() {
   usersAfterYield[user] = readUser()
 }
 
+const waiting = createDeferred()
+const resumed = createDeferred()
+async function onReadAfterWait() {
+  waiting.resolve()
+  await resumed.promise
+  return readUser()
+}
+
 const usersAtClose: Record<string, string> = {}
 async function onReadAtClose() {
   const { user, onClose } = getContext<{ user: string }>()
@@ -56,6 +65,7 @@ async function onReadAtCancel() {
 const telefunctions: Record<string, unknown> = {
   onReadAroundAwait,
   onReadAfterYield,
+  onReadAfterWait,
   onReadAtClose,
   onReadAtCancel,
 }
@@ -105,8 +115,19 @@ test('the `cancel()` of a returned stream reads the context of its own request, 
   expect(usersAtCancel).toEqual({ A: 'A', B: 'B' })
 })
 
+test('a call never reads the context another caller gives provideTelefuncContext()', async () => {
+  const userAfterWait = callForReturn('onReadAfterWait', 'B')
+  await waiting.promise
+  resumed.resolve()
+  try {
+    provideTelefuncContext({ user: 'A' })
+  } catch {
+    // Whether this throws is not what is checked here: the other call's read is.
+  }
+  expect(await userAfterWait).toBe('throws')
+})
+
 test('provideTelefuncContext(context) without `fn` throws', () => {
-  // @ts-expect-error
   expect(() => provideTelefuncContext({ user: 'A' })).toThrow()
 })
 

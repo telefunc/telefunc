@@ -7,7 +7,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { isCallable } from '../../../utils/isCallable.js'
 import { isObject } from '../../../utils/isObject.js'
 import { objectAssign } from '../../../utils/objectAssign.js'
-import { getRawContext, restoreContext, isAsyncMode } from './context.js'
+import { getRawContext, provideContext, restoreContext, isAsyncMode } from './context.js'
 import { REQUEST_CONTEXT } from './requestContext.js'
 import type { RequestContext } from './requestContext.js'
 import type { Telefunc } from './TelefuncNamespace.js'
@@ -18,10 +18,7 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
   const raw = getRawContext()
   if (!raw) {
     if (isAsyncMode()) {
-      assertUsage(
-        false,
-        '[getContext()] Make sure to call getContext() inside the `fn` of provideTelefuncContext(context, fn)',
-      )
+      assertUsage(false, '[getContext()] Make sure to call provideTelefuncContext() before calling getContext()')
     }
     assertUsage(false, '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access')
   }
@@ -48,14 +45,17 @@ type TelefuncBuiltins = {
   signal: AbortSignal
 }
 
-function provideTelefuncContext<Context extends object, Result>(context: Context, fn: () => Result): Result {
+function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void
+function provideTelefuncContext<Context extends object, Result>(context: Context, fn: () => Result): Result
+function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
   /* TO-DO/eventually: check whether it's possible to deprecate Async Hooks for Nuxt.
   assertWarning(false, 'provideTelefuncContext() is deprecated', { onlyOnce: true })
   */
   assertUsage(isObject(context), '[provideTelefuncContext()] Argument `context` should be an object')
   assertUsage(
-    isCallable(fn),
-    '[provideTelefuncContext(context, fn)] Argument `fn` should be a function, for example `provideTelefuncContext(context, () => someTelefunction())`. See https://telefunc.com/provideTelefuncContext',
+    arguments.length === 1 || isCallable(fn),
+    '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
   )
-  return restoreContext({ [PROVIDED_CONTEXT]: context }, fn)
+  if (fn) return restoreContext({ [PROVIDED_CONTEXT]: context }, fn)
+  provideContext(context)
 }
