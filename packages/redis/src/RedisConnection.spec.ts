@@ -1,9 +1,13 @@
+import { createServer, type Server } from 'node:net'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { inspect } from 'node:util'
-import { Redis } from 'ioredis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { Cluster, Redis } from 'ioredis'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
+import { addressOf, createSubscriberSocket, deploymentOf } from './ioredis.js'
+import { redisFailure } from './redisFailure.js'
 
-const clients: Redis[] = []
+const clients: Array<Redis | Cluster> = []
 afterEach(() => {
   for (const client of clients.splice(0)) client.disconnect()
 })
@@ -24,11 +28,6 @@ function replyError(message: string): Error {
 /** A reply error as ioredis gives it: the command it answered, with its arguments, is on it. */
 function answered(message: string, command: { name: string; args: unknown[] }): Error {
   return Object.assign(replyError(message), { command })
-}
-
-/** All of a rejection as Node prints it, its causes and own properties too. */
-async function printed(rejection: Promise<unknown>): Promise<string> {
-  return inspect(await rejection.catch((error: unknown) => error), { depth: 8 })
 }
 
 function installed(redis: Redis): RedisConnection {
@@ -52,7 +51,8 @@ describe('a client installed again', () => {
   it('with TLS where the first had none: the backend connects with TLS', () => {
     const connection = installed(client())
     connection.holdFor(client({ tls: { servername: 'redis.example' } }))
-    expect(connection.client.options.tls).toEqual({ servername: 'redis.example' })
+    const { options } = connection.client
+    expect('tls' in options ? options.tls : undefined).toEqual({ servername: 'redis.example' })
   })
 
   it('a client of the same options: the backend keeps its connection', () => {
@@ -99,36 +99,75 @@ describe('a client of a replica', () => {
     )
   })
 
-  it('a command a replica refuses with READONLY rejects with an error that names the replica and READONLY, and no cause', async () => {
-    const connection = installed(client())
+  it('a command a replica refuses with READONLY is an error that names the replica and READONLY, and no cause', () => {
     const readOnly = replyError("READONLY You can't write against a read only replica.")
-    const rejection = connection.send(() => Promise.reject(readOnly))
-    await expect(rejection).rejects.toThrow(
-      "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
-    )
-    await expect(rejection).rejects.toMatchObject({ code: 'READONLY', refused: true })
-    await expect(rejection).rejects.not.toHaveProperty('cause')
+    const failure = redisFailure(readOnly, client(), true)
+    expect(failure).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Telefunc's Redis backend reached a replica at 127.0.0.1:6390, which refuses writes (READONLY): give installRedis() a client of the primary",
+      code: 'unavailable',
+      outcome: 'not-run',
+    })
+    expect(failure).not.toHaveProperty('cause')
   })
 })
 
-describe('a failure of Redis, as a command rejects with it', () => {
-  it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", async () => {
-    const connection = installed(client())
+/** A port whose server refuses every login, as Redis does a wrong password, and closes the connection. */
+async function refusingNode(): Promise<{ port: number; server: Server }> {
+  const server = createServer((socket) => {
+    socket.on('error', () => {})
+    socket.once('data', () => socket.end('-WRONGPASS invalid username-password pair or user is disabled.\r\n'))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the refusing node has no port')
+  return { port: address.port, server }
+}
+
+describe('a backend client that ended before anything waited on it', () => {
+  it('a refused login: a command made after the end rejects with the refusal, not as unreachable', async () => {
+    const { port, server } = await refusingNode()
+    // The app's client connects at once, so the backend's copy of it does too, and gives up at its first failed
+    // connect, as the app's retry strategy says.
+    const app = new Redis({ host: '127.0.0.1', port, password: 'pw', retryStrategy: () => null })
+    app.on('error', () => {})
+    clients.push(app)
+    const connection = installed(app)
+    while (connection.client.status !== 'end') await sleep(10)
+    const failure = await connection
+      .send('hkeys', (commands) => commands.hkeys('tf:0:k'))
+      .then(
+        () => 'answered',
+        (error: unknown) => error,
+      )
+    server.close()
+
+    expect(failure).toMatchObject({
+      code: 'denied',
+      outcome: 'not-run',
+      message: expect.stringContaining("refused the login of Telefunc's Redis backend (WRONGPASS)"),
+    })
+  })
+})
+
+describe('a failure of Redis, as the backend reports it', () => {
+  it("a refused login: Telefunc's error, with Redis's code and what to do, and not the password", () => {
     const refused = answered('WRONGPASS invalid username-password pair or user is disabled.', {
       name: 'auth',
       args: ['tf', 'pw-SECRET'],
     })
-    const rejection = connection.send(() => Promise.reject(refused))
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
-    )
-    const text = await printed(rejection)
+    const failure = redisFailure(refused, client(), true)
+    expect(failure).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 refused the login of Telefunc's Redis backend (WRONGPASS): check the username and password of the client given to installRedis()",
+    })
+    const text = inspect(failure, { depth: 8 })
     expect(text).not.toContain('pw-SECRET')
     expect(text).not.toContain('args')
   })
 
-  it("a script Redis fails: Telefunc's error, with Redis's code, and not the message it was publishing", async () => {
-    const connection = installed(client())
+  it("a script Redis fails: Telefunc's error, with Redis's code, and not the message it was publishing", () => {
     const failed = answered(
       'WRONGTYPE Operation against a key holding the wrong kind of value script: 06f79f6ab4, on @user_script:1.',
       {
@@ -136,12 +175,266 @@ describe('a failure of Redis, as a command rejects with it', () => {
         args: ['06f79f6ab4', '2', 'tf:0:seq:{k}', 'tf:0:t:{k}', Buffer.from('body-SECRET')],
       },
     )
-    const rejection = connection.send(() => Promise.reject(failed))
-    await expect(rejection).rejects.toThrow(
-      "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
-    )
-    const text = await printed(rejection)
+    const failure = redisFailure(failed, client(), true)
+    expect(failure).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (WRONGTYPE): a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
+      outcome: 'may-have-run',
+    })
+    const text = inspect(failure, { depth: 8 })
     expect(text).not.toContain('body-SECRET')
     expect(text).not.toContain('args')
+  })
+})
+
+/** What a real client rejects a write with when nothing listens at its port: `options` decide which error it is. */
+async function rejectionOfWrite(options: {
+  enableOfflineQueue: boolean
+  maxRetriesPerRequest: number | null
+  retryStrategy: () => number | null
+}): Promise<unknown> {
+  const redis = new Redis({ host: '127.0.0.1', port: 6390, lazyConnect: true, ...options })
+  redis.on('error', () => {})
+  clients.push(redis)
+  return redis.set('tf:k', 'v').then(
+    () => 'answered',
+    (error: unknown) => error,
+  )
+}
+
+describe('a write whose connection failed, as ioredis rejects it', () => {
+  it("never written, as the backend's client keeps no offline queue: it didn't run", async () => {
+    const unsent = await rejectionOfWrite({
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: null,
+      retryStrategy: () => 50,
+    })
+    expect(redisFailure(unsent, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+  })
+
+  it('in the queue when the connection closed for good: it may have run', async () => {
+    const closed = await rejectionOfWrite({
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: null,
+      retryStrategy: () => null,
+    })
+    expect(closed).toMatchObject({ message: 'Connection is closed.' })
+    expect(redisFailure(closed, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+
+  it('in the queue when ioredis gave up retrying it: it may have run', async () => {
+    const gaveUp = await rejectionOfWrite({
+      enableOfflineQueue: true,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => 50,
+    })
+    expect(gaveUp).toMatchObject({ name: 'MaxRetriesPerRequestError' })
+    expect(redisFailure(gaveUp, client(), true)).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+})
+
+/** What `send` rejects with when the reply to the command client's `name` is lost, on a command client that was ready. */
+async function replyLost(name: 'unlink' | 'hkeys', send: (connection: RedisConnection) => Promise<unknown>) {
+  const connection = installed(client())
+  vi.spyOn(connection.client, name).mockRejectedValue(new Error('Connection is closed.'))
+  const sent = send(connection)
+  connection.client.emit('ready')
+  return sent.then(
+    () => 'answered',
+    (error: unknown) => error,
+  )
+}
+
+describe('a command sent without a script, read or write as ioredis tells it', () => {
+  it('UNLINK, a write: its lost reply says it may have run', async () => {
+    expect(
+      await replyLost('unlink', (connection) => connection.send('unlink', (commands) => commands.unlink('tf:0:k'))),
+    ).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+  })
+
+  it("HKEYS, a read: its lost reply says it didn't run", async () => {
+    expect(
+      await replyLost('hkeys', (connection) => connection.send('hkeys', (commands) => commands.hkeys('tf:0:k'))),
+    ).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+  })
+})
+
+describe('the address a failure names', () => {
+  function cluster(nodes: ConstructorParameters<typeof Cluster>[0]): Cluster {
+    const redis = new Cluster(nodes, { lazyConnect: true })
+    clients.push(redis)
+    return redis
+  }
+  function standalone(redis: Redis): Redis {
+    clients.push(redis)
+    return redis
+  }
+
+  const STARTUP_NODES: Array<[string, ConstructorParameters<typeof Cluster>[0], string]> = [
+    ['an object', [{ host: '10.0.0.1', port: 7001 }], '10.0.0.1:7001'],
+    ['an object without a host', [{ port: 7002 }], '127.0.0.1:7002'],
+    ['a port', [7003], '127.0.0.1:7003'],
+    ['a port as a string', ['7004'], '127.0.0.1:7004'],
+    ['host:port', ['10.0.0.5:7005'], '10.0.0.5:7005'],
+    ['a redis: URL with a password', ['redis://:pw-SECRET@10.0.0.6:7006'], '10.0.0.6:7006'],
+    ['a rediss: URL with a username and password', ['rediss://app:pw-SECRET@10.0.0.7:7007'], '10.0.0.7:7007'],
+    ['a URL without its scheme', ['//app:pw-SECRET@10.0.0.8:7008'], '10.0.0.8:7008'],
+    ['a URL without a port', ['redis://:pw-SECRET@10.0.0.9'], '10.0.0.9:6379'],
+    ['an IPv6 URL', ['redis://:pw-SECRET@[::1]:7010'], '[::1]:7010'],
+    ['a socket path', ['/run/redis/node.sock'], '/run/redis/node.sock'],
+    ['several', [{ host: '10.0.0.1', port: 7001 }, 'redis://:pw-SECRET@10.0.0.2:7002'], '10.0.0.1:7001, 10.0.0.2:7002'],
+  ]
+  it.each(STARTUP_NODES)(
+    'a Cluster whose startup node is %s: its host and port, and no credential',
+    (_form, nodes, address) => {
+      const redis = cluster(nodes)
+      expect(addressOf(redis)).toBe(address)
+      const refused = answered('NOPERM this user has no permissions to run the evalsha command', {
+        name: 'evalsha',
+        args: [],
+      })
+      expect(inspect(redisFailure(refused, redis, true))).not.toContain('SECRET')
+    },
+  )
+
+  it.each([
+    [
+      'a URL with a password',
+      () => new Redis('redis://:pw-SECRET@10.0.0.11:7011', { lazyConnect: true }),
+      '10.0.0.11:7011',
+    ],
+    ['a port and a host', () => new Redis(7012, '10.0.0.12', { lazyConnect: true }), '10.0.0.12:7012'],
+    ['a socket path', () => new Redis({ path: '/run/redis.sock', lazyConnect: true }), '/run/redis.sock'],
+  ])('a client given %s: where it connects, and no credential', (_form, make, address) => {
+    expect(addressOf(standalone(make()))).toBe(address)
+  })
+})
+
+describe('a state of Redis that a later call may get past', () => {
+  it('NOREPLICAS: unavailable, saying the replicas are behind', () => {
+    const behind = replyError('NOREPLICAS Not enough good replicas to write.')
+    expect(redisFailure(behind, client(), true)).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (NOREPLICAS): fewer replicas than its min-replicas-to-write have caught up; a later call may succeed once they do",
+      code: 'unavailable',
+      outcome: 'not-run',
+    })
+  })
+
+  it('OOM: unavailable, saying it may pass and what it needs if it lasts', () => {
+    const full = replyError("OOM command not allowed when used memory > 'maxmemory'.")
+    expect(redisFailure(full, client(), true)).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 failed a command of Telefunc's Redis backend (OOM): Redis reached its maxmemory; a later call may succeed as keys expire, and if it lasts, raise maxmemory, with maxmemory-policy noeviction",
+      code: 'unavailable',
+      outcome: 'not-run',
+    })
+  })
+})
+
+describe("a write script's refusal before its first write", () => {
+  it("TFNOTRUN at the start of Redis's reply: it didn't run, in Telefunc's words, without the reply's", () => {
+    const refused = replyError(
+      'TFNOTRUN WRONGTYPE tf:0:seq:{k} holds a hash where Telefunc keeps a string script: 06f79f6ab4, on @user_script:9.',
+    )
+    expect(redisFailure(refused, client(), true)).toMatchObject({
+      name: 'BackendError',
+      message:
+        "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a key of another type than Telefunc keeps there, so Telefunc's Redis backend changed nothing (WRONGTYPE): keep that prefix to Telefunc",
+      code: 'failed',
+      outcome: 'not-run',
+    })
+    expect(inspect(redisFailure(refused, client(), true), { depth: 8 })).not.toContain('tf:0:seq:{k}')
+  })
+
+  it("a refused value: ERR, in Telefunc's words", () => {
+    const refused = replyError(
+      "TFNOTRUN ERR counter n isn't the JSON Telefunc writes script: 06f79f6ab4, on @user_script:9.",
+    )
+    expect(redisFailure(refused, client(), true)).toMatchObject({
+      message:
+        "Redis at 127.0.0.1:6390 holds, under Telefunc's prefix, a value Telefunc didn't write, so Telefunc's Redis backend changed nothing (ERR): keep that prefix to Telefunc",
+      outcome: 'not-run',
+    })
+  })
+
+  it.each([
+    // A Lua error's text, a key name or a payload in it, comes after ERR: an app's TFNOTRUN can't lead a reply.
+    'ERR user_script:1: TFNOTRUN WRONGTYPE forged script: 06f79f6ab4, on @user_script:1.',
+    'WRONGTYPE Operation against a key holding the wrong kind of value TFNOTRUN',
+    ' TFNOTRUN WRONGTYPE forged',
+    'TFNOTRUNWRONGTYPE forged',
+  ])('TFNOTRUN anywhere else, as in %j: it may have run', (message) => {
+    expect(redisFailure(replyError(message), client(), true)).toMatchObject({ outcome: 'may-have-run' })
+  })
+})
+
+/** A port that takes connections and never answers: a Cluster's startup node there never gets its slots. */
+async function silentNode(): Promise<{ port: number; server: Server }> {
+  const server = createServer(() => {})
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('the silent node has no port')
+  return { port: address.port, server }
+}
+
+describe("a Cluster's subscriber socket, opened before the Cluster is ready", () => {
+  for (const lazyConnect of [true, false]) {
+    it(`${lazyConnect ? 'a lazy' : 'a connecting'} Cluster: each opening waits on one wait for the Cluster, and fails as unreachable once it closes`, async () => {
+      const { port, server } = await silentNode()
+      const cluster = new Cluster([{ host: '127.0.0.1', port }], { lazyConnect, slotsRefreshTimeout: 10_000 })
+      cluster.on('error', () => {})
+      clients.push(cluster)
+      const readyListeners = cluster.listenerCount('ready')
+      const openings = [1, 2, 3].map(() =>
+        createSubscriberSocket(cluster).then(
+          () => 'opened',
+          (error: unknown) => redisFailure(error, cluster, false),
+        ),
+      )
+      const settledFirst = await Promise.race([...openings, sleep(200).then(() => 'still waiting')])
+      const waits = cluster.listenerCount('ready') - readyListeners
+      cluster.disconnect()
+      const failures = await Promise.all(openings)
+      server.close()
+
+      expect({ settledFirst, waits }).toEqual({ settledFirst: 'still waiting', waits: 1 })
+      for (const failure of failures) expect(failure).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+    })
+  }
+})
+
+describe("the backend's Cluster client", () => {
+  it("never retries a command whose connection closed, so a command ioredis redirected until it gave up didn't run", () => {
+    const cluster = new Cluster([{ host: '127.0.0.1', port: 7001 }], { lazyConnect: true, retryDelayOnFailover: 100 })
+    clients.push(cluster)
+    const connection = new RedisConnection({ redis: cluster, prefix: 'tf:' })
+    connection.holdFor(cluster)
+    clients.push(connection.client)
+    expect(connection.client.options).toMatchObject({ retryDelayOnFailover: 0 })
+  })
+})
+
+describe("a Cluster's deployment, which installRedis() keys its backend by", () => {
+  it('a Cluster of the same startup nodes is the same deployment; one of other nodes is another', () => {
+    const cluster = (port: number) => {
+      const redis = new Cluster([{ host: '127.0.0.1', port }], { lazyConnect: true })
+      clients.push(redis)
+      return redis
+    }
+    const first = cluster(7000)
+    expect(deploymentOf(first)).toBe(deploymentOf(first))
+    expect(deploymentOf(cluster(7000))).toBe(deploymentOf(first))
+    expect(deploymentOf(cluster(7001))).not.toBe(deploymentOf(first))
+  })
+})
+
+describe('a key prefix', () => {
+  it('that is not a well-formed string is refused at install, saying so; one with a `}`, a `:` or a space is not', () => {
+    const at = (prefix: string) => () => new RedisConnection({ redis: client(), prefix })
+    expect(at('tf:\ud800')).toThrow('installRedis(): the prefix must be a well-formed string')
+    for (const prefix of ['}app:', 'a}b:', 'my app ']) expect(at(prefix)).not.toThrow()
   })
 })

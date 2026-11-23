@@ -17,23 +17,23 @@ async function heldRoom() {
   }
   const plane = getRoomPlane()
   const config = encodeRoomRecord({ meta: {}, inc: room.inc, hold: room.hold })
-  await plane.compareExchangeHead(
+  await plane.direct.compareExchangeHead(
     room.id,
     { form: 'absent' },
-    { head: { currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
+    { head: { rev: crypto.randomUUID(), currentInc: room.inc, state: 'open', config }, ...newRoomHold(room.hold) },
   )
   const lease = new RoomLease()
-  await holdViews(room, lease, ['page'])
+  await holdViews(plane.direct, room, lease, ['page'])
   const model = { closed: false }
   let renewedAt = 0
   const hosting = {
     maintain: vi.fn(async () => {
       renewedAt = Date.now()
-      await renewLease(room, lease)
+      await renewLease(plane.direct, room, lease)
     }),
   }
   const authority = {
-    reconcileMeta: () => plane.driver.readHead(room.id),
+    reconcileMeta: () => plane.direct.reads.readHead(room.id),
     checkCoverage: vi.fn<() => Promise<void>>(),
   }
   const heartbeat = new RoomHeartbeat({
@@ -50,7 +50,7 @@ async function heldRoom() {
     model.closed = true
     heartbeat.update()
   }
-  const lapse = async () => (await plane.driver.readHead(room.id))?.expiresAt ?? 0
+  const lapse = async () => (await plane.direct.reads.readHead(room.id))?.expiresAt ?? 0
   return { room, hosting, authority, stop, lapse, renewedAt: () => renewedAt }
 }
 
@@ -114,7 +114,7 @@ describe('RoomHeartbeat', () => {
     })
     authority.controlDelivered(1)
     // The close dropped the room's lanes, and its closed frame reaches the view while the check reads the control lane.
-    await getRoomPlane().driver.dropIncarnation(room.id, room.inc)
+    await getRoomPlane().direct.dropIncarnation(room.id, room.inc)
     const check = authority.checkCoverage()
     model.closed = true
     await check

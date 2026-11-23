@@ -32,7 +32,7 @@ import {
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
-import { assert, assertUsage } from '../utils/assert.js'
+import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT, SESSION_HOME_HEADER, STATUS_CODE_WIRE_VERSION } from '../wire-protocol/constants.js'
@@ -233,10 +233,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return Reflect.apply(call, methods, args)
     }
 
-    /** Only an extension's `durableObject` schedules alarms. */
+    /** An extension's `durableObject` schedules its alarms; a Broadcast key's authority, which belongs to no extension,
+     *  its sweep. */
     async alarm(): Promise<void> {
       const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
-      assert(name !== undefined)
+      if (name === undefined) return this.authorityState.alarm()
       this.storedExtension = name
       await this.#durableObject(name).alarm?.()
     }

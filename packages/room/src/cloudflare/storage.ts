@@ -14,6 +14,7 @@ export {
   nextMaintenanceDeadline,
   compareExchangeHead,
   readCells,
+  heldCell,
   readExpiringCells,
   writeExpiringCell,
   deleteExpiredCells,
@@ -42,6 +43,7 @@ import {
   type HeadExpectation,
   type HeadNext,
   type CellSelector,
+  type CellsBeside,
   type CellsRead,
   type ExpiringCell,
   type ExpiringCellsRead,
@@ -52,6 +54,8 @@ import { incarnationScopes } from './routes.js'
 import {
   countCell,
   encodeCellCounter,
+  hasLapsed,
+  type HeldCell,
   headExpectationHolds,
   isOpenIncarnation,
   materializeHead,
@@ -85,7 +89,8 @@ function initSchema(sql: SqlStorage): void {
        lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
-      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (inc, key));
+      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, version INTEGER NOT NULL, lapses_at INTEGER,
+       PRIMARY KEY (inc, key));
     CREATE TABLE IF NOT EXISTS expiring_cell
       (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, key));
     CREATE INDEX IF NOT EXISTS expiring_cell_expires_at ON expiring_cell(expires_at);
@@ -259,7 +264,7 @@ function compareExchangeHead(
 }
 
 function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
-  const head = materializeHead(next, now, crypto.randomUUID())
+  const head = materializeHead(next, now)
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) ' +
       'VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
@@ -287,29 +292,77 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
   return head
 }
 
-type CellRow = { key: string; bytes: ArrayBuffer; version: number }
+/** `lapses_at`: the authority time a cell written with `lapsesInMs` lapses at. */
+type CellRow = { key: string; bytes: ArrayBuffer; version: number; lapses_at: number | null }
 
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
 type CellPage = (Extract<CellsRead, { kind: 'read' }> & { cursor?: string }) | StaleIncarnation
 
-function cellPage(rows: CellRow[], now: number): Extract<CellPage, { kind: 'read' }> {
-  return {
+function cellPage(
+  sql: SqlStorage,
+  inc: string,
+  rows: CellRow[],
+  now: number,
+  beside?: CellsBeside,
+): Extract<CellPage, { kind: 'read' }> {
+  const page: Extract<CellPage, { kind: 'read' }> = {
     kind: 'read',
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
     versions: new Map(rows.map((row) => [row.key, String(row.version)])),
     now,
+    lapsed: new Set(rows.filter((row) => rowLapsed(row, now)).map((row) => row.key)),
   }
+  if (beside !== undefined) page.beside = cellsBeside(sql, inc, rows, beside, now)
+  return page
+}
+
+/** By the key of each row under `beside.of` whose reference is there, the cell it names, `null` where it is absent or
+ *  lapsed. */
+function cellsBeside(
+  sql: SqlStorage,
+  inc: string,
+  rows: CellRow[],
+  beside: CellsBeside,
+  now: number,
+): Map<string, Uint8Array | null> {
+  const besides = new Map<string, Uint8Array | null>()
+  for (const { key } of rows) {
+    if (!key.startsWith(beside.of)) continue
+    const reference = cellRow(sql, inc, beside.reference + key.slice(beside.of.length))
+    if (reference === undefined) continue
+    const target = cellRow(sql, inc, beside.target + referenceDecoder.decode(reference.bytes))
+    besides.set(key, target === undefined || rowLapsed(target, now) ? null : new Uint8Array(target.bytes))
+  }
+  return besides
+}
+
+const referenceDecoder = new TextDecoder()
+
+function rowLapsed(row: CellRow, now: number): boolean {
+  return hasLapsed(row.lapses_at ?? undefined, now)
+}
+
+function cellRow(sql: SqlStorage, inc: string, key: string): CellRow | undefined {
+  return sql
+    .exec<CellRow>('SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND key = ?', inc, key)
+    .toArray()[0]
+}
+
+/** The cell `key` as a commit's check of its required cells finds it (`unheldRequiredCell()`). */
+function heldCell(sql: SqlStorage, inc: string, key: string, now: number): HeldCell | undefined {
+  const row = cellRow(sql, inc, key)
+  return row && { bytes: new Uint8Array(row.bytes), lapsed: rowLapsed(row, now) }
 }
 
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
-  if ('keys' in sel) {
-    return sel.keys.flatMap((key) =>
-      sql.exec<CellRow>('SELECT key, bytes, version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray(),
-    )
-  }
+  if ('keys' in sel) return sel.keys.flatMap((key) => cellRow(sql, inc, key) ?? [])
   const range = keyRange('key', sel.prefix)
   return sql
-    .exec<CellRow>(`SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
+    .exec<CellRow>(
+      `SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND ${range.where}`,
+      inc,
+      ...range.args,
+    )
     .toArray()
 }
 
@@ -317,7 +370,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
-  return cellPage(selectCellRows(sql, inc, sel), now)
+  return cellPage(sql, inc, selectCellRows(sql, inc, sel), now, sel.beside)
 }
 
 /** The expiring cells of `keys` that haven't expired; the alarm deletes the others. */
@@ -353,19 +406,26 @@ function deleteExpiredCells(sql: SqlStorage, now: number): void {
   sql.exec('DELETE FROM expiring_cell WHERE expires_at <= ?', now)
 }
 
-function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
+function readCellPage(
+  sql: SqlStorage,
+  inc: string,
+  prefix: string,
+  cursor: string | undefined,
+  now: number,
+  beside?: CellsBeside,
+): CellPage {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const range = keyRange('key', prefix, cursor)
   const rows = sql
     .exec<CellRow>(
-      `SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where} ORDER BY key LIMIT ?`,
+      `SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND ${range.where} ORDER BY key LIMIT ?`,
       inc,
       ...range.args,
       CELL_PAGE_SIZE,
     )
     .toArray()
-  const page = cellPage(rows, now)
+  const page = cellPage(sql, inc, rows, now, beside)
   if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
   return page
 }
@@ -380,9 +440,26 @@ function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
   return row === undefined ? null : String(row.version)
 }
 
-function writeCell(sql: SqlStorage, inc: string, key: string, bytes: Uint8Array | null, version: number): void {
+/** `lapsesAt`: null for a cell that never lapses. */
+function writeCell(
+  sql: SqlStorage,
+  inc: string,
+  key: string,
+  bytes: Uint8Array | null,
+  version: number,
+  lapsesAt: number | null,
+): void {
   if (bytes === null) sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, key)
-  else sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes, version) VALUES (?, ?, ?, ?)', inc, key, bytes, version)
+  else {
+    sql.exec(
+      'INSERT OR REPLACE INTO cell (inc, key, bytes, version, lapses_at) VALUES (?, ?, ?, ?, ?)',
+      inc,
+      key,
+      bytes,
+      version,
+      lapsesAt,
+    )
+  }
 }
 
 /** Deletes the incarnation's cells under `prefix`. */
@@ -398,13 +475,15 @@ function compareExchangeCells(sql: SqlStorage, inc: string, exchange: CellsExcha
   if (exchange.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return { kind: 'conflict' }
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
   const version = readRevision(sql, inc)
-  for (const mutation of exchange.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
+  for (const { key, bytes, lapsesInMs } of exchange.mutations) {
+    writeCell(sql, inc, key, bytes, version, lapsesInMs === undefined ? null : now + lapsesInMs)
+  }
   const counters = new Map<string, CellCounter>()
   for (const count of exchange.counts ?? []) {
     const current = selectCellRows(sql, inc, { keys: [count.key] })[0]
     const counted = countCell(current === undefined ? undefined : new Uint8Array(current.bytes), count, now)
     if (counted === null) continue
-    if (counted.written) writeCell(sql, inc, count.key, encodeCellCounter(counted.counter), version)
+    if (counted.written) writeCell(sql, inc, count.key, encodeCellCounter(counted.counter), version, null)
     counters.set(count.key, counted.counter)
   }
   return { kind: 'committed', counters }

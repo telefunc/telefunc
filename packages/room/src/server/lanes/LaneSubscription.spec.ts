@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { createDeferred, type BackendSubscription } from 'telefunc/__internal'
+import { BackendError, createDeferred, type BackendSubscription } from 'telefunc/__internal'
 import { SEMANTIC_LANE } from './lanes.js'
 import { LaneSubscription, type LaneSubscriptionOwner } from './LaneSubscription.js'
 
 type AttemptState = ReturnType<BackendSubscription['state']>
 
-function refusal(): Error {
-  const error = new Error('NOPERM this user has no permissions to access the channel')
-  error.name = 'ReplyError'
-  return error
+/** A store's refusal, as its driver reports it. */
+function refusal(): BackendError {
+  return new BackendError({ code: 'denied', outcome: 'may-have-run', message: 'refused the channel (NOPERM)' })
 }
 
 /** A consumer's subscription as core hands it out: its driver moves it, and `ready` rejects once it is closed. */
@@ -45,14 +44,19 @@ function fakeSubscription() {
       }
       enter('lost')
     },
-    /** As core closes it: with the driver's reason as the cause, or none where the backend ended it on purpose. */
+    /** As core closes it: with the store's `BackendError` itself, with another reason of its driver's as the cause, or
+     *  with none where the backend ended it on purpose. */
     close(reason?: Error) {
       if (state === 'ready') {
         readiness = createDeferred()
         void readiness.promise.catch(() => {})
       }
       enter('closed')
-      readiness.reject(new Error('Backend subscription closed: lane', reason === undefined ? {} : { cause: reason }))
+      readiness.reject(
+        reason instanceof BackendError
+          ? reason
+          : new Error('Backend subscription closed: lane', reason === undefined ? {} : { cause: reason }),
+      )
     },
   }
 }
@@ -80,7 +84,7 @@ function setup() {
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('a Room lane', () => {
-  it('that Redis refuses fails its consumer at once with the refusal, and nothing subscribes it again', async () => {
+  it('that Redis refuses fails its consumer at once with the refusal itself, and nothing subscribes it again', async () => {
     const { lane, subscriptions, calls } = setup()
     lane.start()
     const refused = refusal()
@@ -88,17 +92,24 @@ describe('a Room lane', () => {
     const failure = await Promise.race([
       lane.ready.then(
         () => 'ready',
-        (error: Error) => error,
+        (error: unknown) => error,
       ),
       tick().then(() => 'pending'),
     ])
-    expect(failure).toBeInstanceOf(Error)
-    expect((failure as Error).cause).toBe(refused)
+    expect(failure).toBe(refused)
     // A planning pass starts it again, as it does every wanted lane.
     lane.start()
     await tick()
     expect(subscriptions).toHaveLength(1)
     expect(calls).toEqual({ ended: 1, recovered: 0, terminal: 0 })
+  })
+
+  it('that its backend ends with a reason that is no store failure fails its consumer with that reason as the cause', async () => {
+    const { lane, subscriptions } = setup()
+    lane.start()
+    const reason = new Error('the platform refused it')
+    subscriptions[0]?.close(reason)
+    await expect(lane.ready).rejects.toMatchObject({ cause: reason })
   })
 
   it('whose driver lost it is ready again on the same subscription, and its owner catches up', async () => {

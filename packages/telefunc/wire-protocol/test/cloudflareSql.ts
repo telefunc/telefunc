@@ -25,8 +25,12 @@ function sqliteStorage(): { storage: DurableObjectStorage; plans: string[] } {
       return cursor([], Number(db.prepare(query).run(...bindings).changes))
     },
   }
+  let alarm: number | null = null
   const storage = {
     sql,
+    getAlarm: async () => alarm,
+    setAlarm: async (at: number) => void (alarm = at),
+    deleteAlarm: async () => void (alarm = null),
     transactionSync<T>(fn: () => T): T {
       db.exec('BEGIN')
       try {

@@ -5,6 +5,7 @@ import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import { handleCallbackBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { BackendError } from './BackendError.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import { stopLogged } from './stopLogged.js'
 import type {
@@ -216,10 +217,14 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     this.enter('lost')
   }
 
-  /** Its consumers' `ready` rejects. Closed with a `reason`, it failed, which is reported once, however many consumers
-   *  share it; without one, the backend ended it on purpose. */
+  /** Its consumers' `ready` rejects: with the store's `BackendError` itself where the store refused it, else with this
+   *  error, the driver's `reason` as its cause. Closed with a `reason`, it failed, which is reported once, however many
+   *  consumers share it; without one, the backend ended it on purpose. */
   private close(reason: unknown): void {
-    const failure = new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
+    const failure =
+      reason instanceof BackendError
+        ? reason
+        : new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
     this.finish()
     // A resolved readiness can't carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this.current === 'ready') this.latestReadiness = createReadiness()

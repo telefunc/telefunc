@@ -2,9 +2,17 @@ export { RoomWrites, runAfterHook }
 export type { RoomWritesOptions, RoomWritesOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
-import type { CommitAccepted } from '../backend/contract.js'
+import type { CommitAccepted, LaneId } from '../backend/contract.js'
+import { getRoomPlane } from '../backend/plane.js'
+import type { RoomStore } from '../backend/RoomStore.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { type ChannelPublishAck, handleCallbackBug, createDeferred, unrefTimer } from 'telefunc/__internal'
+import {
+  type ChannelPublishAck,
+  handleCallbackBug,
+  createDeferred,
+  isChannelOverflowError,
+  unrefTimer,
+} from 'telefunc/__internal'
 import { publicTrack, type BinaryFrame } from '../shared/binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
@@ -24,13 +32,24 @@ import type {
   RoomResult,
   RoomDmEnvelope,
   SenderStamp,
+  MemberSnapshot,
 } from '../shared/protocol.js'
 import type { RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import type { RoomModel } from '../shared/RoomModel.js'
 import type { ParticipantMeta, RoomSendReceipt, Sender } from '../types.js'
-import { memberCellKey } from './store/cells.js'
+import { hostedMembers } from './store/cells.js'
 import { reportRoomError } from './reportRoomError.js'
-import { SEMANTIC_LANE, acceptedOrThrow, commitLane, encodeRoomRecord, inboxOf } from './lanes/lanes.js'
+import {
+  SEMANTIC_LANE,
+  acceptedOrThrow,
+  commitFitsBeforeWriting,
+  commitLane,
+  encodeRoomRecord,
+  inboxOf,
+  type CommitFitsBeforeWriting,
+  type CommitsOf,
+  type SizedCommit,
+} from './lanes/lanes.js'
 import { reapAndReadMembersById } from './store/roster.js'
 import { storeDmReply, takeDmReply } from './store/dmReplies.js'
 import { setMemberConnection, setMemberMeta, type MemberMetaWrite } from './store/meta.js'
@@ -117,8 +136,8 @@ class RoomWrites {
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: this.incarnation.id, inc: this.incarnation.inc, lane: SEMANTIC_LANE }
-      const opts = { retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitLane(target, record, opts)
+      const opts = { retain, owner: from, required: hostedMembers(from) }
+      const committing = commitLane(getRoomPlane().direct, target, record, opts)
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
@@ -135,8 +154,17 @@ class RoomWrites {
       const { sender } = await this.admitPublish(from, message, track)
       const admitted = this.replica.admitTrack(from, lane.track)
       if (admitted !== null) await admitted
-      const opts = { retain: frame.retain, owner: from, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitLane({ roomId: this.incarnation.id, inc: this.incarnation.inc, lane }, framed, opts)
+      const opts = { retain: frame.retain, owner: from, required: hostedMembers(from) }
+      const committing = commitLane(
+        getRoomPlane().direct,
+        {
+          roomId: this.incarnation.id,
+          inc: this.incarnation.inc,
+          lane,
+        },
+        framed,
+        opts,
+      )
       sent()
       return { sender, commit: acceptedOrThrow(this.incarnation.id, await committing) }
     })
@@ -250,42 +278,121 @@ class RoomWrites {
     { ackId, field }: { ackId?: string; field?: string } = {},
   ): Promise<RoomSendReceipt> {
     if (this.model.closed) throw roomClosedError(this.incarnation.id)
-    const target = await this.resolveMember(to)
-    if (!target) throw participantGoneError(to)
-    const sender = this.memberSender(from)
-    const stamp = this.stampedSender(from, sender)
-    const onBeforeSend = this.owner.guards?.onBeforeSend
-    if (onBeforeSend) await onBeforeSend(sender, target, data)
-    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
-    if (ackId) envelope.ackId = ackId
-    if (field !== undefined) envelope.field = field
-    const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-    const committing = commitLane(inboxOf(this.incarnation.id, this.incarnation.inc, to), encodeRoomRecord(envelope), {
-      requiredCellKeys,
+    // One account of the call's writes: the reap that finding the recipient may do, and the send.
+    return await getRoomPlane().call(async (store) => {
+      const inbox = inboxOf(this.incarnation.id, this.incarnation.inc, to)
+      const dm = new ParticipantDm(inbox.lane, () => {
+        const envelope: RoomDmEnvelope = {
+          __r: 'dm',
+          to,
+          from,
+          ...this.stampedSender(from, this.memberSender(from)),
+          data,
+        }
+        if (ackId) envelope.ackId = ackId
+        if (field !== undefined) envelope.field = field
+        return envelope
+      })
+      const target = await this.resolveMember(to, store, commitFitsBeforeWriting(store, dm))
+      if (!target) throw participantGoneError(to)
+      // Its size is checked before the guard, whether the view or the store listed the recipient.
+      dm.checked(store)
+      const sender = this.memberSender(from)
+      const onBeforeSend = this.owner.guards?.onBeforeSend
+      if (onBeforeSend) {
+        await onBeforeSend(sender, target, data)
+        dm.guarded()
+      }
+      const payload = dm.bytes()
+      const committed = await commitLane(store, inbox, payload, { required: hostedMembers(from, to) })
+      const receipt = acceptedOrThrow(this.incarnation.id, committed)
+      if (receipt.lost !== undefined) throw messageLostError()
+      const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
+      const onAfterSend = this.owner.guards?.onAfterSend
+      if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
+      return info
     })
-    const receipt = acceptedOrThrow(this.incarnation.id, await committing)
-    if (receipt.lost !== undefined) throw messageLostError()
-    const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
-    const onAfterSend = this.owner.guards?.onAfterSend
-    if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
-    return info
   }
 
-  /** A sender that left had its wait failed by its leave; only a closed room is an error. */
+  /** A sender that left had its wait failed by its leave; only a closed room is an error. The stored reply and the
+   *  frame are the same bytes, so whichever the sender reads first, it reads the same answer. */
   async publishDmAck(to: string, ackId: string, reply: RoomResult): Promise<void> {
-    await storeDmReply(this.incarnation.id, this.incarnation.inc, to, ackId, reply)
     const { id, inc } = this.incarnation
-    const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
-    const requiredCellKeys = [memberCellKey(to)]
-    const acked = await commitLane(inboxOf(id, inc, to), encodeRoomRecord(envelope), { requiredCellKeys })
+    const { direct } = getRoomPlane()
+    const target = inboxOf(id, inc, to)
+    const frame = dmAckFrame(direct, target.lane, { __r: 'dm-ack', to, ackId, ...reply })
+    await storeDmReply(id, inc, to, ackId, frame)
+    const acked = await commitLane(direct, target, frame, { required: hostedMembers(to) })
     if (acked.kind === 'stale-incarnation') throw roomClosedError(id)
   }
 
-  private async resolveMember(id: string): Promise<Sender | null> {
+  /** Its reads and writes, a reap of a lapsed lease among them, are steps of the call `store` is of; a lookup in the
+   *  store runs `fits` before them. */
+  private async resolveMember(id: string, store: RoomStore, fits: CommitFitsBeforeWriting): Promise<Sender | null> {
     const entry = this.model.entry(id)
     if (entry) return senderSnapshot(id, entry.meta.object, entry.identity)
-    const [member] = await reapAndReadMembersById(this.incarnation, [id])
+    const [member] = await reapAndReadMembersById(store, this.incarnation, [id], fits)
     return member === undefined ? null : senderSnapshot(id, member.meta, member.identity ?? null)
+  }
+}
+
+/** A participant's DM to one member, checked for its size before the send guard runs: by the lookup that finds the
+ *  member in the store, before that lookup's reap, or else by `checked()` once the view lists it. A guard may change
+ *  the message it is given, so where one ran, the message it let through is encoded again, and its commit applies the
+ *  store's size rule to it; else the bytes checked are the bytes committed. */
+class ParticipantDm implements CommitsOf {
+  private message: RoomDmEnvelope | null = null
+  private encoded: Uint8Array | null = null
+  private sized = false
+
+  /** `envelope` is made once, with the sender as it is before the guard waits. */
+  constructor(
+    private readonly lane: LaneId,
+    private readonly envelope: () => RoomDmEnvelope,
+  ) {}
+
+  commits(members: readonly MemberSnapshot[]): SizedCommit[] {
+    if (members.length === 0) return []
+    this.sized = true
+    return [{ lane: this.lane, payload: this.bytes(), kept: 'delivered' }]
+  }
+
+  /** Checks the envelope against `store`'s size rule unless the lookup did. */
+  checked(store: RoomStore): void {
+    if (!this.sized) store.assertCommittable(this.lane, this.bytes(), 'delivered')
+    this.sized = true
+  }
+
+  /** The send guard ran on the message the envelope holds: it is encoded again. */
+  guarded(): void {
+    this.encoded = null
+  }
+
+  bytes(): Uint8Array {
+    this.message ??= this.envelope()
+    this.encoded ??= encodeRoomRecord(this.message)
+    return this.encoded
+  }
+}
+
+/** `envelope` encoded once; one the store would refuse on `lane` is replaced by its refusal, as the sender's answer. */
+function dmAckFrame(store: RoomStore, lane: LaneId, envelope: RoomDmAckEnvelope): Uint8Array {
+  const frame = encodeRoomRecord(envelope)
+  try {
+    store.assertCommittable(lane, frame, 'stored')
+    return frame
+  } catch (error) {
+    if (!isChannelOverflowError(error)) throw error
+    const { to, ackId } = envelope
+    const overflow: RoomDmAckEnvelope = {
+      __r: 'dm-ack',
+      to,
+      ackId,
+      ok: false,
+      kind: 'overflow',
+      message: error.message,
+    }
+    return encodeRoomRecord(overflow)
   }
 }
 

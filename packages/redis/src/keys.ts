@@ -9,6 +9,7 @@ export {
   cellIndexKey,
   cellValuesKey,
   cellVersionsKey,
+  cellLapsesKey,
   orderKey,
   memberOrderKey,
   trackLanesKey,
@@ -43,10 +44,17 @@ const DEFAULT_PREFIX = 'tf:'
 /** Builders take the prefix as checked here, once: a `{` would open a hash tag of its own. */
 function assertKeyPrefix(prefix: string): void {
   if (prefix.includes('{')) throw new Error("installRedis(): the prefix must not contain '{'")
+  // The directory's hash tag holds it encoded (`hashTag`), and a string that isn't well formed has no encoding.
+  if (!prefix.isWellFormed()) throw new Error('installRedis(): the prefix must be a well-formed string')
 }
-/** Encoded like a room id, so any key is one hash tag; an empty tag would hash the whole name instead. */
+/** The hash tag of `text`, encoded: a Redis hash tag ends at the first `}`, so a `}` in a room id, a broadcast key or the
+ *  prefix can't end it early, and one logical name can't be split across slots or share another's. */
+function hashTag(text: string): string {
+  return `{${encodeURIComponent(text)}}`
+}
+/** An empty tag would hash the whole name instead. */
 function broadcastTag(key: string): string {
-  return key === '' ? '{_}:empty' : `{${encodeURIComponent(key)}}`
+  return key === '' ? '{_}:empty' : hashTag(key)
 }
 function broadcastSequenceKey(prefix: string, key: string): string {
   return `${prefix}seq:${broadcastTag(key)}`
@@ -57,9 +65,7 @@ function broadcastChannel(prefix: string, route: BroadcastRoute): string {
 }
 
 function roomTag(prefix: string, roomId: string): string {
-  // A Redis hash tag ends at the first `}`. Encode caller input before placing it in braces so an
-  // arbitrary room id cannot escape the tag or split one logical room across slots.
-  return `${prefix}room:{${encodeURIComponent(roomId)}}`
+  return `${prefix}room:${hashTag(roomId)}`
 }
 function headKey(prefix: string, roomId: string): string {
   return `${roomTag(prefix, roomId)}:head`
@@ -84,6 +90,12 @@ function cellValuesKey(prefix: string, roomId: string, inc: string): string {
 /** Each cell's version, by its key. */
 function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
   return `${incarnationPrefix(prefix, roomId, inc)}:versions`
+}
+/** Each cell's lapse, by its key: the authority time it lapses at, or '' for a cell written with no `lapsesInMs`. A
+ *  field for every cell keeps this hash there whenever the values are: a script of a slot that migrates is asked to the
+ *  importing node only while it finds all of its keys there. */
+function cellLapsesKey(prefix: string, roomId: string, inc: string): string {
+  return `${incarnationPrefix(prefix, roomId, inc)}:lapses`
 }
 /** An expiring cell's bytes, under a TTL of its own, so Redis deletes it. It isn't in the incarnation's manifest:
  *  it expires by itself. */
@@ -145,14 +157,15 @@ function channelsPrefix(prefix: string, roomId: string, inc: string): string {
 function incarnationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`
 }
-/** The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster. */
+/** The directory's keys share their own tag so the tag-guarded delete stays one slot under Cluster; two prefixes have
+ *  two tags. */
 function directoryIndexKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:index`
+  return `${prefix}room-dir:${hashTag(`${prefix}dir`)}:index`
 }
 function directoryTagsKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:tags`
+  return `${prefix}room-dir:${hashTag(`${prefix}dir`)}:tags`
 }
 /** Each listed room scored by when it is due, if ever. */
 function directoryChecksKey(prefix: string): string {
-  return `${prefix}room-dir:{${prefix}dir}:checks`
+  return `${prefix}room-dir:${hashTag(`${prefix}dir`)}:checks`
 }

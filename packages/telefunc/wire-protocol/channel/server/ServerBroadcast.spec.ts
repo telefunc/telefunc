@@ -24,6 +24,7 @@ import { collectGarbage } from '../../test/collectGarbage.js'
 import { MONITORING_FAILURES } from '../../test/monitoringFailures.js'
 import { binaryData } from '../broadcastPayload.js'
 import { ChannelOverflowError } from '../channelErrors.js'
+import { BackendError } from '../../backend/BackendError.js'
 import type { BroadcastPublishOptions, Unsubscribe } from '../channel.js'
 
 afterEach(() => disposeBackend())
@@ -614,6 +615,13 @@ describe("a static subscriber's `ready` once its backend refused the key's subsc
         await expect(ready).rejects.toMatchObject({ cause: { message: 'NOPERM' } })
       })
     }
+    it(`${name}: rejects with the store's BackendError itself`, async () => {
+      const refusal = new BackendError({ code: 'denied', outcome: 'may-have-run', message: 'refused' })
+      const ready = Promise.reject(refusal)
+      const listen = () => ({ unsubscribe: () => {}, ready })
+      configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
+      await expect(subscribe().ready).rejects.toBe(refusal)
+    })
   }
 })
 

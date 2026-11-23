@@ -1,25 +1,57 @@
-// ioredis policy: a client's deployment, the connection the backend's commands run on, subscriber creation, and calls
-// to defined commands.
+// The client library's facts: the command client and subscriber socket the backend builds from an app's client, a
+// client's deployment and address, which raw commands write by ioredis's own command table, its wording for a command
+// it never wrote or redirected until it gave up. What a store's reply means is redisFailure.ts's.
 export {
   createCommandClient,
   createSubscriberSocket,
-  callDefinedCommand,
+  subscriberNodeCount,
+  nextReady,
+  ClusterNodesFailed,
   isCluster,
+  rawWrites,
   deploymentOf,
   connectsAlike,
   addressOf,
-  redisFailure,
-  isRefusal,
+  isReplyError,
+  isUnsent,
+  lastClusterReply,
 }
-export type { RedisClient, SubscriberSocket }
+export type { RedisClient, SubscriberSocket, RawCommand }
 
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { hasFlag } from '@ioredis/commands'
 import { Cluster, type Redis } from 'ioredis'
-import { assert, isBug } from './assert.js'
+import { isObject } from 'telefunc/__internal'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
+
+/** The client's commands the backend sends without a script, by their method's name: `getBuffer` is GET, its reply
+ *  bytes. */
+const RAW_COMMANDS = [
+  'get',
+  'getBuffer',
+  'hget',
+  'hkeys',
+  'hmget',
+  'smembers',
+  'sscan',
+  'unlink',
+  'zrangebylex',
+] as const
+type RawCommand = (typeof RAW_COMMANDS)[number]
+
+/** The raw commands that may write: those ioredis's own table of Redis's commands, which it routes by, doesn't flag
+ *  `readonly`. Built once; the table throws here for a name it lacks. */
+const WRITING: ReadonlySet<RawCommand> = new Set(
+  RAW_COMMANDS.filter((name) => !hasFlag(name.replace(/Buffer$/, ''), 'readonly')),
+)
+
+/** Whether the raw command `name` may write, by ioredis's table: no flag of a raw command is written by hand. */
+function rawWrites(name: RawCommand): boolean {
+  return WRITING.has(name)
+}
 
 /** What `RedisSubscriptions` needs of its connection. */
 type SubscriberSocket = {
@@ -39,8 +71,7 @@ function isCluster(redis: RedisClient): redis is Cluster {
 
 /** What a client connects to: a Cluster's startup nodes, or a server's address, database and Sentinel name. */
 function deploymentOf(redis: RedisClient): string {
-  // ioredis keeps a Cluster's startup nodes private; its own duplicate() reads the same field.
-  if (isCluster(redis)) return JSON.stringify((redis as unknown as { startupNodes: unknown }).startupNodes)
+  if (isCluster(redis)) return JSON.stringify(startupNodesOf(redis))
   const { path, host, port, db, sentinels, name } = redis.options
   return JSON.stringify({ path, host, port, db, sentinels, name })
 }
@@ -76,126 +107,73 @@ function connectsAlike(a: RedisClient, b: RedisClient): boolean {
   return CONNECTION_OPTIONS.every((name) => isDeepStrictEqual(a.options[name], b.options[name]))
 }
 
-/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port. */
+/** A Cluster's startup nodes, as the app gave them: ioredis keeps them private, and its own duplicate() reads the same
+ *  field. */
+function startupNodesOf(cluster: Cluster): unknown {
+  return cluster['startupNodes']
+}
+
+/** Where a client connects, as a person reads it: its startup nodes, socket path, Sentinel master or host:port, and never
+ *  a credential its URL holds. */
 function addressOf(redis: RedisClient): string {
   if (isCluster(redis)) {
-    const nodes = (redis as unknown as { startupNodes: Array<{ host?: string; port?: number } | string | number> })
-      .startupNodes
-    return nodes.map((node) => (typeof node === 'object' ? `${node.host}:${node.port}` : String(node))).join(', ')
+    const nodes = startupNodesOf(redis)
+    return Array.isArray(nodes) ? nodes.map(nodeAddress).join(', ') : 'a Redis Cluster'
   }
   const { path, host, port, sentinels, name } = redis.options
   if (path) return path
   return sentinels?.length ? `Sentinel master ${name}` : `${host}:${port}`
 }
 
-/** How Redis 5 and 6 and Dragonfly wrap the refusal of a call a script makes. */
-const IN_SCRIPT = String.raw`ERR Error running script \(call to (?:f_)?[0-9a-f]+\): @user_script:\d+: (?:@user_script: \d+: )?`
-
-/** Redis's refusal of a command its user's ACL denies, at top level or inside a script: Redis 7 and later word a
- *  script's ACL refusal as `ERR`. */
-const ACL_REFUSAL = new RegExp(
-  String.raw`^(?:NOPERM |ERR ACL failure in script: |ERR The user executing the script |${IN_SCRIPT}(?:The user executing the script |-NOPERM ))`,
-)
-
-/** A replica's refusal of a write, at top level or inside a script. */
-const READ_ONLY = new RegExp(String.raw`^(?:READONLY |${IN_SCRIPT}-READONLY )`)
-
-/** Redis's refusal of a login: Redis 6 and later, and Redis 5's `AUTH`. */
-const LOGIN_REFUSAL = /^(?:WRONGPASS |NOAUTH |ERR invalid password)/
-
-/** What to do about a failed command, by Redis's error code. */
-const WHAT_TO_DO: Record<string, string> = {
-  BUSY: "another client's script keeps Redis busy; end it with SCRIPT KILL",
-  LOADING: 'Redis is loading its data; the backend can use it once that ends',
-  OOM: 'Redis reached its maxmemory; raise it, with maxmemory-policy noeviction',
-  WRONGTYPE: "a key under Telefunc's prefix holds a value Telefunc didn't write; keep that prefix to Telefunc",
-}
-
-/** A failure of Redis, or of the connection to it, as the backend reports it: what failed and what to do, with Redis's
- *  error code (the first word of its reply) or the connection's. It holds none of what ioredis' error does: the command,
- *  its arguments (a password, a message's bytes) or a nested error. */
-class RedisFailure extends Error {
-  /** `NOPERM`, `WRONGPASS`, `ECONNREFUSED` and the like. */
-  readonly code: string | undefined
-  /** Redis refused it, by its user's ACL or as a replica, which stands until an operator changes the ACL or the role. */
-  readonly refused: boolean
-  constructor(message: string, code: string | undefined, refused: boolean) {
-    super(message)
-    this.code = code
-    this.refused = refused
+/** A Cluster startup node's host and port as ioredis reads it (an object, a port, a URL or `host:port`, with its
+ *  defaults), or its socket path. */
+function nodeAddress(node: unknown): string {
+  if (typeof node === 'number' || (typeof node === 'string' && /^\d+$/.test(node))) return `127.0.0.1:${node}`
+  if (typeof node === 'string') {
+    if (node.startsWith('/') && !node.startsWith('//')) return node
+    try {
+      const url = new URL(node.includes('//') ? node : `//${node}`, 'redis://localhost')
+      return `${url.hostname || '127.0.0.1'}:${url.port || 6379}`
+    } catch {
+      return 'a startup node'
+    }
   }
+  if (!isObject(node)) return 'a startup node'
+  const host = typeof node.host === 'string' ? node.host : '127.0.0.1'
+  return `${host}:${typeof node.port === 'number' || typeof node.port === 'string' ? node.port : 6379}`
 }
 
-/** What the backend reports of an error ioredis gave on a connection of `redis`'s: the one place a failure of Redis
- *  becomes Telefunc's. An error the backend's own `assert()` threw passes as it is, and so does one this made. */
-function redisFailure(error: unknown, redis: RedisClient): unknown {
-  if (error instanceof RedisFailure || isBug(error)) return error
-  const where = addressOf(redis)
-  if (!(error instanceof Error) || error.name !== 'ReplyError') {
-    const code = connectionCode(error)
-    return new RedisFailure(
-      `Telefunc's Redis backend can't reach Redis at ${where}${code === undefined ? '' : ` (${code})`}`,
-      code,
-      false,
-    )
-  }
-  const { message } = error
-  const code = replyCode(message)
-  const tagged = code === undefined ? '' : ` (${code})`
-  if (READ_ONLY.test(message)) {
-    return new RedisFailure(
-      `Telefunc's Redis backend reached a replica at ${where}, which refuses writes${tagged}: give installRedis() a ` +
-        'client of the primary',
-      code,
-      true,
-    )
-  }
-  if (ACL_REFUSAL.test(message)) {
-    return new RedisFailure(
-      `Redis at ${where} refused Telefunc's Redis backend a command, key or channel by its user's ACL${tagged}: allow ` +
-        'that user what the ACL rule in the docs of @telefunc/redis lists',
-      code,
-      true,
-    )
-  }
-  if (LOGIN_REFUSAL.test(message)) {
-    return new RedisFailure(
-      `Redis at ${where} refused the login of Telefunc's Redis backend${tagged}: check the username and password of ` +
-        'the client given to installRedis()',
-      code,
-      false,
-    )
-  }
-  const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
-  return new RedisFailure(
-    `Redis at ${where} failed a command of Telefunc's Redis backend${tagged}` +
-      (toDo === undefined ? ": Redis's log may say why" : `: ${toDo}`),
-    code,
-    false,
-  )
+/** ioredis's rejection of a command it didn't write, as the backend's command client keeps no offline queue. */
+const UNSENT = /^(?:Stream|Cluster) isn't (?:writeable|ready) and enableOfflineQueue options is false$/
+
+/** ioredis's rejection of a command it never wrote. */
+function isUnsent(error: unknown): boolean {
+  return error instanceof Error && UNSENT.test(error.message)
 }
 
-/** The first word of the reply a script's call got, where it is a code, else of Redis's reply. */
-function replyCode(message: string): string | undefined {
-  const inScript = new RegExp(`^${IN_SCRIPT}-?`).exec(message)
-  const words = [message.split(' ', 1)[0]]
-  if (inScript !== null) words.unshift(message.slice(inScript[0].length).split(' ', 1)[0])
-  return words.find((word) => word !== undefined && /^[A-Z][A-Z_]*$/.test(word))
+/** ioredis's rejection of a Cluster command once its redirections ran out, holding the reply that ended it. ioredis
+ *  counts the app's `maxRedirections` down on every reply that fails a try, before it reads the reply, so at 0 the
+ *  first reply ends the command, whatever it is (ioredis 5.10.1, `Cluster.handleError()`). */
+const GAVE_UP = /^Too many Cluster redirections\. Last error: ReplyError: /
+
+/** The reply that ended a Cluster command ioredis gave up once its redirections ran out, as Redis worded it. Every try
+ *  before it was redirected, so it didn't run: ioredis tries a command again only on MOVED, ASK, TRYAGAIN and
+ *  CLUSTERDOWN, each answered before the command runs, as the backend's command client never retries a closed
+ *  connection (`retryDelayOnFailover: 0`, `createCommandClient()`). So the last reply tells what the command did. */
+function lastClusterReply(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined
+  const gaveUp = GAVE_UP.exec(error.message)
+  return gaveUp === null ? undefined : error.message.slice(gaveUp[0].length)
 }
 
-/** The system's code of a failed connection, such as `ECONNREFUSED`. */
-function connectionCode(error: unknown): string | undefined {
-  if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') return undefined
-  return /^E[A-Z]+$/.test(error.code) ? error.code : undefined
+/** An error Redis replied with, as ioredis gives it: by its name, as an app may load another copy of the errors' class. */
+function isReplyError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'ReplyError'
 }
 
-/** Redis refused it, by its user's ACL or as a replica; `BUSY`, `LOADING` and the like pass. */
-function isRefusal(error: unknown): error is RedisFailure {
-  return error instanceof RedisFailure && error.refused
-}
-
-/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
- *  only (Room reads are strongly consistent). */
+/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), never holds one
+ *  it can't write yet (`nextReady()` waits for it to be ready instead), and reads masters only (Room reads are strongly
+ *  consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
@@ -214,29 +192,49 @@ function createCommandClient(redis: RedisClient): RedisClient {
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
+        // A closed connection fails its command (`lastClusterReply()` counts on it).
         retryDelayOnFailover: 0,
+        enableOfflineQueue: false,
         // Autopipelining batches a Cluster command by the node of its first argument, which for a script with a
         // variable key count is the count, and refuses a batch whose keys span masters.
         enableAutoPipelining: false,
         redisOptions: { ...redis.options.redisOptions, maxRetriesPerRequest: 0, reconnectOnError: null },
       })
-    : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null })
-  // A connection error reaches the backend as its command's rejection.
-  commands.on('error', () => {})
+    : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null, enableOfflineQueue: false })
+  recordAttempts(commands)
   return commands
+}
+
+/** Keeps what the client's connection attempt ended with, from the client's start, for `nextReady()`: a wait that
+ *  starts after the attempt failed, or after the client ended, still rejects with it. Its last error, and for a
+ *  Cluster each node's since the Cluster last read its slots, which it does from the first node that answers; a `ready`
+ *  clears them. A connection error reaches the backend as its command's rejection, not as an event. */
+function recordAttempts(client: RedisClient): void {
+  const attempt: Attempt = { lastError: new Error('Connection is closed.'), nodeErrors: new Map() }
+  attempts.set(client, attempt)
+  client.on('error', (error: unknown) => {
+    attempt.lastError = error
+  })
+  if (isCluster(client)) {
+    client.on('node error', (error: unknown, node: string) => void attempt.nodeErrors.set(node, error))
+    client.on('refresh', () => attempt.nodeErrors.clear())
+  }
+  client.on('ready', () => {
+    attempt.lastError = new Error('Connection is closed.')
+    attempt.nodeErrors.clear()
+  })
 }
 
 /** A fresh, unconnected subscriber that never retries on its own; on a Cluster it sits on a live node. */
 async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSocket> {
   let source: Redis
   if (isCluster(redis)) {
-    // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
-    if (redis.status === 'wait') await redis.connect()
-    else if (redis.status === 'connecting') await clusterReady(redis)
+    // A Cluster fills its node pool just before it is ready.
+    if (redis.status !== 'ready') await nextReady(redis)
     // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled
     // until the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after
     // the last node used.
-    const nodes = redis.nodes('all').filter((candidate) => candidate.status !== 'end')
+    const nodes = subscriberNodesOf(redis)
     const last = subscriberNodes.get(redis)
     const node = nodes[last === undefined ? 0 : (nodes.indexOf(last) + 1) % nodes.length]
     if (node === undefined) throw new Error('Redis Cluster has no available nodes')
@@ -253,43 +251,81 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
   })
 }
 
-const { subscriberNodes, clusterWaits } = getGlobalObject('ioredis.ts', () => ({
-  /** The node each Cluster's subscriber was last duplicated from. */
-  subscriberNodes: new WeakMap<Cluster, Redis>(),
-  /** One wait per connecting Cluster, however often subscribers reopen during it. */
-  clusterWaits: new WeakMap<Cluster, Promise<void>>(),
-}))
-
-function clusterReady(cluster: Cluster): Promise<void> {
-  let wait = clusterWaits.get(cluster)
-  if (wait) return wait
-  wait = new Promise((resolve, reject) => {
-    const settle = (error?: Error) => {
-      clusterWaits.delete(cluster)
-      cluster.off('ready', onReady)
-      cluster.off('close', onClose)
-      if (error) reject(error)
-      else resolve()
-    }
-    const onReady = () => settle()
-    // Every failed connect closes, whether the Cluster retries it or ends.
-    const onClose = () => settle(new Error('Redis Cluster connection closed'))
-    cluster.once('ready', onReady)
-    cluster.once('close', onClose)
-  })
-  clusterWaits.set(cluster, wait)
-  return wait
+/** The nodes a Cluster's subscriber may sit on, in its pool's order: a failed node stays pooled until the Cluster uses
+ *  it. */
+function subscriberNodesOf(redis: Cluster): Redis[] {
+  return redis.nodes('all').filter((candidate) => candidate.status !== 'end')
 }
 
-/** Invoke a command registered via `defineCommand`: ioredis attaches it as a dynamic method TypeScript can't see. */
-function callDefinedCommand(
-  redis: RedisClient,
-  command: string,
-  keysAndArgs: ReadonlyArray<string | Uint8Array>,
-): Promise<unknown> {
-  const fn = (redis as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[command]
-  assert(typeof fn === 'function', `Redis command "${command}" was not registered via defineCommand`)
-  // One array argument, which ioredis flattens into the command: an incarnation's keys can outnumber a call's
-  // arguments.
-  return fn.call(redis, keysAndArgs)
+/** How many nodes the subscriber tries in turn before a refusal of its login stands: each node of a Cluster, as each
+ *  reconnect starts after the last node used (`createSubscriberSocket()`), and a server's one. */
+function subscriberNodeCount(redis: RedisClient): number {
+  return isCluster(redis) ? Math.max(subscriberNodesOf(redis).length, 1) : 1
+}
+
+/** What a client's connection attempt ended with, until its next `ready` (`recordAttempts()`). */
+type Attempt = {
+  lastError: unknown
+  /** By node: what each answered since the Cluster last read its slots. */
+  nodeErrors: Map<string, unknown>
+}
+
+const { subscriberNodes, readyWaits, attempts } = getGlobalObject('ioredis.ts', () => ({
+  /** The node each Cluster's subscriber was last duplicated from. */
+  subscriberNodes: new WeakMap<Cluster, Redis>(),
+  /** Each client's wait for its next `ready` (`nextReady()`). */
+  readyWaits: new WeakMap<RedisClient, Promise<void>>(),
+  /** What each backend client's connection attempt ended with (`recordAttempts()`). */
+  attempts: new WeakMap<RedisClient, Attempt>(),
+}))
+
+/** A Cluster's connect that closed after its nodes failed, with each node's last error (`endedWith()`): what the nodes
+ *  replied tells a refused login from a node that is only unreachable (`redisFailure()`). Only the backend reads it. */
+class ClusterNodesFailed extends Error {
+  readonly nodeErrors: readonly unknown[]
+  constructor(nodeErrors: readonly unknown[]) {
+    super('Every node of the Redis Cluster that was tried failed')
+    this.nodeErrors = nodeErrors
+  }
+}
+
+/** The client's next `ready`, one wait for everything that waits meanwhile: the commands made while it reconnects, and
+ *  the subscriber sockets a Cluster opens before it is ready. It rejects once the connection closes first, which is when
+ *  ioredis would fail a command it held, or at once if the client ended: with what its attempt ended with
+ *  (`endedWith()`). Every failed connect of a Cluster closes, whether it retries or ends. A client made with
+ *  `lazyConnect` connects here. */
+function nextReady(client: RedisClient): Promise<void> {
+  const waiting = readyWaits.get(client)
+  if (waiting !== undefined) return waiting
+  if (client.status === 'end') return Promise.reject(endedWith(client))
+  const promise = new Promise<void>((resolve, reject) => {
+    const settle = () => {
+      client.off('ready', onReady)
+      client.off('close', onClose)
+      client.off('end', onClose)
+      if (readyWaits.get(client) === promise) readyWaits.delete(client)
+    }
+    const onReady = () => {
+      settle()
+      resolve()
+    }
+    const onClose = () => {
+      settle()
+      reject(endedWith(client))
+    }
+    client.once('ready', onReady)
+    client.once('close', onClose)
+    client.once('end', onClose)
+  })
+  readyWaits.set(client, promise)
+  if (client.status === 'wait') void client.connect().catch(() => {})
+  return promise
+}
+
+/** What the client's last connection attempt ended with (`recordAttempts()`): for a Cluster whose nodes failed, each
+ *  node's error (`ClusterNodesFailed`), as ioredis's own error keeps only the last node's; else its last error. */
+function endedWith(client: RedisClient): unknown {
+  const attempt = attempts.get(client)
+  if (attempt === undefined) return new Error('Connection is closed.')
+  return attempt.nodeErrors.size === 0 ? attempt.lastError : new ClusterNodesFailed([...attempt.nodeErrors.values()])
 }

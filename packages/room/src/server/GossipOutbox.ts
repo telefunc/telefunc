@@ -97,7 +97,7 @@ class GossipOutbox {
     const lane = { roomId: this.room.id, inc: this.room.inc, lane: DEMAND_LANE }
     try {
       // A stale commit is a closed room's: its gossip has no reader.
-      await getRoomPlane().commitLane(lane, encodeDemandPage(page))
+      await getRoomPlane().direct.commitLane(lane, encodeDemandPage(page))
     } catch (error) {
       reportRoomError(error)
     }

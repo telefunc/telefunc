@@ -400,14 +400,14 @@ Broadcast.subscribe('room:lobby', (msg, info) => {
 
 > `Broadcast.subscribe()` returns a function that unsubscribes. Its `ready` promise resolves once the subscription is in effect, or once you unsubscribe. While the server can't reach Redis, a new subscription's `ready` waits. A subscription already in effect stays: its callback receives what is published once Redis is back, and <Link href="#delivery">Delivery</Link> says what it missed.
 
-> A subscription fails when Redis, Cloudflare or your <Link href="/broadcast-config">`BroadcastTransport`</Link> refuses it (see <Link href="/redis#errors">Redis errors</Link>). Telefunc then removes it, and your callback receives nothing more. If `ready` hadn't resolved yet, it rejects with an error whose `cause` is the refusal. The server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. To receive again, call `Broadcast.subscribe()` again.
+> A subscription fails when Redis, Cloudflare or your <Link href="/broadcast-config">`BroadcastTransport`</Link> refuses it (see <Link href="/redis#errors">Redis errors</Link>). Telefunc then removes it, and your callback receives nothing more. If `ready` hadn't resolved yet, it rejects: with Redis, with the refusal itself, a `BackendError`; with Cloudflare or your `BroadcastTransport`, with an error whose `cause` is the refusal. The server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. To receive again, call `Broadcast.subscribe()` again.
 
 ### Delivery
 
 When `publish()` rejects depends on where Broadcast runs:
 
 - In memory (the default), with `ChannelOverflowError`, when a `subscribe()` callback, before its first `await`, publishes a message that would take those waiting past 320 MiB, or one that answers a chain of answers 10,000 deep, which is taken for a callback that answers its own messages without end. With none waiting, a message goes through whatever its size. A publish from anywhere else never gets this error.
-- With <Link href="/redis">`@telefunc/redis`</Link>, when Redis can't run the publish, for example while the connection is down. It also rejects with `ChannelOverflowError` when a publish to a key this server has only just subscribed to would take the publishes waiting on that subscription past the default per-channel limit of 320 MiB, or `maxMemory`. With none waiting, a message goes through whatever its size.
+- With <Link href="/redis">`@telefunc/redis`</Link>, with `BackendError`, when Redis can't run the publish, for example while the connection is down (see <Link href="/redis#errors">Redis errors</Link>). It also rejects with `ChannelOverflowError` when a publish to a key this server has only just subscribed to would take the publishes waiting on that subscription past the default per-channel limit of 320 MiB, or `maxMemory`. With none waiting, a message goes through whatever its size.
 - With a <Link href="/broadcast-config">`BroadcastTransport`</Link>, when its `send()` or `sendBinary()` throws or rejects, with that error.
 - On Cloudflare, when a server <Link href="/stream/cloudflare#delivery-guarantees">couldn't take it</Link>.
 
@@ -652,7 +652,7 @@ A call that can't start throws instead of rejecting: one on a closed channel, or
 
 A channel closes when one of its ends closes or aborts it, and when its client stays gone longer than `reconnectTimeout`. A slow client doesn't close a `Channel`, and neither does a refused `send()`. Two things do: a client that sends more than the server holds while your `listen()` callbacks work on what it sent, and a client with so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server can't hold even their refusals. The channel then closes with `ChannelOverflowError`. A `BroadcastChannel` also closes, with `ChannelOverflowError`, where its client would miss a message, and where the server can't hold even the newest <Link href="#lossy-broadcast">lossy</Link> publish for its client.
 
-Channels and broadcasts signal failure through four errors:
+Channels and broadcasts signal failure through five errors:
 
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
@@ -664,6 +664,7 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for lossy publishes, the server couldn't hold even the newest one. For any channel, its client sent more than the server holds while your `listen()` callbacks or a stream's reader work on what it sent, or had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then publish with `lossy: true`, `await` each send and acknowledged call before the next, or raise `maxMemory` |
 | `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
 | `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |
+| `BackendError` (`publish()`) | With <Link href="/redis">`@telefunc/redis`</Link>, Redis couldn't run the publish | Open | Read `err.code` and `err.outcome`, see <Link href="/redis#errors">Redis errors</Link> |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 

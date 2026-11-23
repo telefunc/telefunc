@@ -15,6 +15,7 @@ import type {
   RoomHead,
   StaleCommit,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitOptions,
   RetainedFrame,
@@ -47,7 +48,7 @@ import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../se
 import { decodeRoomRecord, encodeRoomRecord, lostReason } from '../server/lanes/lanes.js'
 import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
-import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../backend/semantics.js'
+import { commitPreconditionHolds, isOpenIncarnation, publicHead, unheldRequiredCell } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
 import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained, retainedOwner } from './retained.js'
@@ -55,6 +56,7 @@ import { routeLease, routeScope, type RouteInstallation } from './routes.js'
 import {
   advanceOrder,
   compareExchangeCells,
+  heldCell,
   compareExchangeHead,
   dropCellPrefix,
   dropIncarnationRows,
@@ -183,8 +185,8 @@ class RoomAuthority {
     return readExpiringCells(this.sql(), inc, keys, Date.now())
   }
 
-  async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
-    return readCellPage(this.sql(), inc, prefix, cursor, Date.now())
+  async readCellPage(inc: string, prefix: string, cursor?: string, beside?: CellsBeside): Promise<CellPage> {
+    return readCellPage(this.sql(), inc, prefix, cursor, Date.now(), beside)
   }
 
   async compareExchangeCells(inc: string, exchange: CellsExchange): Promise<CellsExchangeResult> {
@@ -204,12 +206,8 @@ class RoomAuthority {
       if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
         return { kind: 'stale-incarnation' }
       }
-      if (opts?.requiredCellKeys !== undefined) {
-        const required = readCells(sql, inc, { keys: opts.requiredCellKeys }, now)
-        assert(required.kind === 'read') // the precondition just found this incarnation open
-        const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
-        if (missing !== undefined) return { kind: 'stale-cell', key: missing }
-      }
+      const unheld = opts?.required && unheldRequiredCell(opts.required, (key) => heldCell(sql, inc, key, now))
+      if (unheld !== undefined) return { kind: 'stale-cell', key: unheld }
       return commitIn(sql, inc, lane, payload, opts ?? {}, now)
     })
     if (outcome.kind !== 'accepted') return outcome
@@ -257,7 +255,11 @@ class RoomAuthority {
             return { kind: 'repeated', answer: decodeRoomRecord<StoredAnswer>(answer) }
           }
         }
-        const { value, writes } = recordRequest(request, { now, cell: (key) => selectCell(sql, inc, key, now) })
+        const { value, writes } = recordRequest(request, {
+          now,
+          cell: (key) => heldCell(sql, inc, key, now)?.bytes,
+          lapsed: (key) => heldCell(sql, inc, key, now)?.lapsed === true,
+        })
         if (lease !== null && writesNothing(writes)) throw new NothingWritten(value)
         const done = applyOperation(sql, inc, value, writes, now)
         if (inbox !== undefined && lease !== null) {
@@ -601,12 +603,6 @@ async function receiptOf(
 
 function handoffKey({ inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): string {
   return JSON.stringify([inc, laneKey, seq])
-}
-
-function selectCell(sql: SqlStorage, inc: string, key: string, now: number): Uint8Array | undefined {
-  const read = readCells(sql, inc, { keys: [key] }, now)
-  assert(read.kind === 'read') // the operation found this incarnation open
-  return read.cells.get(key)
 }
 
 /** A data or binary frame a subscribed session DO didn't take is reported as lost on its room's lane. */

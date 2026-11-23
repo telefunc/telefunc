@@ -14,11 +14,13 @@ import type {
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
+  CommitKept,
   LaneId,
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
   CellSelector,
+  CellsBeside,
   CellsRead,
   CommitAccepted,
   CommitOptions,
@@ -37,12 +39,14 @@ import {
   commitPreconditionHolds,
   countCell,
   encodeCellCounter,
+  hasLapsed,
   headExpectationHolds,
   isOpenIncarnation,
   materializeHead,
   nextOrdering,
   publicHead,
   type StoredHead,
+  unheldRequiredCell,
 } from './semantics.js'
 import {
   type BackendReceiver,
@@ -58,7 +62,8 @@ import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
 import { MemoryCommitQueue } from './MemoryCommitQueue.js'
 
 type Expiring = { expiresAt: number | null }
-type StoredCell = { bytes: Uint8Array; version: string }
+/** `lapsesAt`: the authority time the cell lapses at, for one written with `lapsesInMs`. */
+type StoredCell = { bytes: Uint8Array; version: string; lapsesAt?: number }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number; owner?: string }
 
 type Incarnation = {
@@ -180,19 +185,38 @@ function takePage(keys: Iterator<string>, seen: Set<string>): string[] {
   return page
 }
 
-function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number): CellsRead {
+const referenceDecoder = new TextDecoder()
+
+function cellsRead(incarnation: Incarnation, keys: Iterable<string>, now: number, beside?: CellsBeside): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
+  const lapsed = new Set<string>()
+  const besides = beside === undefined ? undefined : new Map<string, Uint8Array | null>()
   for (const key of keys) {
     const cell = incarnation.cells.get(key)
     if (cell === undefined) continue
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
+    if (hasLapsed(cell.lapsesAt, now)) lapsed.add(key)
+    if (beside === undefined || besides === undefined || !key.startsWith(beside.of)) continue
+    const reference = incarnation.cells.get(beside.reference + key.slice(beside.of.length))
+    if (reference === undefined) continue
+    const target = incarnation.cells.get(beside.target + referenceDecoder.decode(reference.bytes))
+    const live = target !== undefined && !hasLapsed(target.lapsesAt, now)
+    besides.set(key, live ? copyBytes(target.bytes) : null)
   }
-  return { kind: 'read', cells, versions, now }
+  return besides === undefined
+    ? { kind: 'read', cells, versions, now, lapsed }
+    : { kind: 'read', cells, versions, now, lapsed, beside: besides }
 }
 
-function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null, version: string): void {
+function setCell(
+  incarnation: Incarnation,
+  key: string,
+  bytes: Uint8Array | null,
+  version: string,
+  lapsesAt?: number,
+): void {
   if (bytes === null) {
     if (!incarnation.cells.delete(key)) return
     for (const prefix of separatorPrefixes(key)) unindex(incarnation.cellsByPrefix, prefix, key)
@@ -202,7 +226,9 @@ function setCell(incarnation: Incarnation, key: string, bytes: Uint8Array | null
     for (const prefix of separatorPrefixes(key))
       getOrCreate(incarnation.cellsByPrefix, prefix, () => new Set()).add(key)
   }
-  incarnation.cells.set(key, { bytes: copyBytes(bytes), version })
+  const cell: StoredCell = { bytes: copyBytes(bytes), version }
+  if (lapsesAt !== undefined) cell.lapsesAt = lapsesAt
+  incarnation.cells.set(key, cell)
 }
 
 /** Writes an expiring cell, replacing one at its key, and the timer that deletes it, which may run late. */
@@ -222,13 +248,18 @@ function applyCells(
   mutations: readonly CellMutation[],
   counts: readonly CellCount[],
 ): Map<string, CellCounter> {
-  const version = String(++incarnation.version)
-  for (const mutation of mutations) setCell(incarnation, mutation.key, mutation.bytes, version)
+  // A revision only for what is written: an operation that writes nothing writes no revision, as on Redis.
+  let version: string | undefined
+  const written = () => (version ??= String(++incarnation.version))
+  const now = Date.now()
+  for (const { key, bytes, lapsesInMs } of mutations) {
+    setCell(incarnation, key, bytes, written(), lapsesInMs === undefined ? undefined : now + lapsesInMs)
+  }
   const counters = new Map<string, CellCounter>()
   for (const count of counts) {
-    const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, Date.now())
+    const counted = countCell(incarnation.cells.get(count.key)?.bytes, count, now)
     if (counted === null) continue
-    if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), version)
+    if (counted.written) setCell(incarnation, count.key, encodeCellCounter(counted.counter), written())
     counters.set(count.key, counted.counter)
   }
   return counters
@@ -275,7 +306,6 @@ class MemoryRoomDriver implements RoomDriver {
   private sortedIds: SortedIds | null = null
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
-  private revSeq = 0
   private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -295,7 +325,7 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   private storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, Date.now(), `rev-${++this.revSeq}`)
+    const materialized = materializeHead(next, Date.now())
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) {
@@ -308,11 +338,12 @@ class MemoryRoomDriver implements RoomDriver {
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const incarnation = this.readableIncarnation(roomId, inc)
     if (incarnation === null) return { kind: 'stale-incarnation' }
-    return cellsRead(incarnation, 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix), Date.now())
+    const keys = 'keys' in sel ? sel.keys : cellKeysWithPrefix(incarnation, sel.prefix)
+    return cellsRead(incarnation, keys, Date.now(), sel.beside)
   }
 
   /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
-  async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
+  async *readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncGenerator<CellsRead> {
     let keys: Generator<string> | null = null
     const seen = new Set<string>()
     let page: string[]
@@ -324,7 +355,7 @@ class MemoryRoomDriver implements RoomDriver {
       }
       keys ??= liveKeysWithPrefix(incarnation, prefix)
       page = takePage(keys, seen)
-      yield cellsRead(incarnation, page, Date.now())
+      yield cellsRead(incarnation, page, Date.now(), beside)
     } while (page.length === CELL_PAGE_SIZE)
   }
 
@@ -370,11 +401,16 @@ class MemoryRoomDriver implements RoomDriver {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)
+    const now = Date.now()
     const { value, writes } = recordOperation(operation, args, {
-      now: Date.now(),
+      now,
       cell: (key) => {
         const cell = incarnation.cells.get(key)
         return cell === undefined ? undefined : copyBytes(cell.bytes)
+      },
+      lapsed: (key) => {
+        const cell = incarnation.cells.get(key)
+        return cell !== undefined && hasLapsed(cell.lapsesAt, now)
       },
     })
     for (const prefix of writes.prefixes) {
@@ -399,14 +435,23 @@ class MemoryRoomDriver implements RoomDriver {
   ): Promise<CommitResult> {
     const room = this.rooms.get(roomId)
     const head = this.liveHead(room)
-    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
+    const now = Date.now()
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, now)) {
       return { kind: 'stale-incarnation' }
     }
     const incarnation = this.incarnation(room, inc)
-    const missing = opts?.requiredCellKeys?.find((key) => !incarnation.cells.has(key))
-    if (missing !== undefined) return { kind: 'stale-cell', key: missing }
+    const unheld =
+      opts?.required &&
+      unheldRequiredCell(opts.required, (key) => {
+        const cell = incarnation.cells.get(key)
+        return cell && { bytes: cell.bytes, lapsed: hasLapsed(cell.lapsesAt, now) }
+      })
+    if (unheld !== undefined) return { kind: 'stale-cell', key: unheld }
     return await this.commitOn(incarnation, lane, payload, opts)
   }
+
+  /** The memory store has no size rule: it keeps a payload at any size, delivered or stored. */
+  assertCommittable(_lane: LaneId, _payload: Uint8Array, _kept: CommitKept): void {}
 
   /** Assigns the commit's seq and queues its delivery in one synchronous step, so deliveries run in seq order. */
   private async commitOn(

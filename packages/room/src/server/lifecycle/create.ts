@@ -2,7 +2,7 @@ export { tryCreateRoom }
 
 import { assertUsage } from '../../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
-import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import type { HeadExpectation, HeadNext, RoomHead } from '../../backend/contract.js'
 import { assertKnownOptions, isRecord, ownMetadata } from '../../shared/arguments.js'
 import type { RoomConfigRecord, RoomIncarnation } from '../protocol.js'
@@ -25,17 +25,25 @@ type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | Refusal
 /** `head`: the open head it found. */
 type Refusal = { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 
-async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
+/** Its reads and writes are steps of the call `store` is of. */
+async function tryCreateRoom(
+  store: RoomStore,
+  id: string,
+  options: RoomOptions | undefined,
+): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
-  const plane = getRoomPlane()
   return await retryCompareExchange(async () => {
     // The head a create may replace: a closing one taken over, a closed one cleaned up.
-    let current = await plane.driver.readHead(id)
+    let current = await store.reads.readHead(id)
     if (current?.state === 'closing') {
-      if (!(await takeOverClose(plane, id, current))) return { kind: 'closing' }
-      current = await plane.driver.readHead(id)
+      const closing = current
+      if (!(await takeOverClose(store, id, closing))) return { kind: 'closing' }
+      current = await store.reads.readHead(id)
     }
-    if (current?.state === 'closed') await cleanupFinalizedIncarnation(plane, id, current)
+    if (current?.state === 'closed') {
+      const closed = current
+      await cleanupFinalizedIncarnation(store, id, closed)
+    }
     if (current !== null && current.state !== 'closed') return refusalOrRetry(current)
     const incarnation: RoomIncarnation = {
       id,
@@ -44,16 +52,17 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsedInc = current === null ? await plane.driver.directoryGet(id) : undefined
+    const lapsedInc = current === null ? await store.reads.directoryGet(id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
-    if (lapsedInc === undefined) await listRoom(plane, incarnation, undefined)
+    if (lapsedInc === undefined) await listRoom(store, incarnation, undefined)
     const next = { head: openHead(created), ...newRoomHold(incarnation.hold) }
-    const result = await plane.compareExchangeHead(id, replacing(current), next)
+    const expected = replacing(current)
+    const result = await store.compareExchangeHead(id, expected, next)
     if (result.kind === 'conflict') return refusalOrRetry(result.current)
     scheduleNewRoomClose(incarnation)
     // The lapsed incarnation's data goes before the listing that names it is replaced.
-    if (lapsedInc !== undefined) await plane.driver.dropIncarnation(id, lapsedInc)
-    await listRoom(plane, incarnation, result.head.expiresAt)
+    if (lapsedInc !== undefined) await store.dropIncarnation(id, lapsedInc)
+    await listRoom(store, incarnation, result.head.expiresAt)
     sweepLapsedRoomsSoon()
     return { kind: 'created', room: seededRoom(id, created) }
   })
@@ -65,7 +74,7 @@ function replacing(current: RoomHead | null): HeadExpectation {
 }
 
 function openHead(created: RoomConfigRecord): HeadNext['head'] {
-  return { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) }
+  return { rev: crypto.randomUUID(), currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) }
 }
 
 /** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */

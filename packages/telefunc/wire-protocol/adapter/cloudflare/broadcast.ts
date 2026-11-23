@@ -37,6 +37,7 @@ import {
   initLeaseSchema,
   leaseRegistered,
   liveLeases,
+  nextLeaseSweep,
   registerLease,
   removeLease,
   renewLease,
@@ -185,6 +186,8 @@ const AUTHORITY_SCHEMA = 'CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRI
 class CloudflareBroadcastAuthorityState {
   private readonly storage: DurableObjectStorage
   private schema = false
+  /** The alarm this run of the object set, null for none; undefined until it first sets or clears it. */
+  private alarmAt: number | null | undefined = undefined
 
   constructor(state: DurableObjectState) {
     this.storage = state.storage
@@ -201,20 +204,23 @@ class CloudflareBroadcastAuthorityState {
   }
 
   /** A grant for a member DO's writes of presence here; a member DO that holds no presence lapses with its grant. */
-  grant(member: string): number {
+  async grant(member: string): Promise<number> {
     const now = Date.now()
-    return this.transaction((sql) => {
+    const grant = this.transaction((sql) => {
       sweepLeases(sql, now)
       return grantHolder(sql, member, now)
     })
+    await this.scheduleSweep()
+    return grant
   }
 
   /** The RPC reply waits for the write. A hold that came before is answered as it was. */
-  hold({ key, kind, member, lease, bucket, order }: BroadcastHoldRequest): LeaseRegistered {
+  async hold({ key, kind, member, lease, bucket, order }: BroadcastHoldRequest): Promise<LeaseRegistered> {
     const scope = broadcastRouteKey({ key, kind })
     const held = this.transaction((sql) =>
       registerLease(sql, { scope, holder: member, lease, bucket }, order, Date.now()),
     )
+    await this.scheduleSweep()
     return leaseRegistered(held)
   }
 
@@ -223,9 +229,18 @@ class CloudflareBroadcastAuthorityState {
     return this.transaction((sql) => renewLease(sql, scope, member, lease, Date.now()))
   }
 
-  release({ key, kind, member, lease, order }: BroadcastReleaseRequest): LeaseRemoved {
+  async release({ key, kind, member, lease, order }: BroadcastReleaseRequest): Promise<LeaseRemoved> {
     const scope = broadcastRouteKey({ key, kind })
-    return this.transaction((sql) => removeLease(sql, scope, member, lease, order, Date.now()))
+    const removed = this.transaction((sql) => removeLease(sql, scope, member, lease, order, Date.now()))
+    await this.scheduleSweep()
+    return removed
+  }
+
+  /** Drops the holders that went idle, so a key nobody holds stores no lease row once `LEASE_TTL_MS` passed. */
+  async alarm(): Promise<void> {
+    this.alarmAt = null
+    this.transaction((sql) => sweepLeases(sql, Date.now()))
+    await this.scheduleSweep()
   }
 
   /** The route's member DOs whose presence is unexpired, each with its bucket. */
@@ -239,6 +254,21 @@ class CloudflareBroadcastAuthorityState {
   private transaction<T>(fn: (sql: SqlStorage) => T): T {
     const sql = this.sql()
     return this.storage.transactionSync(() => fn(sql))
+  }
+
+  /** Sets the alarm to when a holder may next go idle in the turn of the write that changed it, with no `await`
+   *  between them, so both are stored or neither. An earlier alarm sets the next one when it fires. */
+  private scheduleSweep(): Promise<void> {
+    const next = nextLeaseSweep(this.sql())
+    const current = this.alarmAt
+    if (next === null) {
+      if (current === null) return Promise.resolve()
+      this.alarmAt = null
+      return this.storage.deleteAlarm()
+    }
+    if (current !== undefined && current !== null && current <= next) return Promise.resolve()
+    this.alarmAt = next
+    return this.storage.setAlarm(next)
   }
 
   private sql(): SqlStorage {

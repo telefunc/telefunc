@@ -30,8 +30,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       log.logText.includes('Backend subscription closed: text:refused-presence') ||
       // testLapsedPresence()'s authority refuses its refreshes, and the route reports it lost.
       log.logText.includes("Cloudflare Broadcast presence for 'lapsed-presence:") ||
-      // testRoomStorage()'s receiver throws, as a test of what a store does then.
-      log.logText.includes('Test: a receiver throws') ||
+      // testRoomStorage()'s server listener throws, as a test of what Room does then.
+      log.logText.includes('Test: a listener throws') ||
       // testRefusedDelivery()'s session refuses a delivery, which its coordinator reports.
       log.logText.includes('Test: the session refused the delivery') ||
       // testRoomJoinInbox()'s authority refuses an inbox's registration, and the subscription it ended is reported.
@@ -59,6 +59,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoomAcrossRegions()
   testRoomCreatedInRegion()
   testRoomStorage()
+  testRoomHostingAtCommit()
   testServerFirst()
 }
 
@@ -672,9 +673,58 @@ function testRoomStorage() {
     for (const page of [holder!, closer!]) await page.context().close()
   })
 
-  test("Room: a store's receiver that throws is reported, its writes still commit and its next frame still arrives", async () => {
+  test('Room: a server listener that throws is reported, and the listener beside it and the messages after it still arrive', async () => {
     await openRoomPage()
-    expect(await clickRoomCard(page, 'throwing-receiver')).deep.equal({ writes: ['written', 'written'], calls: 2 })
+    expect(await clickRoomCard(page, 'throwing-listener')).deep.equal({ thrower: 2, healthy: 2 })
+  })
+
+  test("Room: an acknowledged DM whose answer is over the store's row limit tells its sender ChannelOverflowError", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('reply-outcome')).deep.equal({ told: 'ChannelOverflowError' })
+  })
+
+  test("Room: a removal whose leave is over the store's row limit is refused with ChannelOverflowError, and the visible tab stays", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('removal-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      visible: 1,
+    })
+  })
+
+  test("Room: a Room.send() of a message over the store's row limit goes through, as its commit keeps no row of it", async () => {
+    await openRoomPage()
+    expect(await outcomeAt('send-outcome', ROW_LIMIT_BYTES)).deep.equal({ told: 'resolved' })
+  })
+
+  test('Room: a read of cells reads the cell each reference names beside its cell, by key and on every page of a prefix read', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'beside-read')).deep.equal({
+      written: 'committed',
+      byKey: { 'tm:a': 'lease one', 'tm:b': null },
+      pages: true,
+      without: 0,
+      fillers: 1024,
+      others: { 'tm:a': 'lease one', 'tm:b': null },
+      plain: 'none',
+    })
+  })
+
+  test("Room: a join over the store's row limit is refused with ChannelOverflowError, and the next join goes through", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('join-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      participants: 0,
+      nextJoin: 'resolved',
+    })
+  })
+
+  test("Room: a meta update over the store's row limit is refused with ChannelOverflowError, and the next update goes through", async () => {
+    await openRoomPage()
+    expect(await overRowLimit('meta-update-outcome')).deep.equal({
+      told: 'ChannelOverflowError',
+      keys: ['seed'],
+      nextUpdate: 'resolved',
+    })
   })
 
   test('Room: its meta keeps the key order its writes gave it', async () => {
@@ -690,6 +740,41 @@ function testRoomStorage() {
         ['y', 2],
       ],
     })
+  })
+}
+
+/** A Durable Object's SQLite storage refuses a row over 8 MiB and 34 bytes. */
+const ROW_LIMIT_BYTES = 8 * 1024 * 1024 + 34
+
+/** What the size card `card` tells of its call with a value of `length` characters. */
+async function outcomeAt(card: string, length: number) {
+  await page.fill('#room-length', String(length))
+  return await clickRoomCard(page, card)
+}
+
+/** What `card`'s call tells one character over the longest value it takes, found by bisection between 4 KiB under the
+ *  row limit and the limit, one call per try. */
+async function overRowLimit(card: string) {
+  let low = ROW_LIMIT_BYTES - 4096
+  let high = ROW_LIMIT_BYTES
+  expect((await outcomeAt(card, low)).told).toBe('resolved')
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2)
+    if ((await outcomeAt(card, middle)).told === 'resolved') low = middle
+    else high = middle
+  }
+  return await outcomeAt(card, low + 1)
+}
+
+function testRoomHostingAtCommit() {
+  test("Room: a Room.send() whose tab's lease lapsed between its lookup and its inbox commit is refused at the commit", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'send-after-lapse')).deep.equal({ receipts: 0 })
+  })
+
+  test("Room: a participant's send() to a tab its view lists, whose lease a reap claimed, is told the participant is gone", async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'send-to-claimed')).deep.equal({ sent: 'participant not found' })
   })
 }
 

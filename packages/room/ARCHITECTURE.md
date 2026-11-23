@@ -70,8 +70,9 @@ this one too, applies the event to its model, and its views tell their listeners
   (`TailHold`).
 - **admission**: a join under way through one handle: its guard, then its inbox, then its record and join event
   (`Admission`).
-- **lease**: a process's claim on the members and views it hosts. Its heartbeat renews it; a lapsed lease's members
-  are reaped by the next process that finds it (`store/lease.ts`).
+- **lease**: a process's claim on the members and views it hosts, a cell that lapses unless its heartbeat renews it.
+  The next process that finds it lapsed claims it, moving it to a claim cell of its own, and reaps its members
+  (`store/lease.ts`). A member hosts while its lease is there and not lapsed, as reads and commits judge it.
 - **hold**: what keeps a room open: its holders and members are counted, and once nothing holds it, it closes after
   its timeout (`lifecycle/hold.ts`).
 - **roster**: the members as the authority lists them, read to correct a view that drifted (`store/roster.ts`,
@@ -110,7 +111,11 @@ and returns the refusal its result type names (`conflict`, `stale-incarnation` o
   one changed (`RedisRoomDriver.runOperation()`).
 - `commitLane()` takes the lane's next seq, keeps the retained frame, and hands the frame to the lane's subscriptions
   in seq order, if the head's open incarnation is `inc`, or, with `closingLease`, the commit is a control commit and
-  the head is closing under that lease. Each of `requiredCellKeys` must exist too.
+  the head is closing under that lease. Each cell of `required` must hold too: there, and with its `beside`, its
+  reference's target there and not lapsed (`RequiredCells`).
+- A cell written with `lapsesInMs` lapses that long after the write, by the authority's clock. A read lists it among
+  `lapsed` and gives no `beside` target that lapsed; a plan sees it through `tx.lapsed()`. Room's leases and their
+  claims are such cells, so the store, not Room, judges when one lapsed.
 - `directoryPut()` writes one room's entry, with its tag and when it is due. `directoryDelete()` deletes it if it is
   still listed under `incTag`. On Cloudflare a room's authority writes its entry with the head's exchange instead, as
   its head lists it, and the two send it to its region's directory.

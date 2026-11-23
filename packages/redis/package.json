@@ -24,6 +24,9 @@
     "build": "tsc",
     "dev": "tsc --watch"
   },
+  "dependencies": {
+    "@ioredis/commands": "1.5.1"
+  },
   "peerDependencies": {
     "@telefunc/room": "0.1.0",
     "ioredis": "^5.10.1 || ^6",

@@ -101,7 +101,7 @@ export {
   onRecreate,
   onJoinAnswering,
   onJoinClosed,
-  onThrowingReceiver,
+  onThrowingListener,
   onPublishLoop,
   onSubscriberDropped,
   onPublishOverRedisLimit,
@@ -125,11 +125,10 @@ export {
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
-import { getRoomPlane } from '@telefunc/room/backend'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
-import { dropRedisSubscribers } from '../../redis'
+import { whileRedisSubscribersDown } from '../../redis'
 import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
@@ -1195,7 +1194,8 @@ async function onJoinAnswering(roomId: string) {
   return me.id
 }
 
-/** This server's subscriber connection drops during these publishes: each arrives or is reported. */
+/** Publishes while this server's subscriber connection is up, then while it is dropped and kept down, then once it may
+ *  come back: each arrives or is reported, and each one made while the connection was down is reported. */
 async function onSubscriberDropped(roomId: string) {
   const room = anyoneCanJoin(await Room.get(roomId))
   let received = 0
@@ -1203,20 +1203,24 @@ async function onSubscriberDropped(roomId: string) {
   const me = await room.join({ meta: { name: 'Publisher' } })
   let reported = 0
   const stopReporting = reportOf(roomId, (reason) => (reported += Number.parseInt(reason)))
-  const published: Promise<unknown>[] = []
-  for (let i = 0; i < 600; i++) {
-    if (i === 100) {
-      await Promise.all(published)
-      await dropRedisSubscribers()
-    }
-    published.push(me.publish(i))
-    await sleep(1)
+  let published = 0
+  let publishedWhileDown = 0
+  const publish = async (count: number, whileDown: boolean) => {
+    const sent: Promise<unknown>[] = []
+    for (let i = 0; i < count; i++) sent.push(me.publish(published + i))
+    published += count
+    if (whileDown) publishedWhileDown += count
+    await Promise.all(sent)
   }
-  await Promise.all(published)
-  // Long enough to reconnect and read each lane's start.
-  await sleep(1_000)
+  await publish(200, false)
+  await whileRedisSubscribersDown(() => publish(200, true))
+  await publish(200, false)
+  // Until each publish arrived or was reported: the subscription is back and has read each lane's start.
+  for (let tries = 1; received + reported < published && tries <= 200; tries++) await sleep(50)
   stopReporting()
-  return { published: published.length, received, reported }
+  if (reported === 0)
+    console.log(`subscriber-dropped: the room reported nothing lost: ${JSON.stringify({ published, received })}`)
+  return { published, publishedWhileDown, received, reported }
 }
 
 /** One byte more than the largest message Telefunc's Redis backend takes. */
@@ -1356,27 +1360,22 @@ async function onPublishLoop(roomId: string) {
   return { otherWorkRan: turns > 0 }
 }
 
-/** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */
-async function onThrowingReceiver(roomId: string) {
-  const { driver } = getRoomPlane()
-  const inc = (await driver.readHead(roomId))!.currentInc!
-  const source = { roomId, inc, lane: { kind: 'semantic' } } as const
+/** A server listener that throws, ahead of a healthy one on the same room: both hear every message. */
+async function onThrowingListener(roomId: string) {
+  const room = await Room.get(roomId)
   let thrower = 0
   let healthy = 0
-  const attempts = [
-    driver.subscribe(source, {
-      deliver() {
-        thrower++
-        throw new Error('Test: a receiver throws')
-      },
+  const offs = [
+    room.subscribe(() => {
+      thrower++
+      throw new Error('Test: a listener throws')
     }),
-    driver.subscribe(source, { deliver: () => void healthy++ }),
+    room.subscribe(() => void healthy++),
   ]
-  while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
   await Room.publish(roomId, 'first')
   await Room.publish(roomId, 'second')
   await sleep(300)
-  await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
+  for (const off of offs) off()
   return { thrower, healthy }
 }
 

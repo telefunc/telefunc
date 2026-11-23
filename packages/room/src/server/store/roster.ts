@@ -5,14 +5,17 @@ import type { MemberSnapshot } from '../../shared/protocol.js'
 import type { RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaOf, readMembersMetaCells, type MemberMetaCells } from './meta.js'
-import { eachInFlight, readOpenCells, readPrefix, readPrefixAt } from './cellStore.js'
-import { getRoomPlane } from '../../backend/plane.js'
+import { readOpenCells, readPrefix, readPrefixAt, type Kept } from './cellStore.js'
+import { eachInFlight } from './inFlight.js'
+import type { CellsRead } from '../../backend/contract.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import { roomClosedError } from '../../shared/errors.js'
 import { leaveCauseFromWire, type WireLeaveCause } from '../../shared/protocol.js'
-import { decodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord, type CommitFitsBeforeWriting } from '../lanes/lanes.js'
 import {
   LEASE_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
+  MEMBER_LEASE_BESIDE,
   departingCellKey,
   identityCellPrefix,
   memberCellKey,
@@ -20,30 +23,50 @@ import {
 } from './cells.js'
 import { reapLeases } from './lease.js'
 
-// The room's members as read from its cells, each read after reaping the lapsed leases it found.
+// The room's members as read from its cells, each read after reaping the lapsed leases it found. A member counts only
+// while it hosts: the lease it joined under, read beside its record in the same turn, is live, unclaimed and not
+// lapsed, as the store gives it beside the record.
 
-type Roster = { members: MemberSnapshot[] }
+/** The members that host, and the ids of those a read left out as their lease can't: their removal is under way. */
+type Roster = { members: MemberSnapshot[]; leaving: ReadonlySet<string> }
 
-/** Live members, read again after a lapsed lease's were removed. */
-async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
-  const [leases, roster] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), readRoster(room)])
-  return (await reapLeases(room, leases)) ? await readRoster(room) : roster
+/** Whether the member whose record is `key` in `read` hosts: the read gives its lease beside it, as it does only for
+ *  a live lease. A member is written and removed with its lease's reference, so a record read without one is a bug. */
+function hosts(read: Extract<CellsRead, { kind: 'read' }>, key: string): boolean {
+  const lease = read.beside?.get(key)
+  if (lease === undefined) assert(false, `the member record ${key} was read without its lease reference`)
+  return lease !== null
 }
 
-async function readRoster(room: RoomIncarnation): Promise<Roster> {
-  const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
+const HOSTED_MEMBERS: Kept = { beside: MEMBER_LEASE_BESIDE, keeps: hosts }
+
+/** Live members, read again after a lapsed lease's were removed. */
+async function reapAndReadRoster(store: RoomStore, room: RoomIncarnation): Promise<Roster> {
+  const [leases, roster] = await Promise.all([
+    readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX),
+    readRoster(store, room),
+  ])
+  return (await reapLeases(store, room, leases)) ? await readRoster(store, room) : roster
+}
+
+async function readRoster(store: RoomStore, room: RoomIncarnation): Promise<Roster> {
+  const { cells, left } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   // After the member read: each member's cells are as new as its record or newer, so the updates after the record's
   // seq bring a view to them.
   const metaCells = await readMembersMetaCells(room, cells)
-  return { members: await liveMembers(memberRecords(cells), metaCells) }
+  return { members: await liveMembers(memberRecords(cells), metaCells), leaving: new Set(left.map(memberIdOfCellKey)) }
 }
 
 /** Why each of `ids` left, for those whose departing record the backend hasn't expired yet. Read after the members, a
  *  leave committing in between has its record. */
-async function readLeaveCauses(room: RoomIncarnation, ids: readonly string[]): Promise<Map<string, LeaveCause>> {
+async function readLeaveCauses(
+  store: RoomStore,
+  room: RoomIncarnation,
+  ids: readonly string[],
+): Promise<Map<string, LeaveCause>> {
   const causes = new Map<string, LeaveCause>()
   if (ids.length === 0) return causes
-  const read = await getRoomPlane().driver.readExpiringCells(room.id, room.inc, ids.map(departingCellKey))
+  const read = await store.reads.readExpiringCells(room.id, room.inc, ids.map(departingCellKey))
   if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
   for (const id of ids) {
     const raw = read.cells.get(departingCellKey(id))
@@ -56,21 +79,34 @@ function* memberRecords(cells: ReadonlyMap<string, Uint8Array>): Generator<reado
   for (const [key, raw] of cells) yield [memberIdOfCellKey(key), raw]
 }
 
-/** Read again after a lapsed lease's members were removed. */
-async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
+/** Read again after a lapsed lease's members were removed. `checkBeforeWriting` runs on each read's members before
+ *  what follows it: on the first read's before the reap, the lookup's first write, so a call its own commit would
+ *  refuse writes nothing; on the reread's before the call's own commits to them. */
+async function reapAndReadMembersById(
+  store: RoomStore,
+  room: RoomIncarnation,
+  ids: string[],
+  checkBeforeWriting?: CommitFitsBeforeWriting,
+): Promise<MemberSnapshot[]> {
   const [leases, members] = await Promise.all([
-    readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX),
-    readMembersById(room, ids),
+    readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX),
+    readMembersById(store, room, ids),
   ])
-  return (await reapLeases(room, leases)) ? await readMembersById(room, ids) : members
+  checkBeforeWriting?.check(members)
+  if (!(await reapLeases(store, room, leases))) return members
+  const reread = await readMembersById(store, room, ids)
+  checkBeforeWriting?.check(reread)
+  return reread
 }
 
-async function readMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  const { cells } = await readOpenCells(room.id, room.inc, ids.map(memberCellKey))
+async function readMembersById(store: RoomStore, room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
+  const read = await readOpenCells(store, room.id, room.inc, ids.map(memberCellKey), MEMBER_LEASE_BESIDE)
+  const { cells } = read
   const metaCells = new Map<string, MemberMetaCells>()
   const entries = ids.flatMap((id) => {
-    const raw = cells.get(memberCellKey(id))
-    return raw === undefined ? [] : [[id, raw] as const]
+    const key = memberCellKey(id)
+    const raw = cells.get(key)
+    return raw === undefined || !hosts(read, key) ? [] : [[id, raw] as const]
   })
   await eachInFlight(entries, async ([id]) => {
     metaCells.set(id, (await readMembersMetaCells(room, cells, id)).get(id) ?? [])
@@ -112,14 +148,17 @@ function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantM
 }
 
 /** Read again after a lapsed lease's members were removed. */
-async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
-  const [leases, count] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), countPresence(room)])
-  return (await reapLeases(room, leases)) ? await countPresence(room) : count
+async function reapAndCountPresence(store: RoomStore, room: RoomIncarnation): Promise<number> {
+  const [leases, count] = await Promise.all([
+    readPrefixAt(store, room.id, room.inc, LEASE_CELL_PREFIX),
+    countPresence(store, room),
+  ])
+  return (await reapLeases(store, room, leases)) ? await countPresence(store, room) : count
 }
 
-/** The members not hidden, from their records alone: a count reads no meta. */
-async function countPresence(room: RoomIncarnation): Promise<number> {
-  const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
+/** The members that host and aren't hidden, from their records alone: a count reads no meta. */
+async function countPresence(store: RoomStore, room: RoomIncarnation): Promise<number> {
+  const { cells } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   let count = 0
   for (const raw of cells.values()) {
     if (!decodeRoomRecord<RoomMemberRecord>(raw).hidden) count++
@@ -127,11 +166,17 @@ async function countPresence(room: RoomIncarnation): Promise<number> {
   return count
 }
 
-async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): Promise<MemberSnapshot[]> {
+/** Its tabs, as `reapAndReadMembersById` reads them, with `checkBeforeWriting` run as it runs it. */
+async function reapAndResolveIdentity(
+  store: RoomStore,
+  room: RoomIncarnation,
+  identity: string,
+  checkBeforeWriting?: CommitFitsBeforeWriting,
+): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
-  const markers = await readPrefix(room.id, room.inc, prefix)
+  const markers = await readPrefix(store, room.id, room.inc, prefix)
   const ids = Array.from(markers.keys(), (key) => key.slice(prefix.length))
-  const members = await reapAndReadMembersById(room, ids)
+  const members = await reapAndReadMembersById(store, room, ids, checkBeforeWriting)
   // A member and its identity marker are written and removed in one compare-exchange.
   assert(members.every((member) => member.identity === identity))
   return members

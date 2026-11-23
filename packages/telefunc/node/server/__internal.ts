@@ -52,6 +52,8 @@ export type {
 } from '../../wire-protocol/backend/driver.js'
 export { DriverAttempt, planeKey, servePlane } from '../../wire-protocol/backend/driver.js'
 export { installBackend, backendPlane, type PlaneDefinition } from '../../wire-protocol/backend/install.js'
+export { BackendError } from '../../wire-protocol/backend/BackendError.js'
+export { BackendCall } from '../../wire-protocol/backend/BackendCall.js'
 export type { BackendSubscription, SourceRules } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { SharedSubscriptions } from '../../wire-protocol/backend/SharedSubscriptions.js'
 export { assertDriverOrdering, isOrdering } from '../../wire-protocol/backend/driverOrdering.js'

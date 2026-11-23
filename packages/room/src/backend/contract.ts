@@ -3,14 +3,18 @@ export type {
   CellMutation,
   CellExpectation,
   CellCount,
+  ControlRecord,
   CellCounter,
   CellsExchange,
   CellsExchangeResult,
   CellSelector,
+  CellsBeside,
   CellsRead,
   ExpiringCell,
   ExpiringCellsRead,
+  CommitKept,
   CommitOptions,
+  RequiredCells,
   CommitTarget,
   DirectoryPage,
   EveryMemberLane,
@@ -82,6 +86,7 @@ type EveryTrackLane = { kind: 'binary-all'; member: string }
 type EveryMemberLane = { kind: 'binary-track'; track: string }
 
 type RoomHead = {
+  /** The `rev` of the exchange that wrote this head, which the exchange's caller minted. Compared for equality only. */
   rev: string
   currentInc: string | null
   state: 'open' | 'closing' | 'closed'
@@ -105,6 +110,10 @@ type HeadExpectation =
 
 type HeadNext = {
   head: {
+    /** A random id minted for this attempt, which the store keeps as the head's `rev`: never repeating under the
+     *  room's id, it lets an exchange that expects a head meet that head and no later one, whatever the store's clock
+     *  does. */
+    rev: string
     currentInc: string | null
     state: RoomHead['state']
     config: Uint8Array
@@ -123,15 +132,36 @@ type StaleIncarnation = { kind: 'stale-incarnation' }
 
 type HeadExchangeResult = { kind: 'committed'; head: RoomHead } | { kind: 'conflict'; current: RoomHead | null }
 
-/** `bytes: null` deletes the cell. */
-type CellMutation = { key: string; bytes: Uint8Array | null }
+/** What a write keeps of a payload, as its size goes: `delivered`, a commit that hands it to the lane's subscribers;
+ *  `stored`, also a record of its own that a later read takes (a DM's reply, a leave's handoff). */
+type CommitKept = 'delivered' | 'stored'
 
-type CellSelector = { keys: string[] } | { prefix: string }
+/** `bytes: null` deletes the cell. With `lapsesInMs`, the cell lapses that long after the write, by the authority's
+ *  clock (at once where it is negative): a read then lists it among `lapsed`, and a commit that requires it as a
+ *  target refuses (`RequiredCells`). A write without it leaves a cell that never lapses. */
+type CellMutation = { key: string; bytes: Uint8Array | null; lapsesInMs?: number }
+
+/** For each cell under `of` it returns, a read also reads the cell `reference` + that key past `of` and, where that cell
+ *  is there and hasn't lapsed, the cell `target` + its bytes, in the same turn: a reference the driver follows without
+ *  decoding a cell. */
+type CellsBeside = { of: string; reference: string; target: string }
+
+type CellSelector = ({ keys: string[] } | { prefix: string }) & { beside?: CellsBeside }
 
 /** The cells found, each with its version, and the authority time of the read; or the incarnation is no longer the
  *  head's. A write gives each cell it writes a version that cell never had in its incarnation. */
 type CellsRead =
-  | { kind: 'read'; cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number }
+  | {
+      kind: 'read'
+      cells: Map<string, Uint8Array>
+      versions: Map<string, string>
+      now: number
+      /** The keys of the cells found that lapsed before `now` (`CellMutation`). */
+      lapsed: Set<string>
+      /** With `beside`: by the key of each cell under `of` whose reference is there, the cell it names, `null` where
+       *  that cell is absent or lapsed. */
+      beside?: Map<string, Uint8Array | null>
+    }
   | StaleIncarnation
 
 /** A cell still at the version read; `null`: still absent. */
@@ -146,14 +176,28 @@ type CellCount = { key: string; delta: number; create?: true }
 /** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
 type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
 
+/** The control lane's record the caller commits once its exchange has committed, numbered by the value the exchange's
+ *  count of `counter` leaves: the record is `bytes` long besides that value's decimal digits. The Redis store refuses
+ *  an exchange whose record its commit on the control lane would refuse, before its first write, with the error that
+ *  commit would throw. The in-memory store has no size rule. The Cloudflare store's SQLite refuses a cell over its
+ *  row limit inside the exchange's transaction, which then writes nothing, and the store throws `ChannelOverflowError`;
+ *  the platform refuses an RPC argument over 32 MiB. The caller owns the match between `bytes` and the record it then
+ *  commits. */
+type ControlRecord = { counter: string; bytes: number }
+
 /** A committed exchange returns each counted counter as it left it. */
 type CellsExchangeResult =
   | { kind: 'committed'; counters: Map<string, CellCounter> }
   | { kind: 'conflict' }
   | StaleIncarnation
 
+/** Cells a commit requires, checked in its atomic step: each of `keys` is there, and with `beside`, each of them under
+ *  `of` has a reference whose target is there and hasn't lapsed. A commit that finds one that doesn't hold is
+ *  `stale-cell`, with its key. */
+type RequiredCells = { keys: string[]; beside?: CellsBeside }
+
 /** `owner`: with `retain`, the member the frame is from; `dropMemberLanes()` of that member drops it. */
-type CommitOptions = { retain?: boolean; owner?: string; closingLease?: string; requiredCellKeys?: string[] }
+type CommitOptions = { retain?: boolean; owner?: string; closingLease?: string; required?: RequiredCells }
 
 type RetainedFrame = OrderingInfo & { payload: Uint8Array }
 
@@ -171,7 +215,8 @@ type CommitAccepted = {
   delivery?: Promise<void>
 }
 
-/** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a required cell is gone. */
+/** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a cell it requires doesn't
+ *  hold (`RequiredCells`). */
 type StaleCommit = StaleIncarnation | { kind: 'stale-cell'; key: string }
 
 type CommitResult = CommitAccepted | StaleCommit
@@ -180,6 +225,8 @@ type CommitResult = CommitAccepted | StaleCommit
 type OperationTx = {
   readonly now: number
   cell(key: string): Uint8Array | undefined
+  /** Whether the cell `key` is there and lapsed before `now` (`CellMutation`). */
+  lapsed(key: string): boolean
   write(mutation: CellMutation): void
   count(count: CellCount): void
   /** Deletes every cell under `prefix`, before the operation's writes. */
@@ -240,8 +287,14 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  - A key written during the read, and kept, comes if the order puts it after every key returned before the write.
    *    Any other key written or removed during the read may or may not come.
    *  - A `stale-incarnation` page is the last. */
-  readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
-  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
+  readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncIterable<CellsRead>
+  /** With `record`, the control record the caller commits once the exchange has committed (`ControlRecord`). */
+  compareExchangeCells(
+    roomId: string,
+    inc: string,
+    exchange: CellsExchange,
+    record?: ControlRecord,
+  ): Promise<CellsExchangeResult>
   /** Runs `operation`'s plan while `inc` is open, and applies the writes of the run it validates:
    *  - The plan may run more than once. Redis runs it in this process, again after a run read a cell it hadn't read
    *    yet, and again from the start when a cell it read changed before the writes applied. Cloudflare and memory run
@@ -260,6 +313,9 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   ): Promise<OperationResult<Value>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
+  /** Throws the `ChannelOverflowError` the write of `payload` on `lane` that `kept` names rejects with, and returns
+   *  otherwise: the store's size rule for that write, for a call that must know it before it writes anything else. */
+  assertCommittable(lane: LaneId, payload: Uint8Array, kept: CommitKept): void
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
   readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>

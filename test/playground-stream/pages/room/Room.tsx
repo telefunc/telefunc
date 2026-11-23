@@ -106,7 +106,7 @@ import {
   onRecreate,
   onJoinAnswering,
   onJoinClosed,
-  onThrowingReceiver,
+  onThrowingListener,
   onPublishLoop,
   onSubscriberDropped,
   onPublishOverRedisLimit,
@@ -1107,9 +1107,9 @@ function Room() {
         setResult(JSON.stringify(await onPublishLoop(roomId)))
       })}
 
-      {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {
-        const roomId = await createRoomId('throwing-receiver')
-        setResult(JSON.stringify(await onThrowingReceiver(roomId)))
+      {scenario('throwing-listener', 'A throwing listener', 'The one beside it still hears', async () => {
+        const roomId = await createRoomId('throwing-listener')
+        setResult(JSON.stringify(await onThrowingListener(roomId)))
       })}
 
       {scenario('join-closed', 'Joins on closed rooms', 'Handles that never heard of the close', async () => {

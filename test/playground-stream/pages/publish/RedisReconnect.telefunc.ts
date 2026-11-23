@@ -20,7 +20,7 @@ import { REDIS_COMMANDS } from '../../../../packages/redis/dist/commands.js'
 import type { SubscriberSocket } from '../../../../packages/redis/dist/ioredis.js'
 import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
-import { dropRedisSubscribers, redis } from '../../redis'
+import { dropRedisSubscribers, redis, whileRedisSubscribersDown } from '../../redis'
 import { sleep } from '../../sleep'
 import { refuseChannels } from './refuseChannels'
 
@@ -36,32 +36,38 @@ async function onBinaryBroadcastAcrossReconnect() {
   return room
 }
 
-/** This server's subscriber connection drops during these publishes of both kinds to one key: each publish of a kind
- *  arrives or is reported. */
+/** Publishes of both kinds to one key, while this server's subscriber connection is up, then while it is dropped and
+ *  kept down, then once it may come back: each publish of a kind arrives or is reported, and each one made while the
+ *  connection was down is reported. */
 async function onBroadcastSubscriberDropped() {
   const key = `room:subscriber-dropped:${crypto.randomUUID()}`
-  const text = { published: 0, received: 0, reported: 0 }
-  const binary = { published: 0, received: 0, reported: 0 }
+  const text = { published: 0, publishedWhileDown: 0, received: 0, reported: 0 }
+  const binary = { published: 0, publishedWhileDown: 0, received: 0, reported: 0 }
   const unsubscribeText = Broadcast.subscribe(key, () => text.received++)
   const unsubscribeBinary = Broadcast.subscribeBinary(key, () => binary.received++)
   config.broadcast.onDeliveryLost = ({ reason }) => {
     const kind = reason.includes('binary') ? binary : text
     kind.reported += Number.parseInt(reason)
   }
-  const published: unknown[] = []
-  for (let i = 0; i < 600; i++) {
-    if (i === 100) {
-      await Promise.all(published)
-      await dropRedisSubscribers()
+  const publish = async (count: number, whileDown: boolean) => {
+    const published: unknown[] = []
+    for (let i = 0; i < count; i++) {
+      const kind = i % 2 === 0 ? text : binary
+      kind.published++
+      if (whileDown) kind.publishedWhileDown++
+      published.push(kind === text ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array(1)))
     }
-    const kind = i % 2 === 0 ? text : binary
-    kind.published++
-    published.push(kind === text ? Broadcast.publish(key, i) : Broadcast.publishBinary(key, new Uint8Array(1)))
-    await sleep(1)
+    await Promise.all(published)
   }
-  await Promise.all(published)
-  // Long enough to reconnect and read where the key starts.
-  await sleep(1_000)
+  await publish(200, false)
+  await whileRedisSubscribersDown(() => publish(200, true))
+  await publish(200, false)
+  // Until each publish arrived or was reported: the subscription is back and has read where the key starts.
+  const settled = () => [text, binary].every(({ published, received, reported }) => received + reported >= published)
+  for (let tries = 1; !settled() && tries <= 200; tries++) await sleep(50)
+  for (const [name, kind] of Object.entries({ text, binary })) {
+    if (kind.reported === 0) console.log(`subscriber-dropped: ${name} reported nothing lost: ${JSON.stringify(kind)}`)
+  }
   config.broadcast.onDeliveryLost = ({ key, reason }) => console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
   unsubscribeText()
   unsubscribeBinary()

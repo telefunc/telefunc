@@ -8,6 +8,7 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomPlane } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { hostLocal, type OrderingInfo, type PublishBody } from 'telefunc/__internal'
+import type { RoomStore } from '../backend/RoomStore.js'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../shared/constants.js'
 import { DemandExchange } from './lanes/DemandExchange.js'
@@ -30,7 +31,7 @@ import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
 import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
-import { eachInFlight } from './store/cellStore.js'
+import { eachInFlight } from './store/inFlight.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { RoomHosting } from './lifecycle/RoomHosting.js'
 import type { StoredRoomMeta } from './store/meta.js'
@@ -182,9 +183,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     })
   }
 
-  /** A new handle on a view other handles share, which catches up with the authority first unless it is current. */
-  async sharedHandle(): Promise<ServerRoom> {
-    await this.authority.catchUp()
+  /** A new handle on a view other handles share, which catches up with the authority first unless it is current: its
+   *  reads and writes, and those of a refresh it waits on, are steps of the call `store` is of. */
+  async sharedHandle(store: RoomStore): Promise<ServerRoom> {
+    await this.authority.catchUp(store)
     this.staleReads.caughtUp()
     return this.handle()
   }
@@ -416,7 +418,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       await this.authority.ensureRoster()
       // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
       await withinRoomHorizon(this.lanePlan.semanticReady)
-      const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
+      const stored = await getRoomPlane().direct.reads.readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
       if (stored === null) return
       const serialized = decodeRoomText(stored.payload)
       const event = parse(serialized) as RoomDataEnvelope
@@ -450,11 +452,10 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
     try {
       await this.authority.ensureRoster()
       await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
-      const plane = getRoomPlane()
       const lanes: LaneId[] =
         member !== EVERY_MEMBER && track !== EVERY_TRACK
           ? [{ kind: 'binary', member, track }]
-          : await plane.driver.listRetained(
+          : await getRoomPlane().direct.reads.listRetained(
               this.id,
               this.incarnation.inc,
               member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
@@ -468,7 +469,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private async replayRetainedLane(lane: LaneId, holder: LaneHolder, hold: ReplayHold): Promise<void> {
     if (lane.kind !== 'binary' || !holder.wantsBinary(lane.member, lane.track)) return
-    const stored = await getRoomPlane().readRetained(this.id, this.incarnation.inc, lane)
+    const stored = await getRoomPlane().direct.reads.readRetained(this.id, this.incarnation.inc, lane)
     // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
     if (stored === null || !holder.wantsBinary(lane.member, lane.track)) return
     if (!this.model.hasMember(lane.member)) return

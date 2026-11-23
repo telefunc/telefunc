@@ -19,7 +19,7 @@ import { assert } from '../utils/assert.js'
 const OPERATION_COMMIT_LANE: LaneId = { kind: 'control' }
 
 /** What an executor reads a plan from. */
-type OperationReads = Pick<OperationTx, 'now' | 'cell'>
+type OperationReads = Pick<OperationTx, 'now' | 'cell' | 'lapsed'>
 
 /** What a plan recorded, which its executor applies in this order: the drops, so a plan may write under a prefix it
  *  dropped, the mutations and counts, then the commit. */
@@ -48,6 +48,7 @@ function recordOperation<Args, Value>(
   const tx: OperationTx = {
     now: reads.now,
     cell: (key) => reads.cell(key),
+    lapsed: (key) => reads.lapsed(key),
     write: (mutation) => void writes.mutations.push(mutation),
     count: (count) => void writes.counts.push(count),
     dropPrefix: (prefix) => void writes.prefixes.push(prefix),

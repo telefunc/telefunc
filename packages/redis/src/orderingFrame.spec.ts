@@ -22,7 +22,9 @@ describe('Redis live delivery', () => {
       { text: 'héllo ✓', seq: 0x1_0000_0002, timestamp: 1_700_000_002_001 },
     ]
     const received = published.map(({ text, seq, timestamp }) => {
-      const { payload, info } = decodeOrderingFrame(frameOf(seq, timestamp, new TextEncoder().encode(text)))
+      const decoded = decodeOrderingFrame(frameOf(seq, timestamp, new TextEncoder().encode(text)))
+      if (decoded === null) throw new Error(`seq ${seq}: not an ordering frame`)
+      const { payload, info } = decoded
       return { text: new TextDecoder().decode(payload), ...info }
     })
     expect(received).toEqual(published)

@@ -505,11 +505,11 @@ function testRoom() {
     },
   )
   testRoomScenario<{ thrower: number; healthy: number }>(
-    'throwing-receiver',
-    "room: a store's receiver that throws is reported, and the receiver beside it and the frames after it still arrive",
+    'throwing-listener',
+    'room: a server listener that throws is reported, and the listener beside it and the messages after it still arrive',
     (r) => {
       expect(r).deep.equal({ thrower: 2, healthy: 2 })
-      expectLog('Test: a receiver throws')
+      expectLog('Test: a listener throws')
     },
   )
   testRoomScenario<{
@@ -2051,12 +2051,14 @@ function testRoomPublishHold() {
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
 function testRoomRedisSubscriberDropped() {
-  testRoomScenario<{ published: number; received: number; reported: number }>(
+  testRoomScenario<{ published: number; publishedWhileDown: number; received: number; reported: number }>(
     'subscriber-dropped',
     "room: Redis drops a server's subscriber connection during publishes: what didn't arrive is reported, count for count",
     (r) => {
       expect(r.published).toBe(600)
-      expect(r.reported > 0).toBe(true)
+      expect(r.publishedWhileDown).toBe(200)
+      // What was published while the connection was down can't have arrived: the row can't pass with nothing lost.
+      expect(r.reported >= r.publishedWhileDown).toBe(true)
       expect(r.received + r.reported).toBe(600)
       expectLog('Redis subscriber connection closed')
     },

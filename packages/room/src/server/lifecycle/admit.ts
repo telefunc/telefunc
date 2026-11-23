@@ -1,6 +1,7 @@
 export { Admissions }
 export type { AdmissionsOptions, AdmissionsOwner }
 
+import { getRoomPlane } from '../../backend/plane.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { roomClosedError } from '../../shared/errors.js'
 import type { RoomCtrlEnvelope } from '../../shared/protocol.js'
@@ -81,7 +82,7 @@ class Admissions {
     const onBeforeJoin = this.owner.guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) {
       // With no control lane, this handle hears of no close, however old it is: a closed room doesn't get its guard run.
-      const closed = !this.lanePlan.observing && (await readOpenConfig(incarnation)) === null
+      const closed = !this.lanePlan.observing && (await readOpenConfig(getRoomPlane().direct, incarnation)) === null
       if (closed) throw roomClosedError(incarnation.id)
       await onBeforeJoin({ id, meta, identity })
     }
@@ -111,16 +112,21 @@ class Admissions {
       admission.assertLive(this.model)
       // The member's record and its join event are one write, so its leave always follows its join. Not sent once the
       // admission was abandoned, whose own error it then rejects with.
-      await joinMember(
-        this.replica.incarnation,
-        this.hosting.lease,
-        { id, record, meta, join },
-        { inbox, wanted: () => !admission.abandoned },
-      ).catch((error: unknown) => {
-        admission.assertLive(this.model)
-        throw error
+      await getRoomPlane().call(async (store) => {
+        await joinMember(
+          store,
+          this.replica.incarnation,
+          this.hosting.lease,
+          { id, record, meta, join },
+          { inbox, wanted: () => !admission.abandoned },
+        ).catch((error: unknown) => {
+          admission.assertLive(this.model)
+          throw error
+        })
+        // An inbox that fails after the join was written tells the join may have run, though the member is then
+        // evicted.
+        await inbox.ready
       })
-      await inbox.ready
       admission.assertLive(this.model)
       admission.commit()
       this.underWay.delete(id)
@@ -140,7 +146,7 @@ class Admissions {
   /** Evicts member `id`; where that fails, the failure is reported and the heartbeat evicts it again. */
   async evictOrLater(id: string, cause: LeaveCause): Promise<void> {
     try {
-      await evictMember(this.replica.incarnation, id, cause)
+      await getRoomPlane().call((store) => evictMember(store, this.replica.incarnation, id, cause))
     } catch (error) {
       reportRoomError(error)
       this.hosting.evictLater(id)

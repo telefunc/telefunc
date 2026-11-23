@@ -22,9 +22,14 @@ import type { RoomState } from './RoomState.js'
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
 
 /** A roster as read: its members; why each member that left recently left (a server reads its departing records);
- *  and `behind` while this side's delivery hadn't reached what the read covers: a leave event may still be on its
- *  way. */
-type RosterRead = { members: MemberSnapshot[]; departing?: ReadonlyMap<string, LeaveCause>; behind?: boolean }
+ *  `leaving`, the members a server's read left out as their lease can't host, whose removal is under way; and `behind`
+ *  while this side's delivery hadn't reached what the read covers: a leave event may still be on its way. */
+type RosterRead = {
+  members: MemberSnapshot[]
+  departing?: ReadonlyMap<string, LeaveCause>
+  leaving?: ReadonlySet<string>
+  behind?: boolean
+}
 
 type MemberEntry = {
   id: string
@@ -470,9 +475,10 @@ class RoomModel {
     for (const id of [...this.members.keys()]) {
       if (this.members.has(id) && !listed.has(id)) {
         // No leave event reached this model: its departing record says why it left. Without one, a model behind the
-        // read keeps the member for its event. Any other missed the leave while it didn't follow the room, and the
-        // record expired since: its cause is `unknown`.
-        const cause = departing.get(id) ?? (roster.behind === true ? undefined : unknownLeaveCause())
+        // read, or a member whose removal is under way, is kept for its event. Any other missed the leave while it
+        // didn't follow the room, and the record expired since: its cause is `unknown`.
+        const kept = roster.behind === true || roster.leaving?.has(id) === true
+        const cause = departing.get(id) ?? (kept ? undefined : unknownLeaveCause())
         if (cause !== undefined) {
           this.applyLeave(id, cause)
           narratedDrift = true

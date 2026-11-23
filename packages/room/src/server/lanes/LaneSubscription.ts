@@ -2,7 +2,7 @@ export { LaneSubscription }
 export type { LaneAddress, LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { createDeferred, type Deferred } from 'telefunc/__internal'
+import { BackendError, createDeferred, type Deferred } from 'telefunc/__internal'
 import type { BackendListener, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
 import { roomClosedError } from '../../shared/errors.js'
@@ -108,9 +108,9 @@ class LaneSubscription {
     if (subscription.state() === 'closed') this.ended(subscription)
   }
 
-  /** Core rejects `ready` right after announcing `closed`: with the driver's reason as the cause where the lane failed
-   *  (Redis refused it), which its readiness rejects with; without one where the backend dropped its incarnation, so
-   *  the room closed, which its readiness rejects with. */
+  /** Core rejects `ready` right after announcing `closed`: where the lane failed, with the store's `BackendError` (Redis
+   *  refused it) or with the driver's reason as the cause, which its readiness rejects with; with neither where the
+   *  backend dropped its incarnation, so the room closed, which its readiness rejects with. */
   private ended(subscription: BackendSubscription): void {
     void this.endOnReadyFailure(subscription, this.ensurePendingReady())
   }
@@ -120,9 +120,8 @@ class LaneSubscription {
       await subscription.ready
     } catch (failure) {
       if (this.subscription !== subscription) return
-      pending.reject(
-        failure instanceof Error && failure.cause !== undefined ? failure : roomClosedError(this.owner.roomId),
-      )
+      const failed = failure instanceof BackendError || (failure instanceof Error && failure.cause !== undefined)
+      pending.reject(failed ? failure : roomClosedError(this.owner.roomId))
       this.owner.onLaneEnded(this)
     }
   }

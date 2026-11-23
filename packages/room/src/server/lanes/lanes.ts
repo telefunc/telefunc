@@ -3,6 +3,7 @@ export {
   DEMAND_LANE,
   SEMANTIC_LANE,
   acceptedOrThrow,
+  commitFitsBeforeWriting,
   commitLane,
   controlLane,
   inboxOf,
@@ -20,22 +21,23 @@ export {
   publishedBytes,
   withinRoomHorizon,
 }
-export type { LaneCommit }
+export type { CommitFitsBeforeWriting, CommitsOf, LaneCommit, SizedCommit }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { utf8ByteLength } from 'telefunc/__internal'
 import { raceTimeout } from '../../utils/raceTimeout.js'
-import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import type {
   CommitAccepted,
+  CommitKept,
   CommitOptions,
   CommitTarget,
   LaneId,
   RoomHead,
   StaleIncarnation,
 } from '../../backend/contract.js'
-import { hasRoomTag } from '../../shared/protocol.js'
+import { hasRoomTag, type MemberSnapshot } from '../../shared/protocol.js'
 import { decodeBinaryFrame } from '../../shared/binary.js'
 import type { RoomConfigRecord, RoomDemandPage, RoomIncarnation } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../../shared/errors.js'
@@ -106,8 +108,8 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
 }
 
 /** The config of `incarnation`, read from the head now; null once the room closed or a later incarnation replaced it. */
-async function readOpenConfig({ id, inc }: RoomIncarnation): Promise<RoomConfigRecord | null> {
-  return openConfig(await getRoomPlane().driver.readHead(id), inc)
+async function readOpenConfig(store: RoomStore, { id, inc }: RoomIncarnation): Promise<RoomConfigRecord | null> {
+  return openConfig(await store.reads.readHead(id), inc)
 }
 
 /** An accepted commit, with why its handoff was lost if it was an inbox's. */
@@ -120,13 +122,41 @@ type LaneCommit = LaneAccepted | { kind: 'gone'; member: string } | StaleIncarna
  *  server applies its own joins and leaves as it commits them, so a join's frame must not reach it after the member's
  *  leave. A lost inbox handoff is the sender's to hear: the message is gone. A control commit's state reaches every
  *  view by its reads. */
-async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
-  const result = await getRoomPlane().commitLane(target, payload, opts)
+async function commitLane(
+  store: RoomStore,
+  target: CommitTarget,
+  payload: Uint8Array,
+  opts?: CommitOptions,
+): Promise<LaneCommit> {
+  const result = await store.commitLane(target, payload, opts)
   // Required cells are member records, so a missing one names the member that left.
   if (result.kind === 'stale-cell') return { kind: 'gone', member: memberIdOfCellKey(result.key) }
   if (result.kind === 'stale-incarnation' || result.delivery === undefined) return result
   const lost = await handoffLost(target.roomId, result.delivery)
   return lost !== null && target.lane.kind === 'inbox' ? { ...result, lost } : result
+}
+
+/** A write a call would make, as its size goes: its lane, its payload, and what the write keeps of it. */
+type SizedCommit = { lane: LaneId; payload: Uint8Array; kept: CommitKept }
+
+/** The commits a call would make to `members`, as their size goes. */
+type CommitsOf = { commits(members: readonly MemberSnapshot[]): readonly SizedCommit[] }
+
+/** A call's check that its commits fit, for a lookup to run on the members it read before it writes: each commit
+ *  `call.commits()` gives for them must be committable, or `check()` throws the refusal the commit would meet. */
+class CommitFitsBeforeWriting {
+  constructor(
+    private readonly store: RoomStore,
+    private readonly call: CommitsOf,
+  ) {}
+
+  check(members: readonly MemberSnapshot[]): void {
+    for (const { lane, payload, kept } of this.call.commits(members)) this.store.assertCommittable(lane, payload, kept)
+  }
+}
+
+function commitFitsBeforeWriting(store: RoomStore, call: CommitsOf): CommitFitsBeforeWriting {
+  return new CommitFitsBeforeWriting(store, call)
 }
 
 /** The accepted commit; a member that left or an ended incarnation throws. */

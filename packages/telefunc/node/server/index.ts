@@ -19,6 +19,8 @@ export { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/
 export type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
+export { BackendError } from '../../wire-protocol/backend/BackendError.js'
+export type { BackendErrorCode, BackendCallOutcome } from '../../wire-protocol/backend/BackendError.js'
 export type { ChannelBase, ClientChannel, Unsubscribe } from '../../wire-protocol/channel/channel.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export type {

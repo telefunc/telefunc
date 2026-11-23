@@ -18,9 +18,17 @@ import {
   onCloseHeld,
   onSubscribeHeld,
   onMetaKeyOrder,
-  onThrowingReceiver,
+  onThrowingListener,
   onJoinClosing,
   onJoinRefused,
+  onReplyOutcome,
+  onRemovalOutcome,
+  onJoinOutcome,
+  onMetaUpdateOutcome,
+  onSendOutcome,
+  onBesideRead,
+  onSendAfterLapse,
+  onSendToClaimed,
 } from './Room.telefunc'
 
 type Channels = Awaited<ReturnType<typeof onOrderChannels>>
@@ -33,6 +41,8 @@ function Page() {
   const [hydrated, setHydrated] = useState(false)
   const channels = useRef<Channels | null>(null)
   const order = useRef<{ broadcast: string[]; room: string[] }>({ broadcast: [], room: [] })
+  // The length of the value a size card's call takes.
+  const length = useRef<HTMLInputElement>(null)
   useEffect(() => {
     setHydrated(true)
     onRoomRoundTrip().then(
@@ -92,9 +102,18 @@ function Page() {
       {card('close-held', () => onCloseHeld(query().get('id')!))}
       {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
       {card('meta-key-order', () => onMetaKeyOrder())}
-      {card('throwing-receiver', () => onThrowingReceiver())}
+      {card('throwing-listener', () => onThrowingListener())}
       {card('join-closing', () => onJoinClosing())}
       {card('join-refused', () => onJoinRefused())}
+      <input id="room-length" ref={length} type="number" />
+      {card('reply-outcome', () => onReplyOutcome(Number(length.current?.value)))}
+      {card('removal-outcome', () => onRemovalOutcome(Number(length.current?.value)))}
+      {card('join-outcome', () => onJoinOutcome(Number(length.current?.value)))}
+      {card('meta-update-outcome', () => onMetaUpdateOutcome(Number(length.current?.value)))}
+      {card('send-outcome', () => onSendOutcome(Number(length.current?.value)))}
+      {card('beside-read', () => onBesideRead())}
+      {card('send-after-lapse', () => onSendAfterLapse())}
+      {card('send-to-claimed', () => onSendToClaimed())}
     </div>
   )
 }
