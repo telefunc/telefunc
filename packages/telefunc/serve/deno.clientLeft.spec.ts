@@ -23,7 +23,7 @@
 // - seen: what the telefunction saw, how its File's read ended and how its channel closed;
 // - window: `WINDOW_MS`, `config.channel.connectTtl`.
 
-import { afterAll, beforeAll, describe, expect, onTestFinished, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -149,11 +149,7 @@ for (const mode of ['legacy', 'modern'] as const) {
       }, 15_000)
 
       test(`a call that returns a Channel and reads its File, whose client leaves after the answer: the read fails as its client left, and the channel closes by its connect window (${through})`, async () => {
-        // A server of its own: behind other rows on its server, Deno at times fails the read on its own as the client
-        // leaves, which hides a read left pending.
-        const own = await startServer(mode)
-        onTestFinished(() => void own.server.kill())
-        const seen = await run(own, entry, {
+        const seen = await run(served[mode], entry, {
           telefunction: 'keepsFile',
           row: `${mode}-${entry}-after`,
           parts: 8,
