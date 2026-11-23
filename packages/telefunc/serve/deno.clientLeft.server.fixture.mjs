@@ -10,22 +10,19 @@
 // `/leave?entry=<entry>&row=<row>` makes a call whose client leaves after the answer, from this process
 // (`callAndLeave`). It prints `LISTENING <port> <node:http port>` once both listen.
 
-import { connect } from 'node:net'
 import { createServer } from 'node:http'
-import { once } from 'node:events'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Telefunc } from './deno.js'
 import { serve } from '../node/server/telefunc.js'
 import { config } from '../node/server/serverConfig.js'
-import { WIRE_VERSION } from '../wire-protocol/constants.js'
+import { startCall } from './deno.clientLeft.call.js'
 
 config.root = dirname(fileURLToPath(import.meta.url))
 config.telefuncFiles = [`${config.root}/deno.clientLeft.telefunc.js`]
 config.disableNamingConvention = true
 config.channel = { connectTtl: 1000 }
 
-const PART = 64 * 1024
 const telefunc = new Telefunc()
 const nodeServer = createServer(async (req, res) => {
   const httpResponse = await serve({ url: req.url, method: req.method, readable: req, headers: req.headers })
@@ -53,29 +50,7 @@ const server = Deno.serve(
  *  first 64 KiB; leaves 160 ms after the answer begins. Its client is this process: where the client is another
  *  process, Deno at times fails the read on its own as the client leaves, which hides a read left pending. */
 async function callAndLeave(entry, row) {
-  const size = 8 * PART
-  const token = `!TelefuncBlob:${JSON.stringify({ index: 0, size, type: '' })}`
-  const metadata = new TextEncoder().encode(
-    JSON.stringify({ file: '/deno.clientLeft.telefunc.js', name: 'keepsFile', args: [token, row, 120] }),
-  )
-  const start = new Uint8Array(4 + metadata.length)
-  new DataView(start.buffer).setUint32(0, metadata.length)
-  start.set(metadata, 4)
-  const socket = connect(entry === 'node' ? nodePort : server.addr.port, '127.0.0.1')
-  socket.on('error', () => {})
-  await once(socket, 'connect')
-  const answered = new Promise((resolve) =>
-    socket.once('data', () => {
-      socket.resume()
-      resolve()
-    }),
-  )
-  socket.write(
-    `POST /_telefunc?wire=${WIRE_VERSION} HTTP/1.1\r\nHost: 127.0.0.1\r\nx-entry: ${entry}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${start.length + size}\r\n\r\n`,
-  )
-  socket.write(start)
-  socket.write(new Uint8Array(PART).fill(120))
-  await answered
+  const socket = await startCall(entry === 'node' ? nodePort : server.addr.port, entry, row, 8, 120)
   await new Promise((resolve) => setTimeout(resolve, 160))
   socket.destroy()
   return 'left'

@@ -10,22 +10,21 @@
 //   answered before reading it, not as its client leaving;
 // - where the client leaves after the answer, the File's read fails as its client's leaving, and the channel closes by
 //   its connect window (`config.channel.connectTtl`, 1 s here).
-// The server is deno.clientLeft.server.fixture.mjs; CI's Vitest job has Deno.
+// The server is deno.clientLeft.server.fixture.mjs, the call deno.clientLeft.call.ts; CI's Vitest job has Deno.
 
 import { afterAll, beforeAll, describe, expect, onTestFinished, test } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { connect, type Socket } from 'node:net'
+import type { Socket } from 'node:net'
 import { once } from 'node:events'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
 import { isObject } from '../utils/isObject.js'
+import { PART, part, startCall } from './deno.clientLeft.call.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const file = '/deno.clientLeft.telefunc.js'
 const telefuncPath = `/_telefunc?wire=${WIRE_VERSION}`
-const encoder = new TextEncoder()
-const PART = 64 * 1024
 type Mode = 'legacy' | 'modern'
 /** The ports of a Deno server: `Deno.serve`'s, and its `node:http` server's. */
 type Ports = { deno: number; node: number }
@@ -64,39 +63,6 @@ afterAll(() => {
 })
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const part = () => new Uint8Array(PART).fill(120)
-
-/** A socket that has sent the head and envelope of a binary call to `keepsFile` with a File of `parts` × 64 KiB, and its
- *  first part: the rest of the File's bytes are the row's to send. Resolves once the answer begins. */
-async function startCall(port: number, entry: string, row: string, parts: number, readAfterMs: number | null) {
-  const size = parts * PART
-  const metadata = encoder.encode(
-    JSON.stringify({
-      file,
-      name: 'keepsFile',
-      args: [`!TelefuncBlob:${JSON.stringify({ index: 0, size, type: '' })}`, row, readAfterMs],
-    }),
-  )
-  const start = new Uint8Array(4 + metadata.length)
-  new DataView(start.buffer).setUint32(0, metadata.length)
-  start.set(metadata, 4)
-  const socket = connect(port, '127.0.0.1')
-  socket.on('error', () => {})
-  await once(socket, 'connect')
-  const answered = new Promise<void>((resolve) =>
-    socket.once('data', () => {
-      socket.resume()
-      resolve()
-    }),
-  )
-  socket.write(
-    `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-entry: ${entry}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${start.length + size}\r\n\r\n`,
-  )
-  socket.write(start)
-  socket.write(part())
-  await answered
-  return socket
-}
 
 /** Whether `socket` takes `parts` more parts, each write drained within 5 s, or where it stalls. */
 async function sendAll(socket: Socket, parts: number): Promise<string> {
