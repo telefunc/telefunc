@@ -333,7 +333,7 @@ const type = (() => {
   }
   const object = <T>(objectType: T): Record<string, T> => {
     const verifier = (input: unknown, breadcrumbs: string) => {
-      if (typeof input !== 'object' || input === null || input.constructor !== Object) {
+      if (typeof input !== 'object' || input === null || Object.getPrototypeOf(input) !== Object.prototype) {
         return errorMessage(breadcrumbs, getTypeName(input), 'object')
       }
       const errorMessages = Object.entries(input)

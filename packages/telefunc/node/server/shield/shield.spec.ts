@@ -68,6 +68,7 @@ describe('shield', () => {
       expect(shieldApply(telefunction, [{ k: 'some string' }])).toBe(
         '[root] > [tuple: element 0] > [object: value of a key] is `string` but should be `number`.',
       )
+      expect(shieldApply(telefunction, [{ constructor: 1 }])).toBe(true)
     }
     {
       const telefunction = shield([{ a: { b: { c: t.const(42) } } }], (_a) => {})
