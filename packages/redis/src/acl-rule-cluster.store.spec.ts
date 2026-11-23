@@ -134,6 +134,9 @@ describe.runIf(runs)("the Redis page's ACL rule on a Cluster", () => {
       // The replica takes the primary's slots over.
       await nodes.replica.admin.call('CLUSTER', 'FAILOVER')
       await settled(nodes, nodes.replica, 'master')
+      // Once the backend reaches the promoted Cluster: a call that races the promotion is told what the promotion did
+      // to its connection (dropped-call-cluster.store.spec.ts).
+      await reaches(`the promoted ${store.name} Cluster`)
       const promoted = await calls('-promoted')
       // A subscription held across the end of every connection, live once its first message arrived.
       const held: unknown[] = []
