@@ -379,13 +379,17 @@ describe("an ended room's data", () => {
     if (inc === null) throw new Error(`room ${id} has no head`)
     await getRoomPlane().direct.commitLane({ roomId: id, inc, lane: SEMANTIC }, new Uint8Array([1]))
     vi.spyOn(MemoryRoomDriver.prototype, 'dropIncarnation').mockRejectedValue(new Error('refused before dispatch'))
-    await settled(Room.close(id))
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const close = await settled(Room.close(id))
+    const reports = reported.mock.calls.length
     vi.restoreAllMocks()
     expect({
+      close,
+      reports,
       state: (await getRoomPlane().direct.reads.readHead(id))?.state,
       data: await holdsData(id, inc),
       listed: await getRoomPlane().direct.reads.directoryGet(id),
-    }).toEqual({ state: 'closed', data: false, listed: undefined })
+    }).toEqual({ close: 'resolved', reports: 1, state: 'closed', data: false, listed: undefined })
   })
 
   it('of an earlier incarnation goes in the turn the head names a new one', async () => {

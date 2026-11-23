@@ -5,6 +5,7 @@ import type { RoomHead } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from '../constants.js'
 import { commitLane, configFromHead, controlLane, encodeRoomRecord } from '../lanes/lanes.js'
+import { reportRoomError } from '../reportRoomError.js'
 
 /** Closes the incarnation `inc`, or when not given the one its first read finds; returns the incarnation that ended
  *  closed, if any. Once that incarnation is gone, closed, lapsed or replaced, it writes nothing to the room under `id`. */
@@ -76,12 +77,17 @@ async function finishClose(store: RoomStore, roomId: string, closing: RoomHead):
   return true
 }
 
+/** Drops what a closed room's incarnation left, then its listing. The close is done once its head is finalized: a drop
+ *  that fails is reported, and the listing stays, so a sweep drops it again, as its close made the room due by its
+ *  close lease's end (`acquireClosingLease()`), or `Room.list()` or a later create of the room does. */
 async function cleanupFinalizedIncarnation(store: RoomStore, roomId: string, closed: RoomHead): Promise<void> {
   // A closed tombstone's incarnation, which a random `inc` never makes current again.
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
-  await store.dropIncarnation(roomId, inc)
-  // The listing goes last: while it stays, `Room.list()`, a later create of the room and the directory sweep (for a
-  // room with hold timeouts, the only kind it visits) drop the incarnation again if this drop failed.
-  await store.directoryDelete(roomId, inc)
+  try {
+    await store.dropIncarnation(roomId, inc)
+    await store.directoryDelete(roomId, inc)
+  } catch (error) {
+    reportRoomError(error)
+  }
 }
