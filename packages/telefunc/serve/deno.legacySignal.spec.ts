@@ -31,11 +31,12 @@ const PART = 64 * 1024
 let server: Server
 let port = 0
 
+/** Deno's error for a read whose client closed its side. */
+class BadResource extends Error {}
+
 beforeAll(async () => {
   // The adapter's WebSocket half (crossws) loads only where Deno is, and its body reads fail with Deno's own errors.
-  vi.stubGlobal('Deno', {
-    errors: { BadResource: class BadResource extends Error {}, Http: class Http extends Error {} },
-  })
+  vi.stubGlobal('Deno', { errors: { BadResource, Http: class Http extends Error {} } })
   const telefunc = new Telefunc()
   server = createServer((req, res) => void answer(telefunc, req, res).catch(() => {}))
   server.listen(0, '127.0.0.1')
@@ -50,7 +51,8 @@ afterAll(() => {
   vi.unstubAllGlobals()
 })
 
-/** Serves `req` as Deno.serve hands a request over: its signal aborts once the response is written. */
+/** Serves `req` as Deno.serve hands a request over: its signal aborts once the response is written, and a read of its
+ *  body that fails, as its connection closes, fails with Deno's `BadResource`, not Node's `aborted`. */
 async function answer(telefunc: Telefunc, req: IncomingMessage, res: ServerResponse) {
   const signal = new AbortController()
   const init: RequestInit & { duplex: 'half' } = {
@@ -58,7 +60,7 @@ async function answer(telefunc: Telefunc, req: IncomingMessage, res: ServerRespo
     headers: Object.entries(req.headers).flatMap(([name, value]) =>
       value === undefined ? [] : (Array.isArray(value) ? value : [value]).map((one): [string, string] => [name, one]),
     ),
-    body: nodeRequestBody(req),
+    body: failingAsDeno(nodeRequestBody(req)),
     signal: signal.signal,
     duplex: 'half',
   }
@@ -67,6 +69,19 @@ async function answer(telefunc: Telefunc, req: IncomingMessage, res: ServerRespo
   for await (const chunk of response?.body ?? []) res.write(chunk)
   res.end()
   signal.abort()
+}
+
+/** `body`, whose failed read fails with Deno's `BadResource`. */
+function failingAsDeno(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = body.getReader()
+  return new ReadableStream<Uint8Array>({
+    pull: (controller) =>
+      reader.read().then(
+        ({ done, value }) => (done ? controller.close() : controller.enqueue(value)),
+        (err: unknown) => controller.error(new BadResource('connection closed', { cause: err })),
+      ),
+    cancel: (reason) => reader.cancel(reason),
+  })
 }
 
 /** The Channels the calls return, made by the spec (`requestBody.telefunc:channel`), and the `Blob`s handed to it. */
