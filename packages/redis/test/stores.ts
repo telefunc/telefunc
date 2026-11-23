@@ -22,17 +22,21 @@ import { inject } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { installRedis } from '../src/index.js'
-import { docker, RUN_LABEL, runs, STORES, type Store } from './docker.js'
+import { docker, RUN_LABEL, removeInBackground, runs, STORES, type Store } from './docker.js'
 
 /** The stores this process started and hasn't removed, each with the admin client `startStore()` made of it. */
 const containers: { name: string; admin: Redis }[] = []
+
+/** How many stores this process started: each container's name is its own, as one being removed may still hold an
+ *  earlier one's. */
+let started = 0
 
 /** The forwarders this process made and hasn't closed: `removeStores()` points them nowhere. */
 const forwarders = new Set<{ to: (host: string) => void }>()
 
 /** The store in a container of its own, once it answers; the container's name, its address, and an admin client of it. */
 async function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
-  const name = `tf-redis-stores-${process.pid}-${containers.length}`
+  const name = `tf-redis-stores-${process.pid}-${started++}`
   docker(
     'run',
     '--detach',
@@ -78,14 +82,14 @@ function storeSpecsRun(): string {
 
 /** Removes the stores this process started so far, as a row does before it starts its own. First their admin clients
  *  end and every forwarder points nowhere, as Docker gives a removed container's address to the next container it
- *  starts, another spec file's too: a client that reconnected to it would reach that store. Those a spec file leaves at
- *  its end go with the run's global teardown. */
+ *  starts, another spec file's too: a client that reconnected to it would reach that store. The containers' removal
+ *  then runs beside the row, which doesn't wait for Docker: those still there at the run's end go with its global
+ *  teardown, as do those a spec file leaves at its end. */
 function removeStores(): void {
   for (const proxy of forwarders) proxy.to('')
-  for (const { name, admin } of containers.splice(0)) {
-    admin.disconnect()
-    docker('rm', '--force', name)
-  }
+  const removed = containers.splice(0)
+  for (const { admin } of removed) admin.disconnect()
+  removeInBackground(removed.map(({ name }) => name))
 }
 
 /** The one place the app's client connects: a forwarder to the store under test, as the backend installs once per

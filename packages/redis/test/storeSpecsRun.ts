@@ -7,7 +7,7 @@ export { setup }
 import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import type { TestProject } from 'vitest/node'
-import { docker, pullImages, RUN_LABEL, runs } from './docker.js'
+import { docker, pullImages, RUN_LABEL, removeContainers, runs } from './docker.js'
 
 declare module 'vitest' {
   export interface ProvidedContext {
@@ -29,11 +29,11 @@ function setup(project: TestProject): () => void {
   const run = `${hostname()}/${BOOT ?? 'unknown'}/${process.pid}`
   project.provide('storeSpecsRun', run)
   if (runs) {
-    removeContainers(listed().filter(({ of }) => isGone(of)))
+    removeContainers(listed().flatMap(({ id, of }) => (isGone(of) ? [id] : [])))
     pullImages()
   }
   return () => {
-    if (runs) removeContainers(listed().filter(({ of }) => of === run))
+    if (runs) removeContainers(listed().flatMap(({ id, of }) => (of === run ? [id] : [])))
   }
 }
 
@@ -58,8 +58,4 @@ function isGone(of: string): boolean {
   } catch (error) {
     return error instanceof Error && 'code' in error && error.code === 'ESRCH'
   }
-}
-
-function removeContainers(containers: { id: string }[]): void {
-  if (containers.length > 0) docker('rm', '--force', ...containers.map(({ id }) => id))
 }

@@ -1,8 +1,8 @@
 // The Docker the store specs run their stores in: its command, whether it is there, the stores' images, and the label of
 // a run's containers.
-export { docker, runs, RUN_LABEL, STORES, pullImages, type Store }
+export { docker, runs, RUN_LABEL, STORES, pullImages, removeContainers, removeInBackground, type Store }
 
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 
 /** Each container a run of the store specs starts carries it, with the run's id: the run's global teardown removes
  *  them by it, and a later run's global setup removes them once that run is gone. */
@@ -10,6 +10,23 @@ const RUN_LABEL = 'dev.telefunc.store-specs.run'
 
 const docker = (...args: string[]) =>
   execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+
+/** Removes the containers, whether or not another removal took or is taking one of them already. */
+function removeContainers(ids: readonly string[]): void {
+  if (ids.length === 0) return
+  try {
+    docker('rm', '--force', ...ids)
+  } catch (error) {
+    const told = error instanceof Error && 'stderr' in error ? String(error.stderr).trim().split('\n') : []
+    if (told.length === 0 || !told.every((line) => /No such container|is already in progress/.test(line))) throw error
+  }
+}
+
+/** Starts the containers' removal without waiting for it, as a row's time is not Docker's: a container the run doesn't
+ *  see removed, its global teardown removes, or a later run's setup once the run is gone, by its label. */
+function removeInBackground(names: readonly string[]): void {
+  if (names.length > 0) execFile('docker', ['rm', '--force', ...names], () => {})
+}
 
 /** Without Docker, the store specs skip here and fail on CI. */
 const runs = (() => {
