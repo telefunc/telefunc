@@ -38,7 +38,7 @@ type RequestContext = {
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
   /** Fires once the call has answered while what its response still sends (a channel, a stream) holds the request:
-   *  never where the client left first, nor where nothing holds the request on. */
+   *  never where nothing holds the request on. */
   onAnswered: (cb: () => void) => void
   /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
    *  is left, and onClose callbacks once no item of trackPending is pending. */
@@ -98,7 +98,7 @@ function createRequestContext(request: Request): RequestContext {
   const answeredCallbacks: Array<() => void> = []
   const markComplete = () => {
     releaseCall()
-    if (closed || request.signal.aborted) return
+    if (closed) return
     for (const cb of answeredCallbacks) invokeCloseCallback(cb)
     answeredCallbacks.length = 0
   }
