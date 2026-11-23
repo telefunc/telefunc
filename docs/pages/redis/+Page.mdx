@@ -55,6 +55,8 @@ To give Telefunc a Redis user that may do only what it needs, create it with thi
 ACL SETUSER telefunc on >your-password ~tf:* resetchannels &tf:* +evalsha +eval +get +set +del +unlink +exists +incr +pexpireat +time +hget +hmget +hset +hdel +hexists +hlen +hkeys +hscan +sadd +srem +scard +smembers +sscan +zadd +zrem +zrangebylex +zrangebyscore +publish +subscribe +unsubscribe +ping +info +client|setname +client|setinfo
 ```
 
+On a Redis Cluster, add `+cluster|info`: a subscription's start reads it.
+
 Such a user needs Redis 7 or later: there, a `publish()` or a room change that Redis refuses leaves nothing behind.
 
 Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.

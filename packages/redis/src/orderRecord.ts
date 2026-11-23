@@ -1,5 +1,5 @@
 export { NO_ID, drawCommitId, decodeLaneOrder, decodeBroadcastOrder, laneWhere }
-export type { LaneStart }
+export type { LaneStart, StartRead, Starts }
 
 import { randomFillSync } from 'node:crypto'
 import type { BroadcastKind } from 'telefunc/__internal'
@@ -7,6 +7,13 @@ import { orderRecordRefusal } from './ioredis.js'
 
 /** Where a lane stands: its last commit's place and id, `NO_ID` before its first. */
 type LaneStart = { place: number; id: bigint }
+
+/** What a start script read, with the history it read it from: the node's replication id, and on a Cluster its config
+ *  epoch. Another history than a route's last start can lack what the old one accepted. */
+type StartRead<T> = { authority: string; read: T }
+
+/** Where each lane of a route starts, by its lane key, and the history that says so. */
+type Starts = { authority: string; starts: Map<string, LaneStart> }
 
 /** The id of no commit, which a lane's first commit names as before it. */
 const NO_ID = BigInt(0)

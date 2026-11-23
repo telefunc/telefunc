@@ -415,7 +415,7 @@ A rejected publish may still have reached some subscribers (on Cloudflare, every
 
 `publish()` is at most once: with <Link href="/redis">`@telefunc/redis`</Link>, a server whose connection to Redis drops never gets what is published before it reconnects, though `publish()` resolved. That server's <Link href="/broadcast-config">`config.broadcast.onDeliveryLost`</Link> is called with how many it missed, and logs them by default.
 
-> A Redis failover or flush can hide the count: that server may report fewer than it missed, or that it doesn't know how many. If the Redis that takes over holds exactly what that server last got, `onDeliveryLost` isn't called. If it lacks some of what that server got, `onDeliveryLost` is called without a count, and the subscription goes on from what that Redis holds, so `info.seq` can go back.
+> A Redis failover or flush can hide the count: that server may report fewer than it missed, or that it doesn't know how many. If Redis shows evidence of a change of history when that server's subscription resumes (a failover, a restart, a slot moved away and back), `onDeliveryLost` is called without a count, even if the Redis that took over holds what that server last got. The subscription then goes on from what that Redis holds, so `info.seq` can go back.
 
 A failed `publish()` you neither `await` nor `.catch()` gives your code no error (see <Link href="#errors">errors</Link>). To see failures, `await` it or add `.catch()`.
 

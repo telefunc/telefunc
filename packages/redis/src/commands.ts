@@ -24,7 +24,14 @@ import type {
   StaleIncarnation,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
-import { decodeBroadcastOrder, decodeLaneOrder, drawCommitId, laneWhere, type LaneStart } from './orderRecord.js'
+import {
+  decodeBroadcastOrder,
+  decodeLaneOrder,
+  drawCommitId,
+  laneWhere,
+  type LaneStart,
+  type StartRead,
+} from './orderRecord.js'
 import {
   broadcastChannel,
   broadcastSequenceKey,
@@ -337,60 +344,102 @@ if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1) end
 return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 `
 
+// The history a start is read from, read before anything else: the node's replication id, and on a Cluster its config
+// epoch, which a slot moving away and back raises. A node that isn't a primary answers TFSTALE, read again; a user whose
+// ACL denies INFO, or CLUSTER INFO on a Cluster, TFINFO, before anything is read or written.
+const AUTHORITY_LUA = `
+local function tf_authority()
+  if redis.acl_check_cmd and not redis.acl_check_cmd('INFO', 'replication') then
+    return nil, redis.error_reply("TFINFO INFO")
+  end
+  local info = redis.call('INFO', 'replication')
+  if not string.find(info, 'role:master', 1, true) then
+    return nil, redis.error_reply("TFSTALE a subscription's start reached a replica")
+  end
+  local authority = string.match(info, 'master_replid:(%x+)')
+  if redis.acl_check_cmd and not redis.acl_check_cmd('CLUSTER', 'INFO') then
+    -- Only a Cluster needs it: a standalone Redis answers CLUSTER INFO with an error.
+    local cluster = redis.pcall('INFO', 'cluster')
+    if string.find(cluster, 'cluster_enabled:1', 1, true) then return nil, redis.error_reply("TFINFO CLUSTER INFO") end
+    return authority
+  end
+  local cluster = redis.pcall('CLUSTER', 'INFO')
+  if type(cluster) == 'table' and cluster.err then
+    if not string.find(cluster.err, 'cluster support disabled', 1, true) then return nil, cluster end
+  else
+    authority = authority .. ':' .. string.match(cluster, 'cluster_my_epoch:(%d+)')
+  end
+  return authority
+end
+`
+
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
 // closed or dropped during establishment is never reported ready, and its frames start after its lane's last commit.
 //   KEYS: [1]=head [2]=order: the order hash of an inbox or binary lane's member, or another lane's own key
 //   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
-//   Reply: nil once the incarnation is not the open head, else the lane's order record, '' before its first commit
-const LANE_START_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, the lane's order record or '' before its
+//   first commit}
+const LANE_START_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 local mark
 if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('HGET', KEYS[2], ARGV[2]) end
-return mark or ''
+return {authority, mark or ''}
 `
 
 // A page of a member's lanes' last commits, inbox included, read as LANE_START_LUA reads one lane's, for its every-track
 // subscription.
 //   KEYS: [1]=head [2]=the member's order hash
 //   ARGV: [1]=inc [2]=HSCAN cursor
-//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, order record, ...}}
-const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, {next cursor, {lane key, order record, ...}}}
+const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
-return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+return {authority, redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})}
 `
 
 // A page of a track's binary lanes that have a commit, read as LANE_START_LUA reads one lane,
 // for its every-member subscription.
 //   KEYS: [1]=head [2]=the track's lane set
 //   ARGV: [1]=inc [2]=SSCAN cursor
-//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, ...}}
-const TRACK_LANES_LUA = `${HEAD_PRELUDE}
+//   Reply: nil once the incarnation is not the open head, else {authority, {next cursor, {lane key, ...}}}
+const TRACK_LANES_LUA = `${HEAD_PRELUDE}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
-return redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+return {authority, redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})}
 `
 
 // Each binary lane's last commit, '' for one whose member's order is gone.
 //   KEYS: [1..]=each lane's member's order hash
 //   ARGV: [1..]=the lane keys, in KEYS's order
-const LANE_MARKS_LUA = `
+//   Reply: {authority, {mark, ...}}
+const LANE_MARKS_LUA = `${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local marks = {}
 for i = 1, #KEYS do marks[i] = redis.call('HGET', KEYS[i], ARGV[i]) or '' end
-return marks
+return {authority, marks}
 `
 
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
 //   KEYS: [1]=order (ORDER_RECORD_LUA's Broadcast record)
-const BROADCAST_START_LUA = `${ORDER_RECORD_LUA}
+//   Reply: {authority, the record}
+const BROADCAST_START_LUA = `${ORDER_RECORD_LUA}${AUTHORITY_LUA}
+local authority, refusal = tf_authority()
+if not authority then return refusal end
 local raw = redis.call('GET', KEYS[1])
-if raw then return raw end
+if raw then return {authority, raw} end
 local t = redis.call('TIME')
 raw = struct.pack('<dddc8c8', tonumber(t[1]) * 1000000 + tonumber(t[2]), 0, 0, TF_NO_ID, TF_NO_ID)
 redis.call('SET', KEYS[1], raw)
-return raw
+return {authority, raw}
 `
 
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
@@ -1030,10 +1079,14 @@ const REDIS_COMMANDS = {
         argv: [inc, memberLane ? laneKey : ''],
       }
     },
-    parse: (reply, { roomId, laneKey }): Map<string, LaneStart> | null => {
+    parse: (reply, { roomId, laneKey }): StartRead<Map<string, LaneStart>> | null => {
       if (reply === null) return null
-      const record = reply as Buffer
-      return record.byteLength === 0 ? new Map() : new Map([['', decodeLaneOrder(record, laneWhere(roomId, laneKey))]])
+      const [authority, record] = reply as [Buffer, Buffer]
+      return {
+        authority: authority.toString(),
+        read:
+          record.byteLength === 0 ? new Map() : new Map([['', decodeLaneOrder(record, laneWhere(roomId, laneKey))]]),
+      }
     },
   }),
   memberLaneStarts: command({
@@ -1045,15 +1098,15 @@ const REDIS_COMMANDS = {
       keys: [headKey(prefix, roomId), memberOrderKey(prefix, roomId, inc, member)],
       argv: [inc, cursor],
     }),
-    parse: (reply, { roomId }): { cursor: string; starts: Array<[string, LaneStart]> } | null => {
+    parse: (reply, { roomId }): StartRead<{ cursor: string; starts: Array<[string, LaneStart]> }> | null => {
       if (reply === null) return null
-      const [cursor, fields] = reply as [Buffer, Buffer[]]
+      const [authority, [cursor, fields]] = reply as [Buffer, [Buffer, Buffer[]]]
       const starts: Array<[string, LaneStart]> = []
       for (let i = 0; i < fields.length; i += 2) {
         const laneKey = fields[i]!.toString()
         starts.push([laneKey, decodeLaneOrder(fields[i + 1]!, laneWhere(roomId, laneKey))])
       }
-      return { cursor: cursor.toString(), starts }
+      return { authority: authority.toString(), read: { cursor: cursor.toString(), starts } }
     },
   }),
   trackLanes: command({
@@ -1064,10 +1117,10 @@ const REDIS_COMMANDS = {
       keys: [headKey(prefix, roomId), trackLanesKey(prefix, roomId, inc, track)],
       argv: [inc, cursor],
     }),
-    parse: (reply): { cursor: string; lanes: string[] } | null => {
+    parse: (reply): StartRead<{ cursor: string; lanes: string[] }> | null => {
       if (reply === null) return null
-      const [cursor, lanes] = reply as [string, string[]]
-      return { cursor, lanes }
+      const [authority, [cursor, lanes]] = reply as [string, [string, string[]]]
+      return { authority, read: { cursor, lanes } }
     },
   }),
   laneMarks: command({
@@ -1079,10 +1132,15 @@ const REDIS_COMMANDS = {
       keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).member)),
       argv: lanes,
     }),
-    parse: (reply, { roomId, lanes }) =>
-      (reply as Buffer[]).map((record, i) =>
-        record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, lanes[i]!)),
-      ),
+    parse: (reply, { roomId, lanes }): StartRead<Array<LaneStart | null>> => {
+      const [authority, records] = reply as [Buffer, Buffer[]]
+      return {
+        authority: authority.toString(),
+        read: records.map((record, i) =>
+          record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, lanes[i]!)),
+        ),
+      }
+    },
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
@@ -1091,8 +1149,13 @@ const REDIS_COMMANDS = {
     binaryReply: true,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
     // The lane of a route counts its kind's publishes, in which a hole is a lost message.
-    parse: (reply, { key, kind }): Map<string, LaneStart> =>
-      new Map([['', decodeBroadcastOrder(reply as Buffer, kind, `the Broadcast key '${key}'`)]]),
+    parse: (reply, { key, kind }): StartRead<Map<string, LaneStart>> => {
+      const [authority, record] = reply as [Buffer, Buffer]
+      return {
+        authority: authority.toString(),
+        read: new Map([['', decodeBroadcastOrder(record, kind, `the Broadcast key '${key}'`)]]),
+      }
+    },
   }),
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',

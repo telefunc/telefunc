@@ -8,7 +8,7 @@ import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './
 import { isRefusal, redisFailure, type SubscriberSocket } from './ioredis.js'
 import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
 import { decodeOrderingFrame } from './orderingFrame.js'
-import type { LaneStart } from './orderRecord.js'
+import type { Starts } from './orderRecord.js'
 import type { RedisConnection } from './RedisConnection.js'
 
 type RedisSubscriptionsOptions = { connection: RedisConnection }
@@ -34,9 +34,9 @@ type RedisAttemptOptions = {
   /** On a fan-in channel, the channel of the lane a frame's lane key names: a lane is one across the channels that
    *  carry it. */
   laneChannel: ((laneKey: string) => string) | null
-  /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another; null
-   *  once a Room source's incarnation is not the open head. */
-  readStarts: () => Promise<Map<string, LaneStart> | null>
+  /** Each of its lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another, and the
+   *  history that says so; null once a Room source's incarnation is not the open head. */
+  readStarts: () => Promise<Starts | null>
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
@@ -381,7 +381,7 @@ class RedisSubscriptions {
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
   private async confirm(attempt: RedisAttempt, { id, socket }: ConnectedSocket): Promise<void> {
-    let starts: Map<string, LaneStart> | null
+    let starts: Starts | null
     try {
       starts = await attempt.readStarts()
       // A resume delivers what the starts count that reached this connection. A frame published just before the read can
@@ -452,6 +452,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   /** Each lane it carries: an every-track or every-member channel carries many binary lanes, keyed by lane key; any
    *  other channel one lane, keyed `''`. */
   private readonly lanes = new Map<string, CarriedLane>()
+  /** The history of its last ready start, from its first: a start from another can lack what it missed. */
+  private authority: string | null = null
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private early: Buffer[] = []
   /** A frame in another form was dropped and reported. */
@@ -519,10 +521,13 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
-   *  before it is ready; on a resume, each lane it carried compares its start with what it delivered. */
-  markReady(starts: Map<string, LaneStart>): void {
+   *  before it is ready; on a resume, each lane it carried compares its start with what it delivered, unless the start
+   *  came from another history than its last: then it reports once that it doesn't know what it missed. */
+  markReady({ authority, starts }: Starts): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
+    const switched = resuming && this.authority !== authority
+    this.authority = authority
     const early = new Map<string, LaneFrame[]>()
     for (const message of this.early) {
       const frame = this.decodeLaneFrame(message)
@@ -541,12 +546,13 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       }
     }
     this.transition('ready')
+    if (switched) this.reportMissed(null)
     for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
       const lane = this.laneOf(laneKey)
       const pass = (frame: LaneFrame) => this.pass(lane, frame)
-      lane.history.establish(this, starts.get(laneKey), early.get(laneKey) ?? [], resuming, pass)
+      lane.history.establish(this, starts.get(laneKey), early.get(laneKey) ?? [], resuming, pass, switched)
     }
   }
 

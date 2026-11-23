@@ -78,13 +78,15 @@ class LaneHistory {
 
   /** `route` is ready at `start` (none: the lane had no commit) with the frames that reached it before. On a first
    *  establish, those its start covers are dropped and the rest go out; on a resume, the start is compared with what
-   *  the lane delivered. A route that joins a running lane only drops the frames its start covers. */
+   *  the lane delivered. A route that joins a running lane only drops the frames its start covers. `switched`: the
+   *  resume read another authority than the route's last start, which the route reported. */
   establish(
     route: LaneRoute,
     start: LaneStart | undefined,
     early: LaneFrame[],
     resuming: boolean,
     passed: (frame: LaneFrame) => number,
+    switched = false,
   ): void {
     if (!this.started) {
       this.started = true
@@ -99,6 +101,7 @@ class LaneHistory {
         return
       }
     }
+    if (resuming && switched) return this.switchTo(start ?? NO_START, early, passed)
     if (resuming) return this.resume(route, start ?? NO_START, early, passed)
     const covered = start === undefined ? null : coveredBy(start, early)
     for (const frame of early) {
@@ -262,6 +265,18 @@ class LaneHistory {
       this.tipOwed = start.id !== NO_ID
     }
     for (const frame of rest) this.offer(frame, passed(frame))
+  }
+
+  /** The route's lost connection ended at `start` of another authority, which it reported: no count holds across
+   *  two authorities, so the lane follows the start as a history it never saw, unless it stands at the start. */
+  private switchTo(start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
+    if (!(start.place === this.last && start.id === this.tip)) {
+      if (start.place < this.last) this.rewindPending = true
+      const owed = start.id !== NO_ID && !this.knowsAt(start.place, start.id)
+      this.follow(start, null, ++this.branches)
+      this.tipOwed = owed
+    }
+    for (const frame of [...early].sort((a, b) => a.place - b.place)) this.offer(frame, passed(frame))
   }
 
   /** Steps past the missing frames before `frame`, unless the ring knows its predecessor: how many it passed. */

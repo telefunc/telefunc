@@ -11,6 +11,7 @@ export {
   redisFailure,
   isRefusal,
   orderRecordRefusal,
+  staleStart,
 }
 export type { RedisClient, SubscriberSocket }
 
@@ -168,6 +169,16 @@ function redisFailure(error: unknown, redis: RedisClient): unknown {
       false,
     )
   }
+  const info = /^TFINFO (.+)$/.exec(message)
+  if (info !== null) {
+    return new RedisFailure(
+      `Redis at ${where} refused Telefunc's Redis backend ${info[1]} by its user's ACL, which a subscription's start ` +
+        'reads: allow that user +info, and +cluster|info on a Cluster, as the ACL rule in the docs of @telefunc/redis lists',
+      'TFINFO',
+      true,
+    )
+  }
+  if (message.startsWith('TFSTALE ')) return staleStart(where)
   const order = /^TFORDER (.+?): /.exec(message)
   if (order !== null) return orderRecordRefusal(order[1]!)
   const toDo = code === undefined ? undefined : WHAT_TO_DO[code]
@@ -188,6 +199,16 @@ function orderRecordRefusal(key: string): RedisFailure {
       "count would pass 2^53 - 1; keep Telefunc's prefix to Telefunc",
     'TFORDER',
     true,
+  )
+}
+
+/** A subscription's start read from a replica, or across two histories: it is read again, once the primary answers. */
+function staleStart(where: string): RedisFailure {
+  return new RedisFailure(
+    `Telefunc's Redis backend read a subscription's start at ${where} from a replica or across a change of Redis's ` +
+      'history: it reads it again',
+    'TFSTALE',
+    false,
   )
 }
 
