@@ -58,7 +58,10 @@ function getRawContext(): Context | null {
  */
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
-  // Without Async Hooks, `globalObject` holds the functions of the copy of Telefunc that was loaded first.
+  // Two copies of Telefunc can run in one process (e.g. two versions in `node_modules`). `globalObject` lives on
+  // `globalThis`: the copy loaded first creates it, and the others get that same object. So its `restoreContext` can
+  // be an older version's, which clears the context with a timer and not when `fn` returns. Without Async Hooks we
+  // call our own. With Async Hooks we call the shared one: it is what `import 'telefunc/async_hooks'` registered.
   return (isAsyncMode() ? globalObject.restoreContext : restoreContext_sync)(context, fn)
 }
 
