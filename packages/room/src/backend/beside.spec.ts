@@ -3,7 +3,7 @@
 // under `of`, and `null` for a reference whose cell is absent.
 import { expect, it } from 'vitest'
 import { Room } from '../index.js'
-import { CELL_PAGE_SIZE, type CellsBeside, type CellsRead } from './contract.js'
+import { CELL_PAGE_SIZE, type CellsBeside, type CellsRead, type CommitTarget } from './contract.js'
 import { getRoomPlane } from './plane.js'
 
 const BESIDE: CellsBeside = { of: 'tm:', reference: 'tml:', target: 'tl:' }
@@ -62,4 +62,34 @@ it('reads the cell each reference names beside its cell, by key and on every pag
     ...Object.fromEntries(FILLERS.map((key) => [key, 'lease one'])),
   })
   expect(besideText(plain)).toBe('none')
+})
+
+/** With `of` empty every key is under it: `a` references a lease that is there, `b` one that isn't. */
+const EMPTY_OF: CellsBeside = { of: '', reference: 'tml:', target: 'tl:' }
+const EMPTY_OF_CELLS: Record<string, string> = { a: 'A', 'tml:a': 'L1', 'tl:L1': 'lease one', b: 'B', 'tml:b': 'L2' }
+
+it("reads beside every cell, and requires a commit's every key to reference a cell that is there, where `of` is empty", async () => {
+  const id = `beside-empty-of-${crypto.randomUUID()}`
+  await Room.create(id)
+  const { direct } = getRoomPlane()
+  const inc = (await direct.reads.readHead(id))?.currentInc
+  if (typeof inc !== 'string') throw new Error(`room ${id} has no incarnation`)
+  const mutations = Object.entries(EMPTY_OF_CELLS).map(([key, text]) => ({ key, bytes: encoder.encode(text) }))
+  expect((await direct.compareExchangeCells(id, inc, { expect: [], mutations })).kind).toBe('committed')
+
+  const read = besideText(await direct.reads.readCells(id, inc, { keys: ['a', 'b'], beside: EMPTY_OF }))
+  const target: CommitTarget = { roomId: id, inc, lane: { kind: 'inbox', member: 'nobody' } }
+  const commit = async (key: string) => {
+    const committed = await direct.commitLane(target, encoder.encode('m'), {
+      required: { keys: [key], beside: EMPTY_OF },
+    })
+    return committed.kind === 'stale-cell' ? `stale-cell ${committed.key}` : committed.kind
+  }
+  const commits = { a: await commit('a'), b: await commit('b') }
+  await Room.close(id)
+
+  expect({ read, commits }).toEqual({
+    read: { a: 'lease one', b: null },
+    commits: { a: 'accepted', b: 'stale-cell b' },
+  })
 })

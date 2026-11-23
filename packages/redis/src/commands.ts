@@ -405,8 +405,8 @@ return '{"head":' .. cjson.encode(head) .. '}'
 // Reads the named cells, or every cell under a prefix, each with its version, while the head still names the
 // incarnation (closing tails may read), after the authority time of the read. A missing cell is left out.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions [5]=lapses
-//   ARGV: [1]=inc [2..4]=the read's beside (of, reference, target; of '' for none) [5]='keys' then the cell keys, or
-//   'prefix' then the prefix
+//   ARGV: [1]=inc [2..5]=the read's beside ('1' then of, reference and target; '' and three '' for none) [6]='keys'
+//   then the cell keys, or 'prefix' then the prefix
 // No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
 // Appends each of keys[first..] that has a value, with its value, its version and whether it lapsed by `now` ('1' or
 // '0'), to reply. With beside, each such cell also gets what its reference names: 'none' where the cell has none (as
@@ -418,8 +418,9 @@ local function tf_lapsed(key, now)
   ${lapsedLua('lapsed', 'raw_lapse', 'now', "KEYS[5] .. ' of ' .. key")}
   return lapsed
 end
-local function tf_cells_reply(reply, keys, first, now, of, reference, target)
-  if of ~= '' then reply[1] = reply[1] .. ':beside' end
+local function tf_cells_reply(reply, keys, first, now, beside, of, reference, target)
+  beside = beside == '1'
+  if beside then reply[1] = reply[1] .. ':beside' end
   for i = first, #keys do
     local value = redis.call('HGET', KEYS[3], keys[i])
     if value then
@@ -427,7 +428,7 @@ local function tf_cells_reply(reply, keys, first, now, of, reference, target)
       reply[#reply + 1] = value
       reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
       reply[#reply + 1] = tf_lapsed(keys[i], now) and '1' or '0'
-      if of ~= '' then
+      if beside then
         local named = false
         if string.sub(keys[i], 1, #of) == of then
           named = redis.call('HGET', KEYS[3], reference .. string.sub(keys[i], #of + 1))
@@ -452,11 +453,11 @@ const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
-local keys, first = ARGV, 6
-if ARGV[5] == 'prefix' then
-  keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[6], '(' .. ARGV[6] .. '\\255'), 1
+local keys, first = ARGV, 7
+if ARGV[6] == 'prefix' then
+  keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[7], '(' .. ARGV[7] .. '\\255'), 1
 end
-return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first, now, ARGV[2], ARGV[3], ARGV[4])
+return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first, now, ARGV[2], ARGV[3], ARGV[4], ARGV[5])
 `
 
 // The expiring cells of the keys that Redis hasn't expired yet, after the head names the incarnation.
@@ -480,7 +481,7 @@ return reply
 // previous page's last key) to past the prefix ARGV[3], after the authority time of the read. A full page is tagged
 // 'more', with its last key after the time.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions [5]=lapses
-//   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size [5..7]=the read's beside, as for READ_CELLS_LUA
+//   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size [5..8]=the read's beside, as for READ_CELLS_LUA
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local now = tf_now()
 local head = tf_live_head(redis.call('GET', KEYS[1]), KEYS[1], now)
@@ -488,8 +489,8 @@ if not head or head.inc ~= ARGV[1] then return {'stale-incarnation'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
 local time = string.format('%.0f', now)
-if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7]) end
-return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7])
+if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7], ARGV[8]) end
+return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, now, ARGV[5], ARGV[6], ARGV[7], ARGV[8])
 `
 
 // Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
@@ -671,11 +672,12 @@ const COMMIT_ARGS = {
   everyMemberFence: 8,
   /** The member a retained frame is from, `''` for none. */
   owner: 9,
-  /** The required cells' beside: `of`, `''` for none, its reference and its target. */
-  requiredOf: 10,
-  requiredReference: 11,
-  requiredTarget: 12,
-  requiredCells: 13,
+  /** The required cells' beside: `'1'`, then its `of`, reference and target; `''` and three `''` for none. */
+  requiredBeside: 10,
+  requiredOf: 11,
+  requiredReference: 12,
+  requiredTarget: 13,
+  requiredCells: 14,
 } as const
 
 /** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
@@ -791,7 +793,7 @@ function commitHoldsLua(
       ? `if ${K.head} ~= ${OPERATION_KEY.head} then ${holdsCheckLua(K.head, COMMIT_HOLD.head)} end
 if #${args} > ${COMMIT_ARGS.requiredCells} then
   ${holdsCheckLua(K.cellValues, COMMIT_HOLD.cellValues)}
-  if ${A.requiredOf} ~= '' then ${holdsCheckLua(K.cellLapses, COMMIT_HOLD.cellLapses)} end
+  if ${A.requiredBeside} == '1' then ${holdsCheckLua(K.cellLapses, COMMIT_HOLD.cellLapses)} end
 end
 if ${K.incarnationKeys} ~= ${OPERATION_KEY.incarnationKeys} then
   ${holdsCheckLua(K.incarnationKeys, COMMIT_HOLD.incarnationKeys)}
@@ -837,12 +839,12 @@ end
 if not ok then return '{"kind":"stale-incarnation"}' end
 -- Each required cell is there, and one under the beside's of has a reference whose target is there, not lapsed: a
 -- cell's lapse field is there exactly while the cell is.
-local required_of = ${A.requiredOf}
+local required_beside, required_of = ${A.requiredBeside} == '1', ${A.requiredOf}
 for i = ${COMMIT_ARGS.requiredCells + 1}, #${args} do
   local key = ${args}[i]
   ${heldCallLua('local present', COMMIT_HOLD.cellValues, `'HEXISTS', ${K.cellValues}, key`, K.cellValues)}
   local held = present == 1
-  if held and required_of ~= '' and string.sub(key, 1, #required_of) == required_of then
+  if held and required_beside and string.sub(key, 1, #required_of) == required_of then
     local named = redis.call('HGET', ${K.cellValues}, ${A.requiredReference} .. string.sub(key, #required_of + 1))
     held = false
     if named then
@@ -1771,9 +1773,10 @@ function lapseArg(lapsesInMs: number | undefined): string {
   return lapsesInMs === undefined ? '' : String(lapsesInMs)
 }
 
-/** A read's beside as its script's arguments: `of` empty for none. */
-function besideArgv(beside: CellsBeside | undefined): string[] {
-  return beside === undefined ? ['', '', ''] : [beside.of, beside.reference, beside.target]
+/** A beside as its script's arguments: `'1'`, then its `of` (empty for every key), reference and target; `''` and three
+ *  `''` for none. */
+function besideArgv(beside: CellsBeside | undefined): [string, string, string, string] {
+  return beside === undefined ? ['', '', '', ''] : ['1', beside.of, beside.reference, beside.target]
 }
 
 /** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */
@@ -1859,9 +1862,11 @@ function commitInvocation(prefix: string, input: CommitInput): { keys: string[];
   argv[COMMIT_ARGS.everyMemberFence] = fenceTokens.everyMember
   argv[COMMIT_ARGS.owner] = input.owner ?? ''
   const { keys: required = [], beside } = input.required ?? {}
-  argv[COMMIT_ARGS.requiredOf] = beside?.of ?? ''
-  argv[COMMIT_ARGS.requiredReference] = beside?.reference ?? ''
-  argv[COMMIT_ARGS.requiredTarget] = beside?.target ?? ''
+  const [besideFlag, of, reference, target] = besideArgv(beside)
+  argv[COMMIT_ARGS.requiredBeside] = besideFlag
+  argv[COMMIT_ARGS.requiredOf] = of
+  argv[COMMIT_ARGS.requiredReference] = reference
+  argv[COMMIT_ARGS.requiredTarget] = target
   for (const key of required) argv.push(key)
   return { keys, argv }
 }

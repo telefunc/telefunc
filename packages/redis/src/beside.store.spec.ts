@@ -4,7 +4,7 @@
 // absent.
 import { afterAll, describe, expect, it } from 'vitest'
 import { Room } from '@telefunc/room'
-import { getRoomPlane, type CellsBeside, type CellsRead } from '@telefunc/room/backend'
+import { getRoomPlane, type CellsBeside, type CellsRead, type CommitTarget } from '@telefunc/room/backend'
 import { endReached, reached, runs, STORES } from '../test/stores.js'
 
 afterAll(() => endReached())
@@ -69,6 +69,41 @@ describe.runIf(runs)('a read of cells with `beside`', () => {
         ...Object.fromEntries(FILLERS.map((key) => [key, 'lease one'])),
       })
       expect(besideText(plain)).toBe('none')
+    }, 60_000)
+  }
+})
+
+/** With `of` empty every key is under it: `a` references a lease that is there, `b` one that isn't. */
+const EMPTY_OF: CellsBeside = { of: '', reference: 'tml:', target: 'tl:' }
+const EMPTY_OF_CELLS: Record<string, string> = { a: 'A', 'tml:a': 'L1', 'tl:L1': 'lease one', b: 'B', 'tml:b': 'L2' }
+
+describe.runIf(runs)('a read and a commit with `beside` whose `of` is empty', () => {
+  for (const [i, store] of STORES.entries()) {
+    it(`${store.name}: reads beside every cell, and requires a commit's every key to reference a cell that is there`, async () => {
+      const admin = await reached(store)
+      const id = `beside-empty-of-${i}`
+      await Room.create(id)
+      const { direct } = getRoomPlane()
+      const inc = (await direct.reads.readHead(id))?.currentInc
+      if (typeof inc !== 'string') throw new Error(`room ${id} has no incarnation`)
+      const mutations = Object.entries(EMPTY_OF_CELLS).map(([key, text]) => ({ key, bytes: encoder.encode(text) }))
+      expect((await direct.compareExchangeCells(id, inc, { expect: [], mutations })).kind).toBe('committed')
+
+      const read = besideText(await direct.reads.readCells(id, inc, { keys: ['a', 'b'], beside: EMPTY_OF }))
+      const target: CommitTarget = { roomId: id, inc, lane: { kind: 'inbox', member: 'nobody' } }
+      const commit = async (key: string) => {
+        const required = { keys: [key], beside: EMPTY_OF }
+        const committed = await direct.commitLane(target, encoder.encode('m'), { required })
+        return committed.kind === 'stale-cell' ? `stale-cell ${committed.key}` : committed.kind
+      }
+      const commits = { a: await commit('a'), b: await commit('b') }
+      await Room.close(id)
+      admin.disconnect()
+
+      expect({ read, commits }).toEqual({
+        read: { a: 'lease one', b: null },
+        commits: { a: 'accepted', b: 'stale-cell b' },
+      })
     }, 60_000)
   }
 })
