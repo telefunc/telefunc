@@ -1215,7 +1215,7 @@ function ChannelDemo() {
     const { channel } = await openChannel(onChannelOpenBurst)
     let received = 0
     channel.listen(() => {
-      if (++received < 500) return
+      if (++received < 2000) return
       setChannelState((s) => ({ ...s, openBurstReceived: received }))
       channel.close()
     })

@@ -6,7 +6,7 @@ import type {
   ServerReplacerContext,
   ServerReviverContext,
 } from 'telefunc'
-import type { TELEFUNC_SHIELDS } from 'telefunc/__internal'
+import { isPeerGone, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import { Observable, Subject, config as rxjsConfig } from 'rxjs'
 
 import {
@@ -38,9 +38,9 @@ declare module 'rxjs' {
 }
 
 // Server-side: swallow ALL unhandled rxjs errors to prevent process crash.
-// Still log them so bugs are visible in server logs.
+// Still log them so bugs are visible in server logs: all but a peer that left, which Telefunc doesn't log either.
 rxjsConfig.onUnhandledError = (err) => {
-  console.error('[telefunc:rxjs] Unhandled rxjs error:', err)
+  if (!isPeerGone(err)) console.error('[telefunc:rxjs] Unhandled rxjs error:', err)
 }
 
 // === Server→client replacers ===

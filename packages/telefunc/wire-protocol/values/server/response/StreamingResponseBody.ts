@@ -6,7 +6,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../constants.js'
-import { isAbort } from '../../../../node/server/Abort.js'
+import { Abort } from '../../../../node/server/Abort.js'
 import type { AbortError } from '../../../../shared/Abort.js'
 import {
   handleTelefunctionBug,
@@ -192,7 +192,7 @@ function buildInlineResponseBody(runContext: {
       // Propagate aborts to side-channels (request argument channels etc.)
       // regardless of cancellation state — listeners care even when the
       // consumer is already gone. A reason JSON can't hold goes to none of them: the error frame reports it.
-      if (isAbort(err)) responseAbort.abort(serializeAbortReason(err.abortValue).value)
+      if (err instanceof Abort) responseAbort.abort(serializeAbortReason(err.abortValue).value)
       // Error frame: [marker][u32 payload_len][payload].
       const errorBytes = encodeErrorPayload(err, telefuncId)
       await emit(encodeFrame(encodeU32(STREAMING_ERROR_FRAME_MARKER)))
@@ -221,7 +221,7 @@ function encodeErrorPayload(err: unknown, telefuncId: TelefuncId): Uint8Array<Ar
     err = usageErr
   }
   let errorPayload: string
-  if (isAbort(err)) {
+  if (err instanceof Abort) {
     const abortError: AbortError = err
     try {
       const payload: StreamingErrorFrameAbort = {

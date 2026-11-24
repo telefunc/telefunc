@@ -23,7 +23,7 @@ import {
 } from '../../wire-protocol/channel/channelErrors.js'
 import { END_CAUSE } from '../../wire-protocol/channel/endCause.js'
 import { NetworkError } from '../../shared/NetworkError.js'
-import { isAbort } from '../../shared/Abort.js'
+import { Abort } from '../../shared/Abort.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
@@ -944,13 +944,13 @@ const ENDINGS: Ending[] = [
   {
     ending: "this end's abort()",
     end: ({ channel }) => channel.abort('stop'),
-    outcome: isAbort,
+    outcome: (outcome) => outcome instanceof Abort,
     waiting: 'resolves',
   },
   {
     ending: "the page's abort()",
     end: ({ page }) => page.abort('stop'),
-    outcome: isAbort,
+    outcome: (outcome) => outcome instanceof Abort,
     waiting: 'rejects',
   },
   {

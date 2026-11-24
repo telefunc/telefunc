@@ -58,15 +58,29 @@ class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse
   }
 }
 
+/** What Telefunc reads of a request with `Upgrade`, once: its URL, where it can be read, and the config. */
+type Handshake = { url: URL | null; config: ReturnType<typeof getServerConfig> }
+
+function readHandshake(req: IncomingMessage): Handshake {
+  return { url: readRequestUrl(req.url ?? ''), config: getServerConfig() }
+}
+
 /** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), a request with `Upgrade` that isn't
  *  Telefunc's is upgraded only where another `upgrade` listener is there to take it and the server's own callback (the
  *  app's, or Node's default) accepts it; any other goes to the app's `request` listeners, as on the same server without
- *  Telefunc's WebSocket. The server's own callback is put back when `listener` is removed. */
-function upgradeOthersOnlyForTheirListeners(server: HttpServer, listener: (...args: never[]) => void): void {
+ *  Telefunc's WebSocket. What the callback reads of a request is kept in `handshakes`, for `listener`. The server's own
+ *  callback is put back when `listener` is removed. */
+function upgradeOthersOnlyForTheirListeners(
+  server: HttpServer,
+  listener: (...args: never[]) => void,
+  handshakes: WeakMap<IncomingMessage, Handshake>,
+): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
   Reflect.set(server, 'shouldUpgradeCallback', (req: IncomingMessage) => {
-    if (readRequestUrl(req.url ?? '')?.pathname === getServerConfig().telefuncUrl) return true
+    const handshake = readHandshake(req)
+    handshakes.set(req, handshake)
+    if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
     return server.listenerCount('upgrade') > 1 && Boolean(own.call(server, req))
   })
   const putBack = (event: string | symbol, removed: unknown) => {
@@ -106,9 +120,10 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       }),
     ))
 
+    // Read by the server's `shouldUpgradeCallback` where it has one; on a Node without it, by `onUpgrade`.
+    const handshakes = new WeakMap<IncomingMessage, Handshake>()
     const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-      const config = getServerConfig()
-      const url = readRequestUrl(req.url ?? '')
+      const { url, config } = handshakes.get(req) ?? readHandshake(req)
       if (url?.pathname !== config.telefuncUrl) {
         // Here only on a Node that doesn't read `shouldUpgradeCallback` (before 22.21 and 24.9), which hands every
         // request with `Upgrade` to the `upgrade` listeners: one that no other listener is there to take is answered as
@@ -133,7 +148,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       adapter.handleUpgrade(req, socket, head, request)
     }
     httpServer.on('upgrade', onUpgrade)
-    upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade)
+    upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade, handshakes)
   }
 
   function inferServer(req: Req): HttpServer | undefined {

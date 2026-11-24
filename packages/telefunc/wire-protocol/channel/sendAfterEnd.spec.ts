@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
-import { isAbort } from '../../shared/Abort.js'
+import { Abort } from '../../shared/Abort.js'
 import { ChannelClosedError, ChannelPageLeftError } from './channelErrors.js'
 import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from './server/ServerBroadcast.js'
@@ -144,7 +144,7 @@ describe('a listen() callback that sends after its channel ended', () => {
       })
 
       const end = await page.closed
-      expect(isAbort(end)).toBe(true)
+      expect(end).toBeInstanceOf(Abort)
       expect(thrown).toHaveLength(2)
       expect(thrown[0]).toBeInstanceOf(ChannelClosedError)
       expect(thrown[1]).toBe(thrown[0])
@@ -215,7 +215,7 @@ describe("a page's subscribe() callback that publishes after its broadcast ended
       })
 
       const end = await page.closed
-      expect(isAbort(end)).toBe(true)
+      expect(end).toBeInstanceOf(Abort)
       expect(thrown).toHaveLength(2)
       expect(thrown[0]).toBeInstanceOf(ChannelClosedError)
       expect(thrown[1]).toBe(thrown[0])

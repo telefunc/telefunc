@@ -29,7 +29,7 @@ import {
 import { TAG, isWireCtrlTag } from '../../wire/tags.js'
 import { keptEndWindowOf, pingDeadline } from '../../wire/pingDeadline.js'
 import { getSessionToken } from '../../wire/requestKind.js'
-import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
 import { frameRefusal, type Refusal } from '../../refusal.js'
 import { ChannelPageLeftError } from '../channelErrors.js'
 import { END_CAUSE, type FrameRefusalCause, type SessionCause } from '../endCause.js'
@@ -110,7 +110,7 @@ type ReconcileOutcome = {
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
-  if (!isProtocolViolationError(err) || err.target !== undefined) return err
+  if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
   return new ProtocolViolationError(err.message, probe)
 }
 
@@ -430,7 +430,7 @@ class ChannelMux implements UpgradeStagesOwner {
         void this.dispatchFrame(entry, frame, next.done ? 'alone' : 'riding')
       }
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
+      if (!(err instanceof ProtocolViolationError)) throw err
       this.endFault(wire, { scope: 'session', cause: 'unreadable' })
     }
     // Whichever frame completed it, a piece of it too.
@@ -575,7 +575,7 @@ class ChannelMux implements UpgradeStagesOwner {
     } catch (err) {
       // A bug is reported here, as no WebSocket host awaits a message's handling. The wire goes on, unless its page
       // waits for the RECONCILED that won't come: then it ends as a lost one, and the page resumes on the next.
-      if (!isProtocolViolationError(err)) {
+      if (!(err instanceof ProtocolViolationError)) {
         handleTelefunctionBug(err)
         if (peekTag(rawFrame) === TAG.RECONCILE) this.endFault(entry.wire, { scope: 'loss' })
       } else {
@@ -902,7 +902,7 @@ class ChannelMux implements UpgradeStagesOwner {
     } catch (err) {
       // A bug: no RECONCILED will go, and what the wire holds for it would stay held on a wire that is up. It ends as a
       // lost wire does, its channels keeping their grace; a protocol violation ends it for good where it is caught.
-      if (!isProtocolViolationError(err)) this.endFault(entry.wire, { scope: 'loss' })
+      if (!(err instanceof ProtocolViolationError)) this.endFault(entry.wire, { scope: 'loss' })
       throw err
     }
   }
@@ -1070,7 +1070,7 @@ class ChannelMux implements UpgradeStagesOwner {
     try {
       for (const { frame } of held) this.dispatchChannelFrame(session, frame)
     } catch (err) {
-      if (!isProtocolViolationError(err)) throw err
+      if (!(err instanceof ProtocolViolationError)) throw err
       this.endFault(entry.wire, { scope: 'channel', ix: awaited.open.ix, cause: 'frameRefused', wire: 'kept' })
     }
   }

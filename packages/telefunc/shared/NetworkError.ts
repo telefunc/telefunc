@@ -1,6 +1,6 @@
 export { NetworkError }
 
-const networkErrorBrand = Symbol.for('telefunc.NetworkError')
+import { markErrorClass } from './markErrorClass.js'
 
 /** Network failure: the connection to the server couldn't be established or was lost.
  *  Thrown for regular telefunction calls — as the `ConnectionError` subclass, with `isChannel: false`
@@ -13,8 +13,6 @@ const networkErrorBrand = Symbol.for('telefunc.NetworkError')
  *
  *  Catch it with a single `instanceof NetworkError` and read `isChannel` to tell the two apart. */
 class NetworkError extends Error {
-  readonly [networkErrorBrand] = true as const
-
   /** `true` if the failure happened on a channel connection, `false` for a regular telefunction call. */
   readonly isChannel: boolean
 
@@ -25,12 +23,6 @@ class NetworkError extends Error {
     this.isChannel = isChannel
     Error.captureStackTrace?.(this, new.target)
   }
-
-  /** `instanceof NetworkError` reads the mark every copy of Telefunc puts on its network errors, as a Vite dev server
-   *  loads one copy beside Node's: an app's `NetworkError` is then another class than the one its channel's error was
-   *  made from. A subclass takes only its own kind, by its prototype. */
-  static [Symbol.hasInstance](thing: unknown): boolean {
-    if (this !== NetworkError) return Function.prototype[Symbol.hasInstance].call(this, thing)
-    return typeof thing === 'object' && thing !== null && networkErrorBrand in thing
-  }
 }
+
+markErrorClass(NetworkError, 'NetworkError')

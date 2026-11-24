@@ -1,12 +1,10 @@
-export { ProtocolViolationError, isProtocolViolationError, assertProtocol }
+export { ProtocolViolationError, assertProtocol }
 
-const protocolViolationErrorBrand = Symbol.for('telefunc.ProtocolViolationError')
+import { markErrorClass } from '../../shared/markErrorClass.js'
 
 /** Raised for every malformed-bytes path. Never `assert`: that one tells the user they found a
  *  telefunc bug, and these bytes are the peer's. */
 class ProtocolViolationError extends Error {
-  readonly [protocolViolationErrorBrand] = true as const
-
   constructor(
     debugInfo?: string,
     readonly target?: unknown,
@@ -15,12 +13,7 @@ class ProtocolViolationError extends Error {
   }
 }
 
-function isProtocolViolationError(thing: unknown): thing is ProtocolViolationError {
-  return (
-    thing instanceof ProtocolViolationError ||
-    (typeof thing === 'object' && thing !== null && protocolViolationErrorBrand in thing)
-  )
-}
+markErrorClass(ProtocolViolationError, 'ProtocolViolationError')
 
 /** `assert` for peer input, `debugInfo` and all. `target` names the wire to terminate when it
  *  isn't the sender. */

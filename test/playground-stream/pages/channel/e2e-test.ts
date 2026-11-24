@@ -14,6 +14,8 @@ import {
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
 type ChannelState = {
   heldBytes: number | null
@@ -1364,13 +1366,25 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 
   if (channelTransport === 'ws') {
-    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages', async () => {
-      let sent = 0
+    test('channel: the page grants credit for 2,000 small messages its server sends as the channel opens in no more WebSocket messages than they arrive in', async () => {
+      // How many WebSocket messages the server's 2,000 take, and whether a heartbeat or an upgrade's frames fall among
+      // the page's, depends on how the turns fall: so the page's messages that grant credit are counted, from the
+      // channel's open to the page's CLOSE, against the messages that bring the server's.
+      let arrivals = 0
+      let grants = 0
       let counting = false
+      const tagsOf = (payload: string | Buffer) =>
+        typeof payload === 'string' ? [] : Array.from(messageFrames(new Uint8Array(payload)), (frame) => frame[0])
       const onWebSocket = (ws: WebSocket) => {
         if (!ws.url().includes('/_telefunc')) return
-        ws.on('framesent', () => {
-          if (counting) sent++
+        ws.on('framereceived', ({ payload }) => {
+          if (counting && tagsOf(payload).includes(TAG.TEXT)) arrivals++
+        })
+        ws.on('framesent', ({ payload }) => {
+          if (!counting) return
+          const tags = tagsOf(payload)
+          if (tags.includes(TAG.WINDOW) || tags.includes(TAG.MSG_WINDOW)) grants++
+          if (tags.includes(TAG.CLOSE)) counting = false
         })
       }
       page.on('websocket', onWebSocket)
@@ -1379,7 +1393,7 @@ function testChannel(isDev: boolean, inDocker = false) {
         const run = async () => {
           await page.click('#channel-test-open-burst')
           await autoRetry(async () => {
-            expect((await getResult<ChannelState>('#channel-state')).openBurstReceived).toBe(500)
+            expect((await getResult<ChannelState>('#channel-state')).openBurstReceived).toBe(2000)
           })
         }
         // The first run opens the WebSocket, so only the second's messages count.
@@ -1389,7 +1403,8 @@ function testChannel(isDev: boolean, inDocker = false) {
       } finally {
         page.off('websocket', onWebSocket)
       }
-      expect(sent).lessThanOrEqual(4)
+      expect(arrivals).greaterThan(0)
+      expect(grants).lessThanOrEqual(arrivals)
     })
   }
 

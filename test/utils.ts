@@ -98,15 +98,23 @@ function upgradeStatus(origin: string): Promise<number | undefined | 'no answer'
 /**
  * The status the server answers a request written byte for byte with, for a request line or a `Host` no HTTP client
  * sends (`GET //_telefunc`, `Host: a b`); `head` holds the request line and the headers, without the blank line.
+ * `'no answer'` where the server closes the connection without an answer, or sends nothing within 10 seconds.
  */
-async function rawRequestStatus(head: string[]): Promise<number> {
+async function rawRequestStatus(head: string[]): Promise<number | 'no answer'> {
   const { hostname, port } = new URL(getServerUrl())
   const socket = connect(Number(port), hostname)
-  await once(socket, 'connect')
-  socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
-  const [first] = (await once(socket, 'data')) as [Buffer]
-  socket.destroy()
-  return Number(first.toString('latin1').split(' ')[1])
+  try {
+    await once(socket, 'connect')
+    socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
+    const first = await new Promise<Buffer | null>((resolve) => {
+      socket.once('data', resolve)
+      socket.once('close', () => resolve(null))
+      socket.setTimeout(10_000, () => resolve(null))
+    })
+    return first ? Number(first.toString('latin1').split(' ')[1]) : 'no answer'
+  } finally {
+    socket.destroy()
+  }
 }
 
 function newCDPSession() {

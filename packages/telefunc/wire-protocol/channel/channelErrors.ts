@@ -1,6 +1,7 @@
 export { ChannelClosedError, ChannelOverflowError, ChannelCloseUnknownError, ChannelPageLeftError, framesRefusedError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
+import { markErrorClass } from '../../shared/markErrorClass.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
@@ -42,6 +43,11 @@ class ChannelPageLeftError extends NetworkError {
     this.name = 'ChannelPageLeftError'
   }
 }
+
+markErrorClass(ChannelClosedError, 'ChannelClosedError')
+markErrorClass(ChannelOverflowError, 'ChannelOverflowError')
+markErrorClass(ChannelCloseUnknownError, 'ChannelCloseUnknownError')
+markErrorClass(ChannelPageLeftError, 'ChannelPageLeftError')
 
 /** How a channel ends, on both ends, when the server can't take a frame the page sent: `reason` is the refusal's
  *  sentence (`END_CAUSE`'s frame causes). Sending the same frame again fails again, so it is no `NetworkError`. */

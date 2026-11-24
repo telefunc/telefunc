@@ -246,8 +246,9 @@ async function fetch(request: RuntimeRequest): Promise<Response | undefined> {
   const { runtime } = request
   if (tfBun && runtime?.bun) {
     const response = await tfBun.serve({ request, server: runtime.bun.server })
-    // An upgraded request is answered by Bun.
-    if (response || request.headers.get('upgrade') === 'websocket') return response
+    // Telefunc's own WebSocket handshake is answered by Bun, once upgraded; one for another path is the app's.
+    const upgraded = request.headers.get('upgrade') === 'websocket' && new URL(request.url).pathname === '/_telefunc'
+    if (response || upgraded) return response
   }
   if (tfDeno && runtime?.deno) {
     const response = await tfDeno.serve({ request, info: runtime.deno.info })
@@ -273,6 +274,10 @@ export default {
       if (!httpServer) return
       // Compose's servers behind Caddy: Node's 5 s idle timer destroyed sockets Caddy then wrote to, which is a 502.
       if (process.env.INSTANCE_ID) httpServer.keepAliveTimeout = 60_000
+      // The app upgrades nothing of its own: the listener below only watches Telefunc's handshakes, so another request
+      // with `Upgrade` goes to its request handler (docs/pages/transport: an app's `upgrade` listener answers or closes
+      // what it gets).
+      Reflect.set(httpServer, 'shouldUpgradeCallback', () => false)
       // Registered first: a socket it destroys is one Telefunc's upgrade listener then leaves alone.
       httpServer.on('upgrade', (req, socket) => {
         if (!req.url?.startsWith('/_telefunc')) return

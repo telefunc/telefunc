@@ -35,7 +35,7 @@ import {
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
+import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 import {
   WIRE_VERSION_REFUSAL,
   refusalContentType,
@@ -298,7 +298,7 @@ class SseServerTransport {
       metadata = parseMetadata(new TextDecoder().decode(rawMetadata))
     } catch (err) {
       if (err instanceof StreamTruncatedError) return refuse(REFUSED.truncated)
-      if (isProtocolViolationError(err) || err instanceof OversizeFrameError) return refuse(REFUSED.metadata)
+      if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError) return refuse(REFUSED.metadata)
       throw err
     }
     const { connId } = metadata

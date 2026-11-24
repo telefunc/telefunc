@@ -108,7 +108,7 @@ config.channel.allowedOrigins = ['https://app.example.com']
 
 > The page can't tell a refused upgrade from a server it can't reach: a browser gives the page's script no reason for a failed WebSocket handshake. The server logs a warning that names the refused origin, once per origin and for the first 20 origins it refuses in 10 minutes, and the browser's console shows the failed handshake.
 
-> On Node, `installWebSocket(server)` leaves every other request with `Upgrade` to your server: your other `upgrade` listeners take theirs, and a request none of them takes reaches your request handler, as on the same server without Telefunc. Node before 22.21 and 24.9 can't hand it to your request handler: there, such a request is answered 404 when no other `upgrade` listener is there.
+> On Node, `installWebSocket(server)` leaves every other request with `Upgrade` to your server, as on the same server without Telefunc. With no `upgrade` listener of your own, it reaches your request handler. With one, it goes to your `upgrade` listeners, and a request none of them answers stays open: answer or close it there. Node before 22.21 and 24.9 can't hand it to your request handler: there, with no `upgrade` listener of your own, such a request is answered 404.
 
 
 
