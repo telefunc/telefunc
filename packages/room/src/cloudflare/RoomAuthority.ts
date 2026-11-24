@@ -26,19 +26,16 @@ import {
   LEASE_CALL_DEADLINE_MS,
   OrderedStubs,
   grantHolder,
-  leaseAnswer,
   leaseRegistered,
   liveLeases,
   registerLease,
   removeLease,
   renewLease,
-  setLeaseAnswer,
   sweepLeases,
   type CloudflareExtensionKit,
   type LeaseOrder,
   type LeaseRegistered,
   type LeaseRemoved,
-  type LeaseWritten,
   type OrderingInfo,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
@@ -85,6 +82,11 @@ import {
   listHandoffs,
   deleteHandoff,
   type Handoff,
+  storeAnswer,
+  readStoredAnswer,
+  recordAnswerLoss,
+  deleteExpiredAnswers,
+  type KeptAnswer,
 } from './storage.js'
 
 /** An inbox or control commit replies once its delivery was handed off, with why it was lost, if it was. */
@@ -114,7 +116,7 @@ type OperationWire =
   | { kind: 'overtaken' }
 /** A member's exact inbox lease, which an operation registers in its own transaction, under the session's `order`. */
 type InboxLease = { route: RouteInstallation; order: LeaseOrder }
-/** What an operation that registered its inbox lease answered, kept with that lease for a copy of it that comes
+/** What an operation that registered its inbox lease answered, kept by the lease's order for a copy of it that comes
  *  again. */
 type StoredAnswer = { value: unknown; counters: Map<string, CellCounter>; commit?: { seq: number; timestamp: number } }
 
@@ -124,6 +126,9 @@ type RegisterWire = LeaseRegistered | 'dropped'
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
+/** How long an operation's answer is kept for a copy of it: a copy comes within its call's deadline, as long as
+ *  Cloudflare's runtime retries a call, or no caller waits for it. */
+const ANSWER_KEPT_MS = LEASE_CALL_DEADLINE_MS
 /** When the alarm hands on a stored commit whose hand-on this run of the object hasn't settled. */
 const ROOM_HANDOFF_RESUME_MS = 10_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
@@ -223,8 +228,8 @@ class RoomAuthority {
   }
 
   /** As `runOperation()`, and the same transaction registers the member's exact inbox lease, and keeps the answer
-   *  with it: a copy of the call that comes again answers it and changes nothing. A plan that writes nothing registers
-   *  nothing. */
+   *  by the lease's order: a copy of the call that comes within the call's deadline is answered as the call was, its
+   *  commit's loss included, and changes nothing. A plan that writes nothing registers nothing. */
   async runOperationWithInbox(
     inc: string,
     request: RoomOperationRequest,
@@ -240,20 +245,20 @@ class RoomAuthority {
   ): Promise<OperationWire | 'regrant'> {
     assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
-    const lease = inbox === undefined ? null : routeLease(inbox.route)
+    // The inbox lease it registers, and the order the session sent it under, by which its answer is kept.
+    const lease = inbox === undefined ? null : { ...routeLease(inbox.route), order: inbox.order }
     let outcome: OperationOutcome
     try {
       outcome = this.transaction((sql): OperationOutcome => {
+        // A copy is answered as the operation was, whatever was written since.
+        const kept = lease === null ? null : readStoredAnswer(sql, lease)
+        if (kept !== null) return { kind: 'repeated', kept }
         if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' }
-        if (inbox !== undefined && lease !== null) {
-          const written: LeaseWritten = registerLease(sql, lease, inbox.order, now)
+        if (lease !== null) {
+          const written = registerLease(sql, lease, lease.order, now)
           if (written === 'regrant') return { kind: 'regrant' }
-          if (written === 'stale') return { kind: 'overtaken' }
-          if (written === 'repeated') {
-            const answer = leaseAnswer(sql, lease.scope, lease.holder)
-            assert(answer !== null) // only an operation registers under its own order, and stores its answer with it
-            return { kind: 'repeated', answer: decodeRoomRecord<StoredAnswer>(answer) }
-          }
+          // A later write of the session's on the inbox came first, or this copy came once its answer's time was over.
+          if (written !== 'registered') return { kind: 'overtaken' }
         }
         const { value, writes } = recordRequest(request, {
           now,
@@ -262,10 +267,11 @@ class RoomAuthority {
         })
         if (lease !== null && writesNothing(writes)) throw new NothingWritten(value)
         const done = applyOperation(sql, inc, value, writes, now)
-        if (inbox !== undefined && lease !== null) {
+        if (lease !== null) {
           const answer: StoredAnswer = { value, counters: done.counters }
           if (done.handoff !== null) answer.commit = { seq: done.handoff.seq, timestamp: done.handoff.timestamp }
-          setLeaseAnswer(sql, lease.scope, lease.holder, inbox.order, encodeRoomRecord(answer))
+          const stored = { answer: encodeRoomRecord(answer), commitSeq: done.handoff?.seq ?? null }
+          storeAnswer(sql, lease, inc, stored, now + ANSWER_KEPT_MS)
         }
         return done
       })
@@ -274,28 +280,32 @@ class RoomAuthority {
       return { kind: 'done', value: error.value, counters: new Map() }
     }
     if (outcome.kind === 'regrant') return 'regrant'
-    if (outcome.kind !== 'done' && outcome.kind !== 'repeated') return outcome
-    if (outcome.kind === 'repeated') {
-      const { value, counters, commit } = outcome.answer
-      if (commit === undefined) return { kind: 'done', value, counters, registered: true }
-      this.resumeHandoffs()
-      const handing = this.handingOn.get(
-        handoffKey({ inc, laneKey: encodeLaneKey(OPERATION_COMMIT_LANE), seq: commit.seq }),
-      )
-      // One this run isn't handing on was handed on before.
-      const receipt = await receiptOf(commit, handing ?? Promise.resolve(null))
-      return { kind: 'done', value, counters, commit: receipt, registered: true }
-    }
+    if (outcome.kind === 'repeated') return this.answerAgain(inc, outcome.kept)
+    if (outcome.kind !== 'done') return outcome
     const { value, counters, handoff } = outcome
     // In this turn, so it leaves before anything committed after it.
     const handing = handoff === null ? null : this.handOn(handoff)
-    // The alarm deletes the expiring cells, as no server may be on the room by then, and hands on a commit whose
-    // hand-on didn't settle.
-    if (outcome.expiring || handoff !== null) await this.scheduleMaintenanceIfNeeded()
+    // The alarm deletes the expiring cells and the stored answer, as no server may be on the room by then, and hands on
+    // a commit whose hand-on didn't settle.
+    if (outcome.expiring || handoff !== null || lease !== null) await this.scheduleMaintenanceIfNeeded()
     const done: OperationWire = { kind: 'done', value, counters }
     if (inbox !== undefined) done.registered = true
     if (handoff !== null && handing !== null) done.commit = await receiptOf(handoff, handing)
     return done
+  }
+
+  /** A copy of an operation that registered its inbox lease: answered as the operation was, its commit's loss
+   *  included, once its hand-on settled. */
+  private async answerAgain(inc: string, { answer, lost }: KeptAnswer): Promise<OperationWire> {
+    const { value, counters, commit } = decodeRoomRecord<StoredAnswer>(answer)
+    if (commit === undefined) return { kind: 'done', value, counters, registered: true }
+    this.resumeHandoffs()
+    const handing = this.handingOn.get(
+      handoffKey({ inc, laneKey: encodeLaneKey(OPERATION_COMMIT_LANE), seq: commit.seq }),
+    )
+    // One this run isn't handing on was handed on before, as its answer says.
+    const receipt = await receiptOf(commit, handing ?? Promise.resolve(lost))
+    return { kind: 'done', value, counters, commit: receipt, registered: true }
   }
 
   /** Hands every commit an earlier run of the object stored and didn't hand on, in commit order, before anything this
@@ -316,13 +326,21 @@ class RoomAuthority {
     const { inc, laneKey, seq, timestamp, payload } = handoff
     const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now())
     const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp }, true)
-    const handed = lostReason(delivery).then((lost) => {
-      this.transaction((sql) => deleteHandoff(sql, handoff))
-      this.handingOn.delete(key)
-      return lost
-    })
+    const handed = this.settleHandOn(handoff, delivery)
     this.handingOn.set(key, handed)
     return handed
+  }
+
+  /** Once `handoff`'s hand-on settled, its row goes, and the answer of the operation that committed it keeps why it was
+   *  lost, if it was, in the same transaction. */
+  private async settleHandOn(handoff: Handoff, delivery: Promise<void>): Promise<string | null> {
+    const lost = await lostReason(delivery)
+    this.transaction((sql) => {
+      deleteHandoff(sql, handoff)
+      if (lost !== null) recordAnswerLoss(sql, handoff.inc, handoff.seq, lost)
+    })
+    this.handingOn.delete(handoffKey(handoff))
+    return lost
   }
 
   /** Fans a commit out; an inbox or control commit's receipt waits for its handoff. */
@@ -448,6 +466,7 @@ class RoomAuthority {
       deleteLapsedHead(sql, now)
       sweepLeases(sql, now)
       deleteExpiredCells(sql, now)
+      deleteExpiredAnswers(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
     })
   }
@@ -541,7 +560,7 @@ type OperationOutcome =
   | { kind: 'stale-incarnation' }
   | { kind: 'overtaken' }
   | { kind: 'regrant' }
-  | { kind: 'repeated'; answer: StoredAnswer }
+  | { kind: 'repeated'; kept: KeptAnswer }
 type OperationApplied = {
   kind: 'done'
   value: unknown

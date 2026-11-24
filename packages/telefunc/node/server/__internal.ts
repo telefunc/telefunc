@@ -95,14 +95,12 @@ export {
   renewsAfterPause,
   grantHolder,
   initLeaseSchema,
-  leaseAnswer,
   leaseRegistered,
   liveLeases,
   nextLeaseSweep,
   registerLease,
   removeLease,
   renewLease,
-  setLeaseAnswer,
   sweepLeases,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
 export type {

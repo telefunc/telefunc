@@ -29,9 +29,13 @@ export {
   storeHandoff,
   listHandoffs,
   deleteHandoff,
+  storeAnswer,
+  readStoredAnswer,
+  recordAnswerLoss,
+  deleteExpiredAnswers,
 }
 
-export type { CellPage, Handoff, ListingPlace }
+export type { CellPage, Handoff, ListingPlace, AnswerKey, KeptAnswer }
 
 // Room-DO `transactionSync` makes head exchanges, cell batches, and order advance atomic under authority time.
 
@@ -49,7 +53,7 @@ import {
   type ExpiringCellsRead,
   type StaleIncarnation,
 } from '../backend/contract.js'
-import { dropLeaseScopes, initLeaseSchema, nextLeaseSweep } from 'telefunc/__internal'
+import { dropLeaseScopes, initLeaseSchema, nextLeaseSweep, type LeaseOrder } from 'telefunc/__internal'
 import { incarnationScopes } from './routes.js'
 import {
   countCell,
@@ -106,6 +110,11 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS handoff
       (inc TEXT NOT NULL, seq INTEGER NOT NULL, lane_key TEXT NOT NULL, ts INTEGER NOT NULL, payload BLOB NOT NULL,
        resume_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, seq));
+    CREATE TABLE IF NOT EXISTS stored_answer
+      (scope TEXT NOT NULL, holder TEXT NOT NULL, grant_id INTEGER NOT NULL, seq INTEGER NOT NULL, inc TEXT NOT NULL,
+       commit_seq INTEGER, answer BLOB NOT NULL, lost TEXT, kept_until INTEGER NOT NULL,
+       PRIMARY KEY (scope, holder, grant_id, seq));
+    CREATE INDEX IF NOT EXISTS stored_answer_kept_until ON stored_answer(kept_until);
     CREATE TABLE IF NOT EXISTS listing
       (id INTEGER PRIMARY KEY CHECK (id = 1), room_id TEXT NOT NULL, inc_tag TEXT, bucket TEXT NOT NULL,
        version INTEGER NOT NULL, due_at INTEGER);
@@ -233,8 +242,9 @@ function hasIncarnation(sql: SqlStorage, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or
- *  an expiring cell, the listing's next send, or when a route's session DO may be dropped, or null for none. */
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, an
+ *  expiring cell or a stored answer, the listing's next send, or when a route's session DO may be dropped, or null for
+ *  none. */
 function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
@@ -244,7 +254,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     }>(
       'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
         'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
-        'UNION ALL SELECT MIN(resume_at) FROM handoff)',
+        'UNION ALL SELECT MIN(resume_at) FROM handoff UNION ALL SELECT MIN(kept_until) FROM stored_answer)',
     )
     .one().deadline
   const sweep = nextLeaseSweep(sql)
@@ -560,4 +570,54 @@ function listHandoffs(sql: SqlStorage): Handoff[] {
 
 function deleteHandoff(sql: SqlStorage, { inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): void {
   sql.exec('DELETE FROM handoff WHERE inc = ? AND lane_key = ? AND seq = ?', inc, laneKey, seq)
+}
+
+/** The write that registered an inbox lease in an operation's transaction: the lease's scope and holder, and the order
+ *  the holder sent it under. */
+type AnswerKey = { scope: string; holder: string; order: LeaseOrder }
+/** What that operation answered, its commit's `seq` if it committed, and why the commit's hand-on lost it, if it did. */
+type KeptAnswer = { answer: Uint8Array; lost: string | null }
+
+function storeAnswer(
+  sql: SqlStorage,
+  { scope, holder, order }: AnswerKey,
+  inc: string,
+  { answer, commitSeq }: { answer: Uint8Array; commitSeq: number | null },
+  keptUntil: number,
+): void {
+  sql.exec(
+    'INSERT INTO stored_answer (scope, holder, grant_id, seq, inc, commit_seq, answer, kept_until) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    scope,
+    holder,
+    order.grant,
+    order.seq,
+    inc,
+    commitSeq,
+    answer,
+    keptUntil,
+  )
+}
+
+function readStoredAnswer(sql: SqlStorage, { scope, holder, order }: AnswerKey): KeptAnswer | null {
+  const rows = sql
+    .exec<{ answer: ArrayBuffer; lost: string | null }>(
+      'SELECT answer, lost FROM stored_answer WHERE scope = ? AND holder = ? AND grant_id = ? AND seq = ?',
+      scope,
+      holder,
+      order.grant,
+      order.seq,
+    )
+    .toArray()
+  const row = rows[0]
+  return row === undefined ? null : { answer: new Uint8Array(row.answer), lost: row.lost }
+}
+
+/** The hand-on of `inc`'s commit `commitSeq` lost it: the answer of the operation that committed it says so. */
+function recordAnswerLoss(sql: SqlStorage, inc: string, commitSeq: number, lost: string): void {
+  sql.exec('UPDATE stored_answer SET lost = ? WHERE inc = ? AND commit_seq = ?', lost, inc, commitSeq)
+}
+
+function deleteExpiredAnswers(sql: SqlStorage, now: number): void {
+  sql.exec('DELETE FROM stored_answer WHERE kept_until <= ?', now)
 }

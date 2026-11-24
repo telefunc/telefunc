@@ -7,14 +7,12 @@ export {
   dropLeaseScopes,
   grantHolder,
   initLeaseSchema,
-  leaseAnswer,
   leaseRegistered,
   liveLeases,
   nextLeaseSweep,
   registerLease,
   removeLease,
   renewLease,
-  setLeaseAnswer,
   sweepLeases,
 }
 export type { Lease, LeaseOrder, LeaseRegistered, LeaseRemoved, LeaseRenewed, LeaseWritten }
@@ -28,8 +26,7 @@ import { CallNotSent, type Invoke } from './OrderedStubs.js'
 // sequence number: one under a grant the holder no longer has, or not after the row's latest, changes nothing. An
 // expired row stays, answered as lapsed, until its holder registers again; a holder's grant and rows go once it has
 // held no unexpired lease for LEASE_TTL_MS, and every write it sent before carries a grant the authority no longer has.
-// A register that carries the exact order of its row is that register again: it changes nothing, and its caller gets
-// the answer stored with the row, if any.
+// A register that carries the exact order of its row is that register again: it changes nothing.
 
 const LEASE_TTL_MS = 90_000
 const LEASE_RENEW_EVERY_MS = LEASE_TTL_MS / 3
@@ -50,7 +47,7 @@ const LEASE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS telefunc_lease_holder_active_at ON telefunc_lease_holder(active_at);
   CREATE TABLE IF NOT EXISTS telefunc_lease
     (scope TEXT NOT NULL, holder TEXT NOT NULL, lease TEXT NOT NULL, grant_id INTEGER NOT NULL, seq INTEGER NOT NULL,
-     bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, answer BLOB, PRIMARY KEY (scope, holder));
+     bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (scope, holder));
   CREATE INDEX IF NOT EXISTS telefunc_lease_by_holder ON telefunc_lease(holder);
 `
 
@@ -161,7 +158,7 @@ function removeLease(
   }
   if (!isAfter(order, fence)) return 'removed'
   sql.exec(
-    'UPDATE telefunc_lease SET grant_id = ?, seq = ?, answer = NULL, ' +
+    'UPDATE telefunc_lease SET grant_id = ?, seq = ?, ' +
       'expires_at = CASE WHEN lease = ? THEN 0 ELSE expires_at END WHERE scope = ? AND holder = ?',
     order.grant,
     order.seq,
@@ -170,32 +167,6 @@ function removeLease(
     holder,
   )
   return 'removed'
-}
-
-/** Stores what the register of `order` answered, for a copy of it that comes again, while it is the row's latest
- *  write. */
-function setLeaseAnswer(sql: SqlStorage, scope: string, holder: string, order: LeaseOrder, answer: Uint8Array): void {
-  sql.exec(
-    'UPDATE telefunc_lease SET answer = ? WHERE scope = ? AND holder = ? AND grant_id = ? AND seq = ?',
-    answer,
-    scope,
-    holder,
-    order.grant,
-    order.seq,
-  )
-}
-
-/** What the row's latest register answered, as `setLeaseAnswer()` stored it. */
-function leaseAnswer(sql: SqlStorage, scope: string, holder: string): Uint8Array | null {
-  const rows = sql
-    .exec<{ answer: ArrayBuffer | null }>(
-      'SELECT answer FROM telefunc_lease WHERE scope = ? AND holder = ?',
-      scope,
-      holder,
-    )
-    .toArray()
-  const answer = rows[0]?.answer ?? null
-  return answer === null ? null : new Uint8Array(answer)
 }
 
 /** The unexpired leases on `scopes`, by holder, with the bucket each holder is in. */
