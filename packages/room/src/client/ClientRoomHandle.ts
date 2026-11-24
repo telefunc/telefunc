@@ -209,7 +209,8 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
    *  applies it before that call runs. */
   private declare(change: WantChange): void {
     if (this.mirror.model.closed) {
-      this.end._setSubscribed('text', false) // a closed room takes no declaration
+      // A closed room keeps no want: the page drops its room-wide text and declares nothing else.
+      this.end._setSubscribed('text', false)
       return
     }
     switch (change.kind) {
