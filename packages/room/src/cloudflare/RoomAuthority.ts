@@ -98,6 +98,7 @@ type AcceptedCommitWire = {
 }
 /** A session DO subscribed to a lane, and the bucket it is in. */
 type RouteHolder = { holder: string; bucket: string }
+const routeHolder = (holder: string, bucket: string): RouteHolder => ({ holder, bucket })
 /** A commit the transaction accepted: its order, the lanes it reaches, and the session DOs subscribed to them then. */
 type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteHolder[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
@@ -324,7 +325,7 @@ class RoomAuthority {
     const handing = this.handingOn.get(key)
     if (handing !== undefined) return handing
     const { inc, laneKey, seq, timestamp, payload } = handoff
-    const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now())
+    const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now(), routeHolder)
     const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp }, true)
     const handed = this.settleHandOn(handoff, delivery)
     this.handingOn.set(key, handed)
@@ -550,6 +551,7 @@ function commitIn(
     sql,
     laneKeys.map((laneKey) => routeScope(inc, laneKey)),
     now,
+    routeHolder,
   )
   return { kind: 'accepted', mark, laneKeys, routes }
 }

@@ -11,7 +11,12 @@ export type {
   TelefuncBroadcastStub,
 }
 
-import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
+import {
+  KNOWN_BROADCAST_BUCKETS,
+  getBucketCoordinatorScale,
+  getDeterministicKeyBucketIndex,
+  readLocationBucket,
+} from './routing.js'
 import { CallNotSent, type CallOptions, type Invoke, type OrderedStubs } from './OrderedStubs.js'
 import { TransientRetry } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
@@ -278,10 +283,7 @@ class CloudflareBroadcastAuthorityState {
 
   /** The route's member DOs whose presence is unexpired, each with its bucket. */
   livePresence(routeKey: string, now: number): MemberPlacement[] {
-    return liveLeases<LocationBucket>(this.sql(), [routeKey], now).map(({ holder, bucket }) => ({
-      member: holder,
-      bucket,
-    }))
+    return liveLeases(this.sql(), [routeKey], now, (member, bucket) => ({ member, bucket: readLocationBucket(bucket) }))
   }
 
   private transaction<T>(fn: (sql: SqlStorage) => T): T {

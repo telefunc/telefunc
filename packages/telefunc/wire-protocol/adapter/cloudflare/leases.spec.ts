@@ -21,7 +21,7 @@ function authority() {
     grant,
     register: (id: string, seq: number, now = 0, order = { grant, seq }) => registerLease(sql, lease(id), order, now),
     remove: (id: string, seq: number, now = 0) => removeLease(sql, 'room:test', 'member', id, { grant, seq }, now),
-    live: (now = 0) => liveLeases(sql, ['room:test'], now).map(({ holder }) => holder),
+    live: (now = 0) => liveLeases(sql, ['room:test'], now, (holder) => holder),
   }
 }
 

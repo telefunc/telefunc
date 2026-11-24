@@ -8,6 +8,7 @@ export {
   getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   readForwardedTarget,
+  readLocationBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 }
@@ -34,6 +35,10 @@ const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** The session Durable Object's name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
+/** Each bucket Broadcast places members in, by its name. */
+const BROADCAST_BUCKETS_BY_NAME = new Map<string, LocationBucket>(
+  DEFAULT_BROADCAST_BUCKETS.map((bucket) => [bucket, bucket]),
+)
 
 type LocationBucket = DurableObjectLocationHint
 type CloudflareScale = number | Partial<Record<DurableObjectLocationHint, number>>
@@ -52,6 +57,13 @@ const CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP = {
   SA: 'enam',
   AN: 'oc',
 } as const satisfies Partial<Record<string, DurableObjectLocationHint>>
+
+/** `bucket` as it was stored, once checked as one of the buckets Broadcast places members in. */
+function readLocationBucket(bucket: string): LocationBucket {
+  const known = BROADCAST_BUCKETS_BY_NAME.get(bucket)
+  if (known === undefined) assert(false, `Invalid Broadcast location bucket "${bucket}".`)
+  return known
+}
 
 /** Builds the concrete session Durable Object name for one bucket-local shard ordinal. */
 function getSessionShardName(baseInstanceName: string, locationBucket: LocationBucket, shardOrdinal: number): string {
