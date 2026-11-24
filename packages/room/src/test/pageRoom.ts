@@ -4,7 +4,8 @@ import type { ChannelPublishInfo } from 'telefunc/__internal'
 import { ClientRoom } from '../client/room.js'
 import { LoneMember } from '../client/LoneMember.js'
 import type { ClientRoomEvent } from '../client/ClientRoomHandle.js'
-import type { ParticipantStubNotice, RoomStubRequest } from '../shared/protocol.js'
+import type { PageRequest } from '../client/ClientParticipant.js'
+import type { ParticipantStubNotice } from '../shared/protocol.js'
 
 /** What a stub's channel answers in place of the server's answer: a join's, a meta write's, a publish's. */
 type Answers = { join?: unknown; metaWrite?: unknown; publish?: unknown }
@@ -55,12 +56,12 @@ function stubChannel<Notice>(answers: Answers) {
   const closes: Array<() => void> = []
   let onText: ((notice: Notice, info: ChannelPublishInfo) => void) | null = null
   let seq = 0
-  const requests: RoomStubRequest[] = []
+  const requests: PageRequest[] = []
   let metaSeq = 0
   const end = {
     isClosed: false,
     isConnected: true,
-    send: async (req: RoomStubRequest) => {
+    send: async (req: PageRequest) => {
       requests.push(req)
       if (req.__r === 'req-join')
         return { ok: true, value: 'join' in answers ? answers.join : { id: 'me', joinedAt: 0 } }

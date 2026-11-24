@@ -1,5 +1,5 @@
 export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
-export type { AckedChannel, RoomChannel, PageLink }
+export type { AckedChannel, RoomChannel, PageLink, PageRequest }
 
 import { getOrCreate } from 'telefunc/__internal'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
@@ -30,8 +30,9 @@ function sendDmReply(end: Pick<ClientBroadcast, '_sendReply'>, ackId: string, re
   )
 }
 
-/** A request a page sends on a room's or a participant's channel. */
-type PageRequest = RoomStubRequest | ParticipantStubRequest
+/** A request a page sends on a room's or a participant's channel and awaits the answer of. A DM's reply is sent with
+ *  `sendDmReply()`, and nothing answers it. */
+type PageRequest = Exclude<RoomStubRequest | ParticipantStubRequest, { __r: 'dm-reply' }>
 
 /** A channel a page's requests go out on, each answered. */
 type AckedChannel = {
@@ -68,7 +69,6 @@ type RequestAnswers = {
   'req-leave': unknown
   'req-dm': unknown
   'req-private': unknown
-  'dm-reply': unknown
 }
 
 /** Reads each kind's answer as the channel hands it over, which no type carries across the wire. */
@@ -80,7 +80,6 @@ const ANSWERS: { [Kind in PageRequest['__r']]: (value: unknown) => RequestAnswer
   'req-leave': (value) => value,
   'req-dm': (value) => value,
   'req-private': (value) => value,
-  'dm-reply': (value) => value,
 }
 
 /** An acked request, as the answer its kind gets, or the error it failed with. */
