@@ -117,6 +117,8 @@ type RoomStatic = {
   ): Promise<ParticipantInfo<P>[]>
 }
 
+// The generic statics' casts give a room the M, P and Pub its caller declares, which nothing stored carries: as
+// `Broadcast.subscribe<U>()` gives a parsed payload the `U` its caller declares (core's `ServerBroadcast.ts`).
 const roomStatics: RoomStatic = {
   create: createRoom as RoomStatic['create'],
   get: getRoom as RoomStatic['get'],

@@ -83,7 +83,7 @@ class RoomRemotes {
   }
 
   /** A listener as the state calls it, with the sender it resolved, which the listener gets as `info.from`: `null` for
-   *  the server. */
+   *  the server. `info` is `any` as `MessageListener`'s is: it takes each `subscribe()` overload's listener. */
   taking<Data>(
     callback: (data: Data, info: any) => unknown,
   ): (data: Data, info: TakenInfo, from: ResolvedSender | null) => unknown {

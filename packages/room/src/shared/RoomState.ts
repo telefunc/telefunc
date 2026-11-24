@@ -25,7 +25,9 @@ import type { MemberWants, RoomDataEvent } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause } from '../types.js'
 
 type TrackListenerOptions = ListenerOptions & { track?: string }
-/** A `subscribe()` listener: its `info` has the frame's fields where it names a track. */
+/** A `subscribe()` listener: its `info` has the frame's fields where it names a track. `info` is `any` because the
+ *  public overloads type it by `options.track`, which no implementation signature ties to the listener: a narrower type
+ *  refuses one overload's listener. */
 type MessageListener<From extends unknown[]> = (data: unknown, info: any, ...from: From) => unknown
 /** A track listener's filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack
@@ -34,6 +36,8 @@ type TrackCounts = { all: number; named: Map<TrackKey, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
 /** A listener on tracks: `subscribeBinary()`'s gets their binary frames, `subscribe({ track })`'s their messages. */
 type TrackListener = {
+  // `any`: the list holds `subscribeBinary()`'s listeners, which take bytes, and `subscribe({ track })`'s, which take a
+  // message; `text` tells them apart, and `unknown` refuses the first.
   cb: (data: any, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) => unknown
   track: TrackFilter
   text: boolean
