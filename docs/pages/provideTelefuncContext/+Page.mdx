@@ -10,12 +10,10 @@ import { Link } from '@brillout/docpress'
 import { provideTelefuncContext } from 'telefunc'
 
 const { todoItems } = await provideTelefuncContext({ user }, () => onLoad())
-// getContext() inside onLoad() returns { user }
+// getContext() inside onLoad() returns `{ user }`
 ```
 
-Call your telefunction inside `fn` (e.g. in your test or your SSR request handler). `provideTelefuncContext(context, fn)` returns what `fn` returns.
-
-> If the telefunction calls `getContext()` after an `await`, add `import 'telefunc/async_hooks'`, see <Link href="/getContext#access" />.
+Call your telefunction inside the callback (e.g. in your test setup or your SSR request handler). The callback's return value is returned by `provideTelefuncContext()`.
 
 > With <Link href="/serve">`serve()`</Link> / <Link href="/Telefunc">`new Telefunc()`</Link>, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 
