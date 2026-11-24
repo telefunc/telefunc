@@ -17,7 +17,7 @@ import type { RoomOperationRequest } from '../server/store/roomOperations.js'
 function setup(
   answers: {
     register: Array<RegisterWire | Error | Promise<RegisterWire>>
-    renew: Array<RenewWire | Error>
+    renew: Array<RenewWire | Error | Promise<RenewWire>>
     open?: Array<Error | undefined>
     /** The answers to operations that carry an inbox's route. */
     carry?: Array<OperationWire | Error | Promise<OperationWire>>
@@ -145,6 +145,41 @@ describe('a Cloudflare Room lane', () => {
     await vi.advanceTimersByTimeAsync(5_000)
     expect(calls).toEqual({ register: 2, renew: 1 })
     expect(states).toEqual(['ready', 'lost', 'ready'])
+  })
+
+  it('whose renewal the room may have applied, its answer lost, is lost, registers its route again, and is ready again', async () => {
+    const { calls, states } = setup({ register: ['registered', 'registered'], renew: [new Error('connection reset')] })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect({ states, calls }).toEqual({ states: ['ready', 'lost', 'ready'], calls: { register: 2, renew: 1 } })
+  })
+
+  it('whose renewal the room never answers is lost once the renewal is given up, before its 90 s lease could have lapsed, and registers its route again', async () => {
+    const { calls, states } = setup({ register: ['registered', 'registered'], renew: [new Promise<never>(() => {})] })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(2 * ROUTE_RENEW_EVERY_MS - 1)
+    expect(states).toEqual(['ready'])
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect({ states, calls }).toEqual({ states: ['ready', 'lost', 'ready'], calls: { register: 2, renew: 1 } })
+  })
+
+  it('unsubscribed and subscribed again while its renewal waits for its answer, a lapse answered late changes nothing of the new subscription', async () => {
+    const late = new Promise<RenewWire>((resolve) => setTimeout(() => resolve('lapsed'), ROUTE_RENEW_EVERY_MS + 5_000))
+    const { attempt, calls, states, subscribe } = setup({ register: ['registered', 'registered'], renew: [late] })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS + 1_000)
+    await attempt.unsubscribe()
+    const again = subscribe({ kind: 'semantic' })
+    const after: string[] = []
+    again.onStateChange((state) => void after.push(state))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect({ states, after, state: again.state(), calls }).toEqual({
+      states: ['ready', 'closed'],
+      after: ['ready'],
+      state: 'ready',
+      calls: { register: 2, renew: 1 },
+    })
   })
 
   // Cloudflare's backoff draws each wait as `100 ms × random × 2^n`.
