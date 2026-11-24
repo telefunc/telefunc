@@ -44,7 +44,8 @@ function getRawContext(): Context | null {
 
 function restoreContext<T>(context: Context, fn: () => T): T {
   globalObject.neverRestored = false
-  return globalObject.restoreContext(context, fn)
+  // With telefunc@0.3.1 loaded first and no Async Hooks, `globalObject.restoreContext` is that version's function: it keeps the context until a timer fires.
+  return (isAsyncMode() ? globalObject.restoreContext : restoreContext_sync)(context, fn)
 }
 
 function provideContext(context: Telefunc.Context): void {
