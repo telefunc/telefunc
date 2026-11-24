@@ -209,7 +209,14 @@ function createCommandClient(redis: RedisClient): RedisClient {
         enableAutoPipelining: false,
         redisOptions: { ...redis.options.redisOptions, maxRetriesPerRequest: 0, reconnectOnError: null },
       })
-    : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null, enableOfflineQueue: false })
+    : redis.duplicate({
+        maxRetriesPerRequest: 0,
+        reconnectOnError: null,
+        enableOfflineQueue: false,
+        // Autopipelining holds a command until the next tick and writes it in a batch, which alone reaches the socket:
+        // each of the backend's commands is written when it is sent, as on its Cluster client.
+        enableAutoPipelining: false,
+      })
   recordAttempts(commands)
   return commands
 }
