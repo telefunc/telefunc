@@ -5,6 +5,7 @@ import { Cluster, Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RedisConnection } from './RedisConnection.js'
 import { addressOf, createSubscriberSocket, deploymentOf, type RedisClient } from './ioredis.js'
+import { RAW_COMMANDS, type RawCommand } from './rawCommands.js'
 import { redisFailure } from './redisFailure.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 
@@ -137,12 +138,10 @@ describe('a backend client that ended before anything waited on it', () => {
     clients.push(app)
     const connection = installed(app)
     while (connection.client.status !== 'end') await sleep(10)
-    const failure = await connection
-      .send('hkeys', (commands) => commands.hkeys('tf:0:k'))
-      .then(
-        () => 'answered',
-        (error: unknown) => error,
-      )
+    const failure = await connection.send(RAW_COMMANDS.hkeys, 'tf:0:k').then(
+      () => 'answered',
+      (error: unknown) => error,
+    )
     server.close()
 
     expect(failure).toMatchObject({
@@ -235,11 +234,14 @@ describe('a write whose connection failed, as ioredis rejects it', () => {
   })
 })
 
-/** What `send` rejects with when the reply to the command client's `name` is lost, on a command client that was ready. */
-async function replyLost(name: 'unlink' | 'hkeys', send: (connection: RedisConnection) => Promise<unknown>) {
+/** What `send` rejects with when the reply to the raw command `command` is lost, on a command client that was ready. */
+async function replyLost(command: RawCommand<unknown>) {
   const connection = installed(client())
-  vi.spyOn(connection.client, name).mockRejectedValue(new Error('Connection is closed.'))
-  const sent = send(connection)
+  vi.spyOn(connection.client, 'sendCommand').mockImplementation((...[request]) => {
+    request.reject(new Error('Connection is closed.'))
+    return request.promise
+  })
+  const sent = connection.send(command, 'tf:0:k')
   connection.client.emit('ready')
   return sent.then(
     () => 'answered',
@@ -249,15 +251,11 @@ async function replyLost(name: 'unlink' | 'hkeys', send: (connection: RedisConne
 
 describe('a command sent without a script, read or write as ioredis tells it', () => {
   it('UNLINK, a write: its lost reply says it may have run', async () => {
-    expect(
-      await replyLost('unlink', (connection) => connection.send('unlink', (commands) => commands.unlink('tf:0:k'))),
-    ).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
+    expect(await replyLost(RAW_COMMANDS.unlink)).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
   })
 
   it("HKEYS, a read: its lost reply says it didn't run", async () => {
-    expect(
-      await replyLost('hkeys', (connection) => connection.send('hkeys', (commands) => commands.hkeys('tf:0:k'))),
-    ).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
+    expect(await replyLost(RAW_COMMANDS.hkeys)).toMatchObject({ code: 'unreachable', outcome: 'not-run' })
   })
 })
 

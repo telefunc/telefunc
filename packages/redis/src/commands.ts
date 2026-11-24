@@ -5,7 +5,7 @@ export {
   REDIS_COMMANDS,
   assertCommittable,
 }
-export type { CommandName, CommitInput, Hold, OperationOutcome, RedisCommand }
+export type { CommitInput, Hold, OperationOutcome, RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
@@ -1262,10 +1262,11 @@ return reply
 
 type Invocation = { keys: readonly string[]; argv: ReadonlyArray<string | Buffer> }
 
-/** One script: whether it writes, its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
- *  first; `binaryReply` reads bulk strings as Buffers. */
-type RedisCommand<Input, Output, Name extends string = CommandName> = {
-  readonly name: Name
+/** One script: whether it writes, its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys` is how many KEYS
+ *  every call gives, `null` where a call's own input decides; `binaryReply` reads bulk strings as Buffers. */
+type RedisCommand<Input, Output> = {
+  /** The script's name, which tells it from the others where a run is read. */
+  readonly name: string
   readonly lua: string
   /** It may write: a failure that Redis doesn't prove came before it ran may have taken effect. */
   readonly writes: boolean
@@ -1277,12 +1278,7 @@ type RedisCommand<Input, Output, Name extends string = CommandName> = {
   parse(reply: unknown, input: Input): Output
 }
 
-const command = <Input, Output, Name extends string>(
-  spec: RedisCommand<Input, Output, Name>,
-): RedisCommand<Input, Output, Name> => spec
-
-/** The name each script is defined under on the backend's client (`defineCommand`). */
-type CommandName = (typeof REDIS_COMMANDS)[keyof typeof REDIS_COMMANDS]['name']
+const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
 
 type RoomInc = { roomId: string; inc: string }
 type DirectoryPutInput = { roomId: string; listing: string; checkAt: number; minDelayMs: number }
@@ -1907,7 +1903,7 @@ function besideArgv(beside: CellsBeside | undefined): [string, string, string, s
   return beside === undefined ? ['', '', '', ''] : ['1', beside.of, beside.reference, beside.target]
 }
 
-/** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */
+/** A copy, as a request may go past the call: while the client connects, on a TRYAGAIN retry, or resent after NOSCRIPT. */
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes)
 }

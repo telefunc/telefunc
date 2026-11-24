@@ -1,7 +1,11 @@
-// The client library's facts: the command client and subscriber socket the backend builds from an app's client, a
-// client's deployment and address, which raw commands write by ioredis's own command table, its wording for a command
-// it never wrote or redirected until it gave up. What a store's reply means is redisFailure.ts's.
+// The client library's facts: the command client and subscriber socket the backend builds from an app's client, the
+// backend's requests as ioredis commands of its own, a client's deployment and address, which raw commands write by
+// ioredis's own command table, its wording for a command it never wrote or redirected until it gave up. What a store's
+// reply means is redisFailure.ts's.
 export {
+  StoreRequest,
+  sendRequest,
+  scriptOf,
   createCommandClient,
   createSubscriberSocket,
   subscriberNodeCount,
@@ -18,42 +22,151 @@ export {
   slotOf,
   masterView,
 }
-export type { RedisClient, SubscriberSocket, RawCommand, MasterView }
+export type { RedisClient, SubscriberSocket, StoreScript, MasterView }
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { Writable } from 'node:stream'
 import { isDeepStrictEqual } from 'node:util'
 import { hasFlag } from '@ioredis/commands'
 import { Cluster, Command, Redis } from 'ioredis'
 import { isObject } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
 
-/** The client's commands the backend sends without a script, by their method's name: `getBuffer` is GET, its reply
- *  bytes. */
-const RAW_COMMANDS = [
-  'get',
-  'getBuffer',
-  'hget',
-  'hgetBuffer',
-  'hkeys',
-  'hmget',
-  'smembers',
-  'sscan',
-  'unlink',
-  'zrangebylex',
-] as const
-type RawCommand = (typeof RAW_COMMANDS)[number]
+/** Whether the raw command `name` may write: ioredis's own table of Redis's commands, which it routes by, doesn't flag it
+ *  `readonly`. The table throws for a name it lacks; no flag of a raw command is written by hand. */
+function rawWrites(name: string): boolean {
+  return !hasFlag(name, 'readonly')
+}
 
-/** The raw commands that may write: those ioredis's own table of Redis's commands, which it routes by, doesn't flag
- *  `readonly`. Built once; the table throws here for a name it lacks. */
-const WRITING: ReadonlySet<RawCommand> = new Set(
-  RAW_COMMANDS.filter((name) => !hasFlag(name.replace(/Buffer$/, ''), 'readonly')),
-)
+/** A script as the backend sends it: its source and its SHA1, by which a socket that ran it once runs it again. */
+type StoreScript = { lua: string; sha: string }
 
-/** Whether the raw command `name` may write, by ioredis's table: no flag of a raw command is written by hand. */
-function rawWrites(name: RawCommand): boolean {
-  return WRITING.has(name)
+/** Each script's SHA1, computed once. */
+const scripts = new Map<string, StoreScript>()
+
+function scriptOf(lua: string): StoreScript {
+  let script = scripts.get(lua)
+  if (script === undefined) {
+    script = { lua, sha: createHash('sha1').update(lua).digest('hex') }
+    scripts.set(lua, script)
+  }
+  return script
+}
+
+/** The scripts each socket ran, by SHA1: a socket's first request of a script sends its source (EVAL), later ones its
+ *  SHA1 (EVALSHA), as Redis keeps a script it ran until it restarts or SCRIPT FLUSH. */
+const socketScripts = new WeakMap<object, Set<string>>()
+
+/** How much of a request the backend hands its socket at once: the socket's progress then shows as each slice is taken,
+ *  and a large argument goes as slices of itself, never copied whole into one frame. */
+const SLICE_BYTES = 1024 * 1024
+
+/** One request of the backend, a raw command or a script, with its arguments (a script's: its key count, its keys, then
+ *  its arguments), as an ioredis command of its own, sent with `sendRequest()`. ioredis serializes it onto the socket it
+ *  writes it to (`toWritable()`): a script as EVAL or EVALSHA by what that socket ran, a request over a slice slice by
+ *  slice. `bytes` keeps the reply's bulk strings as bytes. */
+class StoreRequest extends Command {
+  private readonly script: StoreScript | undefined
+  /** The socket it was last written to. */
+  private socket: object | undefined
+
+  constructor(sent: { command: string } | { script: StoreScript }, args: (string | Buffer)[], bytes: boolean) {
+    const script = 'script' in sent ? sent.script : undefined
+    const name = 'command' in sent ? sent.command : 'evalsha'
+    super(name, script === undefined ? args : [script.sha, ...args], { replyEncoding: bytes ? null : 'utf8' })
+    this.script = script
+  }
+
+  /** Whether `error` is Redis's answer that the socket the request was written to no longer has its script (NOSCRIPT),
+   *  which that socket then forgets: the request ran nothing, and a resend goes as EVAL. */
+  lostScript(error: unknown): boolean {
+    if (this.script === undefined || !isReplyError(error) || !error.message.startsWith('NOSCRIPT ')) return false
+    if (this.socket !== undefined) socketScripts.get(this.socket)?.delete(this.script.sha)
+    return true
+  }
+
+  override toWritable(socket: object): string | Buffer {
+    this.socket = socket
+    if (this.script !== undefined) {
+      let ran = socketScripts.get(socket)
+      if (ran === undefined) socketScripts.set(socket, (ran = new Set()))
+      const again = ran.has(this.script.sha)
+      ran.add(this.script.sha)
+      this.name = again ? 'evalsha' : 'eval'
+      this.args[0] = again ? this.script.sha : this.script.lua
+    }
+    const bytes = frameBytes(this.name, this.args)
+    // A socket that isn't a Node stream gets the frame whole.
+    if (bytes <= SLICE_BYTES || !(socket instanceof Writable)) return super.toWritable(socket)
+    const slices = slicesOf(framePieces(this.name, this.args), bytes)
+    const last = slices.pop()
+    assert(last !== undefined)
+    // ioredis writes what this returns right after, so the frame reaches the socket whole and in order.
+    for (const slice of slices) socket.write(slice)
+    return last
+  }
+}
+
+/** The length in bytes of the RESP frame of a command `name` with `args`, as ioredis writes it: each argument is
+ *  `$<length>\r\n<argument>\r\n`. */
+function frameBytes(name: string, args: readonly unknown[]): number {
+  let bytes = Buffer.byteLength(frameHead(name, args))
+  for (const arg of args) {
+    const length = Buffer.byteLength(argument(arg))
+    bytes += String(length).length + length + 5
+  }
+  return bytes
+}
+
+/** The RESP frame of a command `name` with `args`, as the pieces ioredis joins. */
+function framePieces(name: string, args: readonly unknown[]): (string | Buffer)[] {
+  const pieces: (string | Buffer)[] = [frameHead(name, args)]
+  for (const arg of args) pieces.push(`$${Buffer.byteLength(argument(arg))}\r\n`, argument(arg), '\r\n')
+  return pieces
+}
+
+const frameHead = (name: string, args: readonly unknown[]) =>
+  `*${args.length + 1}\r\n$${Buffer.byteLength(name)}\r\n${name}\r\n`
+
+/** An argument as ioredis keeps it once it made the command: a string or bytes. */
+function argument(arg: unknown): string | Buffer {
+  assert(typeof arg === 'string' || Buffer.isBuffer(arg))
+  return arg
+}
+
+/** The frame's pieces as slices of at most `SLICE_BYTES`: a piece longer than a slice is cut into views of itself. */
+function slicesOf(pieces: readonly (string | Buffer)[], bytes: number): Buffer[] {
+  const slices: Buffer[] = []
+  let pending: Buffer[] = []
+  let pendingBytes = 0
+  const flush = () => {
+    const [only] = pending
+    slices.push(pending.length === 1 && only !== undefined ? only : Buffer.concat(pending, pendingBytes))
+    pending = []
+    pendingBytes = 0
+  }
+  for (const piece of pieces) {
+    let left = typeof piece === 'string' ? Buffer.from(piece) : piece
+    while (left.length > 0) {
+      const taken = left.subarray(0, SLICE_BYTES - pendingBytes)
+      pending.push(taken)
+      pendingBytes += taken.length
+      left = left.subarray(taken.length)
+      if (pendingBytes === SLICE_BYTES) flush()
+    }
+  }
+  if (pendingBytes > 0) flush()
+  assert(slices.reduce((sum, slice) => sum + slice.length, 0) === bytes)
+  return slices
+}
+
+/** Sends `request` on `client`: its reply, as its `bytes` says. */
+function sendRequest(client: RedisClient, request: StoreRequest): Promise<unknown> {
+  void client.sendCommand(request)
+  return request.promise
 }
 
 /** What `RedisSubscriptions` needs of its connection. */

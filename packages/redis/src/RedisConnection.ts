@@ -8,18 +8,17 @@ import {
   isCluster,
   masterView,
   nextReady,
-  rawWrites,
+  scriptOf,
+  sendRequest,
+  StoreRequest,
   subscriberNodeCount,
-  type RawCommand,
   type RedisClient,
   type SubscriberSocket,
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
-// The scripts' methods on the client (`client[name]` in run()), in every program that compiles this file; it adds no
-// import to the emitted code or types.
-import type {} from './definedCommands.js'
+import type { RawCommand } from './rawCommands.js'
 import { redisFailure } from './redisFailure.js'
-import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
+import type { RedisCommand } from './commands.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 
@@ -67,18 +66,16 @@ class RedisConnection {
     return this.commands
   }
 
-  /** Sends the command client's command `name` once the client is ready, as `call` makes it, which reaches no other
-   *  command: a read or a write as ioredis's own table of Redis's commands says (`rawWrites()`). */
-  send<Name extends RawCommand, Output>(
-    name: Name,
-    call: (client: Pick<RedisClient, Name>) => Promise<Output>,
-  ): Promise<Output> {
-    return this.dispatch(rawWrites(name), call)
+  /** Sends the raw command `command` with `args` once the command client is ready: its reply, as the command reads it. */
+  async send<Output>(command: RawCommand<Output>, ...args: (string | Buffer)[]): Promise<Output> {
+    const request = () => new StoreRequest({ command: command.name }, args, command.bytes)
+    return command.parse(await this.dispatch(command.writes, request))
   }
 
-  /** Sends `command` on the command client once it is ready; a failure of Redis rejects as the backend reports it, with
-   *  what this dispatch proves of a command that `writes`, or can't (`redisFailure()`). */
-  private async dispatch<Output>(writes: boolean, command: (client: RedisClient) => Promise<Output>): Promise<Output> {
+  /** Sends the request `request()` makes on the command client once it is ready; a failure of Redis rejects as the
+   *  backend reports it, with what this dispatch proves of a request that `writes`, or can't (`redisFailure()`). A
+   *  socket that lost a script (SCRIPT FLUSH) answers NOSCRIPT before running it, and the request goes once more. */
+  private async dispatch(writes: boolean, request: () => StoreRequest): Promise<unknown> {
     const client = this.commands
     try {
       if (client.status !== 'ready') await nextReady(client)
@@ -87,7 +84,11 @@ class RedisConnection {
       throw redisFailure(error, client, false)
     }
     try {
-      return await command(client)
+      const sent = request()
+      return await sendRequest(client, sent).catch((error: unknown) => {
+        if (!sent.lostScript(error)) throw error
+        return sendRequest(client, request())
+      })
     } catch (error) {
       throw redisFailure(error, client, writes)
     }
@@ -131,7 +132,7 @@ class RedisConnection {
    *  what the old master accepted, and a subscriber connection on another node isn't cut by it: once a refresh of the
    *  client's slot map shows a slot on another master, its subscriptions follow the move (`followMoves`). */
   private makeCommandClient(redis: RedisClient): RedisClient {
-    const commands = commandClientOf(redis)
+    const commands = createCommandClient(redis)
     if (!isCluster(commands)) return commands
     /** Each slot's master at the last refresh that listed it. */
     const masters: (string | undefined)[] = []
@@ -148,25 +149,14 @@ class RedisConnection {
     return commands
   }
 
+  /** Runs the script `command` for `input` once the command client is ready: its reply, as the command reads it. */
   async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
-    const parts = command.numberOfKeys === null ? [[String(keys.length)], keys, argv] : [keys, argv]
-    const name = command.binaryReply ? bufferForm(command.name) : command.name
-    // Each part an array argument, which ioredis flattens into the command, so no array joins them first: an
-    // incarnation's keys can outnumber a call's arguments. The method is the script's, as definedCommands.ts types it.
-    return command.parse(await this.dispatch(command.writes, (client) => client[name](...parts)), input)
+    // EVAL and EVALSHA take the key count, then the keys, then the arguments.
+    const args = [String(keys.length), ...keys, ...argv]
+    const script = scriptOf(command.lua)
+    const request = () => new StoreRequest({ script }, args, command.binaryReply === true)
+    return command.parse(await this.dispatch(command.writes, request), input)
   }
-}
-
-/** The method of a defined command whose reply holds bytes. */
-const bufferForm = <Name extends string>(name: Name): `${Name}Buffer` => `${name}Buffer`
-
-/** The backend's own client for its commands, with its scripts defined. */
-function commandClientOf(redis: RedisClient): RedisClient {
-  const commands = createCommandClient(redis)
-  for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS)) {
-    commands.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
-  }
-  return commands
 }

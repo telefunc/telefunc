@@ -57,6 +57,7 @@ import { decodeLaneOrder, laneWhere, type LaneStart, type StartRead, type Starts
 import { assert } from './assert.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { neverReachedSubscription } from './RedisSubscriptions.js'
+import { RAW_COMMANDS } from './rawCommands.js'
 import type { WaitingSend, WaitRule } from './NewSubscriptionWait.js'
 
 const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
@@ -205,8 +206,8 @@ class RedisRoomDriver implements RoomDriver {
   private async memberLanes(roomId: string, inc: string, member: string): Promise<DroppedMember> {
     const { prefix } = this.connection
     const [lanes, retained] = await Promise.all([
-      this.connection.send('hkeys', (client) => client.hkeys(memberOrderKey(prefix, roomId, inc, member))),
-      this.connection.send('smembers', (client) => client.smembers(retainedOfKey(prefix, roomId, inc, member))),
+      this.connection.send(RAW_COMMANDS.hkeys, memberOrderKey(prefix, roomId, inc, member)),
+      this.connection.send(RAW_COMMANDS.smembers, retainedOfKey(prefix, roomId, inc, member)),
     ])
     return { member, lanes, retained }
   }
@@ -411,19 +412,20 @@ class RedisRoomDriver implements RoomDriver {
     const laneKey = this.kit.encodeLaneKey(lane)
     const record =
       lane.kind === 'inbox' || lane.kind === 'binary'
-        ? await this.connection.send('hgetBuffer', (client) =>
-            client.hgetBuffer(memberOrderKey(this.connection.prefix, roomId, inc, lane.member), laneKey),
+        ? await this.connection.send(
+            RAW_COMMANDS.hgetBytes,
+            memberOrderKey(this.connection.prefix, roomId, inc, lane.member),
+            laneKey,
           )
-        : await this.connection.send('getBuffer', (client) =>
-            client.getBuffer(orderKey(this.connection.prefix, roomId, inc, laneKey)),
-          )
+        : await this.connection.send(RAW_COMMANDS.getBytes, orderKey(this.connection.prefix, roomId, inc, laneKey))
     if (record === null) return null
     return { seq: decodeLaneOrder(record, laneWhere(roomId, laneKey)).place }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const frame = await this.connection.send('getBuffer', (client) =>
-      client.getBuffer(retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane))),
+    const frame = await this.connection.send(
+      RAW_COMMANDS.getBytes,
+      retainedKey(this.connection.prefix, roomId, inc, this.kit.encodeLaneKey(lane)),
     )
     if (frame === null) return null
     const decoded = decodeRetainedFrame(frame)
@@ -439,9 +441,7 @@ class RedisRoomDriver implements RoomDriver {
           ? retainedOfKey(this.connection.prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this.connection.prefix, roomId, inc, of.track)
     }
-    return (await this.connection.send('smembers', (client) => client.smembers(index))).map((laneKey) =>
-      this.kit.decodeLaneKey(laneKey),
-    )
+    return (await this.connection.send(RAW_COMMANDS.smembers, index)).map((laneKey) => this.kit.decodeLaneKey(laneKey))
   }
 
   /** Each page, and the manifest last, goes only while no live head names the incarnation: where one does, the drop
@@ -454,7 +454,7 @@ class RedisRoomDriver implements RoomDriver {
       do {
         // A page's scan needs the last one's cursor, not its drop, which the manifest doesn't see.
         const [[next, keys], dropped] = await Promise.all([
-          this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
+          this.connection.send(RAW_COMMANDS.sscan, manifest, cursor, 'COUNT', String(LANE_PAGE_SIZE)),
           dropping,
         ])
         if (dropped === false) return
@@ -480,15 +480,21 @@ class RedisRoomDriver implements RoomDriver {
 
   async directoryGet(roomId: string): Promise<Omit<DirectoryEntry, 'roomId'> | undefined> {
     const tagsKey = directoryTagsKey(this.connection.prefix)
-    const listing = await this.connection.send('hget', (client) => client.hget(tagsKey, roomId))
+    const listing = await this.connection.send(RAW_COMMANDS.hget, tagsKey, roomId)
     return listing === null ? undefined : directoryEntry(roomId, listing)
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this.connection.prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this.connection.send('zrangebylex', (client) =>
-      client.zrangebylex(index, min, '+', 'LIMIT', 0, this.kit.DIRECTORY_PAGE_SIZE + 1),
+    const page = await this.connection.send(
+      RAW_COMMANDS.zrangebylex,
+      index,
+      min,
+      '+',
+      'LIMIT',
+      '0',
+      String(this.kit.DIRECTORY_PAGE_SIZE + 1),
     )
     const matching: string[] = []
     for (const member of page) {
@@ -498,9 +504,7 @@ class RedisRoomDriver implements RoomDriver {
     const roomIds = matching.slice(0, this.kit.DIRECTORY_PAGE_SIZE)
     const last = roomIds.at(-1)
     if (last === undefined) return { entries: [] }
-    const tags = await this.connection.send('hmget', (client) =>
-      client.hmget(directoryTagsKey(this.connection.prefix), ...roomIds),
-    )
+    const tags = await this.connection.send(RAW_COMMANDS.hmget, directoryTagsKey(this.connection.prefix), ...roomIds)
     const entries = roomIds.flatMap((roomId, i) => {
       const listing = tags[i]
       return listing === null || listing === undefined ? [] : [directoryEntry(roomId, listing)]
