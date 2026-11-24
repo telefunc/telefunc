@@ -197,8 +197,10 @@ function keyRange(column: string, prefix: string, cursor?: string): { where: str
 /** The least string above every string starting with `prefix` (TEXT compares by code point), or null for none. */
 function prefixEnd(prefix: string): string | null {
   const codePoints = [...prefix]
-  while (codePoints.length > 0) {
-    const next = codePoints.pop()!.codePointAt(0)! + 1
+  for (let last = codePoints.pop(); last !== undefined; last = codePoints.pop()) {
+    const point = last.codePointAt(0)
+    assert(point !== undefined)
+    const next = point + 1
     if (next <= 0x10ffff) return codePoints.join('') + String.fromCodePoint(next === 0xd800 ? 0xe000 : next)
   }
   return null
@@ -209,10 +211,12 @@ function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   const row = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()[0]
   if (row === undefined) return null
   if (row.expires_at !== null && row.expires_at <= now) return null
+  const { state } = row
+  assert(state === 'open' || state === 'closing' || state === 'closed')
   const head: StoredHead = {
     rev: row.rev,
     currentInc: row.inc,
-    state: row.state as StoredHead['state'],
+    state,
     config: new Uint8Array(row.config),
     expiresAt: row.expires_at,
   }
@@ -431,7 +435,8 @@ function readCellPage(
     )
     .toArray()
   const page = cellPage(sql, inc, rows, now, beside)
-  if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
+  const last = rows.at(-1)
+  if (last !== undefined && rows.length === CELL_PAGE_SIZE) page.cursor = last.key
   return page
 }
 

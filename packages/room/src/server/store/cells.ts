@@ -39,6 +39,7 @@ export {
 }
 
 import type { CellsBeside, RequiredCells } from '../../backend/contract.js'
+import { assert } from '../../utils/assert.js'
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
 const MEMBER_CELL_PREFIX = 'm:'
@@ -156,9 +157,10 @@ function metaKeyCellKey(genPrefix: string, key: string): string {
 /** The key of a cell under `genPrefix`, or null for another generation's and for the generation's mark, `genPrefix`
  *  itself. */
 function metaKeyOfCellKey(genPrefix: string, cellKey: string): string | null {
-  return cellKey.startsWith(genPrefix) && cellKey !== genPrefix
-    ? (JSON.parse(cellKey.slice(genPrefix.length)) as string)
-    : null
+  if (!cellKey.startsWith(genPrefix) || cellKey === genPrefix) return null
+  const key: unknown = JSON.parse(cellKey.slice(genPrefix.length))
+  assert(typeof key === 'string')
+  return key
 }
 
 /** A recipient's reply to an acknowledged DM, under its sender's prefix until the sender settles it. */

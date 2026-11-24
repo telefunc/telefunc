@@ -1,5 +1,6 @@
 export { RoomView, RoomRemotes, remoteBacking }
 
+import { assert } from '../utils/assert.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { type ChannelPublishInfo, tetherTo, untether, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import type { ListenerOptions } from './disposer.js'
@@ -34,9 +35,18 @@ type ShownParticipant = {
  *  participants `snapshot()` lists of it share one. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
 
-const { remoteBackings } = getGlobalObject('shared/RoomView.ts', () => ({
-  remoteBackings: new WeakMap<object, RemoteBacking>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    remoteBackings: new WeakMap<object, RemoteBacking>(),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'shared/RoomView.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { remoteBackings } = getGlobalObject('shared/RoomView.ts', createGlobalObject)
 
 /** The state and entry behind a minted `RemoteParticipant` (`null` for anything else). */
 function remoteBacking(value: unknown): RemoteBacking | null {
@@ -186,7 +196,9 @@ class RoomRemotes {
     }
     for (const name of participantFields().keys()) values[name] = ownValue(fieldValue(fields, name))
     const participant: RemoteParticipant = Object.freeze(Object.create(remote, values))
-    remoteBackings.set(participant, remoteBackings.get(remote)!)
+    const backing = remoteBackings.get(remote)
+    assert(backing !== undefined)
+    remoteBackings.set(participant, backing)
     this.shown.set(entry, { meta, isConnected, fields, participant })
     return participant
   }

@@ -15,7 +15,7 @@ import {
   utf8ByteLength,
 } from 'telefunc/__internal'
 import { Abort } from 'telefunc/client'
-import { assertUsage } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
 import { makeDisposer, replayToLateListener, type ListenerOptions } from './disposer.js'
 import { DM_FAILURE, participantLeftError } from './errors.js'
 import {
@@ -302,7 +302,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     pending.push({ msg, bytes, ackResolve })
     this.pendingInboxBytes += bytes
     while (this.pendingInboxBytes > PUBLISH_HOLD_BYTES) {
-      const dropped = pending.shift()!
+      const dropped = pending.shift()
+      assert(dropped !== undefined)
       this.pendingInboxBytes -= dropped.bytes
       dropped.ackResolve?.(DM_FAILURE.overflow)
     }

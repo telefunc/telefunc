@@ -3,6 +3,7 @@ export type { ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
+import { isObject } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
@@ -25,7 +26,7 @@ import { departureCause } from '../shared/RoomModel.js'
 import { RoomState, type RoomStateOwner, type WantChange } from '../shared/RoomState.js'
 import { RoomRemotes } from '../shared/RoomView.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
-import { roomResultValue } from '../shared/errors.js'
+import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
 import {
   ClientParticipant,
@@ -112,10 +113,10 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const reqId = this.joins.start()
     try {
-      const { id, joinedAt } = (await request(this.end, { __r: 'req-join', reqId, meta, selfDelivery })) as {
-        id: string
-        joinedAt: number
-      }
+      const joined = await request(this.end, { __r: 'req-join', reqId, meta, selfDelivery })
+      assert(isObject(joined), 'A join was answered with no member')
+      const { id, joinedAt } = joined
+      assert(typeof id === 'string' && typeof joinedAt === 'number', 'A join was answered with no member')
       const participant = new ClientParticipant({
         link: this,
         // A page's join carries no identity: it's server-assigned (see JoinOptions.identity).
@@ -151,11 +152,11 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   async publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return roomResultValue<ChannelPublishAck>(this.end._publishUnreported(publish))
+    return publishAck(await roomResultValue(this.end._publishUnreported(publish)))
   }
 
   async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
+    return publishAck(await roomResultValue(this.end._publishBinaryUnreported(framed, stream, lossy)))
   }
 
   get isConnected(): boolean {

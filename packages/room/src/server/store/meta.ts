@@ -108,8 +108,9 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
   while (runs.length > 1) {
     const merged: RoomMetaEntry[][] = []
     for (let r = 0; r < runs.length; r += 2) {
-      const a = runs[r]!
+      const a = runs[r]
       const b = runs[r + 1]
+      assert(a !== undefined)
       merged.push(b === undefined ? a : await mergePair(a, b, slice))
     }
     runs = merged
@@ -120,14 +121,23 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
 /** Two sorted runs as one, within `slice`. */
 async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): Promise<RoomMetaEntry[]> {
   const out: RoomMetaEntry[] = []
+  // Past a run's end, its next entry is undefined.
   let i = 0
   let j = 0
-  while (i < a.length && j < b.length) {
-    out.push(compareMetaEntries(a[i]!, b[j]!) < 0 ? a[i++]! : b[j++]!)
+  let x = a[i]
+  let y = b[j]
+  while (x !== undefined && y !== undefined) {
+    if (compareMetaEntries(x, y) < 0) {
+      out.push(x)
+      x = a[++i]
+    } else {
+      out.push(y)
+      y = b[++j]
+    }
     if (out.length % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
   }
-  while (i < a.length) out.push(a[i++]!)
-  while (j < b.length) out.push(b[j++]!)
+  for (; x !== undefined; x = a[++i]) out.push(x)
+  for (; y !== undefined; y = b[++j]) out.push(y)
   return out
 }
 
@@ -157,7 +167,10 @@ async function readMetaPaged(
   if (before.kind === 'stale-incarnation') return null
   const seq = before.cells.get(META_SEQ_CELL_KEY)
   if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
-  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!))
+  // The first write stores the generation with `meta:seq`.
+  const gen = before.cells.get(META_GEN_CELL_KEY)
+  assert(gen !== undefined)
+  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(gen))
   const runs: RoomMetaEntry[][] = []
   const slice = new Slice()
   for await (const page of reads.readCellPages(roomId, inc, prefix)) {
@@ -175,7 +188,10 @@ async function readMetaPaged(
 async function readMetaWhole(store: RoomStore, roomId: string, inc: string): Promise<StoredRoomMeta | null> {
   const read = await store.reads.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if (read.kind === 'stale-incarnation') return null
-  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
+  const gen = read.cells.get(META_GEN_CELL_KEY)
+  const seq = read.cells.get(META_SEQ_CELL_KEY)
+  assert(gen !== undefined && seq !== undefined)
+  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(gen))
   const runs: RoomMetaEntry[][] = []
   let run = new Map<string, Uint8Array>()
   const slice = new Slice()
@@ -187,7 +203,7 @@ async function readMetaWhole(store: RoomStore, roomId: string, inc: string): Pro
     if (slice.over) await slice.next()
   }
   runs.push(metaRun(run, prefix))
-  return { entries: await mergeRuns(runs), seq: decodeCellCounter(read.cells.get(META_SEQ_CELL_KEY)!).value }
+  return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
 }
 
 /** How many writes the stored meta reflects; null once the incarnation is gone. */
@@ -439,7 +455,9 @@ async function settleCutMember(
   member: string,
 ): Promise<void> {
   const seq = metaSeqOf(records.get(memberCellKey(member)))
-  byMember.set(member, await settleMemberMetaCells(store, room, member, seq, byMember.get(member)!))
+  const cells = byMember.get(member)
+  assert(cells !== undefined)
+  byMember.set(member, await settleMemberMetaCells(store, room, member, seq, cells))
 }
 
 /** The meta cells under `prefix` by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time, and the members that
@@ -508,8 +526,7 @@ async function memberMetaOf(id: string, recordGen: number, cells: MemberMetaCell
   }
   const entries = await mergeRuns(runs)
   const meta: ParticipantMeta = {}
-  for (let i = 0; i < entries.length; i++) {
-    const [key, value] = entries[i]!
+  for (const [i, [key, value]] of entries.entries()) {
     Object.defineProperty(meta, key, { value, enumerable: true, configurable: true, writable: true })
     if (i % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
   }

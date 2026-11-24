@@ -43,9 +43,11 @@ function uuidToBytes(uuid: string): Uint8Array {
 /** First 16 bytes → canonical lowercase UUID string. */
 function bytesToUuid(bytes: Uint8Array): string {
   let uuid = ''
-  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) {
+  for (const [i, byte] of bytes.subarray(0, MEMBER_ID_BYTE_LENGTH).entries()) {
     if (i === 4 || i === 6 || i === 8 || i === 10) uuid += '-'
-    uuid += BYTE_TO_HEX[bytes[i]!]!
+    const hex = BYTE_TO_HEX[byte]
+    assert(hex !== undefined)
+    uuid += hex
   }
   return uuid
 }
@@ -165,8 +167,9 @@ function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undef
 }
 
 function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
-  if (data.byteLength < cursor.offset + 2) return undefined
-  const length = (data[cursor.offset]! << 8) | data[cursor.offset + 1]!
+  const [high, low] = data.subarray(cursor.offset, cursor.offset + 2)
+  if (high === undefined || low === undefined) return undefined
+  const length = (high << 8) | low
   cursor.offset += 2
   if (data.byteLength < cursor.offset + length) return undefined
   const serialized = decodeFrameText(data.subarray(cursor.offset, cursor.offset + length))
@@ -193,8 +196,8 @@ type BinaryFrame = {
 }
 
 function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
-  if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
-  const flags = data[MEMBER_ID_BYTE_LENGTH]!
+  const flags = data[MEMBER_ID_BYTE_LENGTH]
+  if (flags === undefined) return null
   if (flags & ~FRAME_FLAGS_KNOWN) return null
   const cursor = { offset: MEMBER_ID_BYTE_LENGTH + 1 }
   const track = flags & FRAME_FLAG_TRACK ? readTrackSection(data, cursor) : DEFAULT_TRACK

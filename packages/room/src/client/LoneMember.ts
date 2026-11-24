@@ -11,7 +11,7 @@ import {
   type ParticipantStubNotice,
   type ParticipantStubRequest,
 } from '../shared/protocol.js'
-import { roomResultValue } from '../shared/errors.js'
+import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomState, type RoomStateOwner } from '../shared/RoomState.js'
 import { RoomRemotes } from '../shared/RoomView.js'
 import {
@@ -58,11 +58,11 @@ class LoneMember implements PageLink {
   async publishText(_from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
     const req: ParticipantStubRequest = { __r: 'req-publish', data }
     if (retain) req.retain = true
-    return (await request(this.end, req)) as ChannelPublishAck
+    return publishAck(await request(this.end, req))
   }
 
   async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
-    return roomResultValue<ChannelPublishAck>(this.end._publishBinaryUnreported(framed, stream, lossy))
+    return publishAck(await roomResultValue(this.end._publishBinaryUnreported(framed, stream, lossy)))
   }
 
   /** Its own meta, as the room accepted it, lands here as its stub's `p-meta` notices of it do; its leave ends it and

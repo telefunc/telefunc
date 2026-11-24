@@ -62,6 +62,7 @@ import {
 import { SortedIds, compareCodePoints } from '../utils/SortedIds.js'
 import { TIMER_DELAY_MAX_MS } from '../shared/constants.js'
 import { MemoryCommitQueue, type MemoryAttempt } from './MemoryCommitQueue.js'
+import { assert } from '../utils/assert.js'
 
 type Expiring = { expiresAt: number | null }
 /** `lapsesAt`: the authority time the cell lapses at, for one written with `lapsesInMs`. */
@@ -292,7 +293,9 @@ function deleteRetainedEntry(incarnation: Incarnation, lane: LaneId): void {
 function dropMemberLanes(incarnation: Incarnation, member: string): void {
   incarnation.memberOrders.delete(member)
   for (const key of [...(incarnation.retainedOf.get(member) ?? [])]) {
-    deleteRetainedEntry(incarnation, incarnation.retained.get(key)!.lane)
+    const entry = incarnation.retained.get(key)
+    assert(entry !== undefined)
+    deleteRetainedEntry(incarnation, entry.lane)
   }
   if (incarnation.retained.get(SEMANTIC_LANE_KEY)?.owner === member) deleteRetainedEntry(incarnation, SEMANTIC_LANE)
 }
@@ -536,7 +539,11 @@ class MemoryRoomDriver implements RoomDriver {
     if (incarnation === undefined) return []
     if (of === undefined) return Array.from(incarnation.retained.values(), (entry) => copyLane(entry.lane))
     const keys = 'member' in of ? incarnation.retainedOf.get(of.member) : incarnation.retainedOfTrack.get(of.track)
-    return Array.from(keys ?? [], (key) => copyLane(incarnation.retained.get(key)!.lane))
+    return Array.from(keys ?? [], (key) => {
+      const entry = incarnation.retained.get(key)
+      assert(entry !== undefined)
+      return copyLane(entry.lane)
+    })
   }
 
   subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
@@ -607,7 +614,8 @@ class MemoryRoomDriver implements RoomDriver {
       const room = this.rooms.get(roomId)
       const incTag = this.liveHead(roomId, room, now)?.currentInc ?? null
       if (room === undefined || incTag === null) continue
-      if (entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: entries.at(-1)!.roomId }
+      const last = entries.at(-1)
+      if (last !== undefined && entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: last.roomId }
       entries.push({ roomId, incTag, version: room.version })
     }
     return { entries }

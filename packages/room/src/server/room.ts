@@ -47,11 +47,20 @@ class ServerRoom extends RoomView implements Room {
 }
 
 // One map each for every module graph of the server, as a Room from one graph is a Room in another.
-const { roomHandles, rooms } = getGlobalObject('server/room.ts', () => ({
-  roomHandles: new WeakMap<ServerRoom, RoomHandle>(),
-  /** The `Room` over each state, which the serializer finds a remote's room by. */
-  rooms: new WeakMap<RoomState, ServerRoom>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    roomHandles: new WeakMap<ServerRoom, RoomHandle>(),
+    /** The `Room` over each state, which the serializer finds a remote's room by. */
+    rooms: new WeakMap<RoomState, ServerRoom>(),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/room.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { roomHandles, rooms } = getGlobalObject('server/room.ts', createGlobalObject)
 
 /** The handle a user's `Room` is over, for Room's own code. */
 function handleOf(room: ServerRoom): RoomHandle {

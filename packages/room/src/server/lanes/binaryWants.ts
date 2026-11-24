@@ -35,8 +35,8 @@ function binaryWantsCovers(wants: BinaryWants, memberId: string, track: TrackKey
 function applyBinaryWantChange(wants: BinaryWants, { member, track, on }: BinaryWantChange): boolean {
   let wanted = member === EVERY_MEMBER ? wants.everyMember : wants.members.get(member)
   if (wanted === undefined) {
-    if (!on) return false
-    wants.members.set(member as string, (wanted = { all: false, tracks: new Set() }))
+    if (!on || member === EVERY_MEMBER) return false
+    wants.members.set(member, (wanted = { all: false, tracks: new Set() }))
   }
   if (track === EVERY_TRACK) {
     if (wanted.all === on) return false

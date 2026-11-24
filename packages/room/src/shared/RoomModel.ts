@@ -204,7 +204,9 @@ class RoomModel {
 
   /** A member `memberIds()` listed, as a roster carries it. */
   memberSnapshot(id: string): MemberSnapshot {
-    const { meta, joinedAt, identity, hidden } = this.members.get(id)!
+    const entry = this.members.get(id)
+    assert(entry !== undefined)
+    const { meta, joinedAt, identity, hidden } = entry
     const member: MemberSnapshot = { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity }
     if (hidden) member.hidden = true
     if (!meta.connected) member.disconnected = true
@@ -456,7 +458,9 @@ class RoomModel {
     const departing = new Map(roster.departing)
     let replayed = 0
     const replay = () => {
-      for (; replayed < events.length; replayed++) replayMembershipEvent(listed, departing, events[replayed]!)
+      for (let event = events[replayed]; event !== undefined; event = events[++replayed]) {
+        replayMembershipEvent(listed, departing, event)
+      }
     }
     replay()
     // The first roster narrates nothing, and `count` stays the seed until its members are in.

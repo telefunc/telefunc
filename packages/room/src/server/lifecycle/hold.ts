@@ -146,9 +146,18 @@ async function extendLapse(
 
 /** One close timer per room in this process, with the incarnation it closes; it checks the record again when it
  *  fires. */
-const { closeTimers } = getGlobalObject('server/lifecycle/hold.ts', () => ({
-  closeTimers: new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    closeTimers: new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>(),
+  }
+}
+declare module '../../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/lifecycle/hold.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { closeTimers } = getGlobalObject('server/lifecycle/hold.ts', createGlobalObject)
 
 function scheduleClose(room: RoomIncarnation, closesIn: number): void {
   clearTimeout(closeTimers.get(room.id)?.timer)

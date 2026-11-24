@@ -24,12 +24,18 @@ type RoomConfig = {
   departureTimeout?: number
 }
 
-const globalObject = getGlobalObject<{ config: RoomConfig }>('server/config.ts', () => ({ config: {} }))
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/config.ts': { config: RoomConfig }
+  }
+}
+const globalObject = getGlobalObject('server/config.ts', () => ({ config: {} }))
 
 /** `Room` defaults. */
-const roomConfig: RoomConfig = new Proxy({} as RoomConfig, {
+const target: RoomConfig = {}
+const roomConfig: RoomConfig = new Proxy(target, {
   get(_target, prop) {
-    return globalObject.config[prop as keyof RoomConfig]
+    return prop === 'emptyTimeout' || prop === 'departureTimeout' ? globalObject.config[prop] : undefined
   },
   set(_target, prop, value) {
     const configPath = `roomConfig.${String(prop)}`

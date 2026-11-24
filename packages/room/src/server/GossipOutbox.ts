@@ -79,7 +79,10 @@ class GossipOutbox {
       }
       this.renewing = false
       const wants: Want[] = []
-      while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this.waiting.length > 0) wants.push(this.waiting.shift()!)
+      for (let want = this.waiting.shift(); want !== undefined; want = this.waiting.shift()) {
+        wants.push(want)
+        if (wants.length === ROOM_DEMAND_PAGE_ENTRIES) break
+      }
       const page: RoomDemandPage = { __r: 'demand', instance: this.instance, page: ++this.pages, wants }
       this.inFlight++
       void this.sendPage(page)

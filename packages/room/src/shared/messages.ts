@@ -12,6 +12,7 @@ import {
 } from 'telefunc/__internal'
 import type { BinaryFrameInfo, RoomMessage, Sender } from '../types.js'
 import { senderSnapshot } from './arguments.js'
+import { assert } from '../utils/assert.js'
 
 type Source = {
   subscribe(
@@ -40,7 +41,8 @@ function roomMessages(source: Source, signal?: AbortSignal): AsyncIterableIterat
     if (error !== undefined) queue.clear()
     changed.resolve()
   }
-  const onAbort = () => finish(signal!.reason)
+  // Added only where there is a signal.
+  const onAbort = () => finish(signal?.reason)
   const receive = (message: RoomMessage, payloadBytes: number) => {
     if (!queue.push(message, payloadBytes))
       return finish(new ChannelOverflowError('Room message iterator buffer overflow'))
@@ -138,7 +140,9 @@ class MessageQueue {
 
   /** A queued message holding `from` left the queue. */
   private release(from: Sender): void {
-    const holders = this.holders.get(from)! - 1
+    const held = this.holders.get(from)
+    assert(held !== undefined)
+    const holders = held - 1
     if (holders > 0) {
       this.holders.set(from, holders)
     } else {

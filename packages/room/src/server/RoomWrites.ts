@@ -56,6 +56,7 @@ import { setMemberConnection, setMemberMeta, type MemberMetaWrite } from './stor
 import type { RoomReplica } from './RoomReplica.js'
 import type { PendingDmAcks } from './PendingDmAcks.js'
 import type { RoomGuardHooks } from './roomStatics.js'
+import { assert } from '../utils/assert.js'
 assertIsNotBrowser()
 
 /** The handle the writes go out through: its guards pass them. */
@@ -214,7 +215,8 @@ class RoomWrites {
 
   /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
   private stampedSender(from: string, sender: Sender): SenderStamp {
-    const accepted = this.model.acceptedMeta(from) ?? this.localParticipants.get(from)!._acceptedMeta
+    const accepted = this.model.acceptedMeta(from) ?? this.localParticipants.get(from)?._acceptedMeta
+    assert(accepted !== undefined)
     const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: accepted.seq }
     if (sender.identity !== null) stamp.fromIdentity = sender.identity
     if (accepted.disconnected) stamp.fromDisconnected = true

@@ -6,7 +6,12 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 type RoomServer = typeof import('./roomServer.js')
 
 // Per process: a dev server's second module graph serializes the rooms the first one made.
-const globalObject = getGlobalObject<{ loading?: Promise<RoomServer>; loaded?: RoomServer }>('server/load.ts', {})
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/load.ts': { loading?: Promise<RoomServer>; loaded?: RoomServer }
+  }
+}
+const globalObject = getGlobalObject('server/load.ts', () => ({}))
 
 /** Room's server code, imported on first use; until then a server loads only Room's entry and Cloudflare extension. */
 function loadRoomServer(): Promise<RoomServer> {

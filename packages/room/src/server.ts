@@ -7,6 +7,7 @@ import {
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from './shared/constants.js'
 import './cloudflare/extension.js'
+import { assert } from './utils/assert.js'
 
 /** Room's own replacer once Room's server code is loaded; until then no value is a room's. */
 function roomServerReplacer(
@@ -20,7 +21,9 @@ function roomServerReplacer(
       return server !== undefined && own(server).detect(value)
     },
     replace(value, context) {
-      return own(loadedRoomServer()!).replace(value, context)
+      const server = loadedRoomServer()
+      assert(server !== undefined)
+      return own(server).replace(value, context)
     },
   }
 }

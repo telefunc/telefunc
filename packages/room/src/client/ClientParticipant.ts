@@ -1,7 +1,7 @@
 export { ClientParticipant, acceptedMeta, reportClientCallbackError, request, sendDmReply }
 export type { PageLink }
 
-import { getOrCreate } from 'telefunc/__internal'
+import { getOrCreate, isObject } from 'telefunc/__internal'
 import type { ClientBroadcast } from 'telefunc/__internal'
 import type { TrackKey } from '../shared/binary.js'
 import type {
@@ -17,9 +17,11 @@ import type {
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
 import type { RoomRemotes } from '../shared/RoomView.js'
+import { isRecord } from '../shared/arguments.js'
 import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
 import { withChange } from '../utils/sets.js'
 import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '../types.js'
+import { assert } from '../utils/assert.js'
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
 function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
@@ -37,7 +39,19 @@ async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantS
 
 /** The meta the room accepted, which a meta write resolves to. */
 function acceptedMeta(req: MemberRequest, value: unknown): MemberMetaUpdate | null {
-  return req.__r === 'req-set-meta' || req.__r === 'req-update-meta' ? (value as MemberMetaUpdate) : null
+  return req.__r === 'req-set-meta' || req.__r === 'req-update-meta' ? memberMetaUpdate(value) : null
+}
+
+/** A meta write's answer: the member's meta at the write's seq, whole or as the write merged it
+ *  (`RoomWrites.writeMetaInOrder()`). */
+function memberMetaUpdate(value: unknown): MemberMetaUpdate {
+  assert(isObject(value), 'A meta write was answered with no update')
+  const { seq, meta, attrs, connected } = value
+  assert(typeof seq === 'number', 'A meta update has no seq')
+  if (isRecord(meta)) return value.disconnected === true ? { seq, meta, disconnected: true } : { seq, meta }
+  if (isRecord(attrs)) return { seq, attrs }
+  assert(typeof connected === 'boolean', 'A meta update carries neither meta nor a connection')
+  return { seq, connected }
 }
 
 /** Where a page's participant acts, and the room it lists the other participants by: the room it joined through

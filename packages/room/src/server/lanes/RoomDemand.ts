@@ -285,9 +285,9 @@ class RoomDemand {
     const { track, except } = entry
     const byMember = entry.byMember === true
     if (!on) {
-      if (held === undefined) return
-      leases!.delete(instance)
-      if (leases!.size === 0) this.tracks.delete(track)
+      if (leases === undefined || held === undefined) return
+      leases.delete(instance)
+      if (leases.size === 0) this.tracks.delete(track)
       return this.queueLease(track, { instance, was: held, now: undefined })
     }
     if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {

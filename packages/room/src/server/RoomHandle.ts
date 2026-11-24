@@ -415,7 +415,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
 
   /** A stub that is not attached holds no lanes. */
   private holdsLanes(holder: LaneHolder): boolean {
-    return holder === this.local || this.stubs.has(holder as RoomStub)
+    return holder === this.local || (holder instanceof RoomStub && this.stubs.has(holder))
   }
 
   /** Whether this handle observes the room: a client stub, a participant, or a listener besides the package fields'. */

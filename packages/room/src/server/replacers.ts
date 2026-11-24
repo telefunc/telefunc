@@ -13,6 +13,7 @@ import type { RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
 import { remoteBacking } from '../shared/RoomView.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
+import { assert } from '../utils/assert.js'
 assertIsNotBrowser()
 
 type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>
@@ -64,13 +65,17 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     return backing !== null && roomOf(backing.state) !== null
   },
   replace(remote, context) {
-    const { state, entry } = remoteBacking(remote)!
+    const backing = remoteBacking(remote)
+    assert(backing !== null)
+    const { state, entry } = backing
+    const room = roomOf(state)
+    assert(room !== null)
     // Returning a hidden member hands it to this client: its room stub relays that member's events. One that left is
     // not handed: as any member its room's roster doesn't list, it revives on the page as one that left.
     const handedHidden = entry.hidden && !entry.left
     if (handedHidden) responseHidden(context, state.model.roomId).add(entry.id)
     const metadata: RemoteParticipantMetadata = {
-      room: roomOf(state)!,
+      room,
       id: entry.id,
       meta: entry.meta.object,
       joinedAt: entry.joinedAt,

@@ -41,6 +41,7 @@ import {
   receiveFromPage,
   roomResult,
 } from './pageRequests.js'
+import { assert } from '../utils/assert.js'
 assertIsNotBrowser()
 
 type RoomParticipantStubOptions = {
@@ -192,7 +193,8 @@ class RoomParticipantStub implements BroadcastEndOwner {
    *  forwarded. */
   deliverAck(msg: InboxMessage): Promise<RoomResult> {
     if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
-    const reply = this.awaitDmReply(msg.ackId!)
+    assert(msg.ackId !== undefined)
+    const reply = this.awaitDmReply(msg.ackId)
     this.notify(dmNotice(msg))
     return this.end.trackAck(reply)
   }

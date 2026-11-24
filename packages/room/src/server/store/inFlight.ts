@@ -15,7 +15,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   if (first.done === true) return
   const slice = new Slice()
   let turn: Promise<void> | null = null
-  let failure = null as { error: unknown } | null
+  const failures: unknown[] = []
   const nextTurn = async () => {
     await slice.next()
     turn = null
@@ -26,7 +26,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
       try {
         await task(next.value)
       } catch (error) {
-        failure ??= { error }
+        failures.push(error)
       }
     }
   }
@@ -36,7 +36,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
     if (workers.length === ROOM_BACKEND_CALLS_IN_FLIGHT_MAX) break
   }
   await Promise.all(workers)
-  if (failure) throw failure.error
+  if (failures.length > 0) throw failures[0]
 }
 
 /** The value of `work`; else its failure, told once `awaited` settled. Beside a sibling that waits for what it

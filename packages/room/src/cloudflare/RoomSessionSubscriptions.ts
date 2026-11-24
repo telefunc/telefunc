@@ -197,7 +197,9 @@ class RoomSessionSubscriptions {
   }
 
   private async renewRoutes(roomId: string): Promise<void> {
-    const attempts = [...this.renewals.get(roomId)!.attempts]
+    const renewal = this.renewals.get(roomId)
+    assert(renewal !== undefined)
+    const attempts = [...renewal.attempts]
     this.renewals.delete(roomId)
     const sentAt = Date.now()
     let results: RenewWire[]
@@ -213,7 +215,12 @@ class RoomSessionSubscriptions {
       if (again.length > 0) this.renewAfterPause(roomId, again)
       return
     }
-    attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!, sentAt))
+    // The authority answers each route in turn.
+    attempts.forEach((attempt, index) => {
+      const result = results[index]
+      assert(result !== undefined)
+      attempt.onRenewal(result, sentAt)
+    })
   }
 }
 

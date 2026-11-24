@@ -34,9 +34,18 @@ class ClientRoom extends RoomView implements Room {
 }
 
 // One map for every module graph of the page, as a Room from one graph is a Room in another.
-const { roomHandles } = getGlobalObject('client/room.ts', () => ({
-  roomHandles: new WeakMap<ClientRoom, ClientRoomHandle>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    roomHandles: new WeakMap<ClientRoom, ClientRoomHandle>(),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'client/room.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { roomHandles } = getGlobalObject('client/room.ts', createGlobalObject)
 
 /** The handle a user's `Room` is over, for Room's own code. */
 function handleOf(room: ClientRoom): ClientRoomHandle {

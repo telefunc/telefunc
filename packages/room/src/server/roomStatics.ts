@@ -121,7 +121,7 @@ const roomStatics: RoomStatic = {
   create: createRoom as RoomStatic['create'],
   get: getRoom as RoomStatic['get'],
   getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],
-  guard: guardRoom as RoomStatic['guard'],
+  guard: guardRoom,
   join: joinRoom as RoomStatic['join'],
   list: listRooms as RoomStatic['list'],
   setMeta: setRoomMeta,
@@ -225,23 +225,26 @@ type RoomGuardHooks<P extends ParticipantMeta = ParticipantMeta> = {
 /** What `Room.guard()` takes: the hooks, and `anyoneCanJoin`, which lets any page join without an `onBeforeJoin`. */
 type RoomGuards<P extends ParticipantMeta = ParticipantMeta> = Partial<RoomGuardHooks<P>> & { anyoneCanJoin?: boolean }
 
-const ROOM_GUARD_KEYS = Object.keys({
+/** Each hook `Room.guard()` takes: its type lists every one. */
+const ROOM_GUARD_HOOKS: Record<keyof RoomGuardHooks, true> = {
   onBeforeJoin: true,
   onAfterJoin: true,
   onBeforeSend: true,
   onAfterSend: true,
   onBeforePublish: true,
   onAfterPublish: true,
-} satisfies Record<keyof RoomGuardHooks, true>) as (keyof RoomGuardHooks)[]
+}
+const ROOM_GUARD_KEYS = Object.keys(ROOM_GUARD_HOOKS).filter(isGuardKey)
 
-function guardRoom(
-  room: Room,
-  guards: Partial<Record<keyof RoomGuardHooks, unknown>> & { anyoneCanJoin?: unknown },
-): void {
+function isGuardKey(key: string): key is keyof RoomGuardHooks {
+  return key in ROOM_GUARD_HOOKS
+}
+
+function guardRoom(room: Room, guards: RoomGuards): void {
   assertUsage(ServerRoom.isServerRoom(room), ROOM_GUARD_USAGE)
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
   assertKnownOptions(guards, [...ROOM_GUARD_KEYS, 'anyoneCanJoin'], 'Room.guard()')
-  const { anyoneCanJoin } = guards
+  const { anyoneCanJoin, ...hooks } = guards
   assertUsage(
     anyoneCanJoin === undefined || typeof anyoneCanJoin === 'boolean',
     'Room.guard() anyoneCanJoin should be a boolean',
@@ -252,7 +255,6 @@ function guardRoom(
       `Room.guard() ${key} should be a function`,
     )
   }
-  const hooks = Object.fromEntries(ROOM_GUARD_KEYS.map((key) => [key, guards[key]])) as Partial<RoomGuardHooks>
   handleOf(room).setGuards({ ...hooks, anyoneCanJoin: anyoneCanJoin === true })
 }
 

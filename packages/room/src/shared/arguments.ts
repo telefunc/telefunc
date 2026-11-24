@@ -22,6 +22,7 @@ import { assertUsage } from '../utils/assert.js'
 import { assignAttributes } from './MemberMeta.js'
 import { freezeMeta } from './freezeMeta.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, PublishOptions, RoomMeta, Sender } from '../types.js'
+import { assert } from '../utils/assert.js'
 
 function assertPublishOptions(options: PublishOptions | undefined): void {
   assertKnownOptions(options, ['track', 'lossy', 'retain'], 'publish()')
@@ -43,12 +44,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return prototype === null || (Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object')
 }
 /** A value as it is now, detached from the caller's object: what its receivers decode. */
-function ownMessage<T>(value: T): T {
-  return parse(stringify(value)) as T
+function ownMessage(value: unknown): unknown {
+  return parse(stringify(value))
 }
 /** Take ownership of metadata at a state boundary and expose only the owned value, frozen. */
-function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
-  return freezeMeta(ownMessage(meta))
+function ownMetadata(meta: RoomMeta | ParticipantMeta): Record<string, unknown> {
+  const owned = ownMessage(meta)
+  // A record decodes as a record.
+  assert(isRecord(owned))
+  return freezeMeta(owned)
 }
 function ownLeaveCause(cause: LeaveCause): LeaveCause {
   return Object.freeze({ ...cause })

@@ -11,6 +11,7 @@ import {
   removeSubscriber,
   type Subscribers,
 } from 'telefunc/__internal'
+import { assert } from '../utils/assert.js'
 
 /** A Worker's timers die with the request that set them, so what waits for a turn would wait for good. There deliveries
  *  go on, and the runtime's own limits are what end a listener that never stops answering. */
@@ -52,7 +53,8 @@ class MemoryDeliveries {
       waiting > 0 && this.queue.length > 0;
       waiting--
     ) {
-      const delivery = this.queue.shift()!
+      const delivery = this.queue.shift()
+      assert(delivery !== undefined)
       this.delivering = true
       // What throws here is a bug, reported: it stops neither the queue behind it nor the commits waiting on it.
       try {

@@ -58,14 +58,23 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
   return hostLocal(REPLICAS, () => new Map<string, WeakRef<RoomReplica>>())
 }
 
-const { collected } = getGlobalObject('server/RoomReplica.ts', () => ({
-  /** Forgets a collected replica, unless a later one of its incarnation took its place. */
-  collected: new FinalizationRegistry<{ replicas: Map<string, WeakRef<RoomReplica>>; inc: string }>(
-    ({ replicas, inc }) => {
-      if (replicas.get(inc)?.deref() === undefined) replicas.delete(inc)
-    },
-  ),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    /** Forgets a collected replica, unless a later one of its incarnation took its place. */
+    collected: new FinalizationRegistry<{ replicas: Map<string, WeakRef<RoomReplica>>; inc: string }>(
+      ({ replicas, inc }) => {
+        if (replicas.get(inc)?.deref() === undefined) replicas.delete(inc)
+      },
+    ),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/RoomReplica.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { collected } = getGlobalObject('server/RoomReplica.ts', createGlobalObject)
 
 type RoomReplicaOptions = {
   incarnation: RoomIncarnation

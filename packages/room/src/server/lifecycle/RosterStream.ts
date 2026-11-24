@@ -119,17 +119,29 @@ class RosterStream {
    *  body, `built` by another stream or built here once; returns the body built here. */
   private sendPart(clients: RosterClient[], part: RosterPart, built: PartBody | undefined): PartBody | undefined {
     // Any client's listing is the visible one in a part with no hidden member.
-    const members = built?.hidden === false ? null : part.ids.map((id) => this.model.memberSnapshot(id))
-    const visible = members?.filter(({ hidden }) => !hidden)
+    if (built?.hidden === false) {
+      for (const client of clients) this.relay(client, part, built.body)
+      return undefined
+    }
+    const members = part.ids.map((id) => this.model.memberSnapshot(id))
+    const visible = members.filter(({ hidden }) => !hidden)
     let visibleBody = built?.body
     for (const client of clients) {
-      const listed = members && client.rosterMembers(members, visible!)
-      if (listed && listed !== visible) client.relayEventBody(rosterBody(listed, part))
-      else client.relayEventBody((visibleBody ??= rosterBody(visible!, part)))
-      if (!part.more) this.streamOf.delete(client)
+      const listed = client.rosterMembers(members, visible)
+      this.relay(
+        client,
+        part,
+        listed !== visible ? rosterBody(listed, part) : (visibleBody ??= rosterBody(visible, part)),
+      )
     }
     if (built !== undefined || visibleBody === undefined) return undefined
-    return { body: visibleBody, hidden: visible!.length < part.ids.length }
+    return { body: visibleBody, hidden: visible.length < part.ids.length }
+  }
+
+  /** `body` to `client`, whose stream ends with the part's last. */
+  private relay(client: RosterClient, part: RosterPart, body: PartBody['body']): void {
+    client.relayEventBody(body)
+    if (!part.more) this.streamOf.delete(client)
   }
 }
 

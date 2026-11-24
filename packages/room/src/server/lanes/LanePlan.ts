@@ -149,7 +149,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     this.queued.all = true
     this.schedulePlan()
     this.syncLanes()
-    return this.planning!
+    assert(this.planning !== null)
+    return this.planning
   }
 
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next

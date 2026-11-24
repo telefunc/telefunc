@@ -43,11 +43,20 @@ async function repairRoomIndex(store: RoomStore, listed: DirectoryEntry, head: R
   else await store.directoryDelete(id, version)
 }
 
-const globalObject = getGlobalObject('server/store/directory.ts', {
-  /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat
-   *  ticks. */
-  nextSweepAt: 0,
-})
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat
+     *  ticks. */
+    nextSweepAt: 0,
+  }
+}
+declare module '../../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'server/store/directory.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const globalObject = getGlobalObject('server/store/directory.ts', createGlobalObject)
 
 function sweepLapsedRoomsSoon(): void {
   const now = performance.now()

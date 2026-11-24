@@ -118,7 +118,7 @@ class ReplayGate {
       return
     }
     const high = this.binaryHigh.get(member)
-    if ((high?.get(track) ?? 0) >= seq) high!.set(track, seq - 1)
+    if (high !== undefined && (high.get(track) ?? 0) >= seq) high.set(track, seq - 1)
   }
 
   /** A sender no text want covers any more starts afresh: a later subscription gets its retained message again. */

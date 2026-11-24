@@ -8,6 +8,7 @@ import type { RoomModel } from '../../shared/RoomModel.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
 import { toggle, toggleEntry } from '../../utils/sets.js'
 import { withinRoomHorizon } from './lanes.js'
+import { assert } from '../../utils/assert.js'
 assertIsNotBrowser()
 
 /** The lane that serves a (member, track) pair: its named lane, the member's every-track lane, the track's
@@ -155,7 +156,9 @@ class BinaryLanes {
     const lane = this.everyTrack.get(member)
     if (lane === undefined) return false
     for (const track of this.namedByMember.get(member) ?? []) {
-      if (!this.named.get(namedKey(member, track))!.delivering) return false
+      const named = this.named.get(namedKey(member, track))
+      assert(named !== undefined)
+      if (!named.delivering) return false
     }
     if (this.waitsFor(this.establishingEveryMember, member)) return false
     this.everyTrack.delete(member)
@@ -169,7 +172,9 @@ class BinaryLanes {
   retireEveryMember(track: string, fetched: boolean): Exclude<TrackCoverage, 'every-member'> | undefined {
     if (!this.everyMember.has(track) && fetched === this.fetchedByMember.has(track)) return undefined
     for (const member of this.namedByTrack.get(track) ?? []) {
-      if (!this.named.get(namedKey(member, track))!.delivering) return undefined
+      const named = this.named.get(namedKey(member, track))
+      assert(named !== undefined)
+      if (!named.delivering) return undefined
     }
     if (this.waitsFor(this.establishingEveryTrack, track)) return undefined
     const lane = this.everyMember.get(track)

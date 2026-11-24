@@ -5,14 +5,23 @@ import type { LocalParticipant } from '../types.js'
 import type { ClientRoomHandle } from './ClientRoomHandle.js'
 
 /** What the page as a whole holds of Room, once across its module graphs. */
-const { heldMembers, rooms, roomHolds } = getGlobalObject('client/page.ts', () => ({
-  /** The members the page holds, joined through any of its rooms or held through their own channel, by id. */
-  heldMembers: new Map<string, LocalParticipant>(),
-  /** The page's rooms, each showing a member the page holds as the page's own connection to it. */
-  rooms: new Set<WeakRef<ClientRoomHandle>>(),
-  /** Each member handle's `join()` promise, which keeps a room a telefunction returned open while reachable. */
-  roomHolds: new WeakMap<LocalParticipant, Promise<LocalParticipant>>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    /** The members the page holds, joined through any of its rooms or held through their own channel, by id. */
+    heldMembers: new Map<string, LocalParticipant>(),
+    /** The page's rooms, each showing a member the page holds as the page's own connection to it. */
+    rooms: new Set<WeakRef<ClientRoomHandle>>(),
+    /** Each member handle's `join()` promise, which keeps a room a telefunction returned open while reachable. */
+    roomHolds: new WeakMap<LocalParticipant, Promise<LocalParticipant>>(),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'client/page.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { heldMembers, rooms, roomHolds } = getGlobalObject('client/page.ts', createGlobalObject)
 
 /** The page holds `member` from now on, until it leaves, and its rooms show the page's own connection to it. */
 function holdMember(member: LocalParticipant): void {

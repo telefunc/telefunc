@@ -5,7 +5,16 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { ROOM_PLAN_SLICE_MS } from './constants.js'
 
 /** The slices waiting in the process, and how many turns resumed one. */
-const waiting = getGlobalObject('Slice.ts', () => ({ resumed: 0, slices: new Fifo<() => void>() }))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return { resumed: 0, slices: new Fifo<() => void>() }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'Slice.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const waiting = getGlobalObject('Slice.ts', createGlobalObject)
 
 /** Work's time on the event loop: `ROOM_PLAN_SLICE_MS` from when it starts, and as much in each later turn it waits
  *  for. A turn resumes one waiting slice, the first to wait, so slices waiting together don't run in one turn. */

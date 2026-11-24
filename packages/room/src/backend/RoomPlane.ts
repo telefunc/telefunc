@@ -71,7 +71,10 @@ class RoomPlane {
     registeredBy?: RoomSubscriptionSource['registeredBy'],
   ): BackendSubscription {
     // The shared subscriptions checked that a lane delivers bytes.
-    return this.subscriptions.subscribe({ roomId, inc, lane, registeredBy }, listener as BackendListener)
+    return this.subscriptions.subscribe({ roomId, inc, lane, registeredBy }, (payload, ordering) => {
+      assert(payload instanceof Uint8Array)
+      listener(payload, ordering)
+    })
   }
 
   dispose(): void {

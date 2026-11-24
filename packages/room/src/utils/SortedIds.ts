@@ -1,5 +1,7 @@
 export { SortedIds, compareCodePoints }
 
+import { assert } from './assert.js'
+
 /** Ids in code point order. An add or a delete is recorded, and the next read merges the recorded ids in at once. */
 class SortedIds {
   private ids: string[]
@@ -23,21 +25,29 @@ class SortedIds {
   /** The ids from `start` on, in order. */
   *from(start: string): Generator<string> {
     const ids = this.merged()
-    for (let at = positionOf(ids, start); at < ids.length; at++) yield ids[at]!
+    // Past the last id, `ids[at]` is undefined.
+    for (let at = positionOf(ids, start), id = ids[at]; id !== undefined; id = ids[++at]) yield id
   }
 
   private merged(): string[] {
     if (this.added.size === 0 && this.deleted.size === 0) return this.ids
     const ids: string[] = []
     let at = 0
+    /** Keeps the held ids from `at` up to `to`. */
+    const keep = (to: number) => {
+      for (; at < to; at++) {
+        const held = this.ids[at]
+        assert(held !== undefined)
+        ids.push(held)
+      }
+    }
     for (const id of [...this.added, ...this.deleted].sort(compareCodePoints)) {
-      const to = positionOf(this.ids, id, at)
-      while (at < to) ids.push(this.ids[at++]!)
-      // A deleted id is held at `to`.
+      keep(positionOf(this.ids, id, at))
+      // A deleted id is held at `at`.
       if (this.added.has(id)) ids.push(id)
       else at++
     }
-    while (at < this.ids.length) ids.push(this.ids[at++]!)
+    keep(this.ids.length)
     this.added.clear()
     this.deleted.clear()
     this.ids = ids
@@ -47,8 +57,9 @@ class SortedIds {
 
 function compareCodePoints(left: string, right: string): number {
   for (let i = 0; i < left.length && i < right.length; ) {
-    const a = left.codePointAt(i)!
-    const b = right.codePointAt(i)!
+    const a = left.codePointAt(i)
+    const b = right.codePointAt(i)
+    assert(a !== undefined && b !== undefined)
     if (a !== b) return a - b
     i += a > 0xffff ? 2 : 1
   }
@@ -60,7 +71,9 @@ function positionOf(ids: readonly string[], id: string, low = 0): number {
   let high = ids.length
   while (low < high) {
     const mid = (low + high) >> 1
-    if (compareCodePoints(ids[mid]!, id) < 0) low = mid + 1
+    const at = ids[mid]
+    assert(at !== undefined)
+    if (compareCodePoints(at, id) < 0) low = mid + 1
     else high = mid
   }
   return low

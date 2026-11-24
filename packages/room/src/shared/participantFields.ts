@@ -28,9 +28,18 @@ type ParticipantField<T> = {
 }
 
 // One registry for every copy of Room in the process: a second copy of the package defines its fields again.
-const { fields } = getGlobalObject('shared/participantFields.ts', () => ({
-  fields: new Map<string, ParticipantField<unknown>>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    fields: new Map<string, ParticipantField<unknown>>(),
+  }
+}
+declare module '../utils/getGlobalObject.js' {
+  interface GlobalObjects {
+    'shared/participantFields.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { fields } = getGlobalObject('shared/participantFields.ts', createGlobalObject)
 
 /** `name` on every participant, and on every participant of `room.snapshot()`, as the package sets it. A name defined
  *  already keeps its first definition, as every copy of the package in the process shares the field. */
@@ -38,7 +47,7 @@ function defineParticipantField<T>(name: string, field: ParticipantField<T>): vo
   if (fields.has(name)) return
   fields.set(name, {
     initial: ownFieldValue(field.initial),
-    attach: field.attach as ParticipantField<unknown>['attach'],
+    attach: (view) => field.attach(view),
   })
 }
 
@@ -58,7 +67,7 @@ function fieldValue(fieldsSet: Readonly<Record<string, unknown>>, name: string):
 }
 
 /** A field's value as Room keeps it: its own copy, frozen deeply, which nothing the package does to its value changes. */
-function ownFieldValue<T>(value: T): T {
+function ownFieldValue(value: unknown): unknown {
   const owned = ownMessage(value)
   return typeof owned === 'object' && owned !== null ? freezeMeta(owned) : owned
 }
