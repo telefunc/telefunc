@@ -3,6 +3,7 @@ import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
+import { LAPSED_PRESENCE_REFUSED_FOR_MS, rerecordedPresences } from './pages/lapsed-presence/presenceRecords'
 
 const tf = new Telefunc({ scale: 5 })
 
@@ -23,8 +24,12 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
       refusedPresences.add(request.key)
       throw new Error('Test: the authority refused the presence')
     }
+    // A `lapsed-presence:` key's hold after its first records the presence again, once the refusals end.
+    const recordingAgain = request.key.startsWith('lapsed-presence:') && lapsedPresences.has(request.key)
     refuseLapsedPresenceRefresh(request)
-    return super.telefuncBroadcastHold(request)
+    const held = await super.telefuncBroadcastHold(request)
+    if (recordingAgain && held === 'registered') rerecordedPresences.add(request.key)
+    return held
   }
   override async telefuncBroadcastRenew(request: PresenceRequest) {
     refuseLapsedPresenceRefresh(request)
@@ -106,12 +111,13 @@ async function withClockAhead<T>(ms: number, work: () => Promise<T>): Promise<T>
 const refusedPresences = new Set<string>()
 const lapsedPresences = new Map<string, number>()
 
-/** Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for 100 s, past its record's 90 s. */
+/** Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for `LAPSED_PRESENCE_REFUSED_FOR_MS`. */
 function refuseLapsedPresenceRefresh({ key }: PresenceRequest): void {
   if (!key.startsWith('lapsed-presence:')) return
   const recordedAt = lapsedPresences.get(key)
   if (recordedAt === undefined) lapsedPresences.set(key, Date.now())
-  else if (Date.now() - recordedAt < 100_000) throw new Error('Test: the authority refused the refresh')
+  else if (Date.now() - recordedAt < LAPSED_PRESENCE_REFUSED_FOR_MS)
+    throw new Error('Test: the authority refused the refresh')
 }
 const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
