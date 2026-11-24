@@ -221,7 +221,8 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
   if (!holding.has(reads)) {
     holding.add(reads)
     const read = reads.readCellPages.bind(reads)
-    reads.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
+    reads.readCellPages = (roomId, inc, prefix, beside) =>
+      heldCellPages(read(roomId, inc, prefix, beside), takeHold(roomId, prefix))
   }
   return { reached: reached.promise, release: released.resolve }
 }
