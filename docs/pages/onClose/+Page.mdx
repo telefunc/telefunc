@@ -114,6 +114,8 @@ export async function onLoad() {
 }
 ```
 
+> On Cloudflare Workers, add `enable_request_signal` to the `compatibility_flags` of your Wrangler configuration, so that `signal` also aborts when the client disconnects before the telefunction answers.
+
 
 ## See also
 
