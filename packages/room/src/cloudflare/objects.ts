@@ -4,7 +4,7 @@ export type { CloudflareRoomAuthorityStub, RegionDirectoryStub }
 // Room's Durable Objects share the Telefunc namespace with sessions and Broadcast: a room's authority, and each
 // region's directory, which lists the rooms whose authority it was first written from.
 
-import type { TelefuncExtensionNamespace, TelefuncExtensionStub } from 'telefunc/__internal'
+import { extensionStub, type TelefuncExtensionNamespace } from 'telefunc/__internal'
 import {
   ROOM_CLOUDFLARE_EXTENSION,
   ROOM_CLOUDFLARE_PREFIX,
@@ -46,7 +46,11 @@ function openRoomAuthority(
   bucket: string,
 ): CloudflareRoomAuthorityStub {
   const id = namespace.idFromName(ROOM_CLOUDFLARE_PREFIX + roomId)
-  return objectStub(namespace.get(id, { locationHint: bucket }), ROOM_CLOUDFLARE_EXTENSION, ROOM_AUTHORITY_METHODS)
+  return extensionStub<CloudflareRoomAuthorityStub>(
+    namespace.get(id, { locationHint: bucket }),
+    ROOM_CLOUDFLARE_EXTENSION,
+    ROOM_AUTHORITY_METHODS,
+  )
 }
 
 /** The methods a region's directory serves, all a call reaches of it. */
@@ -59,14 +63,5 @@ function openRegionDirectory(namespace: TelefuncExtensionNamespace, bucket: stri
   // Not under ROOM_CLOUDFLARE_PREFIX, which a room id may follow with anything.
   const id = namespace.idFromName(`__telefunc_room_directory__:${bucket}`)
   const stub = namespace.get(id, { locationHint: bucket })
-  return objectStub(stub, ROOM_DIRECTORY_CLOUDFLARE_EXTENSION, REGION_DIRECTORY_METHODS)
-}
-
-/** `extension`'s `methods` of a Durable Object, called through its `telefuncDurableObjectCall()`. */
-function objectStub<Stub>(stub: TelefuncExtensionStub, extension: string, methods: readonly string[]): Stub {
-  const call =
-    (method: string) =>
-    (...args: unknown[]) =>
-      stub.telefuncDurableObjectCall(extension, method, args)
-  return Object.fromEntries(methods.map((method) => [method, call(method)])) as Stub
+  return extensionStub<RegionDirectoryStub>(stub, ROOM_DIRECTORY_CLOUDFLARE_EXTENSION, REGION_DIRECTORY_METHODS)
 }
