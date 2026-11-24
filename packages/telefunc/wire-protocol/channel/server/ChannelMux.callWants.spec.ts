@@ -17,6 +17,7 @@ import { TAG } from '../../wire/tags.js'
 import type { Want } from '../../wire/payloads.js'
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
+import { ATTACHABLE_NOW } from './ServerChannel.js'
 
 config.channel = { maxMemory: '2m' }
 
@@ -33,7 +34,7 @@ function returnedBroadcast(session: string, lossy = false) {
   const broadcast = new ServerBroadcast<string>({ key, lossy })
   // As `carryChannel` stamps it.
   broadcast._callRequest = callOf(session)
-  getChannelMux().registerChannel(broadcast)
+  getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
   const frames: Uint8Array[] = []
   const sender: PeerSender = {
     send: (frame) => frames.push(frame),

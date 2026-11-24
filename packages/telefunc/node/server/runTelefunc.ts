@@ -2,6 +2,7 @@ export { runTelefunc }
 export type { HttpResponse }
 
 import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import { refusalContentType, type RefusalContentType } from '../../wire-protocol/refusal.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -66,7 +67,7 @@ type HttpResponse = {
   err?: unknown
 }
 
-type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
+type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream' | RefusalContentType
 /** A response body is either a literal string or a concrete stream of the
  *  matching runtime (Node `Readable` when the adapter passed a Node
  *  `IncomingMessage`, Web `ReadableStream` otherwise). Producers commit to one
@@ -75,19 +76,27 @@ type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-strea
  *  middleman on the hot path. */
 type ResponseBody = string | StreamReadableNode | ReadableStream<Uint8Array<ArrayBuffer>>
 
-function createHttpResponse({
-  statusCode,
-  contentType,
-  headers,
-  body: responseBody,
-  err,
-}: {
+/** What a response is made of, as the call ends. */
+type HttpResponseParts = {
   statusCode: HttpResponse['statusCode']
   contentType: ContentType
   headers: [string, string][]
   body: ResponseBody
   err?: unknown
-}): HttpResponse {
+}
+
+/** The response. Where it is `hold`'s, what its accessors send ends only once `hold.over` settles, but for `body`, the
+ *  string as it is, which `hold.unheld` is told of. */
+function createHttpResponse(
+  { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
+  hold: { over: Promise<void>; unheld: () => void } | null,
+): HttpResponse {
+  const sent = (): ResponseBody =>
+    hold === null
+      ? responseBody
+      : getStreamReadableWeb(responseBody).pipeThrough(
+          new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => hold.over }),
+        )
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -112,29 +121,31 @@ function createHttpResponse({
         typeof responseBody === 'string',
         "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
       )
+      hold?.unheld()
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
-      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(responseBody, writable)
-      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(responseBody, writable)
+      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(sent(), writable)
+      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(sent(), writable)
       assertUsage(
         false,
         "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
       )
     },
     getReadableWebStream() {
-      return getStreamReadableWeb(responseBody)
+      return getStreamReadableWeb(sent())
     },
     getReadableNodeStream() {
-      return getStreamReadableNode(responseBody)
+      return getStreamReadableNode(sent())
     },
     async getBody() {
-      if (typeof responseBody === 'string') return responseBody
+      const body = sent()
+      if (typeof body === 'string') return body
       const decoder = new TextDecoder()
       let result = ''
       // A `ReadableStream` is iterable on modern runtimes; the cast is just to
       // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of responseBody as AsyncIterable<Uint8Array<ArrayBuffer>>) {
+      for await (const chunk of body as AsyncIterable<Uint8Array<ArrayBuffer>>) {
         result += decoder.decode(chunk, { stream: true })
       }
       result += decoder.decode()
@@ -264,22 +275,56 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
-  let httpResponse: HttpResponse | undefined
+  // A `Request`'s own `signal` (`telefunc/deno`, `serve({ request })`) is one Deno.serve aborts at every response's end
+  // too; the Node entries' is their socket's, which no response aborts, also on Deno's `node:http`.
+  const { request, clientGone } = httpRequestResolved
+  const held = isDeno() && clientGone === request.signal ? heldClientGone(clientGone) : null
+  let response: HttpResponseParts | undefined
   try {
-    httpResponse = await runTelefunc_(httpRequestResolved, requestContext)
+    response = await runTelefunc_(
+      held ? { ...httpRequestResolved, clientGone: held.signal } : httpRequestResolved,
+      requestContext,
+    )
   } catch (err: unknown) {
     handleTelefunctionBug(err)
-    httpResponse = createHttpResponse({
-      ...serverError,
-      err,
-    })
+    response = { ...serverError, err }
   } finally {
     // A call that answers without a value ends the live values it was passed as arguments.
-    if (httpResponse?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
+    if (response?.statusCode !== STATUS_CODE_SUCCESS) requestContext.markCallFailed()
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
-  return httpResponse
+  // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
+  // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
+  // at every response's end. So on Deno the response to a `Request` ends once the call's body is over, and from then on
+  // nothing is read from the body: Deno's abort at that response's end isn't taken for the client leaving.
+  if (held) void requestContext.bodyRead.then(held.unheld)
+  return createHttpResponse(response, held && { over: requestContext.bodyRead, unheld: held.unheld })
+}
+
+/** On Deno, a `Request`'s `signal` while the response holds it: Deno's `request.signal` says the client left only while
+ *  the response is open, and Deno also aborts it at every response's end. Its aborts stop counting once the call's body
+ *  is over, which is where a held response ends, or once the answer goes out as a string (`httpResponse.body`), which
+ *  nothing holds open; after a string answer, a failed read of the body says the client left. */
+function heldClientGone(clientGone: AbortSignal): { signal: AbortSignal; unheld: () => void } {
+  const gone = new AbortController()
+  let held = true
+  const abort = () => {
+    if (held) gone.abort(clientGone.reason)
+  }
+  if (clientGone.aborted) abort()
+  else clientGone.addEventListener('abort', abort, { once: true })
+  return {
+    signal: gone.signal,
+    unheld: () => {
+      held = false
+    },
+  }
+}
+
+/** Whether this runs on Deno: `globalThis.Deno`, which isn't typed here. */
+function isDeno(): boolean {
+  return hasProp(globalThis, 'Deno', 'object')
 }
 
 async function runTelefunc_(
@@ -288,14 +333,16 @@ async function runTelefunc_(
     readable,
     context,
     clientLeft,
+    clientGone,
   }: {
     request: Request
     readable?: StreamReadableNode
     context?: Telefunc.Context
     clientLeft: ClientLeft
+    clientGone: AbortSignal
   },
   requestContext: RequestContext,
-): Promise<HttpResponse> {
+): Promise<HttpResponseParts> {
   const runContext = { requestContext }
 
   {
@@ -305,6 +352,7 @@ async function runTelefunc_(
       request,
       readable,
       clientLeft,
+      clientGone,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
@@ -325,10 +373,11 @@ async function runTelefunc_(
   {
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      const contentType = parsed.refusal ? refusalContentType(parsed.refusal) : malformedRequest.contentType
+      return { ...malformedRequest, contentType }
     }
     if (parsed.isSseRequest) {
-      return createHttpResponse(parsed.sseResponse)
+      return parsed.sseResponse
     }
     const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -349,7 +398,7 @@ async function runTelefunc_(
   {
     const telefunction = await findTelefunction(runContext)
     if (!telefunction) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     objectAssign(runContext, { telefunction })
   }
@@ -359,7 +408,7 @@ async function runTelefunc_(
   {
     const resolved = runContext.resolveRequest(runContext.telefunction)
     if (resolved.isMalformedRequest) {
-      return createHttpResponse({ ...malformedRequest })
+      return { ...malformedRequest }
     }
     const { telefunctionArgs, streamTransport, requestExtensions } = resolved
     objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
@@ -373,7 +422,7 @@ async function runTelefunc_(
         telefunctionAborted: true,
         telefunctionReturn: undefined,
       })
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
   }
 
@@ -401,7 +450,7 @@ async function runTelefunc_(
 
   if (runContext.telefunctionHasErrored) {
     if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
-      return createHttpResponse({ ...shieldValidationError })
+      return { ...shieldValidationError }
     }
     throw runContext.telefunctionTopLevelError
   }
@@ -413,7 +462,7 @@ async function runTelefunc_(
     if (result.type === 'streaming') {
       const contentType =
         result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
-      return createHttpResponse({
+      return {
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
         contentType,
         headers: [
@@ -421,16 +470,16 @@ async function runTelefunc_(
           ['X-Accel-Buffering', 'no'],
         ],
         body: result.body,
-      })
+      }
     }
 
     objectAssign(runContext, { httpResponseBody: result.body })
   }
 
-  return createHttpResponse({
+  return {
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
     contentType: 'text/plain',
     headers: [],
     body: runContext.httpResponseBody,
-  })
+  }
 }

@@ -211,6 +211,23 @@ describe('cloudflare adapter entrypoint', () => {
     expect(response?.status).toBe(400)
   })
 
+  it.each([
+    ['an SSE request of another wire version', { 'x-telefunc-request': 'sse' }, 409, 'reload'],
+    ['a request that names no kind', {}, 400, 'route'],
+  ])('refuses %s as Telefunc, which says so in its media type', async (_request, headers, status, kind) => {
+    const { binding } = createBinding()
+    const env = { TelefuncDurableObject: binding }
+    const tf = new Telefunc()
+    const request = new Request('https://telefunc.test/_telefunc', { method: 'POST', headers, body: 'x' })
+
+    const response = await tf.serve({ request, env })
+
+    expect(response?.status).toBe(status)
+    expect(response?.headers.get('content-type')).toMatch(
+      new RegExp(`^text/vnd\\.telefunc\\.refusal; kind=${kind}; reason="[^"]+"$`),
+    )
+  })
+
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { binding, jurisdiction } = createBinding()
     const kv = createMockKV()

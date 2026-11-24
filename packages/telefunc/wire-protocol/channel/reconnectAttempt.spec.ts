@@ -7,7 +7,7 @@ import { createServer, type Server } from 'node:http'
 import net, { type Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { ChannelMux, getChannelMux } from './server/ChannelMux.js'
@@ -138,7 +138,7 @@ async function link(holdsAll = false) {
 async function pair(transport: 'sse' | 'ws') {
   const network = await link()
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const register = vi.spyOn(WireLifecycle.prototype, 'register')
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
@@ -249,8 +249,10 @@ for (const transport of ['sse', 'ws'] as const)
       network.drop('forward')
       void page.send('after')
       expect(await received).toBe('after')
-      // 3 s, at most 1 s of backoff, then 4 s.
-      expect(performance.now() - droppedAt).toBeLessThan(9_000)
+      // At most 0.5 s of backoff, the 3 s cut, then at most 1.5 s, as the page's send has waited since the drop, and 4 s.
+      // Over SSE that send then goes in a POST of its own, once the open is answered, behind the PING that couldn't wait
+      // for it: 4 s more.
+      expect(performance.now() - droppedAt).toBeLessThan(transport === 'ws' ? 9_000 : 13_500)
       expect(lost.mock.contexts.filter((context) => context === connection)).toHaveLength(2)
       page.abort()
     } finally {
@@ -264,14 +266,15 @@ test("over SSE, a page whose opens after a drop the network holds cuts the third
   const { network, page, received } = await pair('sse')
   try {
     const droppedAt = performance.now()
-    // The first three attempts: 0.9 of 500, then 0.9 of 1,000 and of 2,000 after cuts at 3 s and 6 s.
+    // The first three attempts: 0.9 of 500, then, as the page's send has waited since the drop, 1.45 of 1,000 and of
+    // 2,000 after cuts at 3 s and 6 s: the third at 13.8 s.
     network.holdUntil(droppedAt + 20_000)
     network.drop('forward')
     void page.send('after')
     expect(await received).toBe('after')
     const since = network.requests.filter(({ at }) => at >= droppedAt)
     // The third attempt's connections, its event stream's and its upload's.
-    const third = since.filter(({ at }) => at > droppedAt + 11_000 && at < droppedAt + 13_000)
+    const third = since.filter(({ at }) => at > droppedAt + 13_300 && at < droppedAt + 15_300)
     expect(third.length).toBeGreaterThan(0)
     for (const { at, closedAt } of third) {
       expect((closedAt ?? Infinity) - at).toBeGreaterThan(11_500)

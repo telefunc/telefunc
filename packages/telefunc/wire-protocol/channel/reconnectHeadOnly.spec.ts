@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http'
 import net, { type Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { getChannelMux } from './server/ChannelMux.js'
@@ -97,7 +97,7 @@ async function link() {
 async function dropsHeadOnlyWire({ stray = false, atOnce = false } = {}) {
   const network = await link()
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const register = vi.spyOn(WireLifecycle.prototype, 'register')
   const page = new ClientChannel<string, string>({
     channelId: channel.id,

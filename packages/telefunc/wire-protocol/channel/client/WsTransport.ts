@@ -7,7 +7,7 @@ import {
   LOSSY_CONFIRM_SLACK_MS,
   WIRE_QUEUE_DELAY_MS,
   WS_CLOSE_PAGE_LEFT,
-  WS_CLOSE_REJECTED,
+  WS_CLOSE_REFUSED,
   WS_CLOSE_WIRE_VERSION,
   WS_PROBE_TIMEOUT_MS,
 } from '../../constants.js'
@@ -17,7 +17,8 @@ import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceive
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
+import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame } from './ClientConnection.js'
@@ -25,6 +26,7 @@ import type { TransportOwner } from './WireLifecycle.js'
 import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
+import { endOfWire } from './readAnswer.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -263,14 +265,13 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       else if (receiver.heldTag === TAG.RECONCILED && ws !== this.abandoned?.ws)
         this.owner.onTransportReconciledPiece(this)
     }
-    ws.onclose = ({ code }: CloseEvent) => {
+    ws.onclose = ({ code, reason }: CloseEvent) => {
       headroom.close()
       if (this.ws === ws) this.ws = null
       this.settleDrained()
-      this.owner.onTransportClosed(this, {
-        otherWireVersion: code === WS_CLOSE_WIRE_VERSION,
-        rejectedFrame: code === WS_CLOSE_REJECTED,
-      })
+      // An end the server decided rides the close: its reason is the refusal, read as an answer's is.
+      const end = code === WS_CLOSE_REFUSED ? endOfWire(reason) : { otherWireVersion: code === WS_CLOSE_WIRE_VERSION }
+      this.owner.onTransportClosed(this, end)
     }
     ws.onerror = () => {}
   }
@@ -331,6 +332,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number {
     return (this.ws?.bufferedAmount ?? 0) + (this.pieces?.sender.unhandedBytes ?? 0)
+  }
+
+  /** What waits behind the rest of a frame, which goes whole. */
+  dropQueued(ix: number): void {
+    this.pieces?.sender.dropWaiting((frame) => {
+      const tag = frame[0]
+      return tag !== undefined && isSequencedTag(tag) && readU16(frame, 1) === ix
+    })
   }
 
   abandonActiveTransport(): void {

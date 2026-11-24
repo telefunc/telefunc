@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http'
 import net, { type Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
@@ -65,7 +65,7 @@ async function refusedOnce(then: 'reset' | 'otherWireVersion') {
   const address = forwarder.address()
   if (address === null || typeof address === 'string') throw new Error('no port')
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
     connection: {

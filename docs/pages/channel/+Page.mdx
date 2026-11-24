@@ -56,6 +56,8 @@ export async function onClock() {
 
 > The server returns `channel.client`: the client gets the same API but with message directions flipped.
 
+> A channel's `id` is a random UUID unless you pass one with `new Channel({ id })`: it can be at most 256 bytes as JSON writes it, and a longer one throws.
+
 ```ts
 // Clock.tsx
 // Environment: client
@@ -267,7 +269,7 @@ const ack = await channel.sendBinary(frame, { ack: true })
 
 > `send()`, `publish()`, a listener's answer and an abort reason are serialized as JSON by Telefunc's serializer, which also carries values such as a `Date`, a `Map` or a `BigInt`. Bytes in them, a `Uint8Array`, another typed array, an `ArrayBuffer` or a `SharedArrayBuffer`, also inside an object or an array, are refused: bytes go through `sendBinary()` and `publishBinary()`, and an abort reason is a plain value, such as a string or a code. `send()` and `publish()` throw at the call. A listener's answer fails as a listener that throws: its error is logged where it runs, and the acknowledged send rejects. An abort whose reason JSON can't hold still ends the channel, on both ends, without the reason: `abort()` then throws, and a callback that threw `Abort` has the error logged where it ran.
 
-A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open.
+A message the client sends can be 64 MiB at most once encoded (32 MiB on Cloudflare with the `'ws'` transport). Over that, `send()`, `sendBinary()`, `publish()` and `publishBinary()` each throw at the call, before returning a promise, and the channel stays open. A client's abort reason is held to the same limit: over it, the abort still ends the channel, on both ends, without the reason, and `abort()` throws a `ChannelOverflowError` that gives the limit.
 
 ### Backpressure
 
@@ -703,8 +705,8 @@ Channels and broadcasts signal failure through these errors:
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout`, or its first connection was refused or answered with something other than a stream of events, such as a proxy's login page: the message names the status and `Content-Type` it got. `ChannelCloseUnknownError` and `ChannelPageLeftError` are kinds of it | Closed | Auto-closed — recreate if needed |
-| `ChannelClosedError` | `send()` on a closed channel; a `close()` that timed out; a frame the other end couldn't read | Closed | Recreate the channel |
+| `NetworkError` (`isChannel: true`) | The client stayed gone longer than `reconnectTimeout`, or its first connection was refused or answered with something other than a stream of events, such as a proxy's login page, or over SSE a request carrying its messages was refused again after a reconnect, such as by a proxy's limit on the size of a request: the message names the status and `Content-Type` it got. Also where the client hadn't confirmed what the server sent on it over the reconnects. `ChannelCloseUnknownError` and `ChannelPageLeftError` are kinds of it | Closed | Auto-closed — recreate if needed |
+| `ChannelClosedError` | `send()` on a closed channel; a `close()` that timed out; a frame the server couldn't take, its reason in the message | Closed | Recreate the channel |
 | `ChannelCloseUnknownError` | The connection was lost during a close, on either end: the other end was gone longer than `reconnectTimeout`, or its verdict took longer than the close's timeout and `reconnectTimeout`. `cause` is the lost connection's error, where the connection ended it; a verdict that didn't arrive in time leaves no `cause` | Closed | Treat the close as unconfirmed: the other end's cleanup may have run past the timeout |
 | `ChannelPageLeftError` | On the server: the page left for good, during a close or outside one | Closed | Nothing to do: what the server still held for the page reaches no one |
 | `ChannelOverflowError` (`send()`) | The message is larger than the per-channel limit (320 MiB, or seven eighths of `maxMemory` where that's less), another `send()` of the channel already waits for room, or `maxMemory` has no room left even for it to wait. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next. Split a message larger than the per-channel limit: it's refused every time, unless a larger `maxMemory` raises that limit. Send any other refused message again after a moment, before the next. Raise `maxMemory` only where all channels together hold too much |

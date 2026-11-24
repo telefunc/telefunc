@@ -82,6 +82,8 @@ type AttemptEnd =
 /** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
 type UpgradeSource = ClientChannelTransport & {
   emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
+  /** When the wire last delivered part of a frame and not its end. */
+  readonly frameCrossingAt: number
 }
 
 /** The wire an upgrade moves TO: it has to be openable without becoming the transport, and
@@ -125,6 +127,8 @@ type UpgradeState =
       bufferedFrames: number
       deferredOmitted: number[]
       joinTimer: ReturnType<typeof setTimeout> | null
+      /** The flip, or the old wire's last frame after it if later: the FIN comes behind what that wire delivers. */
+      oldDeliveredAt: number
     }
 
 type CommittingUpgrade = Extract<UpgradeState, { tag: 'committing' }>
@@ -276,6 +280,7 @@ class Upgrade implements ProbeOwner {
     if (u === null) return 'held'
     const { flipped } = u
     if (flipped && isUpgradeCompletionFrame(frame)) return 'complete'
+    if (flipped && source === 'old') u.oldDeliveredAt = performance.now()
     ;(flipped ? u.buffer[source] : u.heldBeforeFlip).push({ frame, byteLength })
     u.bufferedFrames += 1
     u.bufferedBytes += byteLength
@@ -372,6 +377,7 @@ class Upgrade implements ProbeOwner {
       bufferedFrames: 0,
       deferredOmitted: [],
       joinTimer: null,
+      oldDeliveredAt: 0,
     }
   }
 
@@ -400,13 +406,13 @@ class Upgrade implements ProbeOwner {
   async run(
     from: UpgradeSource,
     to: UpgradeTarget,
-    { sessionId, pingInterval }: { sessionId: string; pingInterval: number },
+    { sessionId, pingInterval, attempt: probeAttempt }: { sessionId: string; pingInterval: number; attempt: number },
     hooks: AttemptHooks,
   ): Promise<AttemptEnd> {
     const attempt = this.start()
     let adopted = false
     try {
-      const session = await this.stage(to, sessionId, pingInterval, attempt)
+      const session = await this.stage(to, { sessionId, attempt: probeAttempt }, pingInterval, attempt)
       if (session === 'no-probe') return { tag: 'aborted' }
       if (session === 'not-ready') return { tag: 'not-ready' }
       await hooks.reconcileSettled(attempt.signal)
@@ -441,7 +447,7 @@ class Upgrade implements ProbeOwner {
    *  attempt is aborted. */
   private async stage(
     to: UpgradeTarget,
-    sessionId: string,
+    { sessionId, attempt: probeAttempt }: { sessionId: string; attempt: number },
     pingInterval: number,
     attempt: AbortController,
   ): Promise<ProbeSession | 'no-probe' | 'not-ready'> {
@@ -461,7 +467,7 @@ class Upgrade implements ProbeOwner {
       attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
     })
     this.armAttemptDeadline(attempt)
-    probe.send(encode.prepare({ upgradeId, sessionId }))
+    probe.send(encode.prepare({ upgradeId, sessionId, attempt: probeAttempt }))
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
@@ -508,6 +514,7 @@ class Upgrade implements ProbeOwner {
     u.probeHeartbeat.stop()
     u.flipped = true
     u.to.adoptProbe()
+    u.oldDeliveredAt = performance.now()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
     const held = u.heldBeforeFlip.splice(0)
     for (const { frame, byteLength } of held)
@@ -519,8 +526,9 @@ class Upgrade implements ProbeOwner {
     const u = this.committing
     if (u === null) return
     u.joinTimer = null
-    // The FIN comes behind what the old wire still delivers: given up on once that wire went quiet for the timeout.
-    const quiet = u.finReceived ? Infinity : (u.from.heartbeat?.quietFor() ?? Infinity)
+    // The FIN comes behind what the old wire still delivers: given up on once that wire delivered no frame, whole or
+    // in part, for the timeout. Its PONGs don't count: they come whether or not the FIN ever will.
+    const quiet = u.finReceived ? Infinity : performance.now() - Math.max(u.oldDeliveredAt, u.from.frameCrossingAt)
     if (quiet < UPGRADE_HANDOFF_JOIN_TIMEOUT_MS) {
       u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
       return

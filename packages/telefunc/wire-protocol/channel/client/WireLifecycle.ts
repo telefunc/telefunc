@@ -1,18 +1,16 @@
 export { WireLifecycle }
-export type { TransportOwner, WireLifecycleOwner }
+export type { TransportOwner, TransportEnd, WireLifecycleOwner }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
-import { ChannelClosedError, ChannelOverflowError, rejectedFrameError, replayLossError } from '../channelErrors.js'
-import { closeTimedOutError } from '../ChannelEnding.js'
+import { endCauseOf } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   ATTEMPT_ALLOWANCE_GROWTH,
   ATTEMPT_ALLOWANCE_MIN_MS,
   ATTEMPT_ALLOWANCE_OPENS,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_HOLD_MAX_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -23,8 +21,9 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
 import { ReplayBuffer } from './ReplayBuffer.js'
-import { ERROR_REASON, isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
-import { TAG } from '../../wire/tags.js'
+import { isSequencedFrame, tellsLastRead } from '../../wire/frame.js'
+import { SEQ_OFFSET, readU16, readU32 } from '../../wire/header.js'
+import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
@@ -41,18 +40,36 @@ import { SseTransport } from './SseTransport.js'
 
 import type { ClientChannelTransport, ClientConnectionOptions, MuxChannel } from './ClientConnection.js'
 
+/** Why a transport's wire closed, where it knows more than that it was lost. */
+type TransportEnd = {
+  /** What the server answered the wire's opening with, which wasn't a wire. */
+  refusal?: string
+  /** The server runs another `WIRE_VERSION`. */
+  otherWireVersion?: boolean
+  /** A request carrying what the page sent was refused with `answer`, which asked to wait `retryAfterMs` before
+   *  another (see `onTransportRefused`). */
+  refused?: { answer: string; retryAfterMs: number }
+  /** Telefunc said it no longer had the wire (`retry`): a loss, with that cause. */
+  lost?: string
+  /** Telefunc doesn't serve the page's SSE requests so (`route`): the page leaves SSE for this connection. */
+  route?: string
+  /** Telefunc ended `channel` for the cause `cause` (`frames` naming it): that channel ends with the cause's error, and
+   *  the wire goes as a loss. */
+  framesRefused?: { channel: number; cause: number }
+  /** Telefunc ended the page's session for the cause with this code: every channel ends with the cause's error. */
+  sessionEnded?: number
+}
+
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 interface TransportOwner {
   /** `startedAt`: when the socket or request that opened started. */
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void
   /** The server answered the attempt: a WebSocket's open, or the event stream's head before the wire opens. */
   onTransportAnswered(transport: ClientChannelTransport): void
-  /** `refusal`: what the server answered the wire's opening with, which wasn't a wire; `otherWireVersion`: it runs
-   *  another `WIRE_VERSION`; `rejectedFrame`: it refused the wire for a frame it couldn't read. */
-  onTransportClosed(
-    transport: ClientChannelTransport,
-    options?: { refusal?: string; otherWireVersion?: boolean; rejectedFrame?: boolean },
-  ): void
+  onTransportClosed(transport: ClientChannelTransport, end?: TransportEnd): void
+  /** A request carrying `frames` was refused with `answer`. Whether the connection is to be established again, so that
+   *  its RECONCILED says what the server has: false only where every channel whose data it refused ended. */
+  onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
   onTransportPong(ended: PongEntry[]): void
   /** A piece of a RECONCILED came on a WebSocket, the RECONCILED not yet whole. */
@@ -63,6 +80,17 @@ interface TransportOwner {
   onTransportBatched(transport: ClientChannelTransport): void
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void
+  /** The most a batch POST carries, which a 413 taught the connection: `Infinity` before one. */
+  readonly ssePostLimit: number
+  /** The channels whose data the server hasn't confirmed since a loss (`ReplayBuffer.stall`). */
+  readonly stalledChannels: ReadonlySet<number>
+  /** A POST of stalled channels' data alone got no answer, or one that asks for later, while its wire's event stream is
+   *  up. Returns how long its data waits before it goes again. */
+  onStalledPostLost(cause: string): number
+  /** Whether the server lacks sequenced `frame`, of a channel still carried. */
+  stillOwed(frame: Uint8Array<ArrayBuffer>): boolean
+  /** A batch POST of `bodyBytes` was refused with a 413: none carries more than half of it from now on. */
+  onTransportTooLarge(bodyBytes: number): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageInitialReconcileBatch(): ReconcileBatch
 }
@@ -77,7 +105,7 @@ type ConnectionState =
   | { tag: 'reconnecting'; timer: ReturnType<typeof setTimeout> | null }
   | { tag: 'closed' }
 
-type Recovery = { attempt: number; deadline: number; refusal: string | null; timer: ReturnType<typeof setTimeout> }
+type Recovery = { tries: number; deadline: number; lost: Error | null; timer: ReturnType<typeof setTimeout> }
 
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
 interface WireLifecycleOwner {
@@ -100,16 +128,22 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private state: ConnectionState = { tag: 'fresh' }
   /** From a first connect's start, or the first wire lost since the last RECONCILED: the attempts made (a wire that
-   *  opens and never reconciles counts), the last refusal an attempt was answered with, and the deadline whose timer
-   *  ends the channels if no wire reconciled by then. */
+   *  opens and never reconciles counts), why the last wire or attempt went where its end said, and the deadline whose
+   *  timer ends the channels if no wire reconciled by then. */
   private recovery: Recovery | null = null
+  /** The attempts made since a recovery started from none (a wire that opens and never reconciles counts). A RECONCILED
+   *  doesn't reset them while a channel's data waits since an earlier loss: the delays keep doubling to the cap. */
+  private attempt = 0
+  /** When the page last read a frame from the server, a PONG or a RECONCILED included: a channel's date is judged only
+   *  once one came after it, whatever the transport. */
+  private readAt = Number.NEGATIVE_INFINITY
   /** When the wire being opened started, until its RECONCILED. */
   private attemptStartedAt: number | null = null
   /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
   private allowanceTimer: ReturnType<typeof setTimeout> | null = null
   /** The attempt under way: the backoff its end waits, drawn as it starts, and when it is cut unanswered (null: it runs
    *  to the deadline, or was answered). */
-  private attempt: { nextDelay: number; cutAt: number | null } | null = null
+  private underWay: { nextDelay: number; cutAt: number | null } | null = null
   /** When the attempt under way started, till the server answered it. */
   private allowanceFrom = 0
   /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
@@ -118,6 +152,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** How long the last wire took from its socket's or request's start to its RECONCILED: the room an attempt needs
    *  before the deadline. */
   private handshakeMs: number | null = null
+  /** The wire on which a request carrying only the connection's own frames was refused, until a PONG came. */
+  private ownFramesRefusedOn: number | null = null
+  /** Half of the least batch POST a 413 refused. The connection's, not a transport's: an upgrade to WebSocket and the
+   *  fallback after it make new transports, behind the same proxy. */
+  private postLimit = Infinity
   private ttl: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
@@ -183,11 +222,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.attemptStartedAt = now
     this.allowanceFrom = now
     this.clearAllowance()
-    const nextDelay = reconnectDelay(recovery.attempt)
+    const nextDelay = reconnectDelay(this.attempt, this.anyStalled())
     // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
     const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
     const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
-    this.attempt = { nextDelay, cutAt: room > 0 ? now + allowance : null }
+    this.underWay = { nextDelay, cutAt: room > 0 ? now + allowance : null }
     if (room > 0) this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
     this.transport.start()
   }
@@ -203,8 +242,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
   private attemptAnswered(): void {
-    if (this.attempt === null) return
-    this.attempt.cutAt = null
+    if (this.underWay === null) return
+    this.underWay.cutAt = null
     this.clearAllowance()
     this.answeredMs = performance.now() - this.allowanceFrom
     this.cuts = 0
@@ -338,6 +377,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // An abandoned wire still delivers, but what answers its RECONCILE answers one the next wire's has replaced.
+    this.readAt = performance.now()
     if (abandoned && ANSWERS_RECONCILE.has(frame.tag)) return
     switch (this.upgrade.takeHandoffFrame(frame, source, byteLength)) {
       case 'dispatch':
@@ -398,7 +438,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         this.startTtlIfIdle()
         return
       case TAG.ERROR:
-        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason))
+        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason, this.reconnectTimeoutMs))
         this.startTtlIfIdle()
         return
     }
@@ -416,7 +456,24 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
   }
 
+  get ssePostLimit(): number {
+    return this.postLimit
+  }
+
+  get stalledChannels(): ReadonlySet<number> {
+    const stalled = new Set<number>()
+    for (const { ix, replay } of this.channels.values()) if (replay.stall !== null) stalled.add(ix)
+    return stalled
+  }
+
+  onTransportTooLarge(bodyBytes: number): void {
+    // A lone frame's body may be larger than what the page learned: it never raises that.
+    this.postLimit = Math.min(this.postLimit, Math.floor(bodyBytes / 2))
+  }
+
   onTransportPong(ended: PongEntry[]): void {
+    this.readAt = performance.now()
+    this.ownFramesRefusedOn = null
     this.liveness.onPong(ended)
   }
 
@@ -447,15 +504,17 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    {
-      refusal,
-      otherWireVersion = false,
-      rejectedFrame = false,
-    }: { refusal?: string; otherWireVersion?: boolean; rejectedFrame?: boolean } = {},
+    { refusal, otherWireVersion = false, refused, lost, route, framesRefused, sessionEnded }: TransportEnd = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
-    // A wire the connection left says nothing of the one it is on.
+    // What the server ended on the page's session holds whichever of its wires said it.
+    if (sessionEnded !== undefined) {
+      this.closeAll(channelErrorFor(sessionEnded, this.reconnectTimeoutMs))
+      return
+    }
+    if (framesRefused !== undefined) this.endRefusedChannel(framesRefused)
+    // A wire the connection left says nothing more of the one it is on.
     if (transport !== this.transport) {
       if (this.upgrade.isLeftWire(transport)) this.fallbackToSse()
       return
@@ -465,18 +524,102 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
       return
     }
-    if (rejectedFrame) {
-      this.closeAll(rejectedFrameError())
+    if (route !== undefined) {
+      this.leaveSse(new NetworkError(`The server refused the page's SSE requests: ${route}`, true))
       return
     }
     this.clearAllowance()
     this.upgrade.abortAttempt()
-    this.handleTransportLoss(refusal ?? null)
+    if (refused) {
+      const err = new NetworkError(`The server refused what the page sent with ${refused.answer}`, true)
+      this.handleTransportLoss(err, false, refused.retryAfterMs)
+      return
+    }
+    const why = lost ?? refusal
+    this.handleTransportLoss(why === undefined ? null : new NetworkError(why, true), refusal !== undefined)
+  }
+
+  /** The server ended the channel for `cause`, which it ends with at once: nothing of it goes again. A RECONCILE tells
+   *  the server, ending it there. */
+  private endRefusedChannel({ channel, cause }: { channel: number; cause: number }): void {
+    const record = this.channels.get(channel)
+    if (record === undefined) return
+    this.gate.release(record)
+    this.exchange.scheduleRegisterReconcile()
+    record.channel._onEnded(channelErrorFor(cause, this.reconnectTimeoutMs))
+  }
+
+  /** The server doesn't serve the page's SSE requests: with WebSocket next in the page's order, the connection goes on
+   *  over one, as a page whose order starts with it does; else every channel ends with `err`. A new connection tries the
+   *  order again. */
+  private leaveSse(err: Error): void {
+    const order = this.connectionOptions.transports
+    if (order.indexOf(CHANNEL_TRANSPORT.WS) <= order.indexOf(CHANNEL_TRANSPORT.SSE)) {
+      this.closeAll(err)
+      return
+    }
+    this.transport.abandonActiveTransport()
+    this.transport.dispose()
+    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.WS](this.telefuncUrl, this.connectionOptions, this)
+    this.handleTransportLoss(err, false)
+  }
+
+  /** Counts the refusal against the channels whose sequenced frames are among `frames`, through the highest seq
+   *  refused: one whose frames were refused on an earlier wire too, so after the connection was established again, ends.
+   *  A 200 for another request clears nothing: what counts is what the server has of each channel. A request that
+   *  carried none of their data counts against the connection (`refusedOwnFrames`). */
+  onTransportRefused(frames: Uint8Array<ArrayBuffer>[], answer: string): boolean {
+    const ownFramesOnly = !frames.some((frame) => frame[0] !== undefined && isSequencedTag(frame[0]))
+    if (ownFramesOnly) return this.refusedOwnFrames(answer)
+    const refused = new Set<ChannelRecord>()
+    const refusedAgain = new Set<ChannelRecord>()
+    for (const frame of frames) {
+      const tag = frame[0]
+      if (tag === undefined || !isSequencedTag(tag)) continue
+      const record = this.channels.get(readU16(frame, 1))
+      if (record === undefined || refusedAgain.has(record)) continue
+      refused.add(record)
+      const seq = this.channels.sentThrough(record.ix, readU32(frame, SEQ_OFFSET))
+      // A refusal of data the server has since confirmed explains nothing any more.
+      const before =
+        record.refused !== null && record.replay.acknowledged < record.refused.throughSeq ? record.refused : null
+      if (before !== null && before.wire < this.wire && seq <= before.throughSeq) refusedAgain.add(record)
+      else record.refused = { wire: this.wire, throughSeq: Math.max(seq, before?.throughSeq ?? 0) }
+    }
+    // Released, which a RECONCILE tells the server, ending it there: one on this wire, or the next wire's.
+    if (refusedAgain.size > 0) this.exchange.scheduleRegisterReconcile()
+    for (const record of refusedAgain) {
+      this.gate.release(record)
+      record.channel._onEnded(
+        new NetworkError(
+          `Channel closed: what the page sent on it was refused with ${answer}, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.`,
+          true,
+        ),
+      )
+    }
+    return refusedAgain.size === 0 || refused.size > refusedAgain.size
+  }
+
+  /** A refused request that carried only the connection's own frames, as its PINGs: it ends once they were refused on
+   *  an earlier wire too and no PONG came since, naming `answer`. Whether the connection is to be established again. */
+  private refusedOwnFrames(answer: string): boolean {
+    const before = this.ownFramesRefusedOn
+    if (before === null || before === this.wire) {
+      this.ownFramesRefusedOn = this.wire
+      return true
+    }
+    this.closeAll(
+      new NetworkError(
+        `Connection closed: the page's requests to keep its connection were refused with ${answer}, again after a reconnect. Something between the page and the server refuses them.`,
+        true,
+      ),
+    )
+    return false
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.attempt = null
+    this.underWay = null
     this.endRecovery()
     if (this.attemptStartedAt !== null) {
       this.handshakeMs = performance.now() - this.attemptStartedAt
@@ -531,7 +674,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const end = await this.upgrade.run(
       from,
       to,
-      { sessionId, pingInterval: this.liveness.pingInterval },
+      { sessionId, pingInterval: this.liveness.pingInterval, attempt: this.exchange.nextAttempt() },
       {
         reconcileSettled: (signal) => this.exchange.reconcileSettled(signal),
         barrier: (session) => this.exchange.buildBarrierFrame(session),
@@ -609,8 +752,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.startTtlIfIdle()
   }
 
-  /** A wire lost, or an attempt failed; `refusal`: the words of the answer that refused it, where one came. */
-  private handleTransportLoss(refusal: string | null): void {
+  /** A wire lost, or an attempt failed. `lost`: why, where its end said so; `rejected`: the server refused the attempt
+   *  with an answer that wasn't a wire; `retryAfterMs`: the least wait before the next attempt that the answer asked for. */
+  private handleTransportLoss(lost: Error | null, rejected = false, retryAfterMs = 0): void {
     if (this.closed) return
     if (this.upgrade.flipped) {
       this.fallbackToSse()
@@ -625,24 +769,33 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.ttl = null
     }
 
+    const now = performance.now()
+    // At once with the recovery's timer, its end wins: every channel is told its cause.
+    if (this.recovery !== null && now >= this.recovery.deadline) return this.onRecoveryDeadline()
+    // Data that has waited since an earlier loss: the attempts go on from where they were, at no less than their step.
+    const stalled = this.anyStalled()
+    if (this.recovery === null && !stalled) this.attempt = 0
     const recovery = this.recoveryFrom()
-    const attempt = recovery.attempt
-    if (refusal !== null) recovery.refusal = refusal
-    if (refusal !== null && attempt === 0) return this.giveUp()
+    const tries = recovery.tries
+    if (lost !== null) recovery.lost = lost
+    if (rejected && tries === 0) return this.giveUp()
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
       if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
+      else record.replay.dateStall(now)
     }
+    this.endStalled(now, lost ?? new NetworkError('Connection dropped', true))
     if (this.channels.size === 0) {
       this.dispose()
       return
     }
-    recovery.attempt = attempt + 1
+    recovery.tries = tries + 1
+    const attempt = this.attempt++
     // An attempt that couldn't reconcile before the deadline doesn't start, and the deadline ends the channels. A loss
     // counts no later than its cut was due, which a late timer passed.
-    const delay = this.attempt?.nextDelay ?? reconnectDelay(attempt)
-    const at = Math.min(performance.now(), this.attempt?.cutAt ?? Infinity)
-    this.attempt = null
+    const delay = Math.max(this.underWay?.nextDelay ?? reconnectDelay(attempt, stalled), retryAfterMs)
+    const at = Math.min(now, this.underWay?.cutAt ?? Infinity)
+    this.underWay = null
     this.enterReconnecting(at <= this.latestEnd(delay, recovery.deadline, this.handshakeMs ?? 0) ? delay : null)
   }
 
@@ -656,13 +809,57 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return deadline - delay - needMs
   }
 
+  /** A POST of stalled channels' data alone got no answer, or one that asks for later, while its wire's event stream is
+   *  up (`SseTransport.holdStalled`): the wire goes on, and that try is those channels' loss, judged as at a wire's
+   *  (`endStalled`). Returns how long its data waits before it goes again: the stalled schedule's next attempt. */
+  onStalledPostLost(cause: string): number {
+    const lost = new NetworkError(cause, true)
+    const released = this.endStalled(performance.now(), lost)
+    // Released: a RECONCILE tells the server, ending it there.
+    if (released) this.exchange.scheduleRegisterReconcile()
+    return reconnectDelay(this.attempt++, true)
+  }
+
+  /** Whether the server lacks sequenced `frame`, of a channel still carried. */
+  stillOwed(frame: Uint8Array<ArrayBuffer>): boolean {
+    const record = this.channels.get(readU16(frame, 1))
+    if (record === undefined) return false
+    return this.channels.sentThrough(record.ix, readU32(frame, SEQ_OFFSET)) > record.replay.acknowledged
+  }
+
+  /** Whether a channel's data has waited for the server since an earlier loss. */
+  private anyStalled(): boolean {
+    for (const { replay } of this.channels.values()) if (replay.stall !== null) return true
+    return false
+  }
+
+  /** Ends each channel, a closed one too, whose data the server hasn't confirmed for over `reconnectTimeout` of
+   *  reconnects: dated at a loss, and the page read something from the server since, so a server was there to confirm
+   *  it. With nothing read at all, the recovery decides. A RECONCILE leaves it out, which ends it on the server. */
+  private endStalled(now: number, lost: Error): boolean {
+    let released = false
+    for (const record of [...this.channels.values()]) {
+      const { stall } = record.replay
+      if (stall === null || this.readAt <= stall.since || now - stall.since <= this.reconnectTimeoutMs) continue
+      this.gate.release(record)
+      record.channel._onEnded(
+        new NetworkError(
+          `Channel closed: the server hasn't confirmed what the page sent on it for over ${Math.round(this.reconnectTimeoutMs / 1000)} s of reconnects. The last try: ${lost.message}`,
+          true,
+        ),
+      )
+      released = true
+    }
+    return released
+  }
+
   /** The recovery under way, or one from now: the server holds the page's channels until its ping deadline noticed
    *  the loss, then `reconnectTimeout`, so the page tries until then and not past it. */
   private recoveryFrom(): Recovery {
     if (this.recovery) return this.recovery
     const windowMs = this.reconnectWindow()
     const timer = setTimeout(() => this.onRecoveryDeadline(), windowMs)
-    this.recovery = { attempt: 0, deadline: performance.now() + windowMs, refusal: null, timer }
+    this.recovery = { tries: 0, deadline: performance.now() + windowMs, lost: null, timer }
     return this.recovery
   }
 
@@ -672,13 +869,13 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.giveUp()
   }
 
-  /** The connection gives up: each channel ends with the refusal this recovery heard last, else with whether the
-   *  server ever attached it. */
+  /** The connection gives up: each channel ends with why this recovery's last wire or attempt went where its end said,
+   *  else with whether the server ever attached it. */
   private giveUp(): void {
-    const refusal = this.recovery?.refusal ?? null
+    const lost = this.recovery?.lost ?? null
     for (const record of this.channels.values()) {
-      const words = refusal ?? (this.channels.isInitial(record) ? 'Connection not established' : 'Connection dropped')
-      record.channel._onConnectionLost(new NetworkError(words, true))
+      const words = this.channels.isInitial(record) ? 'Connection not established' : 'Connection dropped'
+      record.channel._onConnectionLost(lost ?? new NetworkError(words, true))
     }
     this.dispose()
   }
@@ -780,11 +977,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 }
 
-/** How long the page waits before reconnect `attempt` (0 after a loss): a random part of a delay that doubles from
- *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, so pages that lost their wires together,
- *  to a proxy or a server that restarted, don't come back together, on the first attempt or at the cap. */
-function reconnectDelay(attempt: number): number {
-  return Math.random() * Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+/** How long the page waits before reconnect `attempt` (0 after a loss): a step that doubles from
+ *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, drawn at random so that pages that lost
+ *  their wires together, to a proxy or a server that restarted, don't come back together, on the first attempt or at
+ *  the cap: anywhere in the step, or, while a channel's data has waited since an earlier loss (`stalled`), between the
+ *  step and half a step more, so what can't get through goes again no more often than on 0.3.1, which waited the step
+ *  itself (its client/connection.ts:1191). */
+function reconnectDelay(attempt: number, stalled: boolean): number {
+  const step = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+  return stalled ? (1 + Math.random() / 2) * step : Math.random() * step
 }
 
 /** How long an attempt may go unanswered before it is cut: three times as long as the last attempt the server answered
@@ -808,18 +1009,6 @@ const TRANSPORT_REGISTRY: Record<
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
-function channelErrorFor(reason: number): Error {
-  if (reason === ERROR_REASON.OVERFLOW) {
-    return new ChannelOverflowError(
-      `Channel closed: the server couldn't hold more for this client. What it had yet to receive, or what it sent that the server was still working on, passed what the server holds for one channel (${CHANNEL_HOLD_MAX_BYTES / 2 ** 20} MiB by default) or config.channel.maxMemory. Read messages faster, send less or await each send and publish(), pass \`lossy: true\` to a BroadcastChannel that may skip to the newest, or raise config.channel.maxMemory`,
-    )
-  }
-  if (reason === ERROR_REASON.CLOSE_TIMED_OUT) return closeTimedOutError()
-  if (reason === ERROR_REASON.LOST) return replayLossError('server')
-  if (reason === ERROR_REASON.NOT_IN_EFFECT) {
-    return new ChannelClosedError(
-      'Broadcast closed: its subscription did not take effect on the server. Get the broadcast from a telefunction again to subscribe again.',
-    )
-  }
-  return makeBugError()
+function channelErrorFor(reason: number, reconnectTimeoutMs: number): Error {
+  return endCauseOf(reason)?.error(reconnectTimeoutMs) ?? makeBugError()
 }

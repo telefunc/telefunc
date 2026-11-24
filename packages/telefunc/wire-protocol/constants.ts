@@ -131,20 +131,13 @@ export const WIRE_VERSION = 3
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
 
-/** A wire the server refused for a frame it couldn't read: a WebSocket's close code, the status of the SSE request that
- *  carried the frame (its stream ends with a `REJECTED` event), and the reason both give, within the 123 bytes a close
- *  frame's reason may hold. The page ends its channels and doesn't reconnect. */
-export const WS_CLOSE_REJECTED = 4002
-export const STATUS_CODE_REJECTED = 422
-export const WIRE_REJECTED_REASON = 'Invalid channel frame. Reload the page.'
+/** The close code of a WebSocket the server ended with a refusal, which its reason carries (`refusal.ts`'s `wireEnd`):
+ *  the channel it names ends with its cause, or every channel of the page's session where it names none. */
+export const WS_CLOSE_REFUSED = 4002
 
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'
-
-/** How long to wait for the stream-request POST handshake ack on the SSE downstream
- *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
-export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
@@ -164,11 +157,8 @@ export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Longest channel id the wire will carry. */
+/** Longest channel id the wire will carry, as JSON writes it (`isChannelId`, wire/payloads.ts). */
 export const UPGRADE_MAX_ID_BYTES = 256
-
-/** Worst case for one open entry beyond its id: its other keys at their largest values, and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -180,15 +170,9 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
 /** The single channels-per-connection limit: the client refuses to open past it, a RECONCILE or barrier may
- *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
+ *  list no more, and the control-frame byte cap is derived from it (`WIRE_MAX_CTRL_FRAME_BYTES`, wire/payloads.ts). (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
-
-/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
- *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
- *  frame is worse than no cap. */
-export const WIRE_MAX_CTRL_FRAME_BYTES =
-  MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
@@ -198,12 +182,20 @@ export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
+/** Largest metadata of a binary call the server will read: the most a V8 server can decode into one string, which holds
+ *  at most 536,870,888 UTF-16 code units, each at most 3 bytes of UTF-8. A V8 client (Chrome, Node, Deno) can't encode
+ *  more either; a JSC one (Safari, Bun), whose strings hold 2,147,483,647, can, but no real call carries that much
+ *  metadata: its files go in the body's binary frames. */
+export const CALL_METADATA_MAX_BYTES = 536_870_888 * 3
 /** An event is encoded and goes to its stream a slice of its frame at a time, so nothing holds it whole. A multiple of 3,
  *  as base64 of such a slice joins the next one's. */
 export const SSE_EVENT_SLICE_BYTES = 48 * 1024
 
 /** How long a RECONCILE waits for RECONCILED, and the wire for any frame where tracked, before the page reconnects. */
 export const RECONCILE_TIMEOUT_MS = 10_000
+
+/** The slowest link a page's reconnect is kept working on, Slow 3G's 400 kbit/s, in bytes per ms. */
+export const RECONCILE_FLOOR_BYTES_PER_MS = 50
 
 // An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
 assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)

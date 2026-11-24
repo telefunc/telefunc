@@ -8,7 +8,6 @@ import {
   RECONCILE_TIMEOUT_MS,
 } from '../../constants.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
-import { ChannelClosedError } from '../channelErrors.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { decode, encode, isOneFrame, messageFrames, withTook } from '../../wire/frame.js'
 import type { ReconcilePayload } from '../../wire/payloads.js'
@@ -317,7 +316,10 @@ describe("a WebSocket RECONCILE's deadline", () => {
       expect(ServerSocket.made.length).toBe(socketsBefore + 1)
       const [next] = ServerSocket.made.at(-1)!.reconciles
       expect(next?.open.map(({ id }) => id).sort()).toEqual([...ids].sort())
-      expect(next?.sessionId).toBe(exchange === 'first connect' ? undefined : 'session')
+      // Before the server named a session, the page names the one it made.
+      const firstSession = ServerSocket.made[0]?.reconciles[0]?.sessionId
+      expect(firstSession).toEqual(expect.any(String))
+      expect(next?.sessionId).toBe(exchange === 'first connect' ? firstSession : 'session')
     },
   )
 
@@ -721,38 +723,6 @@ describe("a page's channels on a live WebSocket", () => {
     await vi.advanceTimersByTimeAsync(100)
     expect(socket!.textOrder).toEqual(['"a1"'])
     for (const page of pages) page.abort()
-  })
-})
-
-describe('a wire the server refused for a frame it could not read', () => {
-  afterEach(() => {
-    vi.clearAllTimers()
-    vi.useRealTimers()
-  })
-
-  test("its event stream's REJECTED event ends the channels with the refusal, and the page opens no other wire", async () => {
-    vi.useFakeTimers()
-    const { fetchImpl, downstreams } = createStalledTransport()
-    const ended: unknown[] = []
-    ClientConnection.getOrCreate(
-      'http://test.local/_telefunc',
-      fakeMuxChannel({ _onEnded: (err) => ended.push(err) }),
-      {
-        transports: [CHANNEL_TRANSPORT.SSE],
-        fetchImpl,
-        connectionKey: crypto.randomUUID(),
-      },
-    )
-    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_INITIAL_DELAY_MS)
-    expect(downstreams).toHaveLength(1)
-
-    downstreams.at(0)?.deliver(new TextEncoder().encode(`data: ${uint8ArrayToBase64url(encode.rejected())}\n\n`))
-    await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_TIMEOUT_MS)
-
-    expect(ended).toHaveLength(1)
-    expect(ended[0]).toBeInstanceOf(ChannelClosedError)
-    expect(ended[0]).toHaveProperty('message', expect.stringContaining('the server refused a frame it could not read'))
-    expect(downstreams).toHaveLength(1)
   })
 })
 

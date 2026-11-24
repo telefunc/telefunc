@@ -8,7 +8,7 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { isAbort } from '../../shared/Abort.js'
 import { ChannelClosedError, ChannelPageLeftError } from './channelErrors.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from './server/ServerBroadcast.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { ClientBroadcast } from './client/ClientBroadcast.js'
@@ -48,7 +48,7 @@ afterAll(() => {
 /** A server channel and the page's end of it, both open. */
 async function pair() {
   const channel = new ServerChannel<unknown, unknown>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<unknown, unknown>({
     channelId: channel.id,
     connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },
@@ -182,7 +182,7 @@ describe("a page's subscribe() callback that publishes after its broadcast ended
     test(`the server aborted: ${method} throws one ChannelClosedError whose cause is the end, and nothing is printed`, async () => {
       const key = crypto.randomUUID()
       const channel = new ServerBroadcast<string>({ key })
-      getChannelMux().registerChannel(channel)
+      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
         connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },

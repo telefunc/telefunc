@@ -9,6 +9,7 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { Broadcast, ServerBroadcast } from './server/ServerBroadcast.js'
 import { ClientBroadcast } from './client/ClientBroadcast.js'
 import { getChannelMux } from './server/ChannelMux.js'
+import { ATTACHABLE_NOW } from './server/ServerChannel.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000 }
 
@@ -51,7 +52,7 @@ for (const transport of ['sse', 'ws'] as const) {
       test(`a close the ${closer} begins hands it ahead of the close: the page reads it before its close begins`, async () => {
         const key = `room:${crypto.randomUUID()}`
         const channel = new ServerBroadcast({ key, lossy: true })
-        getChannelMux().registerChannel(channel)
+        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
         const page = new ClientBroadcast<string>({
           channelId: channel.id,
           lossy: true,
@@ -94,7 +95,7 @@ for (const transport of ['sse', 'ws'] as const) {
       test(`a close the ${closer} begins skips none of them: the page reads each before its close begins`, async () => {
         const key = `room:${crypto.randomUUID()}`
         const channel = new ServerBroadcast({ key, lossy: true })
-        getChannelMux().registerChannel(channel)
+        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
         const page = new ClientBroadcast<string>({
           channelId: channel.id,
           lossy: true,
@@ -115,7 +116,7 @@ for (const transport of ['sse', 'ws'] as const) {
     test("in a close the page begins, the page's own publish is read before its publish() resolves", async () => {
       const key = `room:${crypto.randomUUID()}`
       const channel = new ServerBroadcast({ key, lossy: true })
-      getChannelMux().registerChannel(channel)
+      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
         lossy: true,
@@ -135,7 +136,7 @@ for (const transport of ['sse', 'ws'] as const) {
     test('a close both ends begin at once skips none of them', async () => {
       const key = `room:${crypto.randomUUID()}`
       const channel = new ServerBroadcast({ key, lossy: true })
-      getChannelMux().registerChannel(channel)
+      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
         lossy: true,

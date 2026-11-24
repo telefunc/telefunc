@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { RECONCILE_TIMEOUT_MS } from '../constants.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { AttachExchange } from './client/AttachExchange.js'
@@ -43,7 +43,7 @@ test.each(['after the RECONCILED', 'past the exchange deadline, within the TTL',
   async (when) => {
     const connection = { telefuncUrl, transports: ['ws' as const], connectionKey: crypto.randomUUID() }
     const lead = new ServerChannel<string, string>()
-    getChannelMux().registerChannel(lead)
+    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
     const neighbour = new ClientChannel<string, string>({ channelId: lead.id, connection })
     const got: string[] = []
     lead.listen((message) => void got.push(message))
@@ -72,7 +72,7 @@ test.each(['after the RECONCILED', 'past the exchange deadline, within the TTL',
       }
       if (when !== 'never, so the TTL expires') {
         const registered = new ServerChannel<string, string>({ id: joiningId })
-        getChannelMux().registerChannel(registered)
+        getChannelMux().registerChannel(registered, ATTACHABLE_NOW)
         await registered.opened
       }
       if (when === 'never, so the TTL expires') expect(await outcome).not.toBe('opened')

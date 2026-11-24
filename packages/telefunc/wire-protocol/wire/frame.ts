@@ -15,6 +15,7 @@ export {
   peekTag,
   isCloseOutcomeFrame,
   tellsLastRead,
+  channelOf,
 }
 export type {
   AckResultStatus,
@@ -31,7 +32,7 @@ export type {
 }
 
 import { HEADER, SEQ_OFFSET, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 } from './header.js'
-import { TAG, isSequencedTag } from './tags.js'
+import { TAG, isSequencedTag, isWireCtrlTag } from './tags.js'
 import {
   parseBarrierPayload,
   parseJsonPayload,
@@ -54,6 +55,7 @@ import {
 } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
+import { END_CAUSE } from '../channel/endCause.js'
 
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
@@ -85,19 +87,18 @@ const ACK_STATUS = {
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
-/** Why the server closed a channel with `ERROR`. */
+/** Why a channel ended, as `ERROR` carries it: each cause's code (`END_CAUSE`, which says what each means). */
 const ERROR_REASON = {
-  /** Its page fell behind what the server holds for it, sent more than the server holds while its listeners work on it,
-   *  or the server can't hold even a refusal of its ack requests. */
-  OVERFLOW: 0x01 as const,
-  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size, or an end the server's
-   *  had no room to keep. */
-  LOST: 0x02 as const,
-  /** A graceful close's deadline passed before both ends were done: from the end that decides the close. */
-  CLOSE_TIMED_OUT: 0x04 as const,
-  /** A broadcast's subscription didn't take effect: its backend refused it, or a call that carries it waited
-   *  `connectTtl` for it, or its request went first. What the backend said stays on the server. */
-  NOT_IN_EFFECT: 0x03 as const,
+  OVERFLOW: END_CAUSE.overflow.code,
+  LOST: END_CAUSE.lost.code,
+  NOT_IN_EFFECT: END_CAUSE.notInEffect.code,
+  CLOSE_TIMED_OUT: END_CAUSE.closeTimedOut.code,
+  FRAME_OVER_LIMIT: END_CAUSE.frameOverLimit.code,
+  FRAME_REFUSED: END_CAUSE.frameRefused.code,
+  UNCONFIRMED: END_CAUSE.unconfirmed.code,
+  UNREADABLE: END_CAUSE.unreadable.code,
+  RECEIVE_BUDGET: END_CAUSE.receiveBudget.code,
+  END_NOT_KEPT: END_CAUSE.endNotKept.code,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
@@ -153,11 +154,11 @@ type WireCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[] }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
+  | { tag: typeof TAG.END; refusal: string }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
-  | { tag: typeof TAG.REJECTED }
   | { tag: typeof TAG.RECONCILE_TAKEN }
   | { tag: typeof TAG.PIECES_ACK_REQ }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
@@ -284,11 +285,11 @@ const encode = {
     return frame
   },
   fin: () => encodeBareFrame(TAG.FIN),
+  end: (refusal: string) => encodeTextFrame(TAG.END, 0, refusal, 0),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
-  rejected: () => encodeBareFrame(TAG.REJECTED),
   reconcileTaken: () => encodeBareFrame(TAG.RECONCILE_TAKEN),
   piecesAckReq: () => encodeBareFrame(TAG.PIECES_ACK_REQ),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
@@ -430,7 +431,6 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.FIN]: encode.fin().byteLength,
   [TAG.PUBLISH_TO]: encode.publishTo(0, 0).byteLength,
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
-  [TAG.REJECTED]: encode.rejected().byteLength,
   [TAG.RECONCILE_TAKEN]: encode.reconcileTaken().byteLength,
   [TAG.PIECES_ACK_REQ]: encode.piecesAckReq().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
@@ -498,6 +498,13 @@ function tellsLastRead<F extends DecodedFrame>(
   frame: F,
 ): frame is Extract<F, { tag: typeof TAG.WINDOW | typeof TAG.CLOSE_ACK | typeof TAG.CLOSE_DONE }> {
   return frame.tag === TAG.WINDOW || frame.tag === TAG.CLOSE_ACK || frame.tag === TAG.CLOSE_DONE
+}
+
+/** The channel a frame is on, from its header alone: none for a frame of the connection's own, or for one too short to
+ *  have a header. */
+function channelOf(raw: Uint8Array): number | undefined {
+  const tag = raw[0]
+  return tag !== undefined && !isWireCtrlTag(tag) && raw.byteLength >= HEADER ? readU16(raw, 1) : undefined
 }
 
 function decode(frame: Uint8Array): DecodedFrame {
@@ -569,6 +576,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     }
     case TAG.FIN:
       return { tag: TAG.FIN }
+    case TAG.END:
+      return { tag: TAG.END, refusal: textDecoder.decode(payload) }
     // Client→server payloads are validated here, at the trust boundary; server→client ones are
     // trusted like every other payload our own server sends.
     case TAG.RECONCILE:
@@ -579,8 +588,6 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILED, payload: parseJsonPayload(payload) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
-    case TAG.REJECTED:
-      return { tag: TAG.REJECTED }
     case TAG.RECONCILE_TAKEN:
       return { tag: TAG.RECONCILE_TAKEN }
     case TAG.PIECES_ACK_REQ:

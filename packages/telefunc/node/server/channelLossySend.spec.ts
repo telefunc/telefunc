@@ -1,7 +1,7 @@
 import { afterEach, assert, describe, expect, expectTypeOf, onTestFinished, test, vi } from 'vitest'
 import { runInNewContext } from 'node:vm'
 
-import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { Channel, ServerChannel, ATTACHABLE_NOW } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { hold, letGo, releaseHolder, type MemoryHolder } from '../../wire-protocol/channel/server/channelMemory.js'
@@ -151,7 +151,7 @@ describe('a lossy send before the telefunction returns', () => {
     test(`${sends}: the page reads ${read}`, () => {
       const channel = new ServerChannel<never, string>()
       send(channel, sends)
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       const page = newPage()
       wire(channel, page).attach()
       expect(page.read.join(' ')).toBe(read)
@@ -163,7 +163,7 @@ describe('a lossy send before the telefunction returns', () => {
 describe('a lossy send while the page is away', () => {
   test('L1, R, L2, L3, close(): the page reads L1, R, L3, then the close', () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const first = wire(channel, page)
     const peer = first.attach()
@@ -177,7 +177,7 @@ describe('a lossy send while the page is away', () => {
 
   test('the newest held for a page that is behind goes into the replay as the wire goes, ahead of what follows', async () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const first = wire(channel, page, { behindAfter: 0 })
     const peer = first.attach()
@@ -199,7 +199,7 @@ describe('a lossy send while the page is away', () => {
 describe('a lossy send to an attached page', () => {
   test('a graceful close hands the held newest ahead of the close', async () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     wire(channel, page, { behindAfter: 0 }).attach()
     send(channel, 'L1')
@@ -211,7 +211,7 @@ describe('a lossy send to an attached page', () => {
 
   test('a page that keeps up reads every one, in order with the others', () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     wire(channel, page).attach()
     send(channel, 'L1 R1 L2 L3 R2')
@@ -225,7 +225,7 @@ describe('a lossy send to an attached page', () => {
   ] as const) {
     test(`${sends} waiting on the wire while the page is behind: the page reads ${read}`, async () => {
       const channel = new ServerChannel<never, string>()
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       const page = newPage()
       const w = wire(channel, page, { behindAfter: 0 })
       w.attach()
@@ -246,7 +246,7 @@ describe('a lossy send to an attached page', () => {
   test('of the lossy sends waiting on the wire, a newer one takes the place only of those after the last plain send', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
@@ -264,7 +264,7 @@ describe('a lossy send to an attached page', () => {
 
   test("a lossy send whose head the wire took isn't replaced, and counts once", async () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
@@ -281,7 +281,7 @@ describe('a lossy send to an attached page', () => {
 
   test('the newest held while the page has no credit left goes once the page grants more', () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page)
     w.attach()
@@ -299,7 +299,7 @@ describe('a lossy send to an attached page', () => {
     const bytes = new Uint8Array([1, 2])
     void channel.sendBinary(bytes, { lossy: true })
     bytes[0] = 9
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
@@ -334,7 +334,7 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(() => channel.send(new ArrayBuffer(4), { ack: false })).toThrow('this `ArrayBuffer`')
     void channel.send('R')
     const server = channel as unknown as ServerChannel<never, string>
-    server._registerChannel()
+    server._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     wire(server, page).attach()
     expect(page.read).toEqual(['R'])
@@ -349,7 +349,7 @@ describe('bytes given to `send()` and `publish()`', () => {
     expect(() => channel.send(new Map([['m', new Uint8Array(1)]]))).toThrow('turns a `Uint8Array` in it into')
     void channel.send('R')
     const server = channel as unknown as ServerChannel<never, string>
-    server._registerChannel()
+    server._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     wire(server, page).attach()
     expect(page.read).toEqual(['R'])
@@ -417,7 +417,7 @@ describe('the confirmation time a lossy send measures', () => {
   test('a lossy send behind an unconfirmed plain one keeps it, so a wire that dies silently takes 20 values in 2 s, not 60', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     // A WebSocket's: 600 ms past the least confirmation time.
     const w = wire(channel, page, { behindAfter: (leastConfirmMs) => 600 + leastConfirmMs })
@@ -450,7 +450,7 @@ describe('a page away for 5 s, with 30 lossy sends and one plain send a second',
   function run(died: 'closed' | 'silently') {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance', 'Date'] })
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     // A confirmation waits 300 ms for the wire, past 300 ms of slack: a WebSocket's `behindAfter` at a 0 ms round trip.
     const first = wire(channel, page, { behindAfter: 600 })
@@ -506,7 +506,7 @@ describe('a large lossy send near the memory budget', () => {
 
   test('before the first attach, a newest as large as the one waiting takes its place where both would not fit, and one too large is refused', async () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const free = leaveRoom(1.5 * size)
     try {
       await expect(channel.send('a'.repeat(size), { lossy: true })).resolves.toBeUndefined()
@@ -524,7 +524,7 @@ describe('a large lossy send near the memory budget', () => {
 
   test('attached and behind, a newest as large as the one waiting takes its place where both would not fit beside what the page has yet to confirm', async () => {
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
@@ -545,9 +545,16 @@ describe('a large lossy send near the memory budget', () => {
   })
 
   /** The page of `channel` over SSE, reading nothing of its event stream unless asked. `waiting()` counts the channel's
-   *  publishes in the wire's queue. */
-  async function overSse(channel: ServerChannel<unknown, string>) {
-    getChannelMux().registerChannel(channel)
+   *  publishes in the wire's queue. With `reconciledOwed`, the server's RECONCILED waits until `reconcile()`. */
+  async function overSse(channel: ServerChannel<unknown, string>, { reconciledOwed = false } = {}) {
+    const mux = getChannelMux()
+    mux.registerChannel(channel, ATTACHABLE_NOW)
+    const sendReconciled = mux.sendReconciled.bind(mux)
+    const deferred = vi.spyOn(mux, 'sendReconciled')
+    onTestFinished(() => deferred.mockRestore())
+    const owed = new Promise<() => void>((resolve) => {
+      if (reconciledOwed) deferred.mockImplementationOnce((outcome) => resolve(() => sendReconciled(outcome)))
+    })
     const connId = crypto.randomUUID()
     const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
     const post = (frames: Uint8Array<ArrayBuffer>[], extra = {}) =>
@@ -563,13 +570,27 @@ describe('a large lossy send near the memory budget', () => {
     // The page falls behind only at `untilBehind()`: a loaded runner may leave two sends further apart than its wire's wait.
     const behindAfter = vi.spyOn(WireSender.prototype, 'behindAfter').mockReturnValue(Number.POSITIVE_INFINITY)
     onTestFinished(() => behindAfter.mockRestore())
-    const response = await post([encode.reconcile({ open })], { streamResponse: true })
+    const response = await post([encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open })], {
+      streamResponse: true,
+    })
     await channel.opened
     const [peer] = attached.mock.calls[attached.mock.contexts.indexOf(channel)] ?? []
     assert(peer)
     assert(response.body instanceof ReadableStream)
     const reader = response.body.getReader()
-    const { events } = getChannelMux().getWireByConnId<{ events: WireQueue }>(connId)!
+    const wire = mux.getWireByConnId<{ events: WireQueue; ready: Promise<void> }>(connId)
+    assert(wire)
+    // The channel opens as its attach runs; what it sends goes to the stream once the RECONCILED went, which the page
+    // reads as it opens: from there it reads nothing unless asked.
+    await wire.ready
+    const opening = new SseEvents()
+    for (let reconciled = reconciledOwed; !reconciled; ) {
+      const read = await reader.read()
+      if (read.done) throw new Error('the event stream ended before its RECONCILED')
+      opening.push(read.value, (frame) => (reconciled ||= frame[0] === TAG.RECONCILED))
+    }
+    const { events } = wire
+    let asked: Promise<ReadableStreamReadResult<Uint8Array>> | undefined
     return {
       /** The page reads and confirms the channel's first send. */
       async readFirst() {
@@ -584,7 +605,26 @@ describe('a large lossy send near the memory budget', () => {
       },
       /** The page asks for more and reads no further: the next event starts, and what follows waits for it. */
       askOnce() {
-        void reader.read()
+        asked = reader.read()
+      },
+      /** The server sends the RECONCILED it owes; the page reads on until a binary send starting with `last`. Returns
+       *  `RECONCILED` and each binary send's first character, in the order the page read them. */
+      async reconcile(last: string): Promise<string[]> {
+        ;(await owed)()
+        const sse = new SseEvents()
+        const read: string[] = []
+        const label = (frame: Uint8Array) => {
+          const decoded = decode(frame)
+          if (decoded.tag === TAG.RECONCILED) read.push('RECONCILED')
+          if (decoded.tag === TAG.BINARY) read.push(String.fromCharCode(decoded.data[0] ?? 0))
+        }
+        while (!read.includes(last)) {
+          const chunk = await (asked ?? reader.read())
+          asked = undefined
+          if (chunk.done) break
+          sse.push(chunk.value, label)
+        }
+        return read
       },
       waiting: () => events.waitingPublishes(0),
       /** Past what its wire takes to confirm a send, after the one the page confirmed: the page is then behind. */
@@ -671,6 +711,25 @@ describe('a large lossy send near the memory budget', () => {
     }
   })
 
+  test('on SSE, while the page is owed its RECONCILED no send is handed to the wire: a send that would not fit takes the place of every lossy send before it', async () => {
+    const channel = new ServerChannel<unknown, string>()
+    const page = await overSse(channel, { reconciledOwed: true })
+    const half = CREDIT_WINDOW_INITIAL_BYTES / 2
+    page.askOnce()
+    await sendLossy(channel, true, 'a'.repeat(half))
+    await sendLossy(channel, true, 'b'.repeat(half))
+    const free = leaveRoom(100_000)
+    try {
+      await expect(sendLossy(channel, true, 'c'.repeat(half / 2))).resolves.toBeUndefined()
+      // `c` alone is kept to replay: its frame and 200 bytes.
+      expect(channel.heldBytes).toBe(half / 2 + 7 + 200)
+      expect(await page.reconcile('c')).toEqual(['RECONCILED', 'c'])
+    } finally {
+      free()
+      await page.leave()
+    }
+  })
+
   test('on SSE, a send after the page fell behind that would not fit beside the one waiting for the wire, which a plain send followed, is refused, and that one stays', async () => {
     const { channel, page } = await leftTwoUnread(true)
     void channel.send('R')
@@ -692,7 +751,7 @@ describe("the server's memory after a lossy send", () => {
   test('a held newest lets go at abort()', async () => {
     const before = ledgerTotal()
     const channel = new ServerChannel<never, string>()
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     const w = wire(channel, page, { behindAfter: 0 })
     w.attach()
@@ -714,9 +773,9 @@ describe("the server's memory after a lossy send", () => {
     const before = ledgerTotal()
     const unattached = new ServerChannel<never, string>()
     void unattached.send('x'.repeat(64 * 1024), { lossy: true })
-    unattached._registerChannel()
+    unattached._registerChannel(ATTACHABLE_NOW)
     const away = new ServerChannel<never, string>()
-    away._registerChannel()
+    away._registerChannel(ATTACHABLE_NOW)
     const peer = wire(away, newPage()).attach()
     away._onPeerDisconnect(peer, 1_000)
     void away.send('x'.repeat(64 * 1024), { lossy: true })
@@ -735,7 +794,7 @@ describe("the server's memory after a lossy send", () => {
     void channel.send('x'.repeat(2 * room), { lossy: true })
     const filler: MemoryHolder = { heldBytes: 0 }
     hold(filler, heldAtMost() - before - room)
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
     wire(channel, page).attach()
     expect(page.read).toEqual(['R'])

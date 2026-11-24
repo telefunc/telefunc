@@ -5,6 +5,7 @@ export { newCDPSession }
 export { sendRefusedWarning }
 export { upgradeStatus }
 export { rawRequestStatus }
+export { exposeSendUnreadable, sessionEndedByUnreadable }
 
 import {
   page,
@@ -25,6 +26,41 @@ import { connect } from 'node:net'
 import { once } from 'node:events'
 
 const sendRefusedWarning = 'A channel refused a `send()`'
+
+/** What each channel of a page's connection reads as the server ends the page's session for a frame it can't read
+ *  (packages/telefunc/wire-protocol/channel/endCause.ts, `unreadable`). */
+const sessionEndedByUnreadable =
+  "Channel closed: the page's connection ended: The server can't read what the page sent on its connection."
+
+declare global {
+  interface Window {
+    /** Sends a frame the server can't read on the page's newest open WebSocket; false where it has none. */
+    sendUnreadable?: () => boolean
+    /** Each of the page's WebSockets that closed, in order: the code and reason the browser handed the page. */
+    socketCloses?: { code: number; reason: string }[]
+  }
+}
+
+/** For `addInitScript`: `window.sendUnreadable()`, as a page that breaks the protocol would send it: a frame of a tag no
+ *  version has (packages/telefunc/wire-protocol/wire/tags.ts), which names no channel; and `window.socketCloses`. */
+function exposeSendUnreadable() {
+  const sockets: WebSocket[] = []
+  const closes: { code: number; reason: string }[] = []
+  window.socketCloses = closes
+  const PageWebSocket = window.WebSocket
+  window.WebSocket = class extends PageWebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols)
+      sockets.push(this)
+      this.addEventListener('close', ({ code, reason }) => void closes.push({ code, reason }))
+    }
+  }
+  window.sendUnreadable = () => {
+    const socket = sockets.findLast(({ readyState }) => readyState === PageWebSocket.OPEN)
+    socket?.send(new Uint8Array([0x0f, 0, 0]))
+    return socket !== undefined
+  }
+}
 
 /**
  * The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`, or `'no answer'`

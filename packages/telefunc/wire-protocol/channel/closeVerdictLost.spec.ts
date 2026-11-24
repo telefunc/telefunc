@@ -2,14 +2,14 @@
 // page's reconnect, and nothing else is. Memory running short first lets go of a verdict, never of a message. Over a real
 // server and page, on SSE and on a WebSocket, with a network the spec can lose bytes on and cut.
 
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, onTestFinished, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import type { Socket } from 'node:net'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { ChannelCloseUnknownError } from './channelErrors.js'
 import { isAbort } from '../../shared/Abort.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { ClientConnection } from './client/ClientConnection.js'
@@ -76,7 +76,7 @@ const HOLDS_AT_MOST = MAX_MEMORY - MAX_MEMORY / 8
  *  its last channel does. */
 async function pair(transport: 'sse' | 'ws', idleTimeout = 0) {
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const { page, lifecycle } = registering(
     () =>
       new ClientChannel<string, string>({
@@ -231,15 +231,26 @@ for (const transport of ['sse', 'ws'] as const) {
         let pageHasVerdict = false
         let closeAfterVerdict = false
         const pageDone = Promise.withResolvers<void>()
+        // The server's RECONCILED goes ahead of its replay, the verdict, so what the page sent while it was lost crosses
+        // the verdict: what the page sends once it has its verdict is what counts.
+        const Transport = transport === 'ws' ? WsTransport : SseTransport
+        const sendFrame = Transport.prototype.sendFrame
+        const sends = vi.spyOn(Transport.prototype, 'sendFrame').mockImplementation(function (
+          this: InstanceType<typeof Transport>,
+          ...args
+        ) {
+          if (args[0].frame[0] === TAG.CLOSE && pageHasVerdict) closeAfterVerdict = true
+          return sendFrame.apply(this, args)
+        })
+        onTestFinished(() => sends.mockRestore())
         class ServerReading extends ServerChannel<string, string> {
           override _dispatchFrame(frame: ChannelFrame): void {
-            if (frame.tag === TAG.CLOSE && pageHasVerdict) closeAfterVerdict = true
             super._dispatchFrame(frame)
             if (frame.tag === TAG.CLOSE_DONE) pageDone.resolve()
           }
         }
         const channel = new ServerReading()
-        getChannelMux().registerChannel(channel)
+        getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
         const connection = {
           telefuncUrl,
           transports: [transport],
@@ -272,7 +283,7 @@ for (const transport of ['sse', 'ws'] as const) {
 
         // What the page sends after its reconnect's replay, on the same connection, arrives after it.
         const next = new ServerChannel<string, string>()
-        getChannelMux().registerChannel(next)
+        getChannelMux().registerChannel(next, ATTACHABLE_NOW)
         const nextPage = new ClientChannel<string, string>({ channelId: next.id, connection })
         const received = Promise.withResolvers<string>()
         next.listen((message) => void received.resolve(message))

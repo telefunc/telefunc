@@ -12,7 +12,7 @@ import {
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
-import { ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 import {
@@ -20,8 +20,8 @@ import {
   ChannelCloseUnknownError,
   ChannelOverflowError,
   ChannelPageLeftError,
-  rejectedFrameError,
 } from '../../wire-protocol/channel/channelErrors.js'
+import { END_CAUSE } from '../../wire-protocol/channel/endCause.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
 import {
@@ -135,7 +135,7 @@ describe('self-initiated close', () => {
   test.each([ACK_STATUS.OK, ACK_STATUS.ABORT])('malformed ack status %s rejects its waiter', async (status) => {
     const channel = new ServerChannel<string, string>({ ack: true })
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const pending = channel.send('hello', { ack: true })
@@ -158,7 +158,7 @@ describe('self-initiated close', () => {
       closeErr = err
     })
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const closePromise = channel.close()
@@ -181,7 +181,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const closePromise = channel.close()
@@ -202,7 +202,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const closePromise = channel.close({ timeout: 10 })
 
@@ -220,7 +220,7 @@ describe('self-initiated close', () => {
     const frames: Uint8Array[] = []
     const cleanup = createDeferred<void>()
     channel.onClose(() => cleanup.promise)
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const closePromise = channel.close({ timeout: 1_000 })
@@ -236,7 +236,7 @@ describe('self-initiated close', () => {
   test('the page never done: the close times out on both ends, and close() resolves the timeout error', async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const closePromise = channel.close({ timeout: 10 })
@@ -251,7 +251,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const work = createDeferred<string>()
@@ -281,7 +281,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
 
@@ -311,7 +311,7 @@ describe('self-initiated close', () => {
     const frames: Uint8Array[] = []
     let didFinishOnClose = false
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.onClose(async () => {
@@ -358,7 +358,7 @@ describe('self-initiated close', () => {
     // No response carried it yet: it closes with no page to wait for.
     await expect(channel.close()).resolves.toBeNull()
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     await Promise.resolve()
 
@@ -375,7 +375,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
 
@@ -396,7 +396,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
 
@@ -430,7 +430,7 @@ describe('peer-initiated close', () => {
     let didFireClose = false
     let closeErr: Error | undefined | null = null
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.onClose((err) => {
@@ -455,7 +455,7 @@ describe('peer-initiated close', () => {
   test('a close() during a close the page began asks for a shorter deadline and returns its outcome', async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.onClose(() => new Promise<void>(() => {}))
@@ -473,7 +473,7 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const work = createDeferred<string>()
@@ -501,7 +501,7 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.listen(
@@ -530,7 +530,7 @@ describe('peer-initiated close', () => {
     let didFinishOnClose = false
 
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.onClose(async () => {
@@ -559,7 +559,7 @@ describe('a close whose verdict never crosses', () => {
       const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
       const closes: (Error | null)[] = []
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(createPeer(frames))
       channel.onClose((err) => void closes.push(err))
       fromPage(channel, frames).closeRequest(100)
@@ -584,7 +584,7 @@ describe('a close whose verdict never crosses', () => {
     try {
       const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(createPeer(frames))
       fromPage(channel, frames).closeRequest(TIMER_DELAY_MAX_MS)
       const longest = () => Math.max(...timers.mock.calls.map(([, delay]) => delay ?? 0))
@@ -606,7 +606,7 @@ describe('a close whose verdict never crosses', () => {
       const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
       const peer = createPeer(frames)
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(peer)
       fromPage(channel, frames).closeRequest(60_000)
       channel._onPeerDisconnect(peer, 1_000)
@@ -625,7 +625,7 @@ describe('a close whose verdict never crosses', () => {
       const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
       const peer = createPeer(frames)
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(peer)
       const result = channel.close({ timeout: 60_000 })
       fromPage(channel, frames).closeAck()
@@ -646,7 +646,7 @@ describe("an onClose callback that waits for its own channel's outcome", () => {
     test(`awaiting \`${reads}\` doesn't hold the close: it ends gracefully, and the callback gets null`, async () => {
       const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(createPeer(frames))
       const page = fromPage(channel, frames)
       const seen = createDeferred<Error | null>()
@@ -669,7 +669,7 @@ describe('cross-close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
 
@@ -694,7 +694,7 @@ describe('cross-close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
 
@@ -710,7 +710,7 @@ describe('cross-close', () => {
   test("a crossed close the server decides ends at the page's shortening, on both ends with the timeout", async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     channel.onClose(() => new Promise<void>(() => {}))
@@ -727,7 +727,7 @@ describe('cross-close', () => {
   test("the server's cleanup starts at the page's CLOSE_ACK, while the page's runs, and a cleanup past the timeout ends both with it", async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     let cleanupStarted = false
@@ -757,7 +757,7 @@ describe('stopping an onOpen or onClose callback', () => {
     })
     stop()
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer([]))
     expect(didFireOpen).toBe(false)
   })
@@ -767,7 +767,7 @@ describe('stopping an onOpen or onClose callback', () => {
     const frames: Uint8Array[] = []
     let didFireClose = false
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     const page = fromPage(channel, frames)
     const stop = channel.onClose(() => {
@@ -801,7 +801,7 @@ describe('stopping an onOpen or onClose callback', () => {
     stopFirstClose()
     stopFirstClose()
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     stopOpen()
     stopOpen()
@@ -825,7 +825,7 @@ describe('stopping an onOpen or onClose callback', () => {
     channel.onClose(fire, { signal: controller.signal })
     controller.abort()
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     fromPage(channel, frames).closeRequest(100)
     expect(didFire).toBe(false)
@@ -840,7 +840,7 @@ describe('a listen() callback that an earlier one stopped during the same messag
     const frames: Uint8Array[] = []
     const got: string[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     channel.listen(() => stopSecond())
     const stopSecond = channel.listen((value) => {
@@ -856,7 +856,7 @@ describe('a listen() callback that an earlier one stopped during the same messag
     const frames: Uint8Array[] = []
     const asked: string[] = []
 
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     channel._attachPeer(createPeer(frames))
     channel.listen(() => stopSecond())
     const stopSecond = channel.listen((value) => {
@@ -888,7 +888,7 @@ describe("a server BroadcastChannel's publish from its onClose()", () => {
           const key = crypto.randomUUID()
           const channel = new ServerBroadcast<string>({ key })
           const frames: Uint8Array[] = []
-          channel._registerChannel()
+          channel._registerChannel(ATTACHABLE_NOW)
           channel._attachPeer(createPeer(frames))
           const sibling = new ServerBroadcast<string>({ key })
           const got: { by: string; data: unknown }[] = []
@@ -1050,7 +1050,7 @@ const ENDINGS: Ending[] = [
   },
   {
     ending: 'a frame the server refused',
-    end: ({ channel }) => channel._onPeerGone(rejectedFrameError()),
+    end: ({ channel }) => channel._onPeerGone(END_CAUSE.frameRefused.error()),
     outcome: (outcome) => outcome instanceof ChannelClosedError,
     waiting: 'rejects',
   },
@@ -1069,7 +1069,7 @@ describe('a send still waiting as its channel ends', () => {
       const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
       const peer = createPeer(frames)
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(peer)
       const page = fromPage(channel, frames)
       const settled: { waiting?: unknown; answer?: unknown } = {}
@@ -1138,7 +1138,7 @@ describe('a send still waiting as its channel ends', () => {
     try {
       const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
       const frames: Uint8Array[] = []
-      channel._registerChannel()
+      channel._registerChannel(ATTACHABLE_NOW)
       channel._attachPeer(createPeer(frames))
       const mine = new NetworkError('an error of its own', true)
       channel.listen(async () => {

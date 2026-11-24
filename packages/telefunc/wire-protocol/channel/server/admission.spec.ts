@@ -32,7 +32,7 @@ import {
 } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './ServerChannel.js'
 
 // One channel may hold 2 MiB, the credit window it starts with, and the server 32 MiB in all.
 config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m' }
@@ -198,7 +198,7 @@ function overWebSocket(channels: ServerChannel[]) {
     return peer
   }
   const peers = channels.map((channel, index) => {
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     return attach(channel, index)
   })
   return {
@@ -552,7 +552,7 @@ test('on a WebSocket, a send waiting for room, made before its telefunction retu
   try {
     expect(await settledIn(other.sendBinary(new Uint8Array(WAITING_ROOM - 519)), 5)).toBe('pending')
     const reserved = ledger().reserved
-    channel._registerChannel()
+    channel._registerChannel(ATTACHABLE_NOW)
     expect({ second: await settledIn(second, 5), reserved: ledger().reserved }).toEqual({
       second: 'overflow',
       reserved,

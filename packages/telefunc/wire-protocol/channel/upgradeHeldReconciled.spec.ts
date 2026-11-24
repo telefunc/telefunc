@@ -6,11 +6,12 @@ import { afterAll, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { TAG } from '../wire/tags.js'
+import { messageFrames } from '../wire/frame.js'
 
 // A link whose queue holds the RECONCILED back holds the old wire's FIN, which goes out after it, as long: the page's
 // join then waits for both, as here.
@@ -73,7 +74,10 @@ class HeldBackWebSocket extends RealWebSocket {
       else deliver()
     }
     this.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
-      if (queue === 'none yet' && new Uint8Array(event.data)[0] === TAG.RECONCILED) {
+      // The acknowledgements the server carries ride ahead of the RECONCILED in its message.
+      const carriesReconciled = () =>
+        Array.from(messageFrames(new Uint8Array(event.data)), (frame) => frame[0]).includes(TAG.RECONCILED)
+      if (queue === 'none yet' && carriesReconciled()) {
         const holding: (() => void)[] = []
         queue = holding
         onHeld()
@@ -160,7 +164,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 /** A server channel that echoes, and the page's end of it on its own connection; the page upgrades on its own. */
 async function pair() {
   const channel = new ServerChannel<string, string>({ ack: true })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   channel.listen((message) => `echo ${message}`)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,

@@ -13,13 +13,16 @@ import {
   SSE_POST_MIN_BYTES_PER_S,
   SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
-  STATUS_CODE_REJECTED,
-  STATUS_CODE_WIRE_VERSION,
-  STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
 import { heartbeatHold } from '../../wire/pingDeadline.js'
-import { encodeU32, encodeLengthPrefixedBlob, encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.js'
+import {
+  U32_SIZE,
+  encodeU32,
+  encodeLengthPrefixedBlob,
+  encodeSseRequest,
+  encodeSseRequestMetadata,
+} from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
@@ -27,6 +30,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
+import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
@@ -35,10 +39,10 @@ import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
-import type { TransportOwner } from './WireLifecycle.js'
+import type { TransportEnd, TransportOwner } from './WireLifecycle.js'
 import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
-import { createDeferred } from '../../../utils/createDeferred.js'
+import { asksLater, endOfWire, readAnswer, telefuncAnswer, telefuncEndOf, type HttpAnswer } from './readAnswer.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
@@ -51,11 +55,11 @@ type SseInitialBatchStage = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-/** A wire's streaming upload POST: its body, what aborts it alone, and its end. */
+/** A wire's streaming upload POST: its body, what aborts it alone, and its end: its answer, null where none came. */
 type StreamUpload = {
   body: PushReadableStream<Uint8Array<ArrayBuffer>>
   abort: AbortController
-  ended: Promise<'fetch-ended'>
+  ended: Promise<HttpAnswer | null>
 }
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
@@ -82,8 +86,10 @@ class SseTransport implements UpgradeSource {
   private connId = randomUuid()
   uplink = new Uplink()
   downlink = new Downlink(this.uplink)
+  /** Whether the wire's frames go in batch POSTs for good: a channel's window is then the batch-POST one. A wire whose
+   *  upload awaits the server's acknowledgement sends in batch POSTs meanwhile, but isn't batched yet. */
   get batched(): boolean {
-    return this.streamRequest.tag !== 'active'
+    return this.streamRequest.tag === 'idle' || this.streamRequest.tag === 'failed'
   }
   heartbeat: Heartbeat | null = null
   private connecting = false
@@ -93,8 +99,13 @@ class SseTransport implements UpgradeSource {
   /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
+  /** When a read of the wire's event stream last ended inside an event: a frame was crossing. */
+  private partwayAt = Number.NEGATIVE_INFINITY
   private readonly abandonedControllers = new WeakSet<AbortController>()
   private outbox: OutboxEntry[] = []
+  /** Stalled channels' data whose POST failed, waiting out `stalledTimer` (`holdStalled`). */
+  private stalledHeld: OutboxEntry[] = []
+  private stalledTimer: ReturnType<typeof setTimeout> | null = null
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
@@ -116,15 +127,14 @@ class SseTransport implements UpgradeSource {
   private drainCallbacks: Array<() => void> = []
   /** A barrier waiting for the POST out: it goes next, with the outbox. */
   private barrierTurn: (() => void) | null = null
-  /** The streaming upload POST. Once `failed`, it stays so, and frames go in batch POSTs from the outbox. */
+  /** The wire's streaming upload POST. `probing`: it carries its metadata alone until the server acknowledges it, and
+   *  frames go in batch POSTs meanwhile; `acknowledged`, it waits for the POST out (`moveToUpload`). `active`: frames go
+   *  on it. `idle`: none on this wire, the next wire probes again. `failed`: an answer said the path refuses a body that
+   *  streams, and no wire of the connection uploads again. */
   private streamRequest:
     | { tag: 'idle' }
-    | {
-        tag: 'active'
-        body: PushReadableStream<Uint8Array<ArrayBuffer>>
-        /** Written before the server acknowledged the POST; null once it did. */
-        unconfirmed: Uint8Array<ArrayBuffer>[] | null
-      }
+    | { tag: 'probing'; upload: StreamUpload; acknowledged: boolean }
+    | { tag: 'active'; upload: StreamUpload }
     | { tag: 'failed' } = { tag: 'idle' }
 
   constructor({ telefuncUrl, fetchImpl, userHeaders, owner }: SseTransportOptions) {
@@ -135,7 +145,8 @@ class SseTransport implements UpgradeSource {
     if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide)
   }
 
-  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
+  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it.
+   *  Nothing reads the answer of its POST: the page is gone, and the server's ping deadline ends a wire it never got. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
     // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
@@ -148,20 +159,52 @@ class SseTransport implements UpgradeSource {
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     if (this.streamRequest.tag === 'active') return this.emitBarrierStreamRequest(buildFrame)
+    // The page leaves this wire: an upload not yet carrying anything goes with it.
+    if (this.streamRequest.tag === 'probing') this.closeStreamRequest()
     return this.emitBarrierBatch(buildFrame, signal)
   }
 
+  /** The barrier goes last on the streaming upload, whose end owns its answer as for every frame on it. */
   private emitBarrierStreamRequest(buildFrame: () => OutboundFrame): BarrierEmission {
     assert(this.streamRequest.tag === 'active' && !this.flushing && this.outbox.length === 0)
     const frame = buildFrame()
-    this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
-    this.streamRequest.body.push(frame.frame)
+    this.streamRequest.upload.body.push(encodeU32(frame.frame.byteLength))
+    this.streamRequest.upload.body.push(frame.frame)
     this.closeStreamRequest()
     return 'emitted'
   }
 
+  /** The barrier goes last in a POST of its own with the outbox, whatever its answer (see `sendStandalonePost`). Past a
+   *  size the page learned, the outbox's data goes ahead in POSTs of its own, under the same byte rule and with the
+   *  answers every POST has (`flushOutbox`). It ends: sends are held from the barrier's emission (`gatesSends`). */
   private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     // The outbox goes with the barrier, so it waits only for the POST out, whose frames the server must take first.
+    if (!(await this.takeTurn())) return 'not-emitted'
+    while (this.owner.ssePostLimit < Infinity && this.outbox.some(isSequenced) && this.hasWire() && !signal.aborted) {
+      void this.flushOutbox()
+      if (!this.flushing) break
+      if (!(await this.takeTurn())) return 'not-emitted'
+    }
+    if (!this.hasWire() || signal.aborted) {
+      // The turn the POST's end handed it held the outbox back: it goes on as that end would have sent it.
+      this.flushNextOrDrain()
+      return 'not-emitted'
+    }
+    this.flushScheduler.cancel()
+    const queued = this.takeOutbox().map((entry) => entry.frame)
+    this.dropStalled()
+    queued.push(buildFrame().frame)
+    // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
+    // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
+    // and a barrier that may have arrived counts as arrived. The wait only delays the flip.
+    await settledOrAborted(this.sendStandalonePost(queued), signal)
+    return 'emitted'
+  }
+
+  /** Waits for the POST out to end, `UPGRADE_DRAIN_TIMEOUT_MS` at most; its end hands the turn here (`barrierTurn`)
+   *  instead of sending the outbox. Whether no POST is out then: one still out is an upload, which the barrier would
+   *  wait behind as long as it takes. */
+  private async takeTurn(): Promise<boolean> {
     if (this.flushing) {
       let timer: ReturnType<typeof setTimeout> | undefined
       await new Promise<void>((resolve) => {
@@ -171,21 +214,7 @@ class SseTransport implements UpgradeSource {
       clearTimeout(timer)
       this.barrierTurn = null
     }
-    // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
-    if (this.flushing) return 'not-emitted'
-    if (!this.hasWire() || signal.aborted) {
-      // The turn the POST's end handed it held the outbox back: it goes on as that end would have sent it.
-      this.flushNextOrDrain()
-      return 'not-emitted'
-    }
-    this.flushScheduler.cancel()
-    const queued = this.takeOutbox().map((entry) => entry.frame)
-    queued.push(buildFrame().frame)
-    // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
-    // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
-    // and a barrier that may have arrived counts as arrived. The wait only delays the flip.
-    await settledOrAborted(this.sendStandalonePost(queued), signal)
-    return 'emitted'
+    return !this.flushing
   }
 
   start(): void {
@@ -216,6 +245,11 @@ class SseTransport implements UpgradeSource {
     this.settleDrained()
   }
 
+  /** When the wire last delivered part of a frame and not its end: a frame was still crossing. */
+  get frameCrossingAt(): number {
+    return this.partwayAt
+  }
+
   hasWire(): boolean {
     return this.transportAbort !== null
   }
@@ -226,14 +260,21 @@ class SseTransport implements UpgradeSource {
 
   sendFrame(frame: OutboundFrame): void {
     if (this.streamRequest.tag === 'active') {
-      this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
-      this.streamRequest.body.push(frame.frame)
-      this.streamRequest.unconfirmed?.push(frame.frame)
+      this.streamRequest.upload.body.push(encodeU32(frame.frame.byteLength))
+      this.streamRequest.upload.body.push(frame.frame)
       return
     }
     const now = performance.now()
-    const deadline = this.getFrameDeadline(frame.kind, now)
+    const own = this.getFrameDeadline(frame.kind, now)
+    const deadline = frame.released ? Math.min(own, now + SSE_RECONCILE_DEADLINE_MS) : own
     const entry = { frame: frame.frame, deadline, queuedAt: now }
+    if (this.stalledHeld.length > 0 && isSequenced(entry)) {
+      const ix = readU16(entry.frame, 1)
+      if (this.stalledHeld.some((held) => isDataOf(held, ix))) {
+        this.stalledHeld.push(entry)
+        return
+      }
+    }
     this.outbox.push(entry)
     this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
@@ -277,7 +318,7 @@ class SseTransport implements UpgradeSource {
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()
 
-    // SSE downstream + upstream POST fire in parallel. If upstream fails, we fall back to outbox+batch.
+    // The event stream and the upload's probe go together; frames go in batch POSTs until the server acknowledges it.
     const ssePromise = this.post(
       encodeSseRequest(
         { connId: this.connId, streamResponse: true },
@@ -297,14 +338,17 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
-      (bytes) => this.heartbeatOf(abortController)?.noteReceived(bytes),
+      (bytes, partway) => {
+        const heartbeat = this.heartbeatOf(abortController)
+        if (heartbeat === null) return
+        const now = performance.now()
+        heartbeat.noteReceived(bytes, now)
+        if (partway) this.partwayAt = now
+      },
     )
-    // Run the SSE loop concurrently with the handshake wait — frames (including the first
-    // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
-    const { promise: handshakeOkP, resolve: resolveHandshakeOk } = createDeferred<'ok'>()
-    void this.readEvents(reader, abortController, () => resolveHandshakeOk('ok'))
-    if (upload && !(await this.settleUpload(upload, handshakeOkP, abortController))) return
-
+    void this.readEvents(reader, abortController, () => {
+      if (upload) this.acknowledgeUpload(upload, abortController)
+    })
     this.connecting = false
     this.owner.onTransportOpen(this, startedAt)
     if (this.outbox.length > 0) void this.flushOutbox()
@@ -333,48 +377,25 @@ class SseTransport implements UpgradeSource {
       abortController.abort()
       return null
     }
-    if (response.status === STATUS_CODE_WIRE_VERSION) {
-      this.failOpen(stage, abortController, { otherWireVersion: true })
+    const answer = readAnswer(response, 'event-stream')
+    if (telefuncAnswer(answer)) {
+      this.failOpen(stage, abortController, telefuncEndOf(answer))
       return null
     }
-    if (!response.ok) {
+    // A login page or an app's HTML fallback, also behind a followed redirect, is no event stream.
+    if (answer.tag === 'refused' || answer.tag === 'tooLarge') {
       this.failOpen(stage, abortController, {
-        refusal: `Server rejected SSE connection with ${describeAnswer(response)}`,
+        refusal: response.ok
+          ? `The server answered the SSE connection with ${answer.answer}, not an event stream`
+          : `Server rejected SSE connection with ${answer.answer}`,
       })
       return null
     }
-    // As a browser's EventSource requires (HTML, "the EventSource interface"): a 200 event stream. A login page or an
-    // app's HTML fallback, also behind a followed redirect, is not one.
-    if (response.status !== 200 || mediaTypeOf(response) !== 'text/event-stream' || !response.body) {
-      this.failOpen(stage, abortController, {
-        refusal: `The server answered the SSE connection with ${describeAnswer(response)}, not an event stream`,
-      })
-      return null
-    }
+    assert(response.body)
     return response.body
   }
 
-  /** Races the upload's acknowledgement against its end and a timeout; `false` when its wire was dropped meanwhile. */
-  private async settleUpload(
-    upload: StreamUpload,
-    handshakeOk: Promise<'ok'>,
-    abortController: AbortController,
-  ): Promise<boolean> {
-    const timeout = createDeferred<'timeout'>()
-    const timer = setTimeout(() => timeout.resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS)
-    const result = await Promise.race([handshakeOk, timeout.promise, upload.ended])
-    clearTimeout(timer)
-    if (this.transportAbort !== abortController) {
-      abortController.abort()
-      return false
-    }
-    // Not acknowledged in time, or the POST ended: frames go in batch POSTs from now on.
-    if (result === 'ok') this.confirmUpload(upload, abortController)
-    else this.abandonUpload(upload)
-    return true
-  }
-
-  /** The streaming upload POST, aborted with the wire's `abortController` or alone. */
+  /** The streaming upload POST, its metadata alone, aborted with the wire's `abortController` or alone: the probe. */
   private openUpload(abortController: AbortController): StreamUpload {
     const abort = new AbortController()
     abortController.signal.addEventListener('abort', () => abort.abort(), { once: true })
@@ -383,46 +404,76 @@ class SseTransport implements UpgradeSource {
     // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
     body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
     const fetch = this.postAndRead(body.readable, abort.signal, { duplex: 'half' })
-    this.streamRequest = { tag: 'active', body, unconfirmed: [] }
     // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
-    const ended = fetch.then(
-      () => 'fetch-ended' as const,
-      () => 'fetch-ended' as const,
-    )
-    return { body, abort, ended }
+    const upload = { body, abort, ended: answerOf(fetch) }
+    this.streamRequest = { tag: 'probing', upload, acknowledged: false }
+    void this.readUploadEnd(upload, abortController)
+    return upload
   }
 
-  /** The server acknowledged the upload: what it was written is confirmed. */
-  private confirmUpload(upload: StreamUpload, abortController: AbortController): void {
-    if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
-    void this.endWireWithUpload(upload, abortController)
+  /** The server acknowledged `upload`, the probe of the wire `abortController` aborts: what it reads from it reaches the
+   *  server as it is sent. An acknowledgement on a wire the page left, or of a probe dropped, moves nothing. */
+  private acknowledgeUpload(upload: StreamUpload, abortController: AbortController): void {
+    const probing = this.streamRequest
+    if (this.transportAbort !== abortController || probing.tag !== 'probing' || probing.upload !== upload) return
+    probing.acknowledged = true
+    this.moveToUpload()
   }
 
-  /** Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends. */
-  private async endWireWithUpload({ body, ended }: StreamUpload, abortController: AbortController): Promise<void> {
-    await ended
-    if (this.streamRequest.tag === 'active' && this.streamRequest.body === body) abortController.abort()
+  /** An acknowledged probe takes the wire's frames once no POST is out: the server reads the upload's frames after
+   *  what the POST out carried, which it took before answering, so no seq passes an earlier one. What waits goes first,
+   *  in its order: stalled channels' data still owed, then the outbox. */
+  private moveToUpload(): void {
+    const probing = this.streamRequest
+    if (probing.tag !== 'probing' || !probing.acknowledged || this.flushing) return
+    this.flushScheduler.cancel()
+    this.folded = null
+    const held = this.stalledHeld.filter((entry) => this.owner.stillOwed(entry.frame))
+    this.dropStalled()
+    const waiting = held.concat(this.takeOutbox())
+    const { body } = probing.upload
+    this.streamRequest = { tag: 'active', upload: probing.upload }
+    for (const { frame } of waiting) {
+      body.push(encodeU32(frame.byteLength))
+      body.push(frame)
+    }
+    this.settleDrained()
+    this.owner.onTransportHeadroom(this)
   }
 
-  /** The upload went unacknowledged: frames go in batch POSTs from now on. */
-  private abandonUpload({ abort }: StreamUpload): void {
-    // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
-    const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-    // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
-    abort.abort()
-    this.streamRequest = { tag: 'failed' }
-    const now = performance.now()
-    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
-    this.owner.onTransportBatched(this)
+  /** The upload's end, while it is the wire's, read as a batch POST's answer is (`readAnswer`, `asksLater`). A rejected
+   *  probe carried nothing: it is dropped and nothing is remembered, the wire goes on in batch POSTs and the next one
+   *  probes again. An answer about the request says the path doesn't carry a body that streams, and no wire uploads
+   *  again: a 4xx not Telefunc's, or any answer to a probe the server never acknowledged, as from something that took
+   *  its body whole. A probe so answered carried nothing, and its wire goes on in batch POSTs. Anything else ends the
+   *  wire as on the batch path: Telefunc's own, or a loss (an answer that asks for later; none, or the end of an upload
+   *  that carried frames). */
+  private async readUploadEnd(upload: StreamUpload, abortController: AbortController): Promise<void> {
+    const answer = await upload.ended
+    const state = this.streamRequest
+    if (this.transportAbort !== abortController || state.tag === 'idle' || state.tag === 'failed') return
+    if (state.upload !== upload) return
+    const probing = state.tag === 'probing'
+    if (answer === null && probing) {
+      this.streamRequest = { tag: 'idle' }
+      this.owner.onTransportBatched(this)
+      return
+    }
+    const asksAgain =
+      answer === null || telefuncAnswer(answer) || (answer.tag === 'refused' && asksLater(answer.status))
+    if (!asksAgain && probing) {
+      this.streamRequest = { tag: 'failed' }
+      this.owner.onTransportBatched(this)
+      return
+    }
+    if (!asksAgain && answer.tag !== 'expected') this.streamRequest = { tag: 'failed' }
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, endOf(answer))
   }
 
   /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. `answer`: what the
    *  server answered with, where it answered. */
-  private failOpen(
-    stage: SseInitialBatchStage,
-    abortController: AbortController,
-    answer: { refusal?: string; otherWireVersion?: boolean },
-  ): void {
+  private failOpen(stage: SseInitialBatchStage, abortController: AbortController, answer: TransportEnd): void {
     this.rollbackInitialBatch(stage)
     this.closeStreamRequest()
     abortController.abort()
@@ -434,22 +485,25 @@ class SseTransport implements UpgradeSource {
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
   private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
     const pair = pairPublishes()
-    let rejectedFrame = false
+    /** What the stream's last event says ended the wire, where the server decided its end; a loss where none says. */
+    let end: TransportEnd | undefined
     try {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
-        if (raw[0] === TAG.REJECTED) {
-          rejectedFrame = true
-          break
-        }
         if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
           onOpenAck()
           continue
         }
         const frame = decode(raw)
+        if (frame.tag === TAG.END) {
+          end = endOfWire(frame.refusal)
+          break
+        }
         if (frame.tag === TAG.PONG) {
-          this.heartbeatOf(abortController)?.resetPong()
+          // A PONG still on its way on a wire the page left says nothing of the wire in use.
+          if (this.transportAbort !== abortController) continue
+          this.heartbeat?.resetPong()
           this.owner.onTransportPong(frame.ended)
           continue
         }
@@ -473,7 +527,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, { rejectedFrame })
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, end)
     }
   }
 
@@ -483,6 +537,8 @@ class SseTransport implements UpgradeSource {
     return this.transportAbort === abortController ? this.heartbeat : null
   }
 
+  /** What the open carries: the RECONCILE and the control frames buffered behind it, never split. The open's answer
+   *  owns them: refused, the open fails (`failOpen`) and they go back to the outbox for the next wire. */
   private stageInitialBatch(): SseInitialBatchStage {
     const reconcileBatch = this.owner.stageInitialReconcileBatch()
     const initialFrames: OutboundFrame[] = []
@@ -490,6 +546,8 @@ class SseTransport implements UpgradeSource {
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
     // Sequenced frames replay after RECONCILED: sent now, they'd pass a POST in flight, making its frames duplicates.
     const movedOutbox = this.takeOutbox().filter(isWindowRefresh)
+    // So does what waited behind a stalled try on a wire before, however that wire ended.
+    this.dropStalled()
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
@@ -514,6 +572,36 @@ class SseTransport implements UpgradeSource {
     return entries
   }
 
+  /** Takes what the next POST carries from the head of the outbox, in bytes as its body goes on the wire (its metadata,
+   *  and four bytes of length before each frame): entries while the body comes to less than `postBytes`, which one may
+   *  pass, and never past the connection's `ssePostLimit`, except a first entry larger alone, which goes alone. A replay
+   *  that refills the outbox goes so too. The data of a channel the server hasn't confirmed since a loss goes in POSTs
+   *  of its own, so that a refusal or a cut of it takes no other channel's data with it. */
+  private takeOutboxHead(): OutboxEntry[] {
+    let count = 0
+    let bytes = 0
+    let body = encodeSseRequestMetadata({ connId: this.connId }).byteLength
+    const stalled = this.owner.stalledChannels
+    let carries: number | 'others' | null = null
+    for (const { frame } of this.outbox) {
+      const size = U32_SIZE + frame.byteLength
+      if (count > 0 && (body >= this.postBytes || body + size > this.owner.ssePostLimit)) break
+      const tag = frame[0]
+      if (stalled.size > 0 && tag !== undefined && isSequencedTag(tag)) {
+        const ix = readU16(frame, 1)
+        const of = stalled.has(ix) ? ix : 'others'
+        if (carries !== null && carries !== of) break
+        carries = of
+      }
+      body += size
+      bytes += frame.byteLength
+      count++
+    }
+    if (count === this.outbox.length) return this.takeOutbox()
+    this.outboxBytes -= bytes
+    return this.outbox.splice(0, count)
+  }
+
   /** Puts `entries` back at the head of the outbox. */
   private requeue(entries: OutboxEntry[]): void {
     this.outbox = entries.concat(this.outbox)
@@ -527,12 +615,13 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
-    const queued = this.takeOutbox()
+    // One that goes before its deadline, because the outbox is full, waited for no throttle, so the next frame doesn't
+    // wait for one after it either.
+    if (this.outbox.some(({ deadline }) => deadline <= now)) this.lastPostStartedAt = now
+    const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
-    this.lastPostStartedAt = now
     const wire = this.transportAbort
-    let rejectedFrame = false
     try {
       const body = encodeSseRequest(
         { connId: this.connId },
@@ -540,33 +629,123 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
-      const response = await this.postWithDeadline(body, wire.signal)
-      rejectedFrame = response.status === STATUS_CODE_REJECTED
-      if (!response.ok) throw new Error('POST failed')
-      this.sizePosts(body.size, performance.now() - now)
-      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
-    } catch {
-      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
-      if (wire !== this.transportAbort) {
+      const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
+      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
+      // refresh goes again whatever it was answered: its limit is cumulative.
+      if (answer === 'left') {
         this.requeue(queued.filter(isWindowRefresh))
+        return
+      }
+      if (answer?.tag === 'expected') {
+        this.sizePosts(body.size, performance.now() - now)
+        this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
+        return
+      }
+      // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
+      // Nothing of it is counted as a refusal of the data.
+      if (telefuncAnswer(answer)) {
+        this.requeue(queued)
+        this.abandonActiveTransport()
+        this.owner.onTransportClosed(this, telefuncEndOf(answer))
+        return
+      }
+      if (answer?.tag === 'tooLarge') {
+        this.owner.onTransportTooLarge(body.size)
+        this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
+        // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs.
+        if (queued.length > 1) {
+          this.requeue(queued)
+          return
+        }
+      }
+      const counted = countedAnswer(answer)
+      if (counted !== null) {
+        // Every channel whose data it refused ended: the wire goes on without that data.
+        if (
+          !this.owner.onTransportRefused(
+            queued.map(({ frame }) => frame),
+            counted,
+          )
+        ) {
+          this.requeue(queued.filter((entry) => !isSequenced(entry)))
+          return
+        }
+      }
+      // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on.
+      const cause =
+        answer === null
+          ? 'The request carrying it got no answer'
+          : answer.tag === 'refused' && asksLater(answer.status)
+            ? `The server refused what the page sent with ${answer.answer}`
+            : null
+      if (cause !== null && this.carriesStalledOnly(queued)) {
+        this.holdStalled(queued, cause)
         return
       }
       this.requeue(queued)
       this.abandonActiveTransport()
-      this.owner.onTransportClosed(this, { rejectedFrame })
+      this.owner.onTransportClosed(this, endOf(answer))
     } finally {
       this.flushing = false
       this.postOutBytes = 0
       if (this.barrierTurn) this.barrierTurn()
-      else this.flushNextOrDrain()
+      else {
+        this.moveToUpload()
+        this.flushNextOrDrain()
+      }
       this.owner.onTransportHeadroom(this)
     }
+  }
+
+  /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */
+  private carriesStalledOnly(queued: OutboxEntry[]): boolean {
+    const stalled = this.owner.stalledChannels
+    const data = queued.filter(isSequenced)
+    return data.length > 0 && data.every(({ frame }) => stalled.has(readU16(frame, 1)))
+  }
+
+  /** The data `queued` carried waits, out of the outbox, behind one wait on the stalled schedule for the whole wire, and
+   *  goes again then if the server still lacks it; what else it carried goes on at once. That try is those channels'
+   *  loss (`onStalledPostLost`). */
+  private holdStalled(queued: OutboxEntry[], cause: string): void {
+    this.requeue(queued.filter((entry) => !isSequenced(entry)))
+    const wait = this.owner.onStalledPostLost(cause)
+    const held = queued.filter((entry) => isSequenced(entry) && this.owner.stillOwed(entry.frame))
+    // What its channels sent since, queued or held, waits behind it: the server drops a seq below one it has.
+    const ixs = new Set(held.map(({ frame }) => readU16(frame, 1)))
+    const later = this.outbox.filter((entry) => isSequenced(entry) && ixs.has(readU16(entry.frame, 1)))
+    if (later.length > 0) {
+      this.outbox = this.outbox.filter((entry) => !later.includes(entry))
+      this.outboxBytes -= bytesOf(later)
+    }
+    this.stalledHeld = held.concat(this.stalledHeld, later)
+    if (this.stalledTimer === null && this.stalledHeld.length > 0)
+      this.stalledTimer = setTimeout(() => this.releaseStalled(), wait)
+  }
+
+  /** The stalled wait ended: what the server still lacks goes back to the head of the outbox. */
+  private releaseStalled(): void {
+    this.stalledTimer = null
+    const held = this.stalledHeld.filter((entry) => this.owner.stillOwed(entry.frame))
+    this.stalledHeld = []
+    this.requeue(held)
+    if (this.outbox.length > 0) void this.flushOutbox()
+    else this.flushNextOrDrain()
+  }
+
+  /** The held data goes with its wire, as the next one opens, or with the barrier that leaves it: the next wire's replay
+   *  sends what the server lacks. */
+  private dropStalled(): void {
+    if (this.stalledTimer) clearTimeout(this.stalledTimer)
+    this.stalledTimer = null
+    this.stalledHeld = []
   }
 
   /** Sizes next POSTs to what this one's rate carries in `SSE_POST_TARGET_MS`, unless it was quicker and not full. */
   private sizePosts(bytes: number, ms: number): void {
     if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
     this.postBytes = Math.min(
+      this.owner.ssePostLimit,
       SSE_POST_MAX_BYTES,
       Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
     )
@@ -579,7 +758,7 @@ class SseTransport implements UpgradeSource {
   }
 
   headroom(): number {
-    return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
+    return this.streamRequest.tag === 'active' ? Infinity : this.postBytes - this.postOutBytes - this.outboxBytes
   }
 
   /** A batch POST out past its deadline is given up, as a wire that missed its pong: its wire reconnects, resending what
@@ -600,11 +779,13 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.headroom() <= 0) void this.flushOutbox()
+      // As in `sendFrame`: a frame whose deadline passed while the POST was out goes now, as does a whole POST.
+      const now = performance.now()
+      if (this.headroom() <= 0 || this.outbox.some(({ deadline }) => deadline <= now)) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }
-    this.settleDrained()
+    if (this.stalledHeld.length === 0) this.settleDrained()
   }
 
   /** A PING still held at its deadline goes alone: the next POST would bring it past the server's ping deadline. */
@@ -615,7 +796,7 @@ class SseTransport implements UpgradeSource {
         if (!this.flushing || at === -1) return
         this.outbox.splice(at, 1)
         this.outboxBytes -= entry.frame.byteLength
-        void this.sendStandalonePost([entry.frame])
+        void this.sendPingAlone(entry.frame)
       },
       Math.max(0, entry.deadline - performance.now()),
     )
@@ -645,6 +826,14 @@ class SseTransport implements UpgradeSource {
     })
   }
 
+  /** The answer to a POST that went on `wire`, read; null where none came. `left` where the page left that wire
+   *  meanwhile: an answer, however late, says nothing of the wire after it, so this is where it stops, before the size
+   *  it would teach, the refusal it would count and the round trip it would sample. */
+  private async answerOn(request: Promise<Response>, wire: AbortController): Promise<HttpAnswer | null | 'left'> {
+    const answer = await answerOf(request)
+    return wire === this.transportAbort ? answer : 'left'
+  }
+
   /** Chrome reports a POST whose response is left unread as canceled. */
   private async postAndRead(body: BodyInit, signal: AbortSignal, extra?: { duplex: 'half' }): Promise<Response> {
     const response = await this.post(body, signal, extra)
@@ -652,19 +841,43 @@ class SseTransport implements UpgradeSource {
     return response
   }
 
-  /** For frames that cannot wait for the next flush. Failure is swallowed: its two senders are a
-   *  heartbeat ping (its own deadline notices a dead wire) and the barrier (delivered either way). */
+  /** A PING that passes the POST out, alone. Its answer goes to the decision every POST's goes to: a refusal is counted
+   *  (`onTransportRefused`), and ends the wire as a refused POST does. Only for the wire it went on; a network failure
+   *  is the heartbeat's deadline to notice. */
+  private async sendPingAlone(frame: Uint8Array<ArrayBuffer>): Promise<void> {
+    if (!this.hasWire()) return
+    const wire = this.transportAbort
+    assert(wire)
+    const answer = await this.answerOn(
+      this.postAndRead(encodeSseRequest({ connId: this.connId }, [frame]), wire.signal),
+      wire,
+    )
+    if (answer === 'left' || answer === null || answer.tag === 'expected') return
+    const counted = countedAnswer(answer)
+    if (counted !== null && !this.owner.onTransportRefused([frame], counted)) return
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, endOf(answer))
+  }
+
+  /** For the barrier, which cannot wait for the next flush and is delivered either way: it is neither split nor sent
+   *  again. Telefunc's own answer ends the wire as a batch POST's does; any other, or none, is swallowed, since the
+   *  barrier may have arrived. */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
-    assert(this.transportAbort)
-    try {
-      await this.postAndRead(encodeSseRequest({ connId: this.connId }, frames), this.transportAbort.signal)
-    } catch {}
+    const wire = this.transportAbort
+    assert(wire)
+    const answer = await this.answerOn(
+      this.postAndRead(encodeSseRequest({ connId: this.connId }, frames), wire.signal),
+      wire,
+    )
+    if (!telefuncAnswer(answer)) return
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, telefuncEndOf(answer))
   }
 
   /** Not the control frames waiting for the next POST: a channel out of credit with only those waiting was starved. */
   bufferedAmount(): number {
-    if (this.streamRequest.tag === 'active') return this.streamRequest.body.bufferedAmount
+    if (this.streamRequest.tag === 'active') return this.streamRequest.upload.body.bufferedAmount
     let bytes = 0
     for (const { frame } of this.outbox) if (isSequencedTag(frame[0]!)) bytes += frame.byteLength
     return bytes
@@ -680,20 +893,28 @@ class SseTransport implements UpgradeSource {
   private getFrameDeadline(kind: OutboundFrameKind, now = performance.now()): number {
     switch (kind) {
       case 'reconcile':
-      case 'released':
         return now + SSE_RECONCILE_DEADLINE_MS
+      // The app awaits the server's answer to an `ack` send: nothing that could join its POST brings that sooner.
       case 'control':
       case 'urgent-flow-control':
+      case 'ack':
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
       case 'flow-control':
       case 'acknowledgement':
-      case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
         return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
     }
+  }
+
+  dropQueued(ix: number): void {
+    this.stalledHeld = this.stalledHeld.filter((entry) => !isDataOf(entry, ix))
+    const dropped = this.outbox.filter((entry) => isDataOf(entry, ix))
+    if (dropped.length === 0) return
+    this.outbox = this.outbox.filter((entry) => !isDataOf(entry, ix))
+    this.outboxBytes -= bytesOf(dropped)
   }
 
   abandonActiveTransport(): void {
@@ -703,7 +924,9 @@ class SseTransport implements UpgradeSource {
     // An open still unanswered goes with its wire: the next `start()` opens another.
     this.connecting = false
     this.openPending = false
-    if (this.streamRequest.tag === 'active') this.streamRequest = { tag: 'idle' }
+    // Its upload goes with it, aborted with its controller (`openUpload`).
+    if (this.streamRequest.tag === 'active' || this.streamRequest.tag === 'probing')
+      this.streamRequest = { tag: 'idle' }
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)
@@ -739,7 +962,8 @@ class SseTransport implements UpgradeSource {
   }
 
   drained(): Promise<void> {
-    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0)) return Promise.resolve()
+    if (!this.hasWire() || (!this.flushing && this.outbox.length === 0 && this.stalledHeld.length === 0))
+      return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
@@ -756,6 +980,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.takeOutbox()
+    this.dropStalled()
     this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
@@ -766,10 +991,13 @@ class SseTransport implements UpgradeSource {
 
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
+  /** The wire's upload ends: an active one with its body, so the server reads what it carried; a probe cut, as it
+   *  carried nothing. `failed` stays the connection's. */
   private closeStreamRequest(): void {
-    // Only 'active' has a body to close; 'failed' is sticky-terminal so don't regress to 'idle'.
-    if (this.streamRequest.tag !== 'active') return
-    this.streamRequest.body.close()
+    const state = this.streamRequest
+    if (state.tag === 'active') state.upload.body.close()
+    else if (state.tag === 'probing') state.upload.abort.abort()
+    else return
     this.streamRequest = { tag: 'idle' }
   }
 }
@@ -786,15 +1014,26 @@ function bytesOf(entries: readonly OutboxEntry[]): number {
   return bytes
 }
 
+/** Whether `entry` holds a data frame of channel `ix`. */
+function isDataOf(entry: OutboxEntry, ix: number): boolean {
+  return isSequenced(entry) && readU16(entry.frame, 1) === ix
+}
+
+function isSequenced({ frame }: OutboxEntry): boolean {
+  const tag = frame[0]
+  return tag !== undefined && isSequencedTag(tag)
+}
+
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
-/** `onChunk`: each read, so an event taking longer than the pong deadline to arrive shows the wire alive meanwhile. */
+/** `onChunk`: each read that carried any of an event, so an event taking longer than the pong deadline to arrive shows
+ *  the wire alive meanwhile; `partway` where the read ended inside one. */
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,
-  onChunk: (bytes: number) => void,
+  onChunk: (bytes: number, partway: boolean) => void,
 ): {
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
@@ -820,24 +1059,34 @@ function createSseEventStreamReader(
       if (event !== undefined) return event
       const { done, value } = await reader.read()
       if (done) return null
-      onChunk(value.byteLength)
-      sse.push(value, onEvent)
+      if (sse.push(value, onEvent)) onChunk(value.byteLength, sse.partway)
     }
   }
 
   return { cancel, readNextEntry }
 }
 
-/** The media type a response says it carries, without its parameters (`text/event-stream; charset=utf-8` is
- *  `text/event-stream`), as the Fetch standard extracts it; null without a `Content-Type`. */
-function mediaTypeOf(response: Response): string | null {
-  const contentType = response.headers.get('content-type')
-  return contentType === null ? null : (contentType.split(';', 1)[0] ?? '').trim().toLowerCase()
+/** The answer to `request`, read; null where none came. */
+async function answerOf(request: Promise<Response>): Promise<HttpAnswer | null> {
+  try {
+    return readAnswer(await request, 'ok')
+  } catch {
+    return null
+  }
 }
 
-/** A response's status and `Content-Type`, as an error message names them. */
-function describeAnswer(response: Response): string {
-  const contentType = response.headers.get('content-type')
-  const type = contentType === null ? ' and no Content-Type' : ` ${contentType}`
-  return `${response.status}${type}${response.body ? '' : ' and no body'}`
+/** Why a wire ends whose batch POST got `answer`: null where none came, a dropped connection. */
+function endOf(answer: HttpAnswer | null): TransportEnd {
+  if (answer === null || answer.tag === 'expected') return {}
+  if (telefuncAnswer(answer)) return telefuncEndOf(answer)
+  return { refused: { answer: answer.answer, retryAfterMs: answer.retryAfterMs } }
+}
+
+/** What a refusal counted against the data it carried names (`onTransportRefused`); null where it isn't one: a
+ *  refusal that asks for later, Telefunc's own, or none. */
+function countedAnswer(answer: HttpAnswer | null | 'left'): string | null {
+  if (answer === null || answer === 'left') return null
+  if (answer.tag === 'tooLarge') return answer.answer
+  if (answer.tag === 'refused') return asksLater(answer.status) ? null : answer.answer
+  return null
 }

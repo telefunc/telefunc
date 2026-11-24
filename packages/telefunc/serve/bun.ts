@@ -65,9 +65,16 @@ function telefunc(): TelefuncServe {
       // its own responses.
       server.timeout(request, 0)
 
-      // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails.
-      const clientLeft = () => request.signal.aborted
-      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, clientLeft)
+      // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails. Once
+      // the request is answered it leaves the signal be, and fails the read with an `AbortError` ("The connection was
+      // closed.").
+      const clientLeft = (err: unknown) =>
+        request.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')
+      const httpResponse = await serveRuntimeRequest(
+        context ? { request, context } : { request },
+        clientLeft,
+        request.signal,
+      )
       return toResponse(httpResponse)
     },
   }

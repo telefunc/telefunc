@@ -9,6 +9,6 @@ function carryChannel(channel: ServerChannel<any, any>, requestContext: RequestC
   // Wired first: registering attaches a page that waits for the channel, which runs its `onOpen` callbacks.
   channel._setResponseAbort(requestContext.responseAbort.abort)
   channel._callRequest = requestContext.request
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, requestContext.page)
   channel.onClose(requestContext.trackPending())
 }

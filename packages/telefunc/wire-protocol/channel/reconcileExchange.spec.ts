@@ -5,11 +5,11 @@ import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { WIRE_VERSION, WS_CLOSE_REJECTED } from '../constants.js'
+import { WIRE_VERSION, WS_CLOSE_REFUSED } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames } from '../wire/frame.js'
 import type { ReconciledPayload } from '../wire/payloads.js'
 import { TAG } from '../wire/tags.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ChannelMux, getChannelMux } from './server/ChannelMux.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
@@ -59,7 +59,7 @@ async function rawPage() {
 function channels(n: number) {
   return Array.from({ length: n }, () => {
     const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     return channel
   })
 }
@@ -72,7 +72,13 @@ async function until(check: () => boolean) {
 test("a join's RECONCILE whose last piece rides behind a PIECES_ACK is taken and answered", async () => {
   const [a, b] = channels(2)
   const page = await rawPage()
-  page.ws.send(encode.reconcile({ open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }] }))
+  page.ws.send(
+    encode.reconcile({
+      sessionId: crypto.randomUUID(),
+      attempt: 1,
+      open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }],
+    }),
+  )
   await until(() => page.reconciled.length === 1)
   const join = encode.reconcile({
     sessionId: page.reconciled[0]!.sessionId,
@@ -101,7 +107,13 @@ test('a message that completes two RECONCILEs ends its wire as refused, and neit
   const attached = vi.spyOn(ServerChannel.prototype, '_attachPeer')
   try {
     const page = await rawPage()
-    page.ws.send(encode.reconcile({ open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }] }))
+    page.ws.send(
+      encode.reconcile({
+        sessionId: crypto.randomUUID(),
+        attempt: 1,
+        open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }],
+      }),
+    )
     await until(() => page.reconciled.length === 1)
     attached.mockClear()
     const join = encode.reconcile({
@@ -112,10 +124,14 @@ test('a message that completes two RECONCILEs ends its wire as refused, and neit
     const half = Math.ceil(join.byteLength / 2)
     page.ws.send(encode.piece(join.byteLength, join.subarray(0, half)))
     const last = encode.piece(join.byteLength, join.subarray(half))
-    const other = encode.reconcile({ open: [{ id: c!.id, ix: 0, lastSeq: 0, initial: true }] })
+    const other = encode.reconcile({
+      sessionId: crypto.randomUUID(),
+      attempt: 1,
+      open: [{ id: c!.id, ix: 0, lastSeq: 0, initial: true }],
+    })
     // The first frame of the two needs a LENGTH ahead of it.
     page.ws.send(encode.message([last, other], 7 + last.byteLength + other.byteLength))
-    expect(await page.closed).toBe(WS_CLOSE_REJECTED)
+    expect(await page.closed).toBe(WS_CLOSE_REFUSED)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(attached).not.toHaveBeenCalled()
     expect(page.reconciled).toHaveLength(1)
@@ -171,7 +187,7 @@ test("a join of 1,000 channels with 256-byte ids, about 300 kB, goes on the serv
   const [lead] = channels(1)
   const rest = Array.from({ length: 1_000 }, (_, ix) => {
     const channel = new ServerChannel({ id: `${crypto.randomUUID()}-${ix}`.padEnd(256, 'x') })
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     return channel
   })
   const connection = {

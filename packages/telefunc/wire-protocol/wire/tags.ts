@@ -36,9 +36,8 @@ const TAG = {
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
   /** Server → client wire-probe ack. Sent over the SSE downstream after the long-lived
-   *  client→server stream-request POST's metadata has been parsed. The client awaits this
-   *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
-   *  confirms the half-duplex streaming wire round-trips end-to-end. */
+   *  client→server stream-request POST's metadata has been parsed: what the page writes on that POST from then on
+   *  reaches the server as it is sent. Until it comes, the page sends in batch POSTs. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
   PREPARE: 0x07 as const,
   READY: 0x08 as const,
@@ -54,9 +53,9 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
-  /** Server → client, an SSE stream's last event: the server refused a frame of the wire and closed it, as a
-   *  WebSocket's close with `WS_CLOSE_REJECTED` says. */
-  REJECTED: 0x0e as const,
+  /** Server → page, the event stream's last event: the end the server decided for the wire (`refusal.ts`'s `wireEnd`),
+   *  as a WebSocket's close reason carries it. Payload: that value, in UTF-8. */
+  END: 0x0e as const,
   /** Server → client on a WebSocket: the wire's RECONCILE arrived whole, and its RECONCILED follows. */
   RECONCILE_TAKEN: 0x0f as const,
 

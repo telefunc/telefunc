@@ -12,6 +12,13 @@ import {
   expectServerError,
 } from '../../e2e-utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
+
+/** Whether a WebSocket message carries a RECONCILED, alone or among the frames of a message of several. */
+function carriesReconciled(message: Buffer): boolean {
+  return Array.from(messageFrames(new Uint8Array(message)), (frame) => frame[0]).includes(TAG.RECONCILED)
+}
 
 function testClose(inDocker = false) {
   for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
@@ -181,7 +188,7 @@ function testClose(inDocker = false) {
       const moved = new Promise<void>((resolve) => (onMoved = resolve))
       const onWebSocket = (ws: WebSocket) => {
         // RECONCILED: the server moved the page's channels to this WebSocket.
-        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && payload[0] === 0x05 && onMoved())
+        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && carriesReconciled(payload) && onMoved())
       }
       page.on('websocket', onWebSocket)
       try {

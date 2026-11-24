@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
@@ -31,7 +31,7 @@ afterAll(() => {
 /** A server channel and the page's end of it, both open. */
 async function pair() {
   const channel = new ServerChannel<unknown, unknown>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<unknown, unknown>({
     channelId: channel.id,
     connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },

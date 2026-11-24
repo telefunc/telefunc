@@ -1,4 +1,5 @@
-export { Channel, ServerChannel }
+export { ATTACHABLE_NOW, Channel, ServerChannel }
+export type { CallPage }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -57,12 +58,13 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+import { END_CAUSE, type RefusalCause } from '../endCause.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { channelMessages } from '../channelMessages.js'
 import { forListener, listenerAnswer } from '../listenerAnswer.js'
 import { isPromise } from '../../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS } from '../../constants.js'
+import { TIMER_DELAY_MAX_MS, UPGRADE_MAX_ID_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { creditWindowOf, type CreditOwner } from '../../flowControl/credit.js'
@@ -80,7 +82,7 @@ import {
 import { ServerReplay } from './ServerReplay.js'
 import { LossyDelivery, type LossyHost } from './LossyDelivery.js'
 import { getChannelConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
-import { closeTimedOutError, type EndingFrame } from '../ChannelEnding.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import {
@@ -92,6 +94,7 @@ import {
   tellsLastRead,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import { isChannelId } from '../../wire/payloads.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
 import type {
@@ -129,6 +132,19 @@ type LossySend = { data: EntryData; held: number }
 type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; bytes: number; held: number }
 /** A send that waits for room, how its promise settles if the channel ends first, and the lossy send behind it. */
 type WaitingSend = { wait: RoomWait; reject: (err: Error) => void; lossy: LossyBehind | null }
+
+/** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
+ *  attaches only once it has sent the call's whole body. */
+type CallPage = {
+  /** When the page last showed it is on its way (a `performance.now()` time): each byte of the call's upload is such a
+   *  sign. The window counts from the later of it and the channel's registration. */
+  lastSign: () => number
+  /** The window ran out: the page isn't coming, and what its call's upload still owes is given up on. */
+  neverCame: () => void
+}
+
+/** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
+const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -219,6 +235,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _validators: ShieldValidators = new Map()
 
   constructor({ ack = false, id }: { ack?: boolean; id?: string } = {}) {
+    // The control-frame cap counts each channel's id at this length (`WIRE_MAX_CTRL_FRAME_BYTES`).
+    assertUsage(
+      id === undefined || isChannelId(id),
+      `A channel's id is at most ${UPGRADE_MAX_ID_BYTES} bytes, as JSON writes it`,
+    )
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
     // Its credits send to the page attached, nothing while none is, and read that page's wire.
@@ -606,8 +627,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
-   *  `ChannelMux.registerChannel`; external code should call that instead. */
-  _registerChannel(mux?: ChannelMux): void {
+   *  `ChannelMux.registerChannel`; external code should call that instead. `page`: the page the channel's connect
+   *  window waits for. */
+  _registerChannel(page: CallPage, mux?: ChannelMux): void {
     this.mux = mux ?? null
     if (this.peer || this.didRegister) return
     // Off the ledger until now: a channel whose telefunction threw never gets here, and just goes.
@@ -629,15 +651,24 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       waiting.reject(this.refuseSend(waiting.wait.bytes))
     }
     if (this._phase === 'ended') return // the mux lets an ended channel go
-    this.ttlTimer = unrefTimer(
-      setTimeout(() => {
-        this.ttlTimer = null
-        this.shutdown(
-          new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
-          { pageGone: true },
-        )
-      }, getChannelConfig().connectTtl),
-    )
+    const { connectTtl } = getChannelConfig()
+    const registeredAt = performance.now()
+    // Each time it runs out, the window counts again from the page's last sign, until a whole one passed without any.
+    const waitForPage = (ms: number) => {
+      this.ttlTimer = unrefTimer(
+        setTimeout(() => {
+          this.ttlTimer = null
+          const waited = performance.now() - Math.max(registeredAt, page.lastSign())
+          if (waited < connectTtl) return waitForPage(connectTtl - waited)
+          page.neverCame()
+          this.shutdown(
+            new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
+            { pageGone: true },
+          )
+        }, ms),
+      )
+    }
+    waitForPage(connectTtl)
   }
 
   /** @internal Attaches the page's wire. An ended channel only sends what it produced while no page was attached;
@@ -659,10 +690,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.offlineBuffer.flush(peer)
     this.sendPendingAckRes(peer)
     if (this.endLost) {
-      // Lost to the page, which both ends say, as for any frame a replay couldn't keep.
+      // Lost to the page, which both ends say.
       this.endLost = false
-      this.replaceEnd(ERROR_REASON.LOST, peer)
-      this.shutdown(replayLossError('server'))
+      this.replaceEnd(ERROR_REASON.END_NOT_KEPT, peer)
+      this.shutdown(END_CAUSE.endNotKept.error())
     }
     this.sendPendingEnd(peer)
     if (live && this._phase !== 'closing') this.lifecycle.fireOpen()
@@ -742,7 +773,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           frame.reason === ERROR_REASON.LOST || frame.reason === ERROR_REASON.CLOSE_TIMED_OUT,
           `ERROR reason ${frame.reason} from a page`,
         )
-        this.shutdown(frame.reason === ERROR_REASON.LOST ? replayLossError() : closeTimedOutError(), { pageGone: true })
+        const cause = frame.reason === ERROR_REASON.LOST ? END_CAUSE.lost : END_CAUSE.closeTimedOut
+        this.shutdown(cause.error(), { pageGone: true })
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
@@ -920,6 +952,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lossySends?.flush()
     this.peer = null
     this.receiveCredit.detach()
+    if (this.endUnconfirmed(reconnectTimeout)) return
+    this._replayBuffer?.dateStall(performance.now())
     this.reconnectTimer = unrefTimer(
       setTimeout(() => {
         this.reconnectTimer = null
@@ -928,14 +962,33 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
+  /** Ends the channel, at a loss of its page's wire, if what it sent hasn't been confirmed for over `reconnectTimeout`
+   *  of its page's reconnects: dated at a loss, and the page attached since, as a loss needs a page attached. What it
+   *  held goes, and the page reads the end alone at its next attach. A page that stays away is the grace period's. */
+  private endUnconfirmed(reconnectTimeout: number): boolean {
+    const replay = this._replayBuffer
+    const stall = replay?.stall
+    if (!replay || !stall || !replay.unconfirmed || performance.now() - stall.since <= reconnectTimeout) return false
+    replay.dispose()
+    this.endWithError(ERROR_REASON.UNCONFIRMED, END_CAUSE.unconfirmed.error(reconnectTimeout))
+    return true
+  }
+
   /** @internal The page reattached but never acknowledged this channel: its connection is lost for good. */
   _onPeerRecoveryFailure(): void {
     this.peer = null
     this.loseConnection(new NetworkError('Channel not acknowledged by client after reconnect', true))
   }
 
+  /** @internal The server ended the channel for `cause`: a frame of the channel's it can't take, or the end of its
+   *  page's session. Told to its page now or at its next attach, as the page's refusal tells it. */
+  _onServerEnd(cause: RefusalCause): void {
+    const { code, error } = END_CAUSE[cause]
+    this.endWithError(code, error())
+  }
+
   /** @internal The page's wire ended for good, and the channel with it: with `ChannelPageLeftError` where the page left,
-   *  `rejectedFrameError()` where the server refused its wire. */
+   *  a session cause's error where the server ended the page's session, which the wire's own end tells the page. */
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null

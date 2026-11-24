@@ -8,6 +8,8 @@ import { TAG } from '../../wire/tags.js'
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
+  /** The kind it was sent with, which it keeps while it waits. */
+  kind: OutboundFrameKind
   channelIx: number
   seq?: number
   waitingSince: number
@@ -71,18 +73,18 @@ class SendGate {
   /** Sends after the frames waiting for headroom; holds it while sends are held back or its channel isn't attached. */
   send(record: ChannelRecord, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
+      this.settleQueue().push({ frame, kind, channelIx: record.ix, seq, waitingSince: performance.now() })
       return
     }
     // What waited goes first.
     this.sendWaiting()
     const { transport } = this.owner
     if (this.waitingForHeadroom.length === 0 && transport.headroom() > 0) {
-      record.replay.push(seq, frame)
+      record.replay.push(seq, frame, kind)
       transport.sendFrame({ kind, frame })
       return
     }
-    this.waitForHeadroom({ frame, channelIx: record.ix, seq, waitingSince: performance.now() })
+    this.waitForHeadroom({ frame, kind, channelIx: record.ix, seq, waitingSince: performance.now() })
   }
 
   /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits, behind or not, and says whether it did. */
@@ -124,7 +126,7 @@ class SendGate {
   /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
   sendUnsequenced(record: ChannelRecord, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined, waitingSince: performance.now() })
+      this.settleQueue().push({ frame, kind, channelIx: record.ix, seq: undefined, waitingSince: performance.now() })
       return
     }
     this.owner.transport.sendFrame({ kind, frame })
@@ -137,11 +139,11 @@ class SendGate {
     const { transport } = this.owner
     let headroom = transport.headroom()
     while (headroom > 0 && this.waitingForHeadroom.length > 0) {
-      const { frame, channelIx, seq } = this.waitingForHeadroom.shift()!
+      const { frame, kind, channelIx, seq } = this.waitingForHeadroom.shift()!
       this.waitingForHeadroomBytes -= frame.byteLength
       headroom -= frame.byteLength
-      this.channels.get(channelIx)!.replay.push(seq, frame)
-      transport.sendFrame({ kind: 'released', frame })
+      this.channels.get(channelIx)!.replay.push(seq, frame, kind)
+      transport.sendFrame({ kind, frame, released: true })
     }
   }
 
@@ -177,7 +179,7 @@ class SendGate {
     let behind = false
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
-      const { frame, channelIx, seq } = entry
+      const { frame, kind, channelIx, seq } = entry
       if (behind || !releasable(channelIx)) {
         behind ||= this.channels.isUndeclared(channelIx) || this.holdsBack(channelIx)
         sendBuffer[writeIx++] = entry
@@ -191,9 +193,9 @@ class SendGate {
           continue
         }
         headroom -= frame.byteLength
-        this.channels.get(channelIx)?.replay.push(seq, frame)
+        this.channels.get(channelIx)?.replay.push(seq, frame, kind)
       }
-      frames.push({ kind: 'released', frame })
+      frames.push({ kind, frame, released: true })
     }
     sendBuffer.length = writeIx
     this.awaitedPrefix = 0
@@ -221,6 +223,7 @@ class SendGate {
   release(record: ChannelRecord): void {
     this.channels.release(record)
     this.dropQueue(record.ix)
+    this.owner.transport.dropQueued(record.ix)
   }
 
   /** Drops the frames channel `ix` holds or has waiting, at the next read. */

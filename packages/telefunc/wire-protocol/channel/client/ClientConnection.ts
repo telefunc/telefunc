@@ -33,11 +33,14 @@ import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
 
-type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
 
+/** A frame and its kind, which it keeps through every wait. `released`: it waited (held back, for headroom, or in the
+ *  replay), and goes by the sooner of its kind's deadline and the release's. */
 type OutboundFrame = {
   kind: OutboundFrameKind
   frame: Uint8Array<ArrayBuffer>
+  released?: boolean
 }
 
 interface MuxChannel {
@@ -149,6 +152,8 @@ type ClientChannelTransport = {
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
   abandonActiveTransport(): void
+  /** Drops the data frames of channel `ix` it holds and hasn't sent: the page released the channel. */
+  dropQueued(ix: number): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
   /** The heartbeat of its current wire, which also tracks what the wire delivers. */

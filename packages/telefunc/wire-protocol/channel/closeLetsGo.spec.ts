@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
-import { ServerChannel } from './server/ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { fakeMuxChannel } from './client/fakeMuxChannel.fixture.js'
@@ -36,7 +36,7 @@ afterAll(() => {
 /** A server channel and the page's end of it, over `transport`, on the page's one connection for it. */
 function pair(transport: 'sse' | 'ws') {
   const channel = new ServerChannel<string, string>({ ack: true })
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
     ack: true,
@@ -158,7 +158,7 @@ for (const transport of ['sse', 'ws'] as const) {
 for (const transport of ['sse', 'ws'] as const) {
   test(`over ${transport === 'sse' ? 'SSE' : 'a WebSocket'}, what the page sent before its close leaves its replay when the server's CLOSE_ACK arrives, while the server's cleanup still runs`, async () => {
     const channel = new ServerChannel()
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     channel.listenBinary(() => {})
     let cleanedUp = () => {}
     channel.onClose(() => new Promise<void>((resolve) => (cleanedUp = resolve)))

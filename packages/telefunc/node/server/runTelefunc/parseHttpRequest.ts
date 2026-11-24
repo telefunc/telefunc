@@ -8,7 +8,7 @@ import { getRequestPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
-import { BodyReader, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
+import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
 import type { ClientLeft } from './clientLeft.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
@@ -20,13 +20,15 @@ import { getGcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
-import { isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { CALL_METADATA_MAX_BYTES, isStreamTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { isCallWant, type CallWant } from '../../../wire-protocol/wire/payloads.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
+import { REQUEST_KIND_REFUSAL, type Refusal } from '../../../wire-protocol/refusal.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
+import { handleTelefunctionBug } from './validateTelefunctionError.js'
 
 type RunContext = {
   request: Request
@@ -36,6 +38,8 @@ type RunContext = {
   readable?: Readable
   /** Whether a failed read of the body is the client leaving, as the adapter that received the request says. */
   clientLeft: ClientLeft
+  /** Aborts once the client left, and only then, as the same adapter says. */
+  clientGone: AbortSignal
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -66,7 +70,8 @@ type ParseResult =
       isMalformedRequest: false
     }
   | { isMalformedRequest: false; isSseRequest: true; sseResponse: SseChannelHttpResponse }
-  | { isMalformedRequest: true }
+  /** `refusal`: Telefunc's own, which the answer marks. */
+  | { isMalformedRequest: true; refusal?: Refusal }
 
 async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
@@ -80,7 +85,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
       `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
       runContext,
     )
-    return { isMalformedRequest: true }
+    return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable, clientLeft)
@@ -93,10 +98,11 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     carryChannel(channel, requestContext)
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, clientLeft, requestKind)
+  const body = await readBody(request, readable, clientLeft, requestKind, runContext)
+  if (body.isMalformedRequest) return body
+  const { text, registerFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
-    consumeFile,
     createChannel,
     receiveStream: ({ channelId }) =>
       ChannelStreamSource.create(createChannel({ id: channelId }), { memory: queueMemory() }),
@@ -140,7 +146,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        ({ value, close, abort }) => {
+        ({ value, close, abort, onEnd }) => {
           assert(isObjectOrFunction(value))
           // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
           // underlying channel/stream closes and the client releases the original.
@@ -150,8 +156,12 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
           // It must NOT be created per-request: a per-request closure hung on the (rooted) request context
           // pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-          // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(getGcRegistry().register(wrapper, close))
+          const forget = getGcRegistry().register(wrapper, close)
+          // Forgotten once nothing is left for `close` to do, so the scan doesn't wait for a collection to stop: at the
+          // value's end where it has one (a File's, once its bytes are gone, which may be past the call), else once the
+          // call's channels have closed.
+          if (onEnd) onEnd(forget)
+          else requestContext.onClose(forget)
           requestContext.onCallFailed(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper
@@ -168,36 +178,117 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 }
 
 /** Reads the HTTP body and returns the metadata text plus the file handlers appropriate for the
- *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. */
+ *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. A binary request
+ *  whose metadata declares more than the server reads (`CALL_METADATA_MAX_BYTES`) is malformed, refused before any of its metadata is read,
+ *  and so is one whose body ends before its envelope is complete. A
+ *  binary request's body is read off to its end at the call's answer where a returned value holds the request
+ *  (`keepRest`), else at its end (`readOffBody`), kept for the files a File can still read. */
 async function readBody(
   request: Request,
   readable: Readable | undefined,
   clientLeft: ClientLeft,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
-): Promise<{
-  text: string
-  registerFile: ServerReviverContext['registerFile']
-  consumeFile: ServerReviverContext['consumeFile']
-}> {
+  runContext: RunContext,
+): Promise<
+  | {
+      isMalformedRequest: false
+      text: string
+      registerFile: ServerReviverContext['registerFile']
+    }
+  | { isMalformedRequest: true }
+> {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
-    assert(source)
+    if (!source) return refuseEndedEnvelope(runContext)
     const reader = new BodyReader(source, clientLeft)
+    // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
+    // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
+    const { clientGone } = runContext
+    runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(clientGone)])
+    // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
+    // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign;
+    // one that stopped short for a whole connect window is given up on, with its files.
+    let lastByteAt = performance.now()
+    reader.onChunk = () => {
+      lastByteAt = performance.now()
+    }
+    runContext.requestContext.page = { lastSign: () => lastByteAt, neverCame: () => reader.clientGaveUp() }
+    // From the answer on, a read of the body may not end where its client leaves (Node no longer watches the request):
+    // the adapter's evidence says it. Watched again, it adds nothing.
+    const leftByClient = () => reader.leftByClient(clientGone.reason)
+    const watchClient = () => {
+      if (clientGone.aborted) leftByClient()
+      else clientGone.addEventListener('abort', leftByClient, { once: true })
+    }
+    runContext.requestContext.onAnswered(() => {
+      reader.keepRest(queueMemory)
+      watchClient()
+    })
+    runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
+    const metadata = await reader
+      .readFrame(CALL_METADATA_MAX_BYTES)
+      .catch((err: unknown): 'oversize' | StreamTruncatedError => {
+        if (err instanceof OversizeFrameError) return 'oversize'
+        if (err instanceof StreamTruncatedError) return err
+        throw err
+      })
+    if (metadata === 'oversize') {
+      logParseError(
+        `The binary request declares more metadata than the server reads (over ${CALL_METADATA_MAX_BYTES} bytes).`,
+        runContext,
+      )
+      return { isMalformedRequest: true }
+    }
+    const envelope = metadata ?? reader.truncation()
+    if (envelope instanceof StreamTruncatedError) {
+      // A client that left, or a read nothing explains: the call's truncation.
+      if (envelope.by !== 'body') throw envelope
+      return refuseEndedEnvelope(runContext)
+    }
     return {
-      text: await reader.readMetadata(Number.POSITIVE_INFINITY),
+      isMalformedRequest: false,
+      text: new TextDecoder().decode(envelope),
       registerFile: (i, s) => reader.registerFile(i, s),
-      consumeFile: (i, s) => reader.consumeFile(i, s),
     }
   }
   return {
+    isMalformedRequest: false,
     text: await readText(request, clientLeft),
-    registerFile: () => {},
-    consumeFile: () =>
-      new ReadableStream<Uint8Array<ArrayBuffer>>({
-        start(controller) {
-          controller.error(new Error('No binary frame'))
-        },
-      }),
+    registerFile: () => ({
+      stream: () =>
+        new ReadableStream<Uint8Array<ArrayBuffer>>({
+          start(controller) {
+            controller.error(new Error('No binary frame'))
+          },
+        }),
+      letGo() {},
+      onGone: (callback) => callback(),
+    }),
+  }
+}
+
+/** A binary request whose body ends before its envelope is complete: no body (a Web `Request`'s `null`), an empty one, or
+ *  one whose own end cuts its metadata. No Telefunc client sends one, so it is malformed. */
+function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true } {
+  logParseError('The binary request ends before its envelope is complete.', runContext)
+  return { isMalformedRequest: true }
+}
+
+/** At the call's end, reads the rest of its body, kept for each File the app can still read and else dropped: a
+ *  connection the client keeps alive carries its next request only after this one's body (Node's HTTP server parses it
+ *  from there). On Node, the server's `requestTimeout` bounds the read; Bun and Deno let a client that trickles its body
+ *  hold the connection as long as it sends, as they do without Telefunc. A failure that is the app's own error is a bug;
+ *  a client that left ends it quietly. `watchClient`: from now on, the client's leaving ends the read. */
+async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
+  // A client that leaves ends the call (`signal`) in the same event in which its body fails: the read of the body under
+  // way settles first, so that the file reads end with that failure, or, with none under way, as the client's. A call
+  // that answered has no failure coming.
+  if (signal.aborted) await reader.readSettled()
+  watchClient()
+  try {
+    await reader.endCall(signal.aborted ? 'client' : 'server', queueMemory)
+  } catch (err: unknown) {
+    handleTelefunctionBug(err)
   }
 }
 
@@ -207,7 +298,7 @@ async function readText(request: Request, clientLeft: ClientLeft): Promise<strin
   try {
     return await request.text()
   } catch (err) {
-    if (clientLeft(err)) throw new StreamTruncatedError({ cause: err })
+    if (clientLeft(err)) throw new StreamTruncatedError('client', { cause: err })
     throw err
   }
 }
@@ -316,4 +407,10 @@ function logParseError(errMsg: string, runContext: { logMalformedRequests: boole
     errMsg = `Malformed request in development. ${errMsg} This is unexpected since, in development, all requests are expected to originate from the Telefunc Client and should therefore be properly structured.`
   }
   console.error(getProjectError(errMsg))
+}
+
+/** Settles once `signal` aborts. */
+function aborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
 }

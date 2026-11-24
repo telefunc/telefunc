@@ -6,16 +6,19 @@ import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
-import { STATUS_CODE_REJECTED, WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../wire-protocol/constants.js'
+import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES, WIRE_VERSION } from '../wire-protocol/constants.js'
 import { encode } from '../wire-protocol/wire/frame.js'
+import { pingDeadline } from '../wire-protocol/wire/pingDeadline.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 
 // The requests of a page's SSE wire carry the page's frames in their bodies: the one that opens the wire, and the
-// stream-request upload. Once the wire is closed, nothing reads what a body still brings: past what Node buffers, the
-// server reads no more of it, and lets its socket go at its keep-alive timeout, through Node's own request and through a
-// Fetch `Request` built from it alike.
+// stream-request upload. Once the wire is closed, the frame a body was bringing goes at once, and what the body still
+// brings is read and dropped for one ping deadline at most, so that a page that ends its body hears the answer: past it,
+// and past what Node buffers, the server reads no more of it, and lets its socket go, through Node's own request and
+// through a Fetch `Request` built from it alike.
 
 config.channel = { pingInterval: 1000 }
+const DEADLINE = pingDeadline(1000, CHANNEL_TRANSPORT.SSE)
 const telefunc = new Telefunc()
 const telefuncPath = `/_telefunc?wire=${WIRE_VERSION}`
 
@@ -34,8 +37,9 @@ function nodeRequest(req: IncomingMessage, res: ServerResponse) {
 }
 /** Telefunc given a Fetch `Request` built from Node's request, as Hono's or srvx's Node server builds one. */
 function fetchRequest(req: IncomingMessage, res: ServerResponse) {
-  nodeReadableToWebRequest(req, `http://127.0.0.1${telefuncPath}`, 'POST', req.headers)
-    .then(({ request }) => telefunc.serve({ request }))
+  const { request } = nodeReadableToWebRequest(req, `http://127.0.0.1${telefuncPath}`, 'POST', req.headers)
+  telefunc
+    .serve({ request })
     .then(async (response) => {
       res.writeHead(response?.status ?? 404)
       for await (const chunk of response?.body ?? []) res.write(chunk)
@@ -104,12 +108,12 @@ const closes = {
 for (const via of Object.keys(servers) as Via[]) {
   for (const [closeName, close] of Object.entries(closes)) {
     test(
-      `after ${closeName}, nothing reads the open's body any more, and its socket goes (${via})`,
+      `after ${closeName}, nothing reads the open's body past one ping deadline, and its socket goes (${via})`,
       { timeout: 20_000 },
       async () => {
         const connId = crypto.randomUUID()
         const open = post(via, connId, 'streamResponse', 1_000_000_000)
-        open.socket.write(prefixed(encode.reconcile({ open: [] })))
+        open.socket.write(prefixed(encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] })))
         // A frame the page goes on sending: it declares the largest a frame may be.
         open.socket.write(u32(WIRE_MAX_RAW_FRAME_BYTES))
         const piece = new Uint8Array(16384).fill(120)
@@ -122,9 +126,9 @@ for (const via of Object.keys(servers) as Via[]) {
           // The wire's end is the end of its event stream, a chunked response's last chunk.
           while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
           silent = false
-          // What Node buffers for a request nobody reads, 64 KiB and as much again for a Fetch `Request`'s body, fills in
-          // under a second.
-          await sleep(2500)
+          // What Node buffers for a request nobody reads past the read-off, 64 KiB and as much again for a Fetch
+          // `Request`'s body, fills in under a second.
+          await sleep(DEADLINE + 2500)
           const req = requests.get(connId)
           const readAt = req?.socket.bytesRead ?? 0
           await sleep(2000)
@@ -163,7 +167,7 @@ for (const via of Object.keys(servers) as Via[]) {
     async () => {
       const connId = crypto.randomUUID()
       const open = post(via, connId, 'streamResponse', 1_000_000_000)
-      open.socket.write(prefixed(encode.reconcile({ open: [] })))
+      open.socket.write(prefixed(encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] })))
       open.socket.write(u32(WIRE_MAX_RAW_FRAME_BYTES))
       // Part of the frame, and then nothing.
       open.socket.write(new Uint8Array(PART).fill(120))
@@ -181,7 +185,7 @@ for (const via of Object.keys(servers) as Via[]) {
 
 /** A wire for `connId` whose open's body was its RECONCILE alone, once the server answered it. */
 async function openedWire(via: Via, connId: string): Promise<{ socket: Socket; text: () => string }> {
-  const reconcile = prefixed(encode.reconcile({ open: [] }))
+  const reconcile = prefixed(encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }))
   const open = post(via, connId, 'streamResponse', metadata(connId, 'streamResponse').length + reconcile.length)
   open.socket.write(reconcile)
   while (!open.text().includes('data: ')) await sleep(10)
@@ -193,7 +197,7 @@ const UPLOADS = { 'stream-request': 'streamRequest', batch: 'batch' }
 for (const via of Object.keys(servers) as Via[]) {
   for (const [uploadName, kind] of Object.entries(UPLOADS)) {
     test(
-      `after the page's close POST, nothing reads its ${uploadName} body any more, and its socket goes (${via})`,
+      `after the page's close POST, nothing reads its ${uploadName} body past one ping deadline, and its socket goes (${via})`,
       { timeout: 20_000 },
       async () => {
         const connId = crypto.randomUUID()
@@ -207,9 +211,9 @@ for (const via of Object.keys(servers) as Via[]) {
           await sleep(500)
           await closes["the page's close POST"](via, connId)
           while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
-          // What Node buffers for a request nobody reads, 64 KiB and as much again for a Fetch `Request`'s body, fills in
-          // under a second.
-          await sleep(2500)
+          // What Node buffers for a request nobody reads past the read-off, 64 KiB and as much again for a Fetch
+          // `Request`'s body, fills in under a second.
+          await sleep(DEADLINE + 2500)
           const req = requests.get(`${connId}-up`)
           const readAt = req?.socket.bytesRead ?? 0
           await sleep(2000)
@@ -248,7 +252,7 @@ for (const via of Object.keys(servers) as Via[]) {
     )
 
     test(
-      `a ${uploadName} the server stopped reading mid-frame, as it refused the wire, answers that it refused it (${via})`,
+      `a ${uploadName} cut mid-frame as the server refused the wire is answered that it was refused one ping deadline after, not before (${via})`,
       { timeout: 20_000 },
       async () => {
         const connId = crypto.randomUUID()
@@ -268,8 +272,10 @@ for (const via of Object.keys(servers) as Via[]) {
             `${connId}-batch`,
           ).socket.write(oversize)
           while (!open.text().endsWith('0\r\n\r\n')) await sleep(10)
-          await sleep(1000)
-          expect(upload.text().split('\r\n')[0]).toBe(`HTTP/1.1 ${STATUS_CODE_REJECTED} Unprocessable Entity`)
+          await sleep(DEADLINE - 500)
+          const before = upload.text()
+          await sleep(1500)
+          expect([before, upload.text().split('\r\n')[0]]).toEqual(['', 'HTTP/1.1 400 Bad Request'])
         } finally {
           open.socket.destroy()
           upload.socket.destroy()

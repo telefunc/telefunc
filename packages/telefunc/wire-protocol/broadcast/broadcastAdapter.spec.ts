@@ -14,6 +14,7 @@ import { onBug } from '../../node/server/runTelefunc/onBug.js'
 const stopOf = (subscription: Listening) => subscription.unsubscribe
 import { ChannelClosedError, ChannelOverflowError } from '../channel/channelErrors.js'
 import type { Unsubscribe } from '../channel/channel.js'
+import { ATTACHABLE_NOW } from '../channel/server/ServerChannel.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -28,8 +29,8 @@ describe('keyed in-process broadcast', () => {
   it('delivers a published message to a sibling broadcast on the same key', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))
@@ -42,7 +43,7 @@ describe('keyed in-process broadcast', () => {
   // Catches a "skip-self" bug that excludes the source from delivery.
   it('delivers a published message to the source broadcast (self-echo)', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:self' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     broadcast.subscribe((msg) => received.push(msg))
@@ -56,8 +57,8 @@ describe('keyed in-process broadcast', () => {
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
     const a = new ServerBroadcast<{ from: string }>({ key: 'room:A' })
     const b = new ServerBroadcast<{ from: string }>({ key: 'room:B' })
-    a._registerChannel()
-    b._registerChannel()
+    a._registerChannel(ATTACHABLE_NOW)
+    b._registerChannel(ATTACHABLE_NOW)
 
     const receivedA: Array<{ from: string }> = []
     const receivedB: Array<{ from: string }> = []
@@ -79,10 +80,10 @@ describe('keyed in-process broadcast', () => {
     const subA = new ServerBroadcast<{ n: number }>({ key: k })
     const subB = new ServerBroadcast<{ n: number }>({ key: k })
     const subC = new ServerBroadcast<{ n: number }>({ key: k })
-    pub._registerChannel()
-    subA._registerChannel()
-    subB._registerChannel()
-    subC._registerChannel()
+    pub._registerChannel(ATTACHABLE_NOW)
+    subA._registerChannel(ATTACHABLE_NOW)
+    subB._registerChannel(ATTACHABLE_NOW)
+    subC._registerChannel(ATTACHABLE_NOW)
 
     const log: Array<[string, number]> = []
     subA.subscribe((m) => log.push(['A', m.n]))
@@ -103,8 +104,8 @@ describe('keyed in-process broadcast', () => {
   it('preserves publish order across multiple in-flight messages', () => {
     const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
     const receiver = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     const seen: number[] = []
     receiver.subscribe((m) => seen.push(m.n))
@@ -118,7 +119,7 @@ describe('keyed in-process broadcast', () => {
   // starve the rest.
   it('isolates subscriber errors — a throwing subscriber does not break others', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
 
     const goodReceived: string[] = []
     broadcast.subscribe(() => {
@@ -139,7 +140,7 @@ describe('keyed in-process broadcast', () => {
   // like duplicate deliveries.
   it('subscribe() returns an unsubscribe that actually stops further delivery', () => {
     const broadcast = new ServerBroadcast<{ n: number }>({ key: 'room:unsub' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
 
     const seen: number[] = []
     const unsubscribe = broadcast.subscribe((m) => seen.push(m.n))
@@ -153,7 +154,7 @@ describe('keyed in-process broadcast', () => {
 
   it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:unsub-in-delivery' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
 
     const seen: string[] = []
     broadcast.subscribe(() => unsubscribe())
@@ -181,8 +182,8 @@ describe('keyed in-process broadcast', () => {
     const k2 = 'room:receipts:B'
     const a = new ServerBroadcast<{ text: string }>({ key: k1 })
     const b = new ServerBroadcast<{ text: string }>({ key: k2 })
-    a._registerChannel()
-    b._registerChannel()
+    a._registerChannel(ATTACHABLE_NOW)
+    b._registerChannel(ATTACHABLE_NOW)
 
     const a1 = await a.publish({ text: 'a-one' })
     const a2 = await a.publish({ text: 'a-two' })
@@ -283,8 +284,8 @@ describe('binary in-process broadcast', () => {
   it('round-trips binary publishes preserving high-bit bytes', () => {
     const sender = new ServerBroadcast({ key: 'room:bin' })
     const receiver = new ServerBroadcast({ key: 'room:bin' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     const received: Uint8Array[] = []
     receiver.subscribeBinary((data) => received.push(data))
@@ -297,8 +298,8 @@ describe('binary in-process broadcast', () => {
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     const text: Array<{ text: string }> = []
     const bin: Uint8Array[] = []
@@ -342,7 +343,7 @@ describe('a subscription the adapter refused', () => {
   it('subscribe(): its callback gets no later publish', () => {
     _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
     const refused: string[] = []
     const later: string[] = []
     expect(() => broadcast.subscribe((msg) => refused.push(msg))).toThrow('subscription refused')
@@ -355,7 +356,7 @@ describe('a subscription the adapter refused', () => {
   it('subscribeBinary(): its callback gets no later publish', () => {
     _resetBroadcastAdapterForTesting(new AdapterRefusingFirstSubscription())
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused-binary' })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
     const refused: Uint8Array[] = []
     const later: Uint8Array[] = []
     expect(() => broadcast.subscribeBinary((data) => refused.push(data))).toThrow('subscription refused')
@@ -1100,7 +1101,7 @@ describe('Broadcast shield validation', () => {
       const v = value as { text?: unknown }
       return typeof v?.text === 'string' ? true : 'expected { text: string }'
     })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
 
     const frames: Uint8Array[] = []
     broadcast._attachPeer(
@@ -1140,8 +1141,8 @@ describe('Broadcast shield validation', () => {
   it('a shield-rejected publish is not delivered to subscribers', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     sender._validators.set('data', () => 'always reject')
 
@@ -1178,7 +1179,7 @@ describe('lossy broadcast under memory pressure', () => {
   // Another owner's publish sheds it: the channel ends once its own owner runs, but what it holds goes at once.
   it('lets go of the newest it holds for a page that is behind', async () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed', lossy: true })
-    broadcast._registerChannel()
+    broadcast._registerChannel(ATTACHABLE_NOW)
     broadcast._attachPeer(
       new IndexedPeer({
         sender: {
@@ -1262,8 +1263,8 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._registerChannel(ATTACHABLE_NOW)
+    receiver._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))

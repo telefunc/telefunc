@@ -7,7 +7,7 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { Telefunc } from '../../../serve/node.js'
 import { config as serverConfig } from '../../../node/server/serverConfig.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { ClientChannel } from '../client/ClientChannel.js'
 import { getChannelMux } from './ChannelMux.js'
 
@@ -35,7 +35,7 @@ test('a server that closes its connections while a page is connected over SSE pr
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('no port')
   const channel = new ServerChannel<string, string>()
-  getChannelMux().registerChannel(channel)
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const page = new ClientChannel<string, string>({
     channelId: channel.id,
     connection: { telefuncUrl: `http://127.0.0.1:${address.port}/_telefunc`, transports: ['sse'] },

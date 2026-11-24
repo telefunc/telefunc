@@ -373,7 +373,8 @@ class PieceSender {
     this.servingLane = key
     const rest = this.rest
     if (rest !== null && this.restLane === key) {
-      if (this.awaitsProbe) return 'passed'
+      // A wire's control frame keeps the turn while its probe's answer is awaited: the page reads it before any data.
+      if (this.awaitsProbe) return key === CONTROL_LANE ? 'held' : 'passed'
       this.rest = null
       this.waitingBytes -= rest.frame.byteLength - rest.offset
       if (this.cutsData || rest.offset > 0) this.cut(rest.frame, rest.offset)

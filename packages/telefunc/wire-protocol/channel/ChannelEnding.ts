@@ -1,7 +1,8 @@
-export { ChannelEnding, closeTimedOutError }
+export { ChannelEnding }
 export type { EndingFrame, EndingPort, EndingSide }
 
-import { ChannelClosedError, ChannelCloseUnknownError } from './channelErrors.js'
+import { ChannelCloseUnknownError } from './channelErrors.js'
+import { END_CAUSE } from './endCause.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
 
 type EndingSide = 'page' | 'server'
@@ -232,7 +233,7 @@ class ChannelEnding {
       this.port.send({ kind: 'timedOut' })
       // Its port may end it with a terminal word of its own in the timeout's place.
       if (this.didEnd) return
-      return this.finish(closeTimedOutError())
+      return this.finish(END_CAUSE.closeTimedOut.error())
     }
     if (this.role === 'decider' && this.peerDone && this.cleanup === 'settled') {
       this.port.send({ kind: 'closeDone' })
@@ -249,8 +250,4 @@ class ChannelEnding {
     this.port.end(err)
     if (runCleanup) this.port.startCleanup(err)
   }
-}
-
-function closeTimedOutError(): ChannelClosedError {
-  return new ChannelClosedError('Channel close timed out')
 }
