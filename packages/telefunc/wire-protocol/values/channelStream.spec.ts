@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
@@ -209,6 +209,28 @@ describe('a chunk sent in parts', () => {
 })
 
 describe("a client's upload stream that fails", () => {
+  test("of a chunk that isn't a Uint8Array: the page's console says so, and the upload fails as a failing stream does", async () => {
+    const logged: unknown[] = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation((error: unknown) => void logged.push(error))
+    try {
+      const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+          // An object, as a JavaScript app enqueues one.
+          controller.enqueue(JSON.parse('{ "part": 1 }'))
+          controller.close()
+        },
+      })
+      const channel = memoryChannel()
+      ChannelStreamSource.create(channel)
+      const sending = sendChunks(channel, readableStreamReplacer.createProducer(stream), new Promise(() => {}))
+      const message = 'Stream chunks given to a telefunction must be Uint8Array.'
+      await expect(sending).rejects.toThrow(message)
+      expect(logged).toEqual([expect.objectContaining({ message: expect.stringContaining(message) })])
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
   test("on a server, reading it throws after the chunks before the failure, with an error that says the client's stream failed", async () => {
     const channel = memoryChannel()
     const source = ChannelStreamSource.create(channel, { memory: queueMemory() })
