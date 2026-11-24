@@ -1,17 +1,32 @@
-export { ROOM_AUTHORITY_METHODS, REGION_DIRECTORY_METHODS, openRoomAuthority, openRegionDirectory }
+export {
+  ROOM_AUTHORITY_METHODS,
+  REGION_DIRECTORY_METHODS,
+  ROOM_JOIN_DEADLINE_MS,
+  openRoomAuthority,
+  openRegionDirectory,
+}
 export type { CloudflareRoomAuthorityStub, RegionDirectoryStub }
 
 // Room's Durable Objects share the Telefunc namespace with sessions and Broadcast: a room's authority, and each
 // region's directory, which lists the rooms whose authority it was first written from.
 
-import type { TelefuncExtensionNamespace, TelefuncExtensionStub } from 'telefunc/__internal'
 import {
+  LEASE_CALL_DEADLINE_MS,
+  type TelefuncExtensionNamespace,
+  type TelefuncExtensionStub,
+} from 'telefunc/__internal'
+import {
+  ROOM_HORIZON_MS,
   ROOM_CLOUDFLARE_EXTENSION,
   ROOM_CLOUDFLARE_PREFIX,
   ROOM_DIRECTORY_CLOUDFLARE_EXTENSION,
 } from '../server/constants.js'
 import type { RegionDirectory } from './RegionDirectory.js'
 import type { RoomAuthority } from './RoomAuthority.js'
+
+/** How long a session waits for a room's authority to answer a member's join, which carries the member's inbox: the
+ *  authority's wait for the join's owed hand-on, the horizon, then a call's own. */
+const ROOM_JOIN_DEADLINE_MS = ROOM_HORIZON_MS + LEASE_CALL_DEADLINE_MS
 
 /** The methods a room authority's Durable Object serves, all a call reaches of it. */
 const ROOM_AUTHORITY_METHODS = [

@@ -47,7 +47,7 @@ import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead, unheldRequiredCell } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
-import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
+import { ROOM_JOIN_DEADLINE_MS, openRegionDirectory, type RegionDirectoryStub } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained, retainedOwner } from './retained.js'
 import { routeLease, routeScope, type RouteInstallation } from './routes.js'
 import {
@@ -126,9 +126,9 @@ type RegisterWire = LeaseRegistered | 'dropped'
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
-/** How long an operation's answer is kept for a copy of it: a copy comes within its call's deadline, as long as
- *  Cloudflare's runtime retries a call, or no caller waits for it. */
-const ANSWER_KEPT_MS = LEASE_CALL_DEADLINE_MS
+/** How long a join's answer is kept for a copy of it: a copy that comes past the join's deadline has no caller waiting
+ *  for it. */
+const ANSWER_KEPT_MS = ROOM_JOIN_DEADLINE_MS
 /** When the alarm hands on a stored commit whose hand-on this run of the object hasn't settled. */
 const ROOM_HANDOFF_RESUME_MS = 10_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
