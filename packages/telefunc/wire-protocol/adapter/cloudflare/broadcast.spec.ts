@@ -818,6 +818,29 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         subscriber()
       })
 
+      it('a held presence whose first write was answered 8 s after it went out is reported lost once 90 s have passed since it went out, while the pause keeps its refreshes from being sent', async () => {
+        vi.useFakeTimers()
+        const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const lost = () => reported.mock.calls.filter(([error]) => String(error).includes('presence for')).length
+        const { inObject, presences, state } = worker()
+        state.held = new Promise((resolve) => setTimeout(resolve, 8_000))
+        const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+        await vi.advanceTimersByTimeAsync(8_000)
+        await subscriber.ready
+        // A publish answered overloaded every 9 s keeps the authority paused from 21 s to 103 s, and the refresh due at
+        // 38 s is tried at each pause's end: 40 s, 49 s, and so on to 94 s.
+        await vi.advanceTimersByTimeAsync(13_000)
+        for (let at = 21_000; at < 95_000; at += 9_000) {
+          await overloadedPublish(inObject)
+          await vi.advanceTimersByTimeAsync(Math.min(9_000, 95_000 - at))
+        }
+        expect({ lost: lost(), renewals: presences.filter((call) => call.op === 'renew').length }).toEqual({
+          lost: 1,
+          renewals: 0,
+        })
+        subscriber()
+      })
+
       it('a held presence whose refresh waits for a pause is refreshed no more, and leaves no timer, once its last subscriber left', async () => {
         vi.useFakeTimers()
         vi.spyOn(console, 'error').mockImplementation(() => {})

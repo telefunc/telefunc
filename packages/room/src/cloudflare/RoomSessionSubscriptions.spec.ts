@@ -589,6 +589,23 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     expect({ states, calls }).toEqual({ states: ['ready', 'lost', 'ready'], calls: { register: 2, renew: 0 } })
   })
 
+  it('whose first registration was answered 8 s after it went out is lost once 90 s have passed since it went out, while the pause keeps its renewals from being sent', async () => {
+    const answered = new Promise<RegisterWire>((resolve) => setTimeout(() => resolve('registered'), 8_000))
+    const { calls, states, commit } = setup(
+      { register: [answered, 'registered'], renew: [], commit: Array.from({ length: 9 }, () => transient(true)) },
+      { kind: 'control' },
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    // A commit answered overloaded every 9 s keeps the room paused from 21 s to 103 s, and the renewal due at 38 s is
+    // tried at each pause's end: 40 s, 49 s, and so on to 94 s.
+    await vi.advanceTimersByTimeAsync(21_000)
+    for (let at = 21_000; at < 95_000; at += 9_000) {
+      void commit()
+      await vi.advanceTimersByTimeAsync(Math.min(9_000, 95_000 - at))
+    }
+    expect({ states, calls }).toEqual({ states: ['ready', 'lost'], calls: { register: 1, renew: 0 } })
+  })
+
   it('whose renewal waits for a pause sends none once it is unsubscribed, and leaves no timer once the pause is over', async () => {
     const { attempt, calls, subscribe } = setup(
       { register: ['registered', transient(true)], renew: ['renewed'] },

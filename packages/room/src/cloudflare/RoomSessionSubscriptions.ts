@@ -238,11 +238,13 @@ class CloudflareRoomAttempt extends DriverAttempt {
   private readonly stopDeliveries: () => void
   private retry: ReturnType<typeof setTimeout> | null = null
   private retryDelay = REGISTER_RETRY_MIN_MS
-  /** Whether a write of its route went out, which then removes it should it close. */
-  private sent = false
+  /** When the last write of its route went out, by this session's clock; null before the first. One that went out
+   *  removes it should it close. */
+  private sentAt: number | null = null
   /** How its first registration is made again, until its route was registered. */
   private firstRegistration: TransientRetry | null = new TransientRetry()
-  /** When the authority last confirmed its route, by this session's clock: registered, or renewed. */
+  /** When the write the authority last confirmed its route by went out, by this session's clock: the authority's lease
+   *  runs from no earlier. */
   private confirmedAt = 0
 
   constructor({ owner, route, registeredByOperation, stopDeliveries }: CloudflareRoomAttemptOptions) {
@@ -267,14 +269,14 @@ class CloudflareRoomAttempt extends DriverAttempt {
     if (registration === 'stale') return this.lose(new Error(`Cloudflare route '${this.route.laneKey}' was overtaken`))
     this.firstRegistration = null
     this.retryDelay = REGISTER_RETRY_MIN_MS
-    this.confirmedAt = Date.now()
+    this.confirm()
     this.transition('ready')
     this.owner.renewWithRoom(this)
   }
 
   /** A write of its route goes out. */
   sending(): void {
-    this.sent = true
+    this.sentAt = Date.now()
   }
 
   /** Its route was registered by the operation that carried it (a member's join): ready, as if its own registration
@@ -282,7 +284,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
   registeredBy(): void {
     if (this.state() === 'closed') return
     this.firstRegistration = null
-    this.confirmedAt = Date.now()
+    this.confirm()
     this.transition('ready')
     this.owner.renewWithRoom(this)
   }
@@ -291,7 +293,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
     this.stop()
     this.transition('closed')
     // A write still in its line isn't sent once it is closed.
-    return this.sent ? this.owner.removeRoute(this.route) : Promise.resolve()
+    return this.sentAt !== null ? this.owner.removeRoute(this.route) : Promise.resolve()
   }
 
   onRenewal(renewal: RenewWire, sentAt: number): void {
@@ -303,6 +305,12 @@ class CloudflareRoomAttempt extends DriverAttempt {
     // A route that went with its dropped incarnation ends on purpose; a lapsed one is registered again.
     if (renewal === 'dropped') this.end()
     else this.lose(new Error(`Cloudflare route '${this.route.laneKey}' lapsed`))
+  }
+
+  /** The authority answered the write of its route that went out last: registered. */
+  private confirm(): void {
+    assert(this.sentAt !== null)
+    this.confirmedAt = this.sentAt
   }
 
   /** Whether its renewal, which failed with `error`, is made again once its room's overload pause ends. */
@@ -336,7 +344,7 @@ class CloudflareRoomAttempt extends DriverAttempt {
     const delay = retry.delayAfter(error)
     if (delay === null) {
       this.stop()
-      if (this.sent) void this.owner.removeRoute(this.route)
+      if (this.sentAt !== null) void this.owner.removeRoute(this.route)
       return this.transition('closed', reason)
     }
     this.retry = setTimeout(() => {

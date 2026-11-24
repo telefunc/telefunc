@@ -100,8 +100,11 @@ class MemberRoute {
   readonly lease = crypto.randomUUID()
   /** Its presence lapsed and was reported, and is recorded again before it is renewed. */
   private lapsed = false
-  /** When its key's authority last confirmed its presence, by this DO's clock: recorded, or renewed. */
+  /** When the write its key's authority last confirmed its presence by went out, by this DO's clock: the authority's
+   *  lease runs from no earlier. */
   private confirmedAt = 0
+  /** When its last hold went out, by this DO's clock. */
+  private heldAt = 0
   private refreshTimer: ReturnType<typeof setInterval> | undefined
   /** A refresh its key's authority's overload pause kept from being sent, made once the pause ends. */
   private refreshAfterPause: ReturnType<typeof setTimeout> | undefined
@@ -110,8 +113,19 @@ class MemberRoute {
     this.route = route
   }
 
-  presenceRecorded(confirmedAt = Date.now()): void {
-    this.confirmedAt = confirmedAt
+  /** A hold of its presence goes out. */
+  holding(): void {
+    this.heldAt = Date.now()
+  }
+
+  /** Its key's authority recorded the hold that went out last. */
+  presenceRecorded(): void {
+    this.confirmed(this.heldAt)
+  }
+
+  /** Its key's authority confirmed its presence by a write that went out at `sentAt`: ready. */
+  private confirmed(sentAt: number): void {
+    this.confirmedAt = sentAt
     if (this.state === 'ready') return
     this.state = 'ready'
     this.attempt?.presence('ready')
@@ -144,7 +158,7 @@ class MemberRoute {
     const sentAt = Date.now()
     try {
       if (!this.lapsed) {
-        if ((await renew()) === 'renewed') return this.presenceRecorded(sentAt)
+        if ((await renew()) === 'renewed') return this.confirmed(sentAt)
         this.lapsed = true
         const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
         reportBroadcastDeliveryLost(this.route.key, reason)
@@ -159,7 +173,7 @@ class MemberRoute {
       return this.presenceLost(error)
     }
     this.lapsed = false
-    this.presenceRecorded(sentAt)
+    this.presenceRecorded()
   }
 
   stopRefresh(): void {
@@ -458,10 +472,12 @@ class CloudflareBroadcastMember {
     }
     return this.write(
       memberRoute.route,
-      (authority, order) =>
-        retry === undefined
+      (authority, order) => {
+        memberRoute.holding()
+        return retry === undefined
           ? authority.telefuncBroadcastHold({ ...request, order })
-          : retry.attempt(() => authority.telefuncBroadcastHold({ ...request, order })),
+          : retry.attempt(() => authority.telefuncBroadcastHold({ ...request, order }))
+      },
       options,
     )
   }
