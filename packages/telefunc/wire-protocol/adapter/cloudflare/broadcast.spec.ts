@@ -11,6 +11,7 @@ import {
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
 import type {
   BroadcastCalls,
+  BroadcastForwardRequest,
   BroadcastHoldRequest,
   BroadcastLeaseRequest,
   BroadcastReleaseRequest,
@@ -21,7 +22,7 @@ import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
 import { CloudflareBackend } from './CloudflareBackend.js'
-import { servesRequest, withCloudflareSession, type CloudflareSession } from './session.js'
+import { cloudflareSession, servesRequest, withCloudflareSession, type CloudflareSession } from './session.js'
 import { disposeBackend, installBackend } from '../../backend/install.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
@@ -42,7 +43,7 @@ function createCloudflareRequest({ colo, continent }: { colo?: string; continent
 }
 
 function createAuthorityState() {
-  return new CloudflareBroadcastAuthorityState({ storage: sqliteStorage().storage } as DurableObjectState)
+  return new CloudflareBroadcastAuthorityState({ storage: sqliteStorage().storage })
 }
 
 /** A member Durable Object's call about its presence at a key's authority. */
@@ -80,7 +81,7 @@ async function flushMicrotasks(turns = 6): Promise<void> {
 function createBasicBinding(
   overrides?: Partial<{
     onPublish: (id: { name: string }, request: any) => any
-    onForward: (id: { name: string }, request: any) => any
+    onForward: (id: { name: string }, request: BroadcastForwardRequest) => Promise<number>
     onDeliver: (id: { name: string }, request: any) => any
     onPresence: (id: { name: string }, call: PresenceCall) => Promise<unknown>
   }>,
@@ -97,7 +98,7 @@ function createBasicBinding(
         telefuncBroadcastPublish(request: any) {
           return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
-        telefuncBroadcastForward(request: any) {
+        telefuncBroadcastForward(request: BroadcastForwardRequest) {
           return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
         },
         telefuncBroadcastDeliver(request: any) {
@@ -452,7 +453,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     const session = (name: string): CloudflareSession => {
       const member = broadcast.member(name, new OrderedStubs())
       member.locate('weur')
-      const session = { broadcast: member, mux: getChannelMux() }
+      const session = cloudflareSession(member, getChannelMux())
       byName.set(name, session)
       return session
     }

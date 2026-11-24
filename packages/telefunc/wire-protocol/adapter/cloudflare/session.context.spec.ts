@@ -7,15 +7,29 @@ import { getContext, PROVIDED_CONTEXT } from '../../../node/server/context/getCo
 import { ChannelMux } from '../../channel/server/ChannelMux.js'
 import { ServerChannel } from '../../channel/server/ServerChannel.js'
 import { TAG } from '../../wire/tags.js'
-import type { CloudflareBroadcastMember } from './broadcast.js'
-import { withCloudflareSession } from './session.js'
+import { CloudflareBroadcast } from './broadcast.js'
+import { OrderedStubs } from './OrderedStubs.js'
+import { cloudflareSession, withCloudflareSession } from './session.js'
 
 beforeAll(() => installAsyncContext(AsyncLocalStorage))
+
+/** A session DO's Broadcast membership, which these tests never call. */
+function member() {
+  const broadcast = new CloudflareBroadcast({
+    baseInstanceName: 'telefunc',
+    scale: 1,
+    locationFallback: 'weur',
+    getNamespace: () => {
+      throw new Error('Unexpected call to a Durable Object')
+    },
+  })
+  return broadcast.member('session', new OrderedStubs())
+}
 
 describe("a Channel's listener in a Cloudflare session", () => {
   // Its messages come from its own page alone, so it keeps the context the request it runs in has: none here.
   it('reads the context of the scope it runs in', () => {
-    const session = { broadcast: {} as CloudflareBroadcastMember, mux: new ChannelMux() }
+    const session = cloudflareSession(member(), new ChannelMux())
     const channel = new ServerChannel<string, string>()
     const read: unknown[] = []
     channel.listen(() => {
@@ -33,7 +47,7 @@ describe("a Channel's listener in a Cloudflare session", () => {
   })
 
   it("whose page asks for a reply reads its request's context", async () => {
-    const session = { broadcast: {} as CloudflareBroadcastMember, mux: new ChannelMux() }
+    const session = cloudflareSession(member(), new ChannelMux())
     const channel = new ServerChannel<string, string>()
     const read: unknown[] = []
     channel.listen(() => void read.push(getContext<{ user: string }>().user))

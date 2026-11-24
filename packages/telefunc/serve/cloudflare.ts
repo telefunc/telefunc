@@ -44,6 +44,7 @@ import {
 } from '../wire-protocol/adapter/cloudflare/extensions.js'
 import {
   servesRequest,
+  cloudflareSession,
   withCloudflareSession,
   type CloudflareSession,
 } from '../wire-protocol/adapter/cloudflare/session.js'
@@ -148,10 +149,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       super(ctx, env)
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
-      this.session = {
-        broadcast: broadcast.member(id, this.broadcastCalls),
-        mux: new ChannelMux({ hostId: id }),
-      }
+      this.session = cloudflareSession(broadcast.member(id, this.broadcastCalls), new ChannelMux({ hostId: id }))
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 

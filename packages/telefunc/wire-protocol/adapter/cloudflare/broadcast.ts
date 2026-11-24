@@ -222,7 +222,7 @@ class CloudflareBroadcastAuthorityState {
   /** The alarm this run of the object set, null for none; undefined until it first sets or clears it. */
   private alarmAt: number | null | undefined = undefined
 
-  constructor(state: DurableObjectState) {
+  constructor(state: Pick<DurableObjectState, 'storage'>) {
     this.storage = state.storage
   }
 
