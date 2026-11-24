@@ -1,4 +1,3 @@
-/// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
 export type { AcceptedCommitWire, CommitWire, InboxLease, OperationWire, RegisterWire, RenewWire }
 
@@ -33,6 +32,8 @@ import {
   renewLease,
   sweepLeases,
   type CloudflareExtensionKit,
+  type DurableStorage,
+  type SqlStore,
   type LeaseOrder,
   type LeaseRegistered,
   type LeaseRemoved,
@@ -137,7 +138,7 @@ const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 /** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
  *  created on first use. */
 class RoomAuthority {
-  private readonly ctx: DurableObjectState
+  private readonly ctx: { storage: DurableStorage }
   private readonly getNamespace: () => TelefuncExtensionNamespace
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
@@ -153,7 +154,7 @@ class RoomAuthority {
   private resumed = false
   private schema = false
 
-  constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
+  constructor(ctx: { storage: DurableStorage }, { regions, getNamespace }: CloudflareExtensionKit) {
     this.ctx = ctx
     this.getNamespace = getNamespace
     this.fanout = new Fanout({ regions })
@@ -499,12 +500,12 @@ class RoomAuthority {
   }
 
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */
-  private transaction<T>(fn: (sql: SqlStorage) => T): T {
+  private transaction<T>(fn: (sql: SqlStore) => T): T {
     const sql = this.sql()
     return this.ctx.storage.transactionSync(() => fn(sql))
   }
 
-  private sql(): SqlStorage {
+  private sql(): SqlStore {
     if (!this.schema) {
       initSchema(this.ctx.storage.sql)
       this.schema = true
@@ -534,7 +535,7 @@ class RoomAuthority {
 
 /** Orders a commit on `lane` in a transaction that found the incarnation open, and retains it with `retain`. */
 function commitIn(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
@@ -585,7 +586,7 @@ function writesNothing({ prefixes, members, mutations, counts, expiring, commit 
 }
 
 /** Applies a plan's writes in a transaction that found `inc` open; its commit is stored until handed on. */
-function applyOperation(sql: SqlStorage, inc: string, value: unknown, writes: OperationWrites, now: number) {
+function applyOperation(sql: SqlStore, inc: string, value: unknown, writes: OperationWrites, now: number) {
   for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
   const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
   const exchanged = compareExchangeCells(sql, inc, exchange, now)

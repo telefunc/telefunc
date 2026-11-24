@@ -119,6 +119,7 @@ export {
 export type {
   DurableStorage,
   SqlBinding,
+  SqlCursor,
   SqlRow,
   SqlStore,
   SqlValue,
