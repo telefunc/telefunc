@@ -1,5 +1,5 @@
 export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
-export type { AckedChannel, PageLink }
+export type { AckedChannel, RoomChannel, PageLink }
 
 import { getOrCreate } from 'telefunc/__internal'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
@@ -37,6 +37,28 @@ type PageRequest = RoomStubRequest | ParticipantStubRequest
 type AckedChannel = {
   send(req: PageRequest, opts: { ack: true }): Promise<unknown>
 }
+
+/** A page's channel to a Room stub, a room's or a lone participant's: it relays `Notice` on its text lane and takes
+ *  `Publish` as a text publish. The stub answers a publish with a `RoomResult`, not the place Broadcast's type gives
+ *  it, so the answer is read with `roomResultValue()`. */
+type RoomChannel<Notice, Publish> = AckedChannel &
+  Pick<
+    ClientBroadcast<Notice, Publish>,
+    | '_sendReply'
+    | '_subscribeLocal'
+    | '_setSubscribed'
+    | '_setWantParts'
+    | '_confirmSoon'
+    | 'onOpen'
+    | 'onClose'
+    | 'onDisconnect'
+    | 'onReconnect'
+    | 'isConnected'
+    | 'close'
+  > & {
+    _publishUnreported(data: Publish): Promise<unknown>
+    _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<unknown>
+  }
 
 /** What the server answers each kind of request with: a join's member, a meta write's update, a publish's place. */
 type RequestAnswers = {

@@ -2,7 +2,7 @@ export { ClientRoomHandle }
 export type { ClientRoomEvent, ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
-import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
+import type { ChannelPublishAck, ChannelPublishInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
@@ -30,8 +30,8 @@ import {
   reportClientCallbackError,
   request,
   sendDmReply,
-  type AckedChannel,
   type PageLink,
+  type RoomChannel,
 } from './ClientParticipant.js'
 import { addRoom } from './page.js'
 import { toggle } from '../utils/sets.js'
@@ -40,27 +40,8 @@ import type { JoinOptions, LeaveCause, Sender } from '../types.js'
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
-/** What a page's room uses of its Broadcast channel. Room's stub answers a publish with a `RoomResult`, not the place
- *  Broadcast's type gives it, so the room reads the answer with `roomResultValue()`. */
-type RoomChannel = AckedChannel &
-  Pick<
-    ClientBroadcast<ClientRoomEvent, RoomDataPublish>,
-    | '_sendReply'
-    | '_subscribeLocal'
-    | '_setSubscribed'
-    | '_setWantParts'
-    | '_confirmSoon'
-    | 'onClose'
-    | 'onDisconnect'
-    | 'onReconnect'
-    | 'isConnected'
-  > & {
-    _publishUnreported(data: RoomDataPublish): Promise<unknown>
-    _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<unknown>
-  }
-
 type ClientRoomHandleOptions = {
-  end: RoomChannel
+  end: RoomChannel<ClientRoomEvent, RoomDataPublish>
   snapshot: RoomSnapshotMetadata
 }
 
@@ -70,7 +51,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   readonly state: RoomState
   /** The app's participants of the room, which the user's `Room` and the handle's participants hand out. */
   readonly remotes: RoomRemotes
-  private readonly end: RoomChannel
+  private readonly end: RoomChannel<ClientRoomEvent, RoomDataPublish>
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()

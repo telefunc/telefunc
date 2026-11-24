@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pageRoom } from '../test/pageRoom.js'
+import { loneMember, pageRoom } from '../test/pageRoom.js'
 import type { ClientRoom } from './room.js'
 
 /** A request of the page's, answered with `answers` in place of the server's answer. */
@@ -50,5 +50,17 @@ describe("a page's request answered with a value Room doesn't write", () => {
     deliver({ __r: 'join', id: 'uma', meta: {}, joinedAt: 3 })
     // The join that arrived while the request was out, and the one after it.
     expect(room.getParticipants().map((participant) => participant.id)).toEqual(expect.arrayContaining(['tia', 'uma']))
+  })
+})
+
+describe("a lone participant's publish answered with a value Room doesn't write", () => {
+  it('rejects that publish, and the participant goes on taking notices', async () => {
+    const { me, deliver } = loneMember({ publish: { key: 'room', seq: 1 } })
+    const sent = me.publishBinary(new Uint8Array([1]))
+    deliver({ __r: 'p-meta', id: me.id, seq: 1, attrs: { name: 'Ann' } })
+    await expect(sent).rejects.toThrow("A publish's time is not a number")
+    deliver({ __r: 'p-meta', id: me.id, seq: 2, attrs: { role: 'host' } })
+    // The meta that arrived while the publish was out, and the one after it.
+    expect(me.meta).toEqual({ name: 'Ann', role: 'host' })
   })
 })
