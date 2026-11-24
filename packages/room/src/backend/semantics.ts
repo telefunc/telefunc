@@ -14,7 +14,8 @@ export {
 export type { StoredHead, HeldCell }
 
 import type { CellCount, CellCounter, HeadExpectation, HeadNext, LaneId, RequiredCells, RoomHead } from './contract.js'
-import type { OrderingInfo } from 'telefunc/__internal'
+import { isObject, type OrderingInfo } from 'telefunc/__internal'
+import { assert } from '../utils/assert.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
 
@@ -129,6 +130,11 @@ function encodeCellCounter(counter: CellCounter): Uint8Array {
   return counterTextEncoder.encode(JSON.stringify(counter))
 }
 
+/** A counter cell as `encodeCellCounter()` wrote it. */
 function decodeCellCounter(bytes: Uint8Array): CellCounter {
-  return JSON.parse(counterTextDecoder.decode(bytes)) as CellCounter
+  const counter: unknown = JSON.parse(counterTextDecoder.decode(bytes))
+  assert(isObject(counter), 'A counter cell is not an object')
+  const { value, changedAt } = counter
+  assert(typeof value === 'number' && typeof changedAt === 'number', 'A counter cell has no value or change time')
+  return { value, changedAt }
 }

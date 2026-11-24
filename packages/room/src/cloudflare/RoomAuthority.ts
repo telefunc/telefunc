@@ -47,6 +47,7 @@ import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE, type OperationWrites } from '../backend/operation.js'
 import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
 import { decodeRoomRecord, encodeRoomRecord, lostReason } from '../server/lanes/lanes.js'
+import { fieldsOf, numberOf, textOf } from '../shared/readers.js'
 import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead, unheldRequiredCell } from '../backend/semantics.js'
@@ -118,6 +119,30 @@ type InboxLease = { route: RouteInstallation; order: LeaseOrder }
 /** What an operation that registered its inbox lease answered, kept with that lease for a copy of it that comes
  *  again. */
 type StoredAnswer = { value: unknown; counters: Map<string, CellCounter>; commit?: { seq: number; timestamp: number } }
+
+/** A `StoredAnswer` as `encodeRoomRecord()` wrote it, its counters rebuilt key by key. */
+function storedAnswerOf(bytes: Uint8Array): StoredAnswer {
+  const fields = fieldsOf(decodeRoomRecord(bytes), 'A stored answer')
+  const stored = fields.counters
+  assert(stored instanceof Map, "A stored answer's counters are not a map")
+  const counters = new Map<string, CellCounter>()
+  for (const [key, counter] of stored) {
+    const { value, changedAt } = fieldsOf(counter, 'A stored counter')
+    counters.set(textOf(key, "A stored counter's key"), {
+      value: numberOf(value, "A stored counter's value"),
+      changedAt: numberOf(changedAt, "A stored counter's change time"),
+    })
+  }
+  const answer: StoredAnswer = { value: fields.value, counters }
+  if (fields.commit !== undefined) {
+    const { seq, timestamp } = fieldsOf(fields.commit, "A stored answer's commit")
+    answer.commit = {
+      seq: numberOf(seq, "A stored answer's commit seq"),
+      timestamp: numberOf(timestamp, "A stored answer's commit time"),
+    }
+  }
+  return answer
+}
 
 /** A route registered, refused because its incarnation is dropped or closing, or not, as `registerLease()` says. */
 type RegisterWire = LeaseRegistered | 'dropped'
@@ -253,7 +278,7 @@ class RoomAuthority {
           if (written === 'repeated') {
             const answer = leaseAnswer(sql, lease.scope, lease.holder)
             assert(answer !== null) // only an operation registers under its own order, and stores its answer with it
-            return { kind: 'repeated', answer: decodeRoomRecord<StoredAnswer>(answer) }
+            return { kind: 'repeated', answer: storedAnswerOf(answer) }
           }
         }
         const { value, writes } = recordRequest(request, {

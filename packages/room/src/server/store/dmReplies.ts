@@ -5,10 +5,9 @@ import type { RoomOperation } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
 import type { RoomResult } from '../../shared/protocol.js'
-import type { RoomDmAckEnvelope } from '../protocol.js'
 import { deleteCells, readOpenCells } from './cellStore.js'
 import { runOperation } from './operations.js'
-import { decodeRoomRecord } from '../lanes/lanes.js'
+import { dmReplyOf } from '../lanes/lanes.js'
 import { ackIdOfDmReplyCellKey, dmReplyCellKey, dmReplyCellPrefix, memberCellKey } from './cells.js'
 
 // A DM's reply, stored for its sender to take until the sender leaves: the `dm-ack` frame's own bytes, which read as the
@@ -45,7 +44,7 @@ async function readDmReply(
 ): Promise<RoomResult | null> {
   const key = dmReplyCellKey(sender, ackId)
   const raw = (await readOpenCells(store, roomId, inc, [key])).cells.get(key)
-  return raw === undefined ? null : decodeRoomRecord<RoomDmAckEnvelope>(raw)
+  return raw === undefined ? null : dmReplyOf(raw)
 }
 
 /** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
@@ -59,8 +58,7 @@ async function takeDmReplies(
   const slice = new Slice()
   for await (const page of store.reads.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(roomId)
-    for (const [key, raw] of page.cells)
-      replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomDmAckEnvelope>(raw))
+    for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), dmReplyOf(raw))
     if (!(await deleteCells(store, roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)
     if (slice.over) await slice.next()
   }

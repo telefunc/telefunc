@@ -10,8 +10,8 @@ import { eachInFlight } from './inFlight.js'
 import type { CellsRead } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { roomClosedError } from '../../shared/errors.js'
-import { leaveCauseFromWire, type WireLeaveCause } from '../../shared/protocol.js'
-import { decodeRoomRecord, type CommitFitsBeforeWriting } from '../lanes/lanes.js'
+import { leaveCauseFromWire } from '../../shared/protocol.js'
+import { departureCauseOf, memberRecordOf, type CommitFitsBeforeWriting } from '../lanes/lanes.js'
 import {
   LEASE_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
@@ -70,7 +70,7 @@ async function readLeaveCauses(
   if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
   for (const id of ids) {
     const raw = read.cells.get(departingCellKey(id))
-    if (raw !== undefined) causes.set(id, leaveCauseFromWire(decodeRoomRecord<WireLeaveCause>(raw)))
+    if (raw !== undefined) causes.set(id, leaveCauseFromWire(departureCauseOf(raw)))
   }
   return causes
 }
@@ -121,7 +121,7 @@ async function liveMembers(
 ): Promise<MemberSnapshot[]> {
   const members: MemberSnapshot[] = []
   await eachInFlight(numbered(entries), async ([i, [id, raw]]) => {
-    const record = decodeRoomRecord<RoomMemberRecord>(raw)
+    const record = memberRecordOf(raw)
     const cells = metaCells.get(id)
     const meta = cells !== undefined ? await memberMetaOf(id, record.metaGen, cells) : {}
     members[i] = memberSnapshot(id, record, meta)
@@ -161,7 +161,7 @@ async function countPresence(store: RoomStore, room: RoomIncarnation): Promise<n
   const { cells } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   let count = 0
   for (const raw of cells.values()) {
-    if (!decodeRoomRecord<RoomMemberRecord>(raw).hidden) count++
+    if (!memberRecordOf(raw).hidden) count++
   }
   return count
 }

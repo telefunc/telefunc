@@ -47,7 +47,8 @@ import {
 import { deleteCells, readOpenCells } from './cellStore.js'
 import { eachInFlight } from './inFlight.js'
 import { runOperation } from './operations.js'
-import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import { decodeRoomRecord, encodeRoomRecord, memberRecordOf } from '../lanes/lanes.js'
+import { fieldsOf, numberOf } from '../../shared/readers.js'
 
 // A meta, the room's or a member's, is a cell per top-level key under its generation's prefix, each holding the
 // key's value and place. A replace writes a new generation; a merge writes its keys into the current one.
@@ -81,9 +82,22 @@ function metaChanges(
   return Object.entries(attrs).map(([key, value], index) => {
     if (value === undefined) return [key]
     const found = merging.get(metaKeyCellKey(prefix, key))
-    const [placeSeq, placeIndex] = found === undefined ? [seq, index] : decodeRoomRecord<MetaKeyCell>(found).place
+    const [placeSeq, placeIndex] = found === undefined ? [seq, index] : metaKeyCellOf(found).place
     return [key, value, placeSeq, placeIndex]
   })
+}
+
+/** A meta key's cell as `metaKeyMutation()` writes it. */
+function metaKeyCellOf(bytes: Uint8Array): MetaKeyCell {
+  const cell = fieldsOf(decodeRoomRecord(bytes), 'A meta key cell')
+  const { place } = cell
+  assert(Array.isArray(place) && place.length === 2, "A meta key cell's place is not two numbers")
+  return { value: cell.value, place: [numberOf(place[0], 'A meta place'), numberOf(place[1], 'A meta place')] }
+}
+
+/** A meta generation, as `genMutation()` and a drop mark write it. */
+function metaGenOf(bytes: Uint8Array): number {
+  return numberOf(decodeRoomRecord(bytes), 'A meta generation')
 }
 
 function changeMutation(prefix: string, change: RoomMetaEntry | [key: string]): CellMutation {
@@ -96,7 +110,7 @@ function metaRun(cells: Iterable<readonly [string, Uint8Array]>, prefix: string)
   for (const [cellKey, raw] of cells) {
     const key = metaKeyOfCellKey(prefix, cellKey)
     if (key === null) continue
-    const { value, place } = decodeRoomRecord<MetaKeyCell>(raw)
+    const { value, place } = metaKeyCellOf(raw)
     run.push([key, value, place[0], place[1]])
   }
   return run.sort(compareMetaEntries)
@@ -170,7 +184,7 @@ async function readMetaPaged(
   // The first write stores the generation with `meta:seq`.
   const gen = before.cells.get(META_GEN_CELL_KEY)
   assert(gen !== undefined)
-  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(gen))
+  const prefix = roomMetaGenPrefix(metaGenOf(gen))
   const runs: RoomMetaEntry[][] = []
   const slice = new Slice()
   for await (const page of reads.readCellPages(roomId, inc, prefix)) {
@@ -191,7 +205,7 @@ async function readMetaWhole(store: RoomStore, roomId: string, inc: string): Pro
   const gen = read.cells.get(META_GEN_CELL_KEY)
   const seq = read.cells.get(META_SEQ_CELL_KEY)
   assert(gen !== undefined && seq !== undefined)
-  const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(gen))
+  const prefix = roomMetaGenPrefix(metaGenOf(gen))
   const runs: RoomMetaEntry[][] = []
   let run = new Map<string, Uint8Array>()
   const slice = new Slice()
@@ -242,7 +256,7 @@ const SET_ROOM_META: RoomOperation<SetRoomMetaArgs, { drop: boolean }> = {
     }
     assert(rawGen !== undefined)
     const count = decodeCellCounter(raw).value
-    const gen = decodeRoomRecord<number>(rawGen)
+    const gen = metaGenOf(rawGen)
     tx.count({ key: META_SEQ_CELL_KEY, delta: 1 })
     if ('replace' in write) {
       const meta = metaEntriesAt(write.replace, count)
@@ -296,7 +310,7 @@ async function dropReplacedMetaGenerations(store: RoomStore, roomId: string, inc
   let held: string[] = []
   for (const [mark, raw] of read.cells) {
     if (mark === META_DROP_PENDING_CELL_KEY) continue
-    for await (const page of store.reads.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
+    for await (const page of store.reads.readCellPages(roomId, inc, roomMetaGenPrefix(metaGenOf(raw)))) {
       if (page.kind === 'stale-incarnation') return
       if (held.length > 0 && !(await deleteCells(store, roomId, inc, held))) return
       held = [...page.cells.keys()]
@@ -349,7 +363,7 @@ const SET_MEMBER_META: RoomOperation<SetMemberMetaArgs, MemberMetaWritten | 'gon
     const memberKey = memberCellKey(id)
     const raw = tx.cell(memberKey)
     if (raw === undefined) return 'gone'
-    const record = decodeRoomRecord<RoomMemberRecord>(raw)
+    const record = memberRecordOf(raw)
     const seq = record.metaSeq + 1
     const gen = 'replace' in write ? seq : record.metaGen
     const prefix = memberMetaGenPrefix(id, gen)
@@ -403,7 +417,7 @@ const SET_MEMBER_CONNECTION: RoomOperation<SetMemberConnectionArgs, MemberMetaWr
     const memberKey = memberCellKey(id)
     const raw = tx.cell(memberKey)
     if (raw === undefined) return 'gone'
-    const { disconnected, ...record } = decodeRoomRecord<RoomMemberRecord>(raw)
+    const { disconnected, ...record } = memberRecordOf(raw)
     if (connected === (disconnected !== true)) return null
     const seq = record.metaSeq + 1
     const next: RoomMemberRecord = { ...record, metaSeq: seq }
@@ -508,7 +522,7 @@ async function settleMemberMetaCells(
 }
 
 function metaSeqOf(record: Uint8Array | undefined): number | undefined {
-  return record === undefined ? undefined : decodeRoomRecord<RoomMemberRecord>(record).metaSeq
+  return record === undefined ? undefined : memberRecordOf(record).metaSeq
 }
 
 /** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. A

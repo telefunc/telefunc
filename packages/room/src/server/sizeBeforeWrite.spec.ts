@@ -14,6 +14,7 @@ import { RoomStore } from '../backend/RoomStore.js'
 import type { CommitOptions, CommitResult, CommitTarget, LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
 import { configFromHead, decodeRoomRecord, encodeRoomRecord } from './lanes/lanes.js'
+import { fieldsOf } from '../shared/readers.js'
 import { leaseCellKey, MEMBER_CELL_PREFIX, memberCellKey } from './store/cells.js'
 import { RoomLease } from './store/lease.js'
 import { joinMember } from './store/members.js'
@@ -377,7 +378,7 @@ it("a participant's send() to a participant only in the store, found by its look
     payload,
     opts,
   ) {
-    const record = decodeRoomRecord<{ __r: string; to?: string; data?: unknown }>(payload)
+    const record = fieldsOf(decodeRoomRecord(payload), 'A committed record')
     if (record.__r === 'dm' && record.to === recipient) committed.push(record.data)
     return await commitLane.bind(this)(target, payload, opts)
   })

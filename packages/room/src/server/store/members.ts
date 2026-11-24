@@ -15,7 +15,7 @@ import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
 import { runOperation } from './operations.js'
-import { decodeRoomRecord, encodeRoomRecord } from '../lanes/lanes.js'
+import { encodeRoomRecord, memberRecordOf } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import { ROOM_DEPARTING_RECORD_MS } from '../constants.js'
 import {
@@ -74,7 +74,7 @@ const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: bo
     const memberKey = memberCellKey(id)
     const raw = tx.cell(memberKey)
     if (raw === undefined) return null
-    const record = decodeRoomRecord<RoomMemberRecord>(raw)
+    const record = memberRecordOf(raw)
     tx.write({ key: memberKey, bytes: null })
     tx.writeExpiring({ key: departingCellKey(id), bytes: encodeRoomRecord(cause), ttlMs: ROOM_DEPARTING_RECORD_MS })
     tx.write({ key: leaseMemberCellKey(record.session, id), bytes: null })

@@ -1,5 +1,5 @@
 // Room wire envelopes, requests and notices, shared by client and server.
-export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire, watchStates }
+export { joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire, watchStates }
 export type {
   MemberSnapshot,
   RoomSnapshotMetadata,
@@ -34,7 +34,7 @@ export type {
   WireLeaveCause,
 }
 
-import { isRecord, ownLeaveCause, removedCause } from './arguments.js'
+import { ownLeaveCause, removedCause } from './arguments.js'
 import type { TrackKey } from './binary.js'
 import type { SetChange } from '../utils/sets.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
@@ -282,9 +282,4 @@ function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): Member
   }
   if (event.hidden) member.hidden = true
   return member
-}
-
-/** All room messages are tagged with `__r`: envelopes, requests, and notices alike. */
-function hasRoomTag(value: unknown): value is { __r: string } {
-  return isRecord(value) && typeof value.__r === 'string'
 }

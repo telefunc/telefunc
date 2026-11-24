@@ -16,8 +16,9 @@ export {
 
 import { Abort, ChannelOverflowError, ShieldValidationError, isShieldValidationError } from 'telefunc/client'
 import { isChannelOverflowError, isObject, type ChannelPublishAck } from 'telefunc/__internal'
-import type { RoomFailure, RoomResult } from './protocol.js'
-import { RoomError, isRoomError, isRoomErrorCode } from './RoomError.js'
+import type { RoomFailure } from './protocol.js'
+import { RoomError, isRoomError } from './RoomError.js'
+import { fieldsOf, roomFailureOf } from './readers.js'
 import { assert } from '../utils/assert.js'
 
 // Error contract: Abort carries its value, RoomError carries a code and a safe message, and bugs are reported on the
@@ -75,9 +76,9 @@ function roomFailureError(failure: RoomFailure): Error {
 
 /** A Room answer's value, else the error its failure rejects with. */
 async function roomResultValue(answer: Promise<unknown>): Promise<unknown> {
-  const result = roomResult(await answer)
-  if (!result.ok) throw roomFailureError(result)
-  return result.value
+  const result = fieldsOf(await answer, 'A Room answer')
+  if (result.ok === true) return result.value
+  throw roomFailureError(roomFailureOf(result))
 }
 
 /** The value of a Room answer to a publish: the place the publish took. */
@@ -86,22 +87,6 @@ function publishAck(value: unknown): ChannelPublishAck {
   const { key, seq, timestamp } = value
   assert(typeof key === 'string' && typeof seq === 'number' && typeof timestamp === 'number')
   return { key, seq, timestamp }
-}
-
-/** A Room answer as the server sends it (`toRoomFailure()`). */
-function roomResult(answer: unknown): RoomResult {
-  assert(isObject(answer), 'A Room answer is not an object')
-  if (answer.ok === true) return { ok: true, value: answer.value }
-  assert(answer.ok === false, 'A Room answer is neither a value nor a failure')
-  const { kind, message, code } = answer
-  if (kind === 'abort') return { ok: false, kind, abortValue: answer.abortValue }
-  assert(typeof message === 'string', 'A Room failure has no message')
-  if (kind === 'error') {
-    assert(isRoomErrorCode(code), 'A Room failure has no error code')
-    return { ok: false, kind, code, message }
-  }
-  assert(kind === 'shield' || kind === 'overflow', 'A Room failure is of no known kind')
-  return { ok: false, kind, message }
 }
 
 /** The replies an `{ ack: true }` sender gets when no one handler of the recipient answered. */

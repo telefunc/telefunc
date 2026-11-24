@@ -1,7 +1,6 @@
 export { RoomReplica }
 export type { PresenceEvent }
 
-import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -17,20 +16,21 @@ import { PublishedTracks } from './lanes/PublishedTracks.js'
 import { PageIndex, type PageEnd } from './lanes/PageIndex.js'
 import { DM_FAILURE, RoomError } from '../shared/errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire, watchStates } from '../shared/protocol.js'
-import type {
-  MemberMetaUpdate,
-  MemberSnapshot,
-  RoomCtrlEnvelope,
-  RoomDmEnvelope,
-  SenderStamp,
-} from '../shared/protocol.js'
-import type { RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
+import type { MemberMetaUpdate, MemberSnapshot, RoomCtrlEnvelope, SenderStamp } from '../shared/protocol.js'
+import type { RoomConfigRecord, RoomDmAckEnvelope, RoomIncarnation } from './protocol.js'
 import { RoomModel, type ServerModelOwner } from '../shared/RoomModel.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync, type AuthorityChange, type AuthoritySyncOwner } from './lifecycle/AuthoritySync.js'
 import { PendingDmAcks } from './PendingDmAcks.js'
 import { reportRoomError } from './reportRoomError.js'
-import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, withinRoomHorizon } from './lanes/lanes.js'
+import {
+  SEMANTIC_LANE,
+  decodeCtrlEnvelope,
+  decodeDataEnvelope,
+  decodeInboxEnvelope,
+  decodeRoomText,
+  withinRoomHorizon,
+} from './lanes/lanes.js'
 import { eachInFlight } from './store/inFlight.js'
 import { dropDmReply, takeDmReplies } from './store/dmReplies.js'
 import { RoomHosting } from './lifecycle/RoomHosting.js'
@@ -430,7 +430,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
       const stored = await getRoomPlane().direct.reads.readRetained(this.id, this.incarnation.inc, SEMANTIC_LANE)
       if (stored === null) return
       const serialized = decodeRoomText(stored.payload)
-      const event = parse(serialized) as RoomDataEnvelope
+      const event = decodeDataEnvelope(serialized)
       // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
       const had = before.members.get(event.from) ?? holder.textDemand().members.has(event.from)
       if (had || !holder.wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
@@ -522,13 +522,13 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private onControl(serialized: string, info: OrderingInfo): void {
     this.authority.controlDelivered(info)
-    const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
+    const ctrl = decodeCtrlEnvelope(serialized)
     if (ctrl.__r === 'demand-ask') return this.demandExchange.onAsk(ctrl)
     this.applyControl(ctrl, () => orderedBody(serialized, info))
   }
 
   private onTextData(serialized: string, info: OrderingInfo): void {
-    const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope
+    const envelope = decodeDataEnvelope(serialized)
     if (envelope.fromMetaSeq !== undefined) this.applyStamp(envelope.from, envelope)
     for (const handle of this.receivers) handle.relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
@@ -547,7 +547,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   /** A DM for a member a handle here owns, routed to that handle. */
   private onDm(serialized: string, info: OrderingInfo): void {
-    const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
+    const envelope = decodeInboxEnvelope(serialized)
     this.inboxFrame(envelope.to, info.seq)
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
     if (envelope.__r === 'dm-ack') return this.dmAcked(envelope)
