@@ -312,10 +312,11 @@ class PendingJoins {
     return reqId
   }
 
-  /** `joined` named the member the request `reqId` admitted. */
+  /** `joined` named the member the request `reqId` admitted: the server sends it before the join's answer, which settles
+   *  the request (`server/joinOrder.spec.ts`). */
   named(reqId: number, id: string): void {
     const join = this.byRequest.get(reqId)
-    if (join === undefined) return
+    assert(join, { reqId })
     join.id = id
     this.byMember.set(id, join)
   }
