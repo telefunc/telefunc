@@ -35,6 +35,7 @@ import {
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { ProtocolViolationError } from '../../wire/protocolViolation.js'
 import {
   WIRE_VERSION_REFUSAL,
@@ -274,11 +275,12 @@ class SseServerTransport {
   }
 
   /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
-   *  or null where it can't say. */
+   *  or null where it can't say; `takesUpgrades`, whether that server takes WebSocket upgrades. */
   async handleRequest(
     request: Request,
     readable: Readable | undefined,
     clientLeft: (err: unknown) => boolean | null,
+    takesUpgrades: TakesUpgrades,
   ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return refuse(REFUSED.notServed)
     if (request.method !== 'POST') return refuse(REFUSED.notPost)
@@ -305,7 +307,7 @@ class SseServerTransport {
     try {
       switch (metadata.kind) {
         case 'streamResponse':
-          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request, takesUpgrades)
         case 'streamRequest':
           return await this.handleStreamRequestPost(connId, reader)
         case 'close':
@@ -328,6 +330,7 @@ class SseServerTransport {
     reader: BodyReader,
     useNodeStream: boolean,
     request: Request,
+    takesUpgrades: TakesUpgrades,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getWireByConnId<SseWire>(connId)
     if (existing) this.mux.endFault(existing, { scope: 'loss' })
@@ -345,7 +348,7 @@ class SseServerTransport {
       pendingDispatches: new Set(),
       bodies: new Set([reader]),
     }
-    this.mux.onWireOpen(wire, this.transport, request)
+    this.mux.onWireOpen(wire, this.transport, takesUpgrades, request)
     reader.onChunk = () => this.mux.onWireBytes(wire)
     this.resolvePendingWires(connId, wire)
     void this.runStreamResponse(wire, reader)
@@ -682,7 +685,8 @@ async function handleSseChannelRequest(
   request: Request,
   readable: Readable | undefined,
   clientLeft: (err: unknown) => boolean | null,
+  takesUpgrades: TakesUpgrades,
 ): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable, clientLeft)
+  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, takesUpgrades)
 }

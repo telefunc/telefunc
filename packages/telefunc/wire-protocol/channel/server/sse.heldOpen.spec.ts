@@ -12,6 +12,7 @@ import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const KEEP = 1_000
 config.channel = { reconnectTimeout: KEEP, connectTtl: 15_000 }
@@ -29,7 +30,7 @@ async function open(reconcileFrame: Uint8Array<ArrayBuffer>) {
     body: encodeSseRequest({ connId: crypto.randomUUID(), streamResponse: true }, [reconcileFrame]),
     duplex: 'half',
   }
-  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
   const body = answer.body
   if (!(body instanceof ReadableStream)) throw new Error('No event stream')
   const attached: number[] = []

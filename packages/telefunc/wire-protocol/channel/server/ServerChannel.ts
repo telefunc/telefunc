@@ -175,7 +175,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
   private didRegister = false
   protected peer: IndexedPeer | null = null
-  /** The request that opened the wire the page last attached on. */
+  /** The request that opened the wire its page is attached on, while it is. */
   protected wireRequest: Request | undefined = undefined
   /** @internal The request of the call that carried it: only calls of its session change what its page wants. */
   _callRequest: Request | undefined = undefined
@@ -951,6 +951,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Into the replay, which the reconnect sends: the wire that went drops it.
     this.lossySends?.flush()
     this.peer = null
+    this.wireRequest = undefined
     this.receiveCredit.detach()
     if (this.endUnconfirmed(reconnectTimeout)) return
     this._replayBuffer?.dateStall(performance.now())
@@ -977,6 +978,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal The page reattached but never acknowledged this channel: its connection is lost for good. */
   _onPeerRecoveryFailure(): void {
     this.peer = null
+    this.wireRequest = undefined
     this.loseConnection(new NetworkError('Channel not acknowledged by client after reconnect', true))
   }
 
@@ -992,6 +994,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerGone(err: Error): void {
     if (this._phase === 'ended') return
     this.peer = null
+    this.wireRequest = undefined
     this.shutdown(err, { pageGone: true })
   }
 
@@ -1236,6 +1239,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lossySends?.dispose()
     const pageAttached = this.peer !== null
     this.peer = null
+    this.wireRequest = undefined
     this.receiveCredit.detach()
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = null

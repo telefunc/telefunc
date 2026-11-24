@@ -13,6 +13,7 @@ import { END_CAUSE } from '../endCause.js'
 import { getChannelMux, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades, upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
@@ -29,7 +30,7 @@ async function sseWire(channel: ServerChannel) {
     }),
   ])
   const init = { method: 'POST', body, duplex: 'half' }
-  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
   if (!answer || !(answer.body instanceof ReadableStream)) throw new Error('No event stream')
   return { connId, events: answer.body }
 }
@@ -57,7 +58,7 @@ function webSocketWire() {
     bufferedAmount: () => 0,
     close: () => void handed.push('close'),
   }
-  mux.onWireOpen(wire, transport)
+  mux.onWireOpen(wire, transport, upgradesTakenHere)
   return { wire, handed }
 }
 

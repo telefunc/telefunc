@@ -1,5 +1,6 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/ChannelMux.js'
+import { noUpgrades } from '../../node/server/runTelefunc/takesUpgrades.js'
 import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { decode, encode, type DecodedFrame } from '../wire/frame.js'
@@ -27,7 +28,7 @@ function createHarness() {
       }),
       close: () => (terminated = true),
     }
-    mux.onWireOpen(conn, transport)
+    mux.onWireOpen(conn, transport, noUpgrades)
     return {
       sent,
       /** The id the last RECONCILED gave this wire. */

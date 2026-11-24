@@ -25,6 +25,7 @@ import { getChannelMux } from './ChannelMux.js'
 import { END_CAUSE } from '../endCause.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // The receive backlog's budget, small enough that a row passes it in a few hundred frames.
 vi.mock('../../constants.js', async (importOriginal) => ({
@@ -38,7 +39,7 @@ const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit, { at = url, method = 'POST' } = {}) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method, body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(at, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(at, init), undefined, () => false, noUpgrades)
 }
 
 /** A stream whose chunks the server reads as they come, ending after the last. */
@@ -99,8 +100,11 @@ afterEach(() => {
 })
 
 test.each([
-  ['a GET', () => handleSseChannelRequest(new Request(url), undefined, () => false)],
-  ['a POST with no body', () => handleSseChannelRequest(new Request(url, { method: 'POST' }), undefined, () => false)],
+  ['a GET', () => handleSseChannelRequest(new Request(url), undefined, () => false, noUpgrades)],
+  [
+    'a POST with no body',
+    () => handleSseChannelRequest(new Request(url, { method: 'POST' }), undefined, () => false, noUpgrades),
+  ],
   ['metadata it cannot read', () => post(bodyOf(encodeU32(2), new TextEncoder().encode('{]')))],
   [
     'a server that serves no SSE',

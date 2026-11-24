@@ -18,6 +18,7 @@ import { encode } from '../../wire/frame.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const PING_INTERVAL = 1_000
 config.channel = { pingInterval: PING_INTERVAL }
@@ -42,7 +43,7 @@ const handlerUrl = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(handlerUrl, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(handlerUrl, init), undefined, () => false, noUpgrades)
 }
 
 /** A real Node server serving Telefunc. */
@@ -137,7 +138,7 @@ test.each([
     // The request and its body stay held to the row's end, as their host holds them.
     const init = { method: 'POST', body, duplex: 'half' }
     const request = new Request(handlerUrl, init)
-    const answer = handleSseChannelRequest(request, undefined, () => false)
+    const answer = handleSseChannelRequest(request, undefined, () => false, noUpgrades)
     await new Promise((resolve) => setTimeout(resolve, 300))
     const endedAt = await end()
     ended = true

@@ -9,6 +9,7 @@ import { TAG } from '../../wire/tags.js'
 import type { ReconcileOpenEntry } from '../../wire/payloads.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
+import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
@@ -31,7 +32,7 @@ function page() {
     bufferedAmount: () => 0,
     close: (_, end) => void ends.push(end),
   }
-  mux.onWireOpen(wire, transport)
+  mux.onWireOpen(wire, transport, upgradesTakenHere)
   return {
     wire,
     ends,

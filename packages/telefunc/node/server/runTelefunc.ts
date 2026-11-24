@@ -35,6 +35,7 @@ import {
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext, type RequestContext } from './context/requestContext.js'
 import type { ClientLeft } from './runTelefunc/clientLeft.js'
+import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 
 type StreamWritableWeb = WritableStream
@@ -334,12 +335,14 @@ async function runTelefunc_(
     context,
     clientLeft,
     clientGone,
+    takesUpgrades,
   }: {
     request: Request
     readable?: StreamReadableNode
     context?: Telefunc.Context
     clientLeft: ClientLeft
     clientGone: AbortSignal
+    takesUpgrades: TakesUpgrades
   },
   requestContext: RequestContext,
 ): Promise<HttpResponseParts> {
@@ -353,6 +356,7 @@ async function runTelefunc_(
       readable,
       clientLeft,
       clientGone,
+      takesUpgrades,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,

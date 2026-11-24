@@ -705,6 +705,39 @@ describe("a page's recovery", () => {
     expect(ended).toEqual([])
   })
 
+  test("a channel the page closed, its server not yet sure of the page's verdict when the wire went, keeps the page retrying until the deadline, and nothing of the connection after", async () => {
+    const pageHideListeners = new Set<unknown>()
+    vi.stubGlobal('addEventListener', (type: string, listener: unknown) => {
+      if (type === 'pagehide') pageHideListeners.add(listener)
+    })
+    vi.stubGlobal('removeEventListener', (type: string, listener: unknown) => {
+      if (type === 'pagehide') pageHideListeners.delete(listener)
+    })
+    try {
+      ScriptedWebSocket.scripts = [{ reconcile: { afterMs: 0 } }]
+      const channel = fakeMuxChannel()
+      const options = { transports: [CHANNEL_TRANSPORT.WS], fetchImpl: fetch, connectionKey: crypto.randomUUID() }
+      const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, options)
+      await vi.advanceTimersByTimeAsync(10)
+      // As the page's `close()` resolves: its CLOSE_DONE sent, the channel let go.
+      connection.sendCloseDone(channel)
+      connection.unregister(channel)
+      const first = ScriptedWebSocket.made[0]
+      if (!first) throw new Error('the page made no socket')
+      first.drop()
+      const lostAt = performance.now()
+      await vi.advanceTimersByTimeAsync(RECOVERY_WINDOW_MS + RECONNECT_TIMEOUT_MS)
+      const retried = madeSince(lostAt)
+      expect(retried.length).toBeGreaterThan(0)
+      expect(Math.max(...retried)).toBeLessThan(RECOVERY_WINDOW_MS)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(pageHideListeners.size).toBe(0)
+      expect(ScriptedWebSocket.made.filter((ws) => ws.readyState !== 3)).toEqual([])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('a channel registered while a reconnect waits starts no attempt sooner', async () => {
     const { lostAt, register } = await lostWire({ then: [] })
     await vi.advanceTimersByTimeAsync(100)

@@ -107,8 +107,8 @@ export function validateChannelTransports(val: unknown, configPath: string, exam
 
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
-/** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
-export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
+/** Default transports the server allows. A page is offered `'ws'` only where its server takes upgrades. */
+export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
 
 /** An attempt not open within 3 × the last open R is cut: TCP's first timeout from R (RFC 6298 §2.2)… */
 export const ATTEMPT_ALLOWANCE_OPENS = 3

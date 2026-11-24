@@ -45,8 +45,9 @@ function pluginDev(): Plugin[] {
               // Skip for @cloudflare/vite-plugin: it runs the worker in its own
               // environment with a custom WS handler — registering the Node.js
               // upgrade listener would steal WS upgrades from Cloudflare's handler.
-              const { Telefunc } = await import('../../../serve/node.js')
-              new Telefunc().installWebSocket(server.httpServer)
+              // The middleware reads a page's server off its request's socket, so this marks no request.
+              const { takeUpgrades } = await import('../../../serve/nodeUpgrades.js')
+              takeUpgrades(server.httpServer)
             }
           }
         },

@@ -12,6 +12,7 @@ import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { getChannelMux, type ServerEnd, type ServerTransport, type WireClose } from './ChannelMux.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades, upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 type ServePath = 'web' | 'node'
 
@@ -22,11 +23,12 @@ async function openStream(path: ServePath, reconcile: Uint8Array<ArrayBuffer>) {
   const body = encodeSseRequest({ connId, streamResponse: true }, [reconcile])
   const opened =
     path === 'web'
-      ? await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
+      ? await handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false, noUpgrades)
       : await handleSseChannelRequest(
           new Request(url, { method: 'POST' }),
           Readable.from([new Uint8Array(await body.arrayBuffer())]),
           () => false,
+          noUpgrades,
         )
   const stream = opened.body
   if (typeof stream === 'string') throw new Error(`no event stream: ${opened.statusCode} ${stream}`)
@@ -51,6 +53,7 @@ async function openStream(path: ServePath, reconcile: Uint8Array<ArrayBuffer>) {
         new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) }),
         undefined,
         () => false,
+        noUpgrades,
       ),
   }
 }
@@ -108,7 +111,7 @@ function openWebSocket({ reads = false, knowsBacklog = true } = {}) {
       state.closedAs = how
     },
   }
-  mux.onWireOpen(wire, transport)
+  mux.onWireOpen(wire, transport, upgradesTakenHere)
   return {
     mux,
     wire,

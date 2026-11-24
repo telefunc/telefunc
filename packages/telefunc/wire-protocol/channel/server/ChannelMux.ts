@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
@@ -13,8 +14,9 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
-  type ChannelTransports,
+  CHANNEL_TRANSPORT,
   type ChannelTransport,
+  type ChannelTransports,
 } from '../../constants.js'
 import {
   channelOf,
@@ -122,7 +124,9 @@ type MuxServerOptions = {
   connectTtl: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
+  /** What `config.channel.transports` allows, and the same less `'ws'` for a wire whose server takes no upgrades. */
   transports: ChannelTransports
+  transportsWithoutWs: ChannelTransports
 }
 
 /** How a wire closed: lost (its page may reconnect), its page left for good, or ended for good by the server for a
@@ -170,6 +174,8 @@ type WireEntry = {
   /** How the wire closed, decided by the server or seen by its transport; null while it is open. A turn queued on the
    *  wire reads it at its start. */
   closed: WireClose | null
+  /** Whether the server that opened the wire takes WebSocket upgrades: its page is offered `'ws'` only where it does. */
+  takesUpgrades: TakesUpgrades
 }
 
 function getChannelMux(): ChannelMux {
@@ -271,7 +277,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   // ── Wire lifecycle (transport-facing) ───────────────────────────────
 
-  onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, request?: Request): void {
+  onWireOpen<TWire>(
+    wire: TWire,
+    transport: ServerTransport<TWire>,
+    takesUpgrades: TakesUpgrades,
+    request?: Request,
+  ): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
     const attaching = new Set<ServerChannel>()
@@ -302,6 +313,7 @@ class ChannelMux implements UpgradeStagesOwner {
       request,
       holds: null,
       closed: null,
+      takesUpgrades,
     }
     this.wires.set(wire, entry)
     const connId = transport.getConnId(wire)
@@ -315,7 +327,8 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
-    this.wires.get(outcome.deliverTo)?.sender.sendReconciled(
+    const entry = this.wires.get(outcome.deliverTo)
+    entry?.sender.sendReconciled(
       encode.reconciled({
         upgradeId: outcome.upgradeId,
         sessionId: outcome.sessionId,
@@ -327,7 +340,7 @@ class ChannelMux implements UpgradeStagesOwner {
         creditWindow: this.options.creditWindow,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-        transports: this.options.transports,
+        transports: entry?.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
       }),
     )
     for (const { channel } of outcome.attached) channel._confirmWant()
@@ -1118,10 +1131,13 @@ class ChannelMux implements UpgradeStagesOwner {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
+    const { peer } = h
+    // The session keeps its channels for the page's reconnect, and nothing of the wire that went.
+    h.peer = null
     // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
     // wire's RECONCILE, or leaving for good.
     if (this.ended.has(h.channel)) {
-      h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
+      if (peer) h.channel._onPeerDisconnect(peer, this.options.reconnectTimeout)
       if (reason === 'transient') this.ended.keep(h.channel, this.options.reconnectTimeout)
       else this.ended.release(h.channel)
       return
@@ -1131,7 +1147,7 @@ class ChannelMux implements UpgradeStagesOwner {
         h.channel._onPeerGone(new ChannelPageLeftError())
         return
       case 'transient':
-        h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
+        if (peer) h.channel._onPeerDisconnect(peer, this.options.reconnectTimeout)
         return
       case 'recoveryFailed':
         h.channel._onPeerRecoveryFailure()
@@ -1205,6 +1221,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,
+    transportsWithoutWs: c.transports.filter((t) => t !== CHANNEL_TRANSPORT.WS),
   }
 }
 

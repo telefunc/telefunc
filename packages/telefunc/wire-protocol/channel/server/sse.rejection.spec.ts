@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { WIRE_VERSION } from '../../constants.js'
@@ -11,7 +12,7 @@ import { SseEvents } from '../../wire/SseEvents.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 const post = (body: BodyInit) =>
-  handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
+  handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false, noUpgrades)
 
 /** A wire-level frame of a tag no version has: it names no channel. */
 const unreadable = new Uint8Array([0x0f, 0, 0])

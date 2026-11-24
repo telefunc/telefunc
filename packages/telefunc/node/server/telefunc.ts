@@ -8,6 +8,7 @@ import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
 import { noTransportEvidence, socketShowsClientLeft, type ClientLeft } from './runTelefunc/clientLeft.js'
+import { noUpgrades, upgradesOfSocketServer, type TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 
 type HttpRequestResolved = {
   request: Request
@@ -23,6 +24,8 @@ type HttpRequestResolved = {
   /** Aborts once the client left, and only then, on the same evidence: from the answer on, a read of the body may not end
    *  by itself where its client leaves. */
   clientGone: AbortSignal
+  /** Whether the server that received the request takes WebSocket upgrades. */
+  takesUpgrades: TakesUpgrades
 }
 
 type HttpRequest =
@@ -93,15 +96,24 @@ async function serveNode(
   return httpResponse
 }
 
-/** `serve()` for the adapters of a runtime's own server (`Bun.serve`, `Deno.serve`), which pass how that server shows its
- *  client left. */
+/** `serve()` for the adapters handed a `Request` with what its server shows: how its client left (`Bun.serve`,
+ *  `Deno.serve`), and whether it takes WebSocket upgrades (those two, a Durable Object, and on Node the server
+ *  `serve({ request })` runs on). */
 async function serveRuntimeRequest(
   httpRequest: Extract<HttpRequest, { request: Request }>,
   clientLeft: ClientLeft,
   clientGone: AbortSignal,
+  takesUpgrades: TakesUpgrades,
 ): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, 1)
-  return runTelefunc({ request: httpRequest.request, context: httpRequest.context, clientLeft, clientGone })
+  assertRequestSignalFlag()
+  return runTelefunc({
+    request: httpRequest.request,
+    context: httpRequest.context,
+    clientLeft,
+    clientGone,
+    takesUpgrades,
+  })
 }
 
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
@@ -124,6 +136,7 @@ async function resolveHttpRequest(
       context: httpRequest.context,
       clientLeft: noTransportEvidence,
       clientGone: httpRequest.request.signal,
+      takesUpgrades: noUpgrades,
     }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
@@ -142,6 +155,7 @@ async function resolveHttpRequest(
       context: httpRequest.context,
       clientLeft: socketShowsClientLeft(httpRequest.readable),
       clientGone,
+      takesUpgrades: upgradesOfSocketServer(httpRequest.readable),
       unwatch,
     }
   }
@@ -151,7 +165,13 @@ async function resolveHttpRequest(
     body: httpRequest.body,
     headers: normalizeHeaders(httpRequest.headers),
   })
-  return { request, context: httpRequest.context, clientLeft: noTransportEvidence, clientGone: request.signal }
+  return {
+    request,
+    context: httpRequest.context,
+    clientLeft: noTransportEvidence,
+    clientGone: request.signal,
+    takesUpgrades: noUpgrades,
+  }
 }
 
 function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {

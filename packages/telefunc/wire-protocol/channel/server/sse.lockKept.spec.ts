@@ -12,6 +12,7 @@ import { pingDeadline } from '../../wire/pingDeadline.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const PING_INTERVAL = 1_000
 config.channel = { pingInterval: PING_INTERVAL }
@@ -50,7 +51,7 @@ const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
 }
 
 test.each([

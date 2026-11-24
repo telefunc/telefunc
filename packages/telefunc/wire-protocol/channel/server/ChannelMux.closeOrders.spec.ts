@@ -13,6 +13,7 @@ import { TAG } from '../../wire/tags.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream } from './serverPage.fixture.js'
+import { noUpgrades, upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 2_000 }
 
@@ -53,7 +54,7 @@ function wire({
       mux.onWireClosed(x, end.how)
     },
   }
-  mux.onWireOpen(w, transport)
+  mux.onWireOpen(w, transport, sse ? noUpgrades : upgradesTakenHere)
   return {
     w,
     connId,

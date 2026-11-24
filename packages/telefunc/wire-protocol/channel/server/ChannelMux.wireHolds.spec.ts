@@ -12,6 +12,7 @@ import { END_CAUSE } from '../endCause.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
+import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const KEEP = 1_000
 config.channel = { reconnectTimeout: KEEP, connectTtl: 15_000 }
@@ -34,7 +35,7 @@ function wire() {
     bufferedAmount: () => 0,
     close: (_, end) => void ends.push(end),
   }
-  mux.onWireOpen(w, transport)
+  mux.onWireOpen(w, transport, upgradesTakenHere)
   const tags = () => frames.map((frame) => frame[0])
   return {
     w,

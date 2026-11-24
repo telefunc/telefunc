@@ -8,13 +8,14 @@ import { WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import { encode } from '../../wire/frame.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 setFlagsFromString('--expose-gc')
 const collect: unknown = runInNewContext('gc')
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit) {
-  return handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false)
+  return handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false, noUpgrades)
 }
 
 /** The Promises alive once garbage is collected. */

@@ -15,6 +15,7 @@ import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const KEEP = 1_000
 config.channel = { reconnectTimeout: KEEP, connectTtl: 2_000 }
@@ -26,7 +27,7 @@ const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 async function open(body: BodyInit) {
   // A stream body is sent half duplex, which a `RequestInit` literal doesn't type.
   const init = { method: 'POST', body, duplex: 'half' }
-  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  const answer = await handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
   const stream = answer.body
   if (!(stream instanceof ReadableStream)) throw new Error('No event stream')
   const reader = stream.getReader()

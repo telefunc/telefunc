@@ -12,11 +12,12 @@ import { TAG } from '../../wire/tags.js'
 import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 function post(body: BodyInit) {
   const init = { method: 'POST', body, duplex: 'half' }
-  return handleSseChannelRequest(new Request(url, init), undefined, () => false)
+  return handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
 }
 
 async function open(connId: string): Promise<ReadableStream> {

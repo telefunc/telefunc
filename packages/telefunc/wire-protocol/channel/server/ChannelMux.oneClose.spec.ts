@@ -8,6 +8,7 @@ import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { getChannelMux, type ServerEnd, type ServerTransport } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
+import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
@@ -27,7 +28,7 @@ function wire({ throws = false } = {}) {
       if (throws) throw new Error('The socket could not close.')
     },
   }
-  mux.onWireOpen(w, transport)
+  mux.onWireOpen(w, transport, upgradesTakenHere)
   return { w, ends, hows: () => ends.map(({ how }) => how) }
 }
 

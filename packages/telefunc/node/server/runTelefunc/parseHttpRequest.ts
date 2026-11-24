@@ -10,6 +10,7 @@ import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
 import { BodyReader, OversizeFrameError, StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
 import type { ClientLeft } from './clientLeft.js'
+import type { TakesUpgrades } from './takesUpgrades.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/ServerChannel.js'
@@ -40,6 +41,8 @@ type RunContext = {
   clientLeft: ClientLeft
   /** Aborts once the client left, and only then, as the same adapter says. */
   clientGone: AbortSignal
+  /** Whether the server that received the request takes WebSocket upgrades, as its adapter says. */
+  takesUpgrades: TakesUpgrades
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -77,7 +80,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, clientLeft, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, takesUpgrades, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -88,7 +91,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft)
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 

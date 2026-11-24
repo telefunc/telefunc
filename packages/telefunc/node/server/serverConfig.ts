@@ -1,9 +1,9 @@
 export { configUser as config }
 export { getServerConfig }
+export { getTelefuncUrl }
 export { getManifestConfig }
 export { applyManifestConfig }
 export { getServerExtensionTypes }
-export { enableChannelTransports }
 export { setAdapterMaxFrameBytes }
 export { setAdapterMaxMemory }
 export { getAdapterMaxFrameBytes }
@@ -84,8 +84,9 @@ type ChannelConfigUser = {
    * Transports enabled on this server for Telefunc channels.
    * Determines which transport(s) clients may connect with or upgrade to.
    *
-   * - `['sse']` (default): SSE only
-   * - `['sse', 'ws']`: SSE and WebSocket — clients may upgrade to WS
+   * - `['sse']`: SSE only
+   * - `['sse', 'ws']` (default): SSE and WebSocket — a page is offered WS only where its server takes upgrades
+   *   (`installWebSocket()`, `telefunc/bun`, `telefunc/deno`, a Durable Object)
    * - `['ws']`: WebSocket only
    *
    * Connections arriving on a transport not listed here are immediately rejected.
@@ -244,8 +245,6 @@ const globalObject = getGlobalObject('node/server/serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** The Vite plugin's settings, from the production manifest: kept so they fill again what a later assignment of the app's server code leaves unset. */
   manifestConfig: {} as Record<string, unknown>,
-  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
-  adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
   /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
@@ -331,6 +330,11 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
 })
 
+/** `config.telefuncUrl` as `getServerConfig()` resolves it, without the rest: a server reads it per request. */
+function getTelefuncUrl(): string {
+  return configState.telefuncUrl || '/_telefunc'
+}
+
 function getServerConfig(): ConfigResolved {
   return {
     disableEtag: configState.disableEtag ?? false,
@@ -349,7 +353,7 @@ function getServerConfig(): ConfigResolved {
         }
       })(),
     },
-    telefuncUrl: configState.telefuncUrl || '/_telefunc',
+    telefuncUrl: getTelefuncUrl(),
     telefuncFiles: (() => {
       if (configState.telefuncFiles) {
         return configState.telefuncFiles.map(toPosixPath)
@@ -379,7 +383,7 @@ function getServerConfig(): ConfigResolved {
 function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved {
   const reconnectTimeout = channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
   return {
-    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports],
+    transports: channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
     reconnectTimeout,
     // A long reconnect window doesn't pin an idle wire, and a short one (Cloudflare's) doesn't wait longer than itself.
     idleTimeout: channel.idleTimeout ?? Math.min(reconnectTimeout, CHANNEL_IDLE_TIMEOUT_MS),
@@ -457,11 +461,6 @@ function getServerExtensionTypes() {
     responseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
     requestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
-}
-
-/** @internal Adds transports to the defaults, which apply while the user sets none. */
-function enableChannelTransports(transports: ChannelTransports): void {
-  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
 }
 
 /** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */

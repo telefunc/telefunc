@@ -149,12 +149,17 @@ class SseTransport implements UpgradeSource {
    *  Nothing reads the answer of its POST: the page is gone, and the server's ping deadline ends a wire it never got. */
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
+    this.postClose()
+    // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened says it closes for good.
+    this.abandonActiveTransport()
+  }
+
+  /** Tells the server the wire closes for good. */
+  private postClose(): void {
     // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
     void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
       () => {},
     )
-    // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened says it closes for good.
-    this.abandonActiveTransport()
   }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
@@ -983,6 +988,8 @@ class SseTransport implements UpgradeSource {
     this.dropStalled()
     this.folded = null
     this.closeStreamRequest()
+    // A wire still on as its connection ends closes for good, as a WebSocket's does with `WS_CLOSE_PAGE_LEFT`.
+    if (this.transportAbort) this.postClose()
     this.transportAbort?.abort()
     this.transportAbort = null
     this.closeAbandonedTransport()

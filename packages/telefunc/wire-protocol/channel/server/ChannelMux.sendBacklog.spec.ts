@@ -13,6 +13,7 @@ import { getChannelMux } from './ChannelMux.js'
 import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { openStream, openWebSocket, order } from './serverPage.fixture.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // The send backlog's base at 1 MiB, not 64 MiB: the rows that pass it build what passes it in milliseconds.
 vi.mock('../../constants.js', async (importOriginal) => ({
@@ -61,6 +62,7 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
     }),
     undefined,
     () => false,
+    noUpgrades,
   )
   expect(opened.statusCode).toBe(200)
   let status = 200
@@ -70,6 +72,7 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
       new Request(url, { method: 'POST', body: encodeSseRequest({ connId }, pings) }),
       undefined,
       () => false,
+      noUpgrades,
     )
     status = answered.statusCode
   }

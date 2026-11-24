@@ -1,7 +1,7 @@
 import { expect, onTestFinished, test } from 'vitest'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { connect } from 'node:net'
-import { once } from 'node:events'
+import { createServer, IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { connect, Socket } from 'node:net'
+import { EventEmitter, once } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 import { Telefunc } from './node.js'
@@ -162,6 +162,160 @@ test.runIf(nodeHasTheCallback)(
     const { server: s } = await server({ telefunc: true, shouldUpgradeCallback: own })
     s.removeAllListeners('upgrade')
     expect(hasProp(s, 'shouldUpgradeCallback') && s.shouldUpgradeCallback).toBe(own)
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "removing Telefunc's upgrade listener leaves the `shouldUpgradeCallback` the app set after Telefunc's WebSocket",
+  async () => {
+    const { server: s } = await server({ telefunc: true })
+    const later = (req: IncomingMessage) => req.url === '/app-ws'
+    Reflect.set(s, 'shouldUpgradeCallback', later)
+    s.removeAllListeners('upgrade')
+    expect(hasProp(s, 'shouldUpgradeCallback') && s.shouldUpgradeCallback).toBe(later)
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "a request the app's own `shouldUpgradeCallback` upgrades with no listener there to take it stays an upgrade, before a second `installWebSocket()` and after it: it is answered as a page the server doesn't have",
+  async () => {
+    const { server: s, port } = await server({ telefunc: true })
+    const own = (req: IncomingMessage) => req.url === '/app-ws'
+    // What an app's `server.shouldUpgradeCallback = …` does after the install, which the typings here don't know.
+    Reflect.set(s, 'shouldUpgradeCallback', own)
+    const unanswered = { status: 404, body: '', open: false }
+    expect(await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).toEqual(unanswered)
+    new Telefunc().installWebSocket(s)
+    expect(await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).toEqual(unanswered)
+    expect((await answer(port, requests["Telefunc's WebSocket handshake"])).status).toBe(101)
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "an app's own `shouldUpgradeCallback` that reads the server's `listening` gets the server's value",
+  async () => {
+    const seen: boolean[] = []
+    function own(this: { listening: boolean }, req: IncomingMessage) {
+      seen.push(this.listening)
+      return req.url === '/app-ws'
+    }
+    const { server: s, port } = await server({ telefunc: true, shouldUpgradeCallback: own })
+    s.on('upgrade', appUpgrade)
+    expect((await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).status).toBe(418)
+    expect(seen).toEqual([true])
+  },
+)
+
+/** The server's `shouldUpgradeCallback` called as Node calls it, on the server, with the request. */
+function callTheCallback(s: Server, req: IncomingMessage): unknown {
+  if (!hasProp(s, 'shouldUpgradeCallback', 'function')) throw new Error('no shouldUpgradeCallback')
+  return s.shouldUpgradeCallback.call(s, req)
+}
+
+test.runIf(nodeHasTheCallback)(
+  "an app's own `shouldUpgradeCallback` gets its server as `this`, and counts the server's listeners as on the same server without Telefunc's WebSocket",
+  async () => {
+    const appsServers = new WeakSet<object>()
+    const notAListener = () => {}
+    const seen: unknown[] = []
+    function own(this: Server, req: IncomingMessage) {
+      const telefuncs = this.listeners('upgrade').find((listener) => listener !== appUpgrade) ?? notAListener
+      seen.push({
+        appsServer: appsServers.has(this),
+        upgrade: this.listenerCount('upgrade'),
+        upgradeTelefuncs: this.listenerCount('upgrade', telefuncs),
+        upgradeApps: this.listenerCount('upgrade', appUpgrade),
+        request: this.listenerCount('request'),
+        requestApps: this.listenerCount('request', app),
+      })
+      return appsServers.has(this) && req.url === '/app-ws'
+    }
+    const answers = []
+    for (const telefunc of [false, true]) {
+      const { server: s, port } = await server({ telefunc, shouldUpgradeCallback: own })
+      appsServers.add(s)
+      s.on('upgrade', appUpgrade)
+      answers.push((await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).status)
+      seen.push({ listenerCountLeft: Object.hasOwn(s, 'listenerCount') })
+    }
+    const counts = { appsServer: true, upgrade: 1, upgradeTelefuncs: 0, upgradeApps: 1, request: 1, requestApps: 1 }
+    expect({ answers, seen }).toEqual({
+      answers: [418, 418],
+      seen: [counts, { listenerCountLeft: false }, counts, { listenerCountLeft: false }],
+    })
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "a `listenerCount` the app put on its server itself is the server's again after its own `shouldUpgradeCallback` ran, and that callback's counts go through it",
+  async () => {
+    const appsCounts: (string | symbol)[] = []
+    function appsListenerCount(this: Server, event: string | symbol, listener?: (...args: never[]) => void) {
+      appsCounts.push(event)
+      return EventEmitter.prototype.listenerCount.call(this, event, listener)
+    }
+    function own(this: Server, req: IncomingMessage) {
+      return this.listenerCount('upgrade') > 0 && req.url === '/app-ws'
+    }
+    const { server: s, port } = await server({ telefunc: true, shouldUpgradeCallback: own })
+    Object.defineProperty(s, 'listenerCount', { value: appsListenerCount, configurable: true, writable: true })
+    s.on('upgrade', appUpgrade)
+    expect((await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).status).toBe(418)
+    expect(Object.getOwnPropertyDescriptor(s, 'listenerCount')?.value).toBe(appsListenerCount)
+    expect(appsCounts).toContain('upgrade')
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "what an app's own `shouldUpgradeCallback` throws reaches Node as without Telefunc's WebSocket, and leaves the server's `listenerCount` as it was",
+  async () => {
+    const thrown = new Error('the app throws')
+    const own = () => {
+      throw thrown
+    }
+    const caught = []
+    for (const telefunc of [false, true]) {
+      const { server: s } = await server({ telefunc, shouldUpgradeCallback: own })
+      const req = new IncomingMessage(new Socket())
+      req.url = '/app-ws'
+      try {
+        callTheCallback(s, req)
+      } catch (error) {
+        caught.push({ same: error === thrown, listenerCountLeft: Object.hasOwn(s, 'listenerCount') })
+      }
+    }
+    expect(caught).toEqual([
+      { same: true, listenerCountLeft: false },
+      { same: true, listenerCountLeft: false },
+    ])
+  },
+)
+
+test.runIf(nodeHasTheCallback)(
+  "an app's own `shouldUpgradeCallback` that asks the server's callback again from inside counts the same at both depths, and leaves nothing on the server",
+  async () => {
+    const seen: { depth: number; upgrade: number }[] = []
+    let depth = 0
+    function own(this: Server, req: IncomingMessage): boolean {
+      depth++
+      try {
+        seen.push({ depth, upgrade: this.listenerCount('upgrade') })
+        if (depth === 1) callTheCallback(this, req)
+        return req.url === '/app-ws'
+      } finally {
+        depth--
+      }
+    }
+    const { server: s, port } = await server({ telefunc: true, shouldUpgradeCallback: own })
+    s.on('upgrade', appUpgrade)
+    expect((await answer(port, requests["a WebSocket handshake for the app's own WebSocket server"])).status).toBe(418)
+    expect({ seen, listenerCountLeft: Object.hasOwn(s, 'listenerCount') }).toEqual({
+      seen: [
+        { depth: 1, upgrade: 1 },
+        { depth: 2, upgrade: 1 },
+      ],
+      listenerCountLeft: false,
+    })
   },
 )
 
