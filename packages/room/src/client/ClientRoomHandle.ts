@@ -34,6 +34,7 @@ import {
   reportClientCallbackError,
   request,
   sendDmReply,
+  type AckedChannel,
   type PageLink,
 } from './ClientParticipant.js'
 import { addRoom } from './page.js'
@@ -43,8 +44,25 @@ import type { JoinOptions, LeaveCause, Sender } from '../types.js'
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
+/** What a page's room uses of its Broadcast channel. */
+type RoomChannel = AckedChannel &
+  Pick<
+    ClientBroadcast,
+    | '_sendReply'
+    | '_publishUnreported'
+    | '_publishBinaryUnreported'
+    | '_subscribeLocal'
+    | '_setSubscribed'
+    | '_setWantParts'
+    | '_confirmSoon'
+    | 'onClose'
+    | 'onDisconnect'
+    | 'onReconnect'
+    | 'isConnected'
+  >
+
 type ClientRoomHandleOptions = {
-  end: ClientBroadcast
+  end: RoomChannel
   snapshot: RoomSnapshotMetadata
 }
 
@@ -54,7 +72,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   readonly state: RoomState
   /** The app's participants of the room, which the user's `Room` and the handle's participants hand out. */
   readonly remotes: RoomRemotes
-  private readonly end: ClientBroadcast
+  private readonly end: RoomChannel
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()

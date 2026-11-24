@@ -1,5 +1,5 @@
 export { ClientParticipant, acceptedMeta, reportClientCallbackError, request, sendDmReply }
-export type { PageLink }
+export type { AckedChannel, PageLink }
 
 import { getOrCreate, isObject } from 'telefunc/__internal'
 import type { ClientBroadcast } from 'telefunc/__internal'
@@ -24,7 +24,7 @@ import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '..
 import { assert } from '../utils/assert.js'
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
-function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
+function sendDmReply(end: Pick<ClientBroadcast, '_sendReply'>, ackId: string, reply: Promise<RoomResult>): void {
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
   end._sendReply(
     reply.then(declare),
@@ -33,7 +33,12 @@ function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomRes
 }
 
 /** An acked request on a room's or a participant's channel, as its value or the error it failed with. */
-async function request(end: ClientBroadcast, req: RoomStubRequest | ParticipantStubRequest): Promise<unknown> {
+/** A channel a page's requests go out on, each answered. */
+type AckedChannel = {
+  send(req: RoomStubRequest | ParticipantStubRequest, opts: { ack: true }): Promise<unknown>
+}
+
+async function request(end: AckedChannel, req: RoomStubRequest | ParticipantStubRequest): Promise<unknown> {
   return roomResultValue(end.send(req, { ack: true }))
 }
 

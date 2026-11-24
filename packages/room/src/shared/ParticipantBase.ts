@@ -61,6 +61,9 @@ type Shown = { meta: ParticipantMeta; connected: boolean; demand: number }
 type TracksWatchers = { watchers: RemoteParticipant[]; watcherCount: number }
 const NO_DEMAND: readonly TrackDemand[] = Object.freeze([])
 const NO_WATCHES: ReadonlyMap<TrackKey, TrackWatch> = new Map()
+/** Marks a participant of any copy of the package, which a package's helper is handed (`watchersOf()`,
+ *  `sendPrivate()`). */
+const PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.RoomParticipant')
 
 /** Where a participant's acts go: on a page, up the channel of the room it joined through or its own; on a server, to
  *  its room's writes. */
@@ -83,6 +86,13 @@ type ParticipantBaseOptions<Link extends MemberLink = MemberLink> = {
 /** A `LocalParticipant`'s acts, private-message inbox and leave lifecycle, identical on server and page; each side
  *  supplies its link and what it reads its room through. */
 abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements LocalParticipant {
+  readonly [PARTICIPANT_BRAND] = true
+
+  /** A participant of any copy of the package: the brand, not `instanceof`, which a second copy's class fails. */
+  static isParticipantBase(value: unknown): value is ParticipantBase {
+    return value !== null && typeof value === 'object' && PARTICIPANT_BRAND in value
+  }
+
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   readonly id: string
@@ -562,7 +572,8 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
 /** Who receives any of your `tracks`, such as the tracks of one media source: each person, and each page or server-side
  *  room with nobody to name, once. */
 function watchersOf(me: LocalParticipant, tracks: readonly string[]): TracksWatchers {
-  return (me as ParticipantBase)._watchersOf(tracks)
+  assert(ParticipantBase.isParticipantBase(me))
+  return me._watchersOf(tracks)
 }
 
 /** In code-unit order, as `sort()` orders strings; no two entries share a track. */
