@@ -402,7 +402,9 @@ class RoomAuthority {
   }
 
   async dropIncarnation(inc: string): Promise<void> {
-    this.transaction((sql) => dropIncarnationRows(sql, inc))
+    this.transaction((sql) => {
+      if (readLiveHead(sql, Date.now())?.currentInc !== inc) dropIncarnationRows(sql, inc)
+    })
     await this.scheduleMaintenanceIfNeeded()
   }
 

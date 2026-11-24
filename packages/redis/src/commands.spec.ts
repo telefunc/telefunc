@@ -112,7 +112,8 @@ describe('a call Redis does not refuse', () => {
       tfRoomTrackLanes: [...head, 'tf_authority'],
       tfRoomLaneMarks: ['tf_authority'],
       tfBroadcastStart: ['tf_authority'],
-      tfRoomDropIncarnation: ['tf_allowed'],
+      tfRoomDropPage: head,
+      tfRoomDropIncarnation: ['tf_allowed', ...head],
       tfRoomCellsExchange: ['tf_allowed', ...head, ...cellWrites],
       tfRoomCommit: ['tf_allowed', ...head, ...frame, 'tf_lane_order'],
       tfRoomOperation: [

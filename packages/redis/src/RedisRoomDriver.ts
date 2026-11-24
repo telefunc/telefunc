@@ -449,25 +449,27 @@ class RedisRoomDriver implements RoomDriver {
     )
   }
 
+  /** Each page, and the manifest last, goes only while no live head names the incarnation: where one does, the drop
+   *  stops there. An incarnation no head names gets no commit, so nothing adds to its manifest while it is paged. */
   async dropIncarnation(roomId: string, inc: string): Promise<void> {
-    // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
     const manifest = incarnationKeysKey(this.connection.prefix, roomId, inc)
     await BackendCall.run(async (call) => {
       let cursor = '0'
-      let unlinking: Promise<unknown> | undefined
+      let dropping: Promise<boolean> | undefined
       do {
-        // A page's scan needs the last one's cursor, not its unlink, which the manifest doesn't see.
-        const [[next, keys]] = await Promise.all([
+        // A page's scan needs the last one's cursor, not its drop, which the manifest doesn't see.
+        const [[next, keys], dropped] = await Promise.all([
           this.connection.send('sscan', (client) => client.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)),
-          unlinking,
+          dropping,
         ])
+        if (dropped === false) return
         cursor = next
-        unlinking =
+        dropping =
           keys.length > 0
-            ? call.write(() => this.connection.send('unlink', (client) => client.unlink(...keys)))
+            ? call.write(() => this.connection.run(REDIS_COMMANDS.dropPage, { roomId, inc, keys }))
             : undefined
       } while (cursor !== '0')
-      await unlinking
+      if ((await dropping) === false) return
       await call.write(() => this.connection.run(REDIS_COMMANDS.dropIncarnation, { roomId, inc }))
     })
   }

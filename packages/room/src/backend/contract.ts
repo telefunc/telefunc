@@ -326,8 +326,8 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
    *  their count. */
   listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]>
-  /** Drops what incarnation `inc` left, which its caller read as one no head names. The memory store, whose head's
-   *  exchange ends the incarnation it stops naming, drops nothing its live head names. */
+  /** Drops what incarnation `inc` left, which its caller read as one no head names, and nothing while the live head
+   *  names it: the caller's read may come before a turn that named it. */
   dropIncarnation(roomId: string, inc: string): Promise<void>
   /** Lists `roomId` under `incTag`, due at `checkAt` (authority ms) and no sooner than `minDelayMs` from the
    *  authority's now; an entry due at Infinity is never due. Where the heads are the listing (memory), it only

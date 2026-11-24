@@ -126,7 +126,8 @@ The other calls are each atomic only on their own. A cell read, and each page of
 but nothing holds between two of them. `subscribe()` delivers each lane's commits in seq order from when it confirms;
 a frame retained before that is read with `readRetained()`. `dropIncarnation()` returns quietly for an incarnation
 already dropped, because a close, a create and the directory's due check can each drop one that was left over. In
-memory the head's exchange ends the incarnation it stops naming, and a drop leaves what a live head names. An
+memory the head's exchange ends the incarnation it stops naming. In every store a drop leaves what a live head names,
+as its caller may have read the head before a turn that named it: Redis checks the head in each page's script. An
 inbox or control commit's `delivery`, its handoff to the subscriptions, settles after the step, outside it.
 
 **Redis's operation packet.** `OPERATION_LUA` (`redis/src/commands.ts`) takes a number of KEYS and ARGV that depends on

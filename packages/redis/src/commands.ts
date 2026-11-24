@@ -626,16 +626,36 @@ redis.call('SET', KEYS[1], raw)
 return {authority, raw}
 `
 
+// A drop goes only while no live head names the incarnation: a caller that read another head may come after a turn
+// that named it. Each answers 1 where it dropped, 0 where the head names the incarnation.
+
+// Drops a page of the incarnation's keys, which the manifest lists.
+//   KEYS: [1]=head [2..]=the page's keys
+//   ARGV: [1]=inc
+// UNLINK takes a key of any type.
+const DROP_PAGE_HOLDS = ['string'] as const
+const DROP_PAGE_LUA = `${HEAD_PRELUDE}
+${headReadLua('KEYS[1]')}
+local head = tf_live_head(raw_head, KEYS[1], tf_now())
+if head and head.inc == ARGV[1] then return 0 end
+redis.call('UNLINK', unpack(KEYS, 2))
+return 1
+`
+
 // Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
-//   KEYS: [1]=invalidation-channel [2]=manifest
+//   KEYS: [1]=invalidation-channel [2]=manifest [3]=head
 //   ARGV: [1]=inc
 // UNLINK takes a key of any type: a manifest of another type is refused before it.
-const DROP_INCARNATION_HOLDS = ['channel', 'set'] as const
-const DROP_INCARNATION_LUA = `${ALLOWED_LUA}
+const DROP_INCARNATION_HOLDS = ['channel', 'set', 'string'] as const
+const DROP_INCARNATION_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}
+${headReadLua('KEYS[3]')}
+local head = tf_live_head(raw_head, KEYS[3], tf_now())
+if head and head.inc == ARGV[1] then return 0 end
 tf_allowed('PUBLISH', KEYS[1], '')
 ${holdsCheckLua('KEYS[2]', DROP_INCARNATION_HOLDS[1])}
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
+return 1
 `
 
 // CELLS EXCHANGE: all mutations and counts or none, while each expected cell is at its version; success implies the
@@ -1600,17 +1620,33 @@ const REDIS_COMMANDS = {
       }
     },
   }),
+  dropPage: command({
+    name: 'tfRoomDropPage',
+    writes: true,
+    holds: DROP_PAGE_HOLDS,
+    lua: DROP_PAGE_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, inc, keys }: RoomInc & { keys: readonly string[] }) => ({
+      keys: [headKey(prefix, roomId), ...keys],
+      argv: [inc],
+    }),
+    parse: (reply) => reply === 1,
+  }),
   dropIncarnation: command({
     name: 'tfRoomDropIncarnation',
     writes: true,
     holds: DROP_INCARNATION_HOLDS,
     lua: DROP_INCARNATION_LUA,
-    numberOfKeys: 2,
+    numberOfKeys: 3,
     invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [incarnationInvalidationChannel(prefix, roomId, inc), incarnationKeysKey(prefix, roomId, inc)],
+      keys: [
+        incarnationInvalidationChannel(prefix, roomId, inc),
+        incarnationKeysKey(prefix, roomId, inc),
+        headKey(prefix, roomId),
+      ],
       argv: [inc],
     }),
-    parse: () => {},
+    parse: (reply) => reply === 1,
   }),
   cellsExchange: command({
     name: 'tfRoomCellsExchange',
