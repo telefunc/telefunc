@@ -15,11 +15,10 @@ export {
 }
 
 import { Abort, ChannelOverflowError, ShieldValidationError, isShieldValidationError } from 'telefunc/client'
-import { isChannelOverflowError, isObject, type ChannelPublishAck } from 'telefunc/__internal'
+import { isChannelOverflowError, type ChannelPublishAck } from 'telefunc/__internal'
 import type { RoomFailure } from './protocol.js'
 import { RoomError, isRoomError } from './RoomError.js'
-import { fieldsOf, roomFailureOf } from './readers.js'
-import { assert } from '../utils/assert.js'
+import { fieldsOf, numberOf, roomFailureOf, textOf } from './readers.js'
 
 // Error contract: Abort carries its value, RoomError carries a code and a safe message, and bugs are reported on the
 // throwing side and hidden from the caller.
@@ -83,10 +82,12 @@ async function roomResultValue(answer: Promise<unknown>): Promise<unknown> {
 
 /** The value of a Room answer to a publish: the place the publish took. */
 function publishAck(value: unknown): ChannelPublishAck {
-  assert(isObject(value), 'A Room publish was answered with no ack')
-  const { key, seq, timestamp } = value
-  assert(typeof key === 'string' && typeof seq === 'number' && typeof timestamp === 'number')
-  return { key, seq, timestamp }
+  const fields = fieldsOf(value, "A publish's answer")
+  return {
+    key: textOf(fields.key, "A publish's key"),
+    seq: numberOf(fields.seq, "A publish's seq"),
+    timestamp: numberOf(fields.timestamp, "A publish's time"),
+  }
 }
 
 /** The replies an `{ ack: true }` sender gets when no one handler of the recipient answered. */

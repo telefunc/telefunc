@@ -40,13 +40,12 @@ import type { JoinOptions, LeaveCause, Sender } from '../types.js'
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
-/** What a page's room uses of its Broadcast channel. */
+/** What a page's room uses of its Broadcast channel. Room's stub answers a publish with a `RoomResult`, not the place
+ *  Broadcast's type gives it, so the room reads the answer with `roomResultValue()`. */
 type RoomChannel = AckedChannel &
   Pick<
     ClientBroadcast<ClientRoomEvent, RoomDataPublish>,
     | '_sendReply'
-    | '_publishUnreported'
-    | '_publishBinaryUnreported'
     | '_subscribeLocal'
     | '_setSubscribed'
     | '_setWantParts'
@@ -55,7 +54,10 @@ type RoomChannel = AckedChannel &
     | 'onDisconnect'
     | 'onReconnect'
     | 'isConnected'
-  >
+  > & {
+    _publishUnreported(data: RoomDataPublish): Promise<unknown>
+    _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<unknown>
+  }
 
 type ClientRoomHandleOptions = {
   end: RoomChannel

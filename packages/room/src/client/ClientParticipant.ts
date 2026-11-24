@@ -1,7 +1,7 @@
 export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
 export type { AckedChannel, PageLink }
 
-import { getOrCreate, isObject } from 'telefunc/__internal'
+import { getOrCreate } from 'telefunc/__internal'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import type { TrackKey } from '../shared/binary.js'
 import type {
@@ -16,11 +16,10 @@ import type {
 import { CLIENT_ROOM_BUG_MESSAGE, publishAck, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
 import type { RoomRemotes } from '../shared/RoomView.js'
-import { isRecord } from '../shared/arguments.js'
+import { fieldsOf, memberMetaUpdateOf, numberOf, textOf } from '../shared/readers.js'
 import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, releaseRoom } from './page.js'
 import { withChange } from '../utils/sets.js'
 import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '../types.js'
-import { assert } from '../utils/assert.js'
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
 function sendDmReply(end: Pick<ClientBroadcast, '_sendReply'>, ackId: string, reply: Promise<RoomResult>): void {
@@ -74,22 +73,17 @@ async function request<Kind extends PageRequest['__r']>(
 
 /** A join's answer: the member it made. */
 function joinedMember(value: unknown): { id: string; joinedAt: number } {
-  assert(isObject(value), 'A join was answered with no member')
-  const { id, joinedAt } = value
-  assert(typeof id === 'string' && typeof joinedAt === 'number', 'A join was answered with no member')
-  return { id, joinedAt }
+  const fields = fieldsOf(value, "A join's answer")
+  return {
+    id: textOf(fields.id, "A joined member's id"),
+    joinedAt: numberOf(fields.joinedAt, "A joined member's time"),
+  }
 }
 
 /** A meta write's answer: the member's meta at the write's seq, whole or as the write merged it
  *  (`RoomWrites.writeMetaInOrder()`). */
 function memberMetaUpdate(value: unknown): MemberMetaUpdate {
-  assert(isObject(value), 'A meta write was answered with no update')
-  const { seq, meta, attrs, connected } = value
-  assert(typeof seq === 'number', 'A meta update has no seq')
-  if (isRecord(meta)) return value.disconnected === true ? { seq, meta, disconnected: true } : { seq, meta }
-  if (isRecord(attrs)) return { seq, attrs }
-  assert(typeof connected === 'boolean', 'A meta update carries neither meta nor a connection')
-  return { seq, connected }
+  return memberMetaUpdateOf(fieldsOf(value, "A meta write's answer"))
 }
 
 /** Where a page's participant acts, and the room it lists the other participants by: the room it joined through

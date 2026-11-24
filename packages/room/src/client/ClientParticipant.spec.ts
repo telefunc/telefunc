@@ -1,0 +1,54 @@
+import { describe, expect, it } from 'vitest'
+import { pageRoom } from '../test/pageRoom.js'
+import type { ClientRoom } from './room.js'
+
+/** A request of the page's, answered with `answers` in place of the server's answer. */
+type Row = [
+  what: string,
+  answers: Parameters<typeof pageRoom>[1],
+  send: (room: ClientRoom) => Promise<unknown>,
+  error: string,
+]
+
+const join = (room: ClientRoom) => room.join()
+const setMeta = async (room: ClientRoom) => (await room.join()).setMeta({ name: 'Ann' })
+const publish = async (room: ClientRoom) => (await room.join()).publish('hi')
+
+describe("a page's request answered with a value Room doesn't write", () => {
+  it.each<Row>([
+    ['a join, with no id', { join: { joinedAt: 1 } }, join, "A joined member's id is not text"],
+    [
+      'a join, with a time of text',
+      { join: { id: 'me', joinedAt: '1' } },
+      join,
+      "A joined member's time is not a number",
+    ],
+    [
+      'a meta write, with no seq',
+      { metaWrite: { meta: { name: 'Ann' } } },
+      setMeta,
+      "A meta update's seq is not a number",
+    ],
+    [
+      'a meta write, with a meta of text',
+      { metaWrite: { seq: 1, meta: 'Ann' } },
+      setMeta,
+      "A meta update's meta is not a meta",
+    ],
+    ['a publish, with no time', { publish: { key: 'room', seq: 1 } }, publish, "A publish's time is not a number"],
+    [
+      'a publish, with a key of a number',
+      { publish: { key: 1, seq: 1, timestamp: 0 } },
+      publish,
+      "A publish's key is not text",
+    ],
+  ])('%s, rejects that request, and the room goes on taking events', async (_, answers, send, error) => {
+    const { room, deliver } = pageRoom({ sam: 1 }, answers)
+    const sent = send(room)
+    deliver({ __r: 'join', id: 'tia', meta: {}, joinedAt: 2 })
+    await expect(sent).rejects.toThrow(error)
+    deliver({ __r: 'join', id: 'uma', meta: {}, joinedAt: 3 })
+    // The join that arrived while the request was out, and the one after it.
+    expect(room.getParticipants().map((participant) => participant.id)).toEqual(expect.arrayContaining(['tia', 'uma']))
+  })
+})
