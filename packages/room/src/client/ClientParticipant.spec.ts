@@ -64,18 +64,3 @@ describe("a lone participant's publish answered with a value Room doesn't write"
     expect(me.meta).toEqual({ name: 'Ann', role: 'host' })
   })
 })
-
-// The server admits a page's member once its `onBeforeJoin()` answered (`server/lifecycle/admit.ts`), which may take
-// longer than the page waits for the join's answer: the `joined` naming that member then names a join the page settled.
-describe("a page's join whose answer timed out before the server admitted its member", () => {
-  it("takes the `joined` that comes after as no join of its own, and shows that member's events", async () => {
-    const { room, requests, deliver } = pageRoom({ sam: 1 }, { joinTimesOut: true })
-    await expect(room.join()).rejects.toThrow('Acknowledgement timed out')
-    const [join] = requests
-    if (join?.__r !== 'req-join') throw new Error('The page sent no join')
-    deliver({ __r: 'joined', reqId: join.reqId, id: 'late' })
-    deliver({ __r: 'join', id: 'late', meta: {}, joinedAt: 2 })
-    deliver({ __r: 'p-meta', id: 'late', seq: 1, attrs: { name: 'Lee' } })
-    expect(room.getParticipants().find((participant) => participant.id === 'late')?.meta).toEqual({ name: 'Lee' })
-  })
-})

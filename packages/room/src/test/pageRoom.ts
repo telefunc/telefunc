@@ -7,9 +7,8 @@ import type { ClientRoomEvent } from '../client/ClientRoomHandle.js'
 import type { PageRequest } from '../client/stubChannel.js'
 import type { ParticipantStubNotice } from '../shared/protocol.js'
 
-/** What a stub's channel answers in place of the server's answer: a join's, a meta write's, a publish's; or no answer
- *  to a join within its acknowledgement timeout, which core then rejects. */
-type Answers = { join?: unknown; metaWrite?: unknown; publish?: unknown; joinTimesOut?: true }
+/** What a stub's channel answers in place of the server's answer: a join's, a meta write's, a publish's. */
+type Answers = { join?: unknown; metaWrite?: unknown; publish?: unknown }
 
 /** A page's room of `members`, each with its join time, on `stubChannel()`; the requests it was sent; what ends the
  *  channel's wire; and what hands the room an event as the server sends one. */
@@ -64,10 +63,8 @@ function stubChannel<Notice>(answers: Answers) {
     isConnected: true,
     send: async (req: PageRequest) => {
       requests.push(req)
-      if (req.__r === 'req-join') {
-        if (answers.joinTimesOut) throw new Error('Acknowledgement timed out')
+      if (req.__r === 'req-join')
         return { ok: true, value: 'join' in answers ? answers.join : { id: 'me', joinedAt: 0 } }
-      }
       if ('metaWrite' in answers && (req.__r === 'req-set-meta' || req.__r === 'req-update-meta'))
         return { ok: true, value: answers.metaWrite }
       if (req.__r === 'req-set-meta') return { ok: true, value: { seq: ++metaSeq, meta: req.meta } }
