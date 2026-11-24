@@ -99,8 +99,9 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
 
-  /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishUnreported(data: ChannelData<Publish>): Promise<ChannelPublishAck> {
+  /** @internal A publish that leaves reporting its rejection to the caller. Its answer is what the add-on's own end
+   *  of the channel answers it with, which only the add-on reads. */
+  _publishUnreported(data: ChannelData<Publish>): Promise<unknown> {
     return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), null, false)
   }
 
@@ -119,8 +120,9 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     )
   }
 
-  /** @internal A publish of `data` as it is, which leaves reporting its rejection to the caller. */
-  _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
+  /** @internal A publish of `data` as it is, which leaves reporting its rejection to the caller. Its answer is what the
+   *  add-on's own end of the channel answers it with, which only the add-on reads. */
+  _publishBinaryUnreported(data: Uint8Array, stream: string, lossy: boolean): Promise<unknown> {
     return this.sendPublish(encode.publishBinaryAckReq, data, stream, lossy)
   }
 
