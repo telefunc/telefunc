@@ -19,8 +19,8 @@ import type { LeaveCause, Sender } from '../types.js'
 type MirrorEvent = RoomRosterEvent | Extract<RoomCtrlEnvelope, { __r: 'join' | 'leave' | 'p-meta' | 'update' }>
 
 type RoomMirrorOptions = {
-  /** The room as the response carried it. */
-  snapshot: RoomSnapshotMetadata
+  /** The room as the response carried it, without the channel it came on. */
+  snapshot: Omit<RoomSnapshotMetadata, 'channelId'>
   /** Every leave the model applies, after its views' callbacks. */
   onMemberLeft: (id: string, cause: LeaveCause) => void
   /** Each member meta the model applies, from an event, an accepted write, a stamp or a roster. */
@@ -69,7 +69,8 @@ class RoomMirror implements RoomModelOwner {
     }
   }
 
-  /** The meta and identity a message's sender had at its send, a newer meta it was stamped with applied first (see
+  /** The meta and identity of a message's sender: the newer of its stamp and the member's meta here, which a newer
+   *  stamp updates first; for a member this side doesn't hold yet, its stamp or the roster still arriving (see
    *  `RoomModel.resolveSender`). */
   senderOf(stamp: SenderClaim): Pick<Sender, 'meta' | 'identity'> {
     const resolved = this.model.resolveSender(stamp)

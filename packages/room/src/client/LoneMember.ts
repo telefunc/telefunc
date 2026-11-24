@@ -128,9 +128,9 @@ class LoneRoom implements RoomStateOwner {
   readonly mirror: RoomMirror
   readonly remotes: RoomRemotes
 
-  constructor({ channelId, roomId }: ParticipantStubMetadata) {
+  constructor({ roomId }: ParticipantStubMetadata) {
     this.mirror = new RoomMirror({
-      snapshot: { channelId, roomId, meta: [], metaSeq: 0, closed: false, members: [] },
+      snapshot: { roomId, meta: [], metaSeq: 0, closed: false, members: [] },
       onMemberLeft: () => {},
       onMemberMeta: () => {},
     })
