@@ -3245,7 +3245,7 @@ function Room() {
         await pollUntil(() => ({ done: leaveView.count === 0 }))
 
         const [joinRoomId, joinView] = await createRoom('hiccup-join')
-        await onFailBackend({ op: 'runOperation', roomId: joinRoomId, key: 'join' })
+        await onFailBackend({ op: 'runJoin', roomId: joinRoomId })
         const firstJoin = await settle(joinView.join({ meta: { name: 'First' } }))
         await joinView.join({ meta: { name: 'Second' } })
         await pollUntil(() => ({ done: joinView.count === 1 }))
@@ -3316,7 +3316,7 @@ function Room() {
         const view = await onGetRoom(viewRoomId)
 
         const [joinRoomId, joinView] = await createRoom('hiccup-join')
-        await onFailBackend({ op: 'runOperation', roomId: joinRoomId, key: 'join' })
+        await onFailBackend({ op: 'runJoin', roomId: joinRoomId })
         const firstJoin = await joinView.join({ meta: { name: 'First' } }).then(
           () => 'ok',
           (err: Error) => err.message,
