@@ -1,6 +1,7 @@
 export { RosterIntake }
 export type { RosterIntakeOptions }
 
+import { assert } from '../utils/assert.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../shared/protocol.js'
 import type { MembershipEvent, RoomModel } from '../shared/RoomModel.js'
 
@@ -46,14 +47,9 @@ class RosterIntake {
       this.rosters.parts = { members: [], next: 0 }
     }
     const rosters = this.rosters
-    if (rosters === null) return
+    // The page gets each roster from its first part on, with no part skipped (`server/lifecycle/RosterStream.ts`).
+    assert(rosters !== null && rosters.parts !== null && part === rosters.parts.next, { part })
     const parts = rosters.parts
-    // A part lost while offline: the next attach sends the whole roster again.
-    if (parts === null || part !== parts.next) {
-      rosters.parts = null
-      this.stopRecording()
-      return
-    }
     for (const member of members) {
       parts.members.push(member)
       rosters.pending.set(member.id, member)
