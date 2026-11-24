@@ -34,7 +34,7 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** The session Durable Object's name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
-const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
+const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS)
 /** Each bucket Broadcast places members in, by its name. */
 const BROADCAST_BUCKETS_BY_NAME = new Map<string, LocationBucket>(
   DEFAULT_BROADCAST_BUCKETS.map((bucket) => [bucket, bucket]),
@@ -42,7 +42,6 @@ const BROADCAST_BUCKETS_BY_NAME = new Map<string, LocationBucket>(
 
 type LocationBucket = DurableObjectLocationHint
 type CloudflareScale = number | Partial<Record<DurableObjectLocationHint, number>>
-type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 type SessionRoutingTarget = {
   sessionInstanceName: string
   locationBucket: LocationBucket
@@ -57,8 +56,11 @@ const CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP = {
   SA: 'enam',
   AN: 'oc',
 } as const satisfies Partial<Record<string, DurableObjectLocationHint>>
+/** Each colo's bucket, and each continent's, by its code. */
+const BUCKETS_BY_COLO = new Map<string, LocationBucket>(Object.entries(CLOUDFLARE_COLO_LOCATION_HINT_MAP))
+const BUCKETS_BY_CONTINENT = new Map<string, LocationBucket>(Object.entries(CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP))
 
-/** `bucket` as it was stored, once checked as one of the buckets Broadcast places members in. */
+/** `bucket` as it was stored or sent, once checked as one of the buckets Broadcast places members in. */
 function readLocationBucket(bucket: string): LocationBucket {
   const known = BROADCAST_BUCKETS_BY_NAME.get(bucket)
   if (known === undefined) assert(false, `Invalid Broadcast location bucket "${bucket}".`)
@@ -88,9 +90,7 @@ function resolveSessionRoutingTarget(
 ): SessionRoutingTarget {
   // The region its session Durable Object named, from any region the page roams to.
   let locationBucket =
-    home !== null && KNOWN_BROADCAST_BUCKETS.has(home)
-      ? (home as LocationBucket)
-      : resolveCloudflareLocationHint(request, locationFallback)
+    (home !== null && BROADCAST_BUCKETS_BY_NAME.get(home)) || resolveCloudflareLocationHint(request, locationFallback)
   // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
   // of its own — route those requests to the `locationFallback` region instead of failing.
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
@@ -108,8 +108,10 @@ function readForwardedTarget(
   request: Request,
 ): Pick<SessionRoutingTarget, 'sessionInstanceName' | 'locationBucket'> | null {
   const sessionInstanceName = request.headers.get(TELEFUNC_SHARD_HEADER)
-  const locationBucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-  return sessionInstanceName && locationBucket ? { sessionInstanceName, locationBucket } : null
+  const locationBucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER)
+  return sessionInstanceName && locationBucket
+    ? { sessionInstanceName, locationBucket: readLocationBucket(locationBucket) }
+    : null
 }
 
 /** Deterministically maps a key, a broadcast's channel key or a session's token, into one bucket index. */
@@ -138,16 +140,13 @@ function resolveCloudflareLocationHint(
     `Cloudflare locationFallback must be one of ${DEFAULT_BROADCAST_BUCKETS.join(', ')}. Received ${String(locationFallback)}.`,
   )
 
-  const cf = (request as CloudflareRequest).cf
-  const colo = cf?.colo?.trim().toUpperCase()
+  const { cf } = request
+  return bucketOf(BUCKETS_BY_COLO, cf?.colo) ?? bucketOf(BUCKETS_BY_CONTINENT, cf?.continent) ?? locationFallback
+}
 
-  return (
-    (colo && CLOUDFLARE_COLO_LOCATION_HINT_MAP[colo as keyof typeof CLOUDFLARE_COLO_LOCATION_HINT_MAP]) ||
-    CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP[
-      cf?.continent?.trim().toUpperCase() as keyof typeof CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP
-    ] ||
-    locationFallback
-  )
+/** The bucket `code`, a colo or a continent as Cloudflare names it on a request, maps to in `buckets`. */
+function bucketOf(buckets: Map<string, LocationBucket>, code: unknown): LocationBucket | undefined {
+  return typeof code === 'string' ? buckets.get(code.trim().toUpperCase()) : undefined
 }
 
 /**

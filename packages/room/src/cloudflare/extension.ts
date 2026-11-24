@@ -12,7 +12,7 @@ import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
-  durableObject: (ctx, _env, kit) => {
+  durableObject: (ctx, kit) => {
     const authority = new RoomAuthority(ctx, kit)
     const methods = Object.fromEntries(
       ROOM_AUTHORITY_METHODS.map((method) => [method, authority[method].bind(authority)]),

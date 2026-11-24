@@ -107,12 +107,8 @@ type CloudflareExtensionDurableObject = {
 type CloudflareExtension = {
   name: string
   /** Builds the extension's part of a Durable Object, once, on its first `telefuncDurableObjectCall()`; `ctx` holds the
-   *  Durable Object's storage, and `env` is its `Cloudflare.Env`. Its `alarm()` gets the Durable Object's alarms. */
-  durableObject?: (
-    ctx: { storage: DurableStorage },
-    env: never,
-    kit: CloudflareExtensionKit,
-  ) => CloudflareExtensionDurableObject
+   *  Durable Object's storage. Its `alarm()` gets the Durable Object's alarms. */
+  durableObject?: (ctx: { storage: DurableStorage }, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
   /** The backend planes the Cloudflare backend serves for the extension; `serveCloudflarePlane()` makes each. */
   planes?: readonly CloudflarePlane[]
 }

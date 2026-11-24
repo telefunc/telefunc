@@ -114,7 +114,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const hooks = getTelefuncChannelHooks({ copiesOnSend: true })
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
-    const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
+    // The binding is named at runtime, by `bindingName`, and the app's `Env` has no index signature: no type reaches it.
+    const namespace = (env as Record<string, TelefuncDurableObjectNamespace | undefined>)[bindingName]
+    assertUsage(namespace, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
   }
   const cloudflareBackend = installBackend(
@@ -257,7 +259,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       )
       const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
       const getNamespace = () => telefuncNamespace(this.env)
-      const durableObject = extension.durableObject(this.ctx, this.env as never, { regions, getNamespace })
+      const durableObject = extension.durableObject(this.ctx, { regions, getNamespace })
       this.durableObjects.set(name, durableObject)
       return durableObject
     }
@@ -300,7 +302,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         new URL(request.url).searchParams.get('home'),
       )
 
-      const forwardedHeaders = new Headers(request.headers as Headers)
+      const forwardedHeaders = new Headers(request.headers)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
@@ -311,10 +313,4 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     },
     TelefuncDurableObject,
   }
-}
-
-function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
-  const binding = (env as Record<string, T | undefined>)[name]
-  assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
-  return binding
 }
