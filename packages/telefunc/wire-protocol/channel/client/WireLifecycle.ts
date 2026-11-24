@@ -17,6 +17,7 @@ import {
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
+  RECONCILE_FLOOR_BYTES_PER_MS,
   type ChannelTransport,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
@@ -79,8 +80,9 @@ interface TransportOwner {
   onTransportHeadroom(transport: ClientChannelTransport): void
   /** The wire's upload fell back to batch POSTs; a channel may have opened before that (see `onTransportOpen`). */
   onTransportBatched(transport: ClientChannelTransport): void
-  /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
-  onTransportReconcileSent(transport: ClientChannelTransport): void
+  /** An SSE wire's RECONCILE went out with the request that opens it, of `bytes`, before the wire opens (see
+   *  `beatFromReconcile`). */
+  onTransportReconcileSent(transport: ClientChannelTransport, bytes: number): void
   /** The most a batch POST carries, which a 413 taught the connection: `Infinity` before one. */
   readonly ssePostLimit: number
   /** The channels whose data the server hasn't confirmed since a loss (`ReplayBuffer.stall`). */
@@ -142,9 +144,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private attemptStartedAt: number | null = null
   /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
   private allowanceTimer: ReturnType<typeof setTimeout> | null = null
-  /** The attempt under way: the backoff its end waits, drawn as it starts, and when it is cut unanswered (null: it runs
-   *  to the deadline, or was answered). */
-  private underWay: { nextDelay: number; cutAt: number | null } | null = null
+  /** The attempt under way: the backoff its end waits, drawn as it starts, when it is cut unanswered (null: it runs to
+   *  the deadline, or was answered), and the latest cut that leaves the next attempt its room (`startWire`). */
+  private underWay: { nextDelay: number; cutAt: number | null; latestCut: number } | null = null
   /** When the attempt under way started, till the server answered it. */
   private allowanceFrom = 0
   /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
@@ -227,7 +229,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
     const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
     const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
-    this.underWay = { nextDelay, cutAt: room > 0 ? now + allowance : null }
+    this.underWay = { nextDelay, cutAt: room > 0 ? now + allowance : null, latestCut: now + room }
     if (room > 0) this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
     this.transport.start()
   }
@@ -239,6 +241,19 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.cuts++
     this.transport.cancelAttempt()
     this.onTransportClosed(this.transport)
+  }
+
+  /** The attempt under way sent a request body of `bytes`: it is cut no sooner than that body and its answer take at the
+   *  floor, as its RECONCILE's deadline counts them, within the room the next attempt needs, as every cut is. */
+  private allowForBody(bytes: number): void {
+    const underWay = this.underWay
+    if (underWay === null || underWay.cutAt === null) return
+    // `fetch` shows no upload's progress: behind a proxy that holds the body, a silent server looks the same till then.
+    const cutAt = Math.min(this.allowanceFrom + (2 * bytes) / RECONCILE_FLOOR_BYTES_PER_MS, underWay.latestCut)
+    if (cutAt <= underWay.cutAt) return
+    this.clearAllowance()
+    underWay.cutAt = cutAt
+    this.allowanceTimer = setTimeout(() => this.cutAttempt(), cutAt - performance.now())
   }
 
   /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
@@ -452,8 +467,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
   }
 
-  onTransportReconcileSent(transport: ClientChannelTransport): void {
+  onTransportReconcileSent(transport: ClientChannelTransport, bytes: number): void {
     if (this.closed || transport !== this.transport) return
+    this.allowForBody(bytes)
     this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
   }
 

@@ -325,16 +325,13 @@ class SseTransport implements UpgradeSource {
     const stage = this.stageInitialBatch()
 
     // The event stream and the upload's probe go together; frames go in batch POSTs until the server acknowledges it.
-    const ssePromise = this.post(
-      encodeSseRequest(
-        { connId: this.connId, streamResponse: true },
-        stage.initialFrames.map((entry) => entry.frame),
-      ),
-      abortController.signal,
-      { accept: 'text/event-stream' },
+    const openBody = encodeSseRequest(
+      { connId: this.connId, streamResponse: true },
+      stage.initialFrames.map((entry) => entry.frame),
     )
+    const ssePromise = this.post(openBody, abortController.signal, { accept: 'text/event-stream' })
     const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
-    this.owner.onTransportReconcileSent(this)
+    this.owner.onTransportReconcileSent(this, openBody.size)
 
     const body = await this.openDownstream(ssePromise, stage, abortController)
     if (!body) return
