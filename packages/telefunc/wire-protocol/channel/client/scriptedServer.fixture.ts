@@ -221,20 +221,25 @@ async function postFrames(body: Blob): Promise<{ metadata: SseRequestMetadata; f
 /** How the server's side answers a batch POST: at once with a 200 (`taken`), after `ms` with a 200 (`slow`), with no
  *  answer once it took the frames (`lost`), with `status` and an HTML page before taking them (`refused`), or with
  *  `status` and the `Content-Type` values `contentType` before taking them (`typed`, as Telefunc's own refusals are); a
- *  refusal's `pongAfterMs` has the wire the POST went on carry a PONG that long after it, as one already on its way. */
+ *  refusal's `pongAfterMs` has the wire the POST went on carry a PONG that long after it, as one already on its way, and
+ *  its `retryAfter` asks for that many seconds' wait (`Retry-After`). */
 type PostAnswer =
   | { tag: 'taken' }
   | { tag: 'slow'; ms: number }
   | { tag: 'lost' }
-  | { tag: 'refused'; status: number; pongAfterMs?: number }
+  | { tag: 'refused'; status: number; pongAfterMs?: number; retryAfter?: number }
   | { tag: 'typed'; status: number; contentType: string[] }
 
-/** An answer with `status` and each of `contentType` as a `Content-Type` value of its own. */
-function typedResponse({ status, contentType }: { status: number; contentType: string[] }): Response {
+/** An answer with `status` and each of `contentType` as a `Content-Type` value of its own, asking for `retryAfter`
+ *  seconds' wait where given. */
+function typedResponse({ status, contentType, retryAfter }: TypedAnswer): Response {
   const headers = new Headers()
   for (const value of contentType) headers.append('Content-Type', value)
+  if (retryAfter !== undefined) headers.set('Retry-After', String(retryAfter))
   return new Response('Refused', { status, headers })
 }
+
+type TypedAnswer = { status: number; contentType: string[]; retryAfter?: number }
 
 /** What a streaming upload meets: the server takes it (`taken`, acknowledged on its wire's event stream, `ackAfterMs`
  *  after it went where given, or when the test calls `world.heldAcks` with `ack: 'held'`); it fails to fetch `afterMs`
@@ -257,7 +262,7 @@ type World = {
   postAnswers: PostAnswer[]
   controlAnswers: PostAnswer[]
   /** How each open is answered before it opens, in order; an event stream once none is left. */
-  openAnswers: { status: number; contentType: string[] }[]
+  openAnswers: TypedAnswer[]
   /** While set, a streaming upload is taken: acknowledged on the latest event stream, its frames answered as a batch
    *  POST's are. Unset, it fails to fetch, and the page sends in batch POSTs. */
   uploads: boolean
@@ -370,7 +375,7 @@ function serveSse(): void {
       post.status = answer.status
       const { pongAfterMs } = answer
       if (pongAfterMs !== undefined) setTimeout(() => stream?.frame(encode.pong()), pongAfterMs)
-      return new Response('<h1>Refused</h1>', { status: answer.status, headers: { 'Content-Type': 'text/html' } })
+      return typedResponse({ status: answer.status, contentType: ['text/html'], retryAfter: answer.retryAfter })
     }
     if (answer.tag === 'typed') {
       post.status = answer.status

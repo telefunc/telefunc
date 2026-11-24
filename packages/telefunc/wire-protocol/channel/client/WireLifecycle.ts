@@ -46,9 +46,10 @@ type TransportEnd = {
   refusal?: string
   /** The server runs another `WIRE_VERSION`. */
   otherWireVersion?: boolean
-  /** A request carrying what the page sent was refused with `answer`, which asked to wait `retryAfterMs` before
-   *  another (see `onTransportRefused`). */
-  refused?: { answer: string; retryAfterMs: number }
+  /** A request carrying what the page sent was refused with this answer (see `onTransportRefused`). */
+  refused?: string
+  /** The wait the answer that ended the wire asked for before the next try (its `Retry-After`). */
+  retryAfterMs?: number
   /** Telefunc said it no longer had the wire (`retry`): a loss, with that cause. */
   lost?: string
   /** Telefunc doesn't serve the page's SSE requests so (`route`): the page leaves SSE for this connection. */
@@ -504,7 +505,16 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportClosed(
     transport: ClientChannelTransport,
-    { refusal, otherWireVersion = false, refused, lost, route, framesRefused, sessionEnded }: TransportEnd = {},
+    {
+      refusal,
+      otherWireVersion = false,
+      refused,
+      retryAfterMs = 0,
+      lost,
+      route,
+      framesRefused,
+      sessionEnded,
+    }: TransportEnd = {},
   ): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -530,13 +540,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.clearAllowance()
     this.upgrade.abortAttempt()
-    if (refused) {
-      const err = new NetworkError(`The server refused what the page sent with ${refused.answer}`, true)
-      this.handleTransportLoss(err, false, refused.retryAfterMs)
-      return
-    }
-    const why = lost ?? refusal
-    this.handleTransportLoss(why === undefined ? null : new NetworkError(why, true), refusal !== undefined)
+    const why = refused === undefined ? (lost ?? refusal) : `The server refused what the page sent with ${refused}`
+    this.handleTransportLoss(
+      why === undefined ? null : new NetworkError(why, true),
+      refusal !== undefined,
+      retryAfterMs,
+    )
   }
 
   /** The server ended the channel for `cause`, which it ends with at once: nothing of it goes again. A RECONCILE tells
@@ -810,7 +819,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   /** A POST of stalled channels' data alone got no answer, or one that asks for later, while its wire's event stream is
-   *  up (`SseTransport.holdStalled`): the wire goes on, and that try is those channels' loss, judged as at a wire's
+   *  up (`SseTransport.hold`): the wire goes on, and that try is those channels' loss, judged as at a wire's
    *  (`endStalled`). Returns how long its data waits before it goes again: the stalled schedule's next attempt. */
   onStalledPostLost(cause: string): number {
     const lost = new NetworkError(cause, true)
