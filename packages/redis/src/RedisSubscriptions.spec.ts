@@ -114,18 +114,20 @@ function setup(
   }
 }
 
-/** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
- *  `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its predecessor's, and the payload. Its id is
- *  its place unless given, and so is the one before it, so a lane's frames name the one before them. */
+/** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place where the source's kinds
+ *  share one seq (`placed`), then `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its
+ *  predecessor's, and the payload. Its id is its place unless given, and so is the one before it, so a lane's frames
+ *  name the one before them. */
 function frameOf(
   place: number,
   text: string,
   {
     lane,
+    placed = true,
     seq = place,
     id = BigInt(place),
     prev = BigInt(Math.max(place - 1, 0)),
-  }: { lane?: string; seq?: number; id?: bigint; prev?: bigint } = {},
+  }: { lane?: string; placed?: boolean; seq?: number; id?: bigint; prev?: bigint } = {},
 ): Buffer {
   const header = Buffer.alloc(40)
   header.writeBigUInt64BE(BigInt(place), 0)
@@ -137,7 +139,7 @@ function frameOf(
   header.writeBigUInt64BE(prev, 32)
   const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
   if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
-  return Buffer.concat([laneKey, header, Buffer.from(text)])
+  return Buffer.concat([laneKey, placed ? header : header.subarray(8), Buffer.from(text)])
 }
 
 describe('a start read Redis answers with an error', () => {
@@ -191,6 +193,32 @@ describe('a resume', () => {
     start = lane(4)
     await expect.poll(() => missed.length).toBe(1)
     expect(missed).toEqual([2])
+  })
+
+  it('tells once where its read, ahead on the same history, finds the frames that reached it forking below the lane', async () => {
+    const { listen, publish, close, delivered, missed } = setup()
+    let start = lane(4)
+    let reading = createDeferred()
+    reading.resolve()
+    let reads = 0
+    const attempt = listen(TEXT, async () => {
+      reads++
+      await reading.promise
+      return start
+    })
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(5, 'm5'))
+    // The record was replaced from place 4 on and stands at y7; y6 and y7 reach the new connection during its read.
+    reading = createDeferred()
+    close()
+    await expect.poll(() => reads).toBe(2)
+    publish(TEXT, frameOf(6, 'y6', { id: BigInt(106), prev: BigInt(105) }))
+    publish(TEXT, frameOf(7, 'y7', { id: BigInt(107), prev: BigInt(106) }))
+    start = { authority: 'a', starts: new Map([['', { place: 7, id: BigInt(107) }]]) }
+    reading.resolve()
+    await expect.poll(() => attempt.state()).toBe('ready')
+    expect(delivered).toEqual(['m5', 'y6', 'y7'])
+    expect(missed).toEqual([null])
   })
 
   it('reports once, with no count, that it may have missed some, from another history, with lanes or none', async () => {
@@ -247,7 +275,7 @@ describe('a Cluster slot whose master changed', () => {
     }
   })
 
-  it('tells a failover once where its frames reach the lane before the check: the lane tells it, and follows the new history', async () => {
+  it('tells a failover once where its frames reach the lane before the check: the read they make tells it, and it follows the new history', async () => {
     const { subscriptions, listen, publish, delivered, missed } = setup()
     let start = lane(3)
     const attempt = listen(TEXT, async () => start)
@@ -255,21 +283,57 @@ describe('a Cluster slot whose master changed', () => {
     const states: string[] = []
     attempt.onStateChange((state) => states.push(state))
     publish(TEXT, frameOf(4, 'm4'))
-    // The new master's first frame takes m4's place: the lane reports, and the attempt finds its key's master of
-    // another history now.
+    // The new master's first frame takes m4's place: the attempt reads where its key stands, as after a cut, and finds
+    // its master of another history now.
     start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
     publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
-    expect(missed).toEqual([null])
+    await expect.poll(() => missed).toEqual([null])
     await subscriptions.followMoves(moved, async () => null)
-    expect(states).toEqual([])
+    expect(states).toEqual(['lost', 'ready'])
     expect(missed).toEqual([null])
     // y5 goes on from y4, and another failover's master stands at y5: nothing in the frames told the lane of it.
     publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
     start = { authority: 'c', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
     await subscriptions.followMoves(moved, async () => null)
-    await expect.poll(() => states).toEqual(['lost', 'ready'])
+    await expect.poll(() => states).toEqual(['lost', 'ready', 'lost', 'ready'])
     expect(missed).toEqual([null, null])
     expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('delivers both sides of a fork once each, under one report, in either order they arrive', async () => {
+    // The old master's x11 and the new master's y11 both follow x10.
+    const x11 = frameOf(11, 'x11')
+    const y11 = frameOf(11, 'y11', { id: BigInt(111) })
+    for (const newFirst of [false, true]) {
+      const { listen, publish, delivered, missed } = setup()
+      let start = lane(10)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      start = { authority: 'b', starts: new Map([['', { place: 11, id: BigInt(111) }]]) }
+      const order = newFirst ? ['y11', 'x11'] : ['x11', 'y11']
+      for (const text of order) publish(TEXT, text === 'x11' ? x11 : y11)
+      await expect.poll(() => delivered).toEqual(order)
+      publish(TEXT, frameOf(12, 'y12', { id: BigInt(112), prev: BigInt(111) }))
+      expect(delivered).toEqual([...order, 'y12'])
+      expect(missed).toEqual([null])
+    }
+  })
+
+  it('tells a failover once where the old master’s late frame follows the new history’s first', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => delivered).toEqual(['m4', 'y4'])
+    // Two writers for a moment: the old master's m5 reaches the lane after the new master's y4, then y5.
+    publish(TEXT, frameOf(5, 'm5'))
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    expect(attempt.state()).toBe('ready')
+    expect(delivered).toEqual(['m4', 'y4', 'm5', 'y5'])
+    expect(missed).toEqual([null])
   })
 
   it('tells a failover once where the check comes before its frames: the frames before the new start are of the change told', async () => {
@@ -296,10 +360,86 @@ describe('a Cluster slot whose master changed', () => {
     publish(TEXT, frameOf(4, 'm4'))
     start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
     publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
-    expect(missed).toEqual([null])
+    await expect.poll(() => missed).toEqual([null])
     // BINARY carried nothing: only the old master, gone, could show it lost nothing.
     await subscriptions.followMoves(new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']]), async () => null)
     await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once to a loss key whose two attempts each meet it in their frames', async () => {
+    const { subscriptions, listen, publish, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    for (const channel of [TEXT, BINARY]) publish(channel, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    for (const channel of [TEXT, BINARY]) publish(channel, frameOf(4, 'y4', { id: BigInt(104) }))
+    await subscriptions.followMoves(new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']]), async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once to a fan-in attempt whose two lanes each meet it in their frames', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    const startsAt = (authority: string, id: bigint) => ({
+      authority,
+      starts: new Map(['x', 'z'].map((laneKey) => [laneKey, { place: Number(id % BigInt(100)), id }])),
+    })
+    let start = startsAt('a', BigInt(3))
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const attempt = listen(TEXT, async () => start, fanIn, 'room')
+    await expect.poll(() => attempt.state()).toBe('ready')
+    for (const laneKey of ['x', 'z']) publish(TEXT, frameOf(4, `m4${laneKey}`, { lane: laneKey, placed: false }))
+    start = startsAt('b', BigInt(104))
+    for (const laneKey of ['x', 'z']) {
+      publish(TEXT, frameOf(4, `y4${laneKey}`, { lane: laneKey, placed: false, id: BigInt(104) }))
+    }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    expect(missed).toEqual([null])
+    for (const laneKey of ['x', 'z']) {
+      expect(delivered.filter((text) => text.endsWith(laneKey))).toEqual([`m4${laneKey}`, `y4${laneKey}`])
+    }
+  })
+
+  it('tells a failover once to a loss key whose attempt met it in its frames, where a cut then resumes both', async () => {
+    const { listen, publish, close, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    const resumed = attempts.map((attempt) => {
+      const states: string[] = []
+      attempt.onStateChange((state) => states.push(state))
+      return states
+    })
+    close()
+    await expect.poll(() => resumed).toEqual(attempts.map(() => ['lost', 'ready']))
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once where the read that places the fork its frames brought fails first', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    let failures = 0
+    const attempt = listen(TEXT, async () => {
+      if (failures === 0) return start
+      failures--
+      throw new Error('Connection is closed.')
+    })
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    failures = 1
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => delivered, { timeout: 3_000 }).toEqual(['m4', 'y4'])
+    await subscriptions.followMoves(moved, async () => null)
+    expect(attempt.state()).toBe('ready')
     expect(missed).toEqual([null])
   })
 
@@ -317,10 +457,11 @@ describe('a Cluster slot whose master changed', () => {
         await subscriptions.followMoves(moved, async () => null)
         await expect.poll(() => missed).toEqual([null])
       } else {
-        // A reported fork, y4 replacing m4, then a resharding.
+        // A reported fork, y4 replacing m4 within the history, then a resharding.
         publish(TEXT, frameOf(4, 'm4'))
+        start = { authority: 'a', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
         publish(TEXT, frameOf(++place, 'y4', { id: BigInt(104) }))
-        expect(missed).toEqual([null])
+        await expect.poll(() => missed).toEqual([null])
         start = { authority: 'b', starts: new Map([['', { place, id: BigInt(104) }]]) }
         await subscriptions.followMoves(moved, async () => resharded)
       }

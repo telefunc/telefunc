@@ -24,10 +24,21 @@ type LaneRoute = {
   deliver(frame: LaneFrame, rewound: boolean): void
   /** The frame isn't delivered: its fence settles. */
   dropped(frame: LaneFrame): void
-  reportMissed(count: number | null): void
+  /** What a drop or the reorder wait passed by: `count` frames. */
+  reportMissed(count: number): void
+  /** The lane can't place `frame` on what it delivered: the route reads where its key stands, as after a cut, and
+   *  offers the frame again after that read. */
+  forked(frame: LaneFrame): void
+  /** The route's start read found the lane's record replaced within the history the route follows. */
+  replaced(): void
   /** The wait for a missing frame ended: the route may have missed messages. */
   waitEnded(): void
 }
+
+/** What a frame the lane can't place on what it delivered is. `live`: maybe of a change no read has seen yet, which
+ *  its route reads for. `accounted`: of a change a start read accounted for. `replaced`: of a record replaced within
+ *  its history, which the lane tells once per resume. */
+type Unplaced = 'live' | 'accounted' | 'replaced'
 
 /** A frame the lane delivered, or a start (`prev` null): where its history stood. */
 type Entry = { place: number; id: bigint; prev: bigint | null; branch: number }
@@ -45,8 +56,9 @@ const NO_START: LaneStart = { place: 0, id: NO_ID }
  * log and a failover may promote a replica that lacks the last commits, so a frame's place alone can't tell a copy or a
  * late frame from the history that replaced the delivered one. Each frame names its commit and the one before it, and the lane
  * remembers its last `RING_SIZE` deliveries: a frame it can tell is a copy or a counted hole's late original is dropped,
- * a frame that continues what it delivered is delivered, and where it can't tell which history a frame belongs to it
- * reports one loss of an unknown number, then delivers and follows the frame. It never picks one history over another.
+ * a frame that continues what it delivered is delivered, and where it can't tell which history a frame belongs to, its
+ * route reads where its key stands first; then the lane delivers and follows the frame. It never picks one history over
+ * another, and only a read tells a loss it can't count.
  */
 class LaneHistory {
   /** The routes it delivers through: it lives while one holds it. */
@@ -60,11 +72,15 @@ class LaneHistory {
   private delivered = false
   /** The highest place the ring let go of: above it, every frame delivered at a place is still in the ring. */
   private evicted = 0
-  private unseenReported = false
   /** A resume followed a start below `last`: the next delivery is a rewind. */
   private rewindPending = false
-  /** The tip is a start a resume followed after a report, whose own commit the lane never delivered. */
+  /** The tip is a start a resume followed, whose own commit the lane never delivered. */
   private tipOwed = false
+  /** This resume told that the lane's record was replaced. */
+  private replacedTold = false
+  /** The frames whose route read where its key stands for them, each with the highest place its route had brought the
+   *  lane before it: offered again, each is of what that read saw. */
+  private readonly reread = new WeakMap<LaneFrame, number>()
   private readonly ring: Entry[] = []
   /** The ring's oldest entry, once it is full. */
   private oldest = 0
@@ -79,7 +95,7 @@ class LaneHistory {
   /** `route` is ready at `start` (none: the lane had no commit) with the frames that reached it before. On a first
    *  establish, those its start covers are dropped and the rest go out; on a resume, the start is compared with what
    *  the lane delivered. A route that joins a running lane only drops the frames its start covers. `switched`: the
-   *  resume read another authority than the route's last start, which the route reported. */
+   *  resume read another authority than the route's last start, which its key was told of. */
   establish(
     route: LaneRoute,
     start: LaneStart | undefined,
@@ -96,7 +112,8 @@ class LaneHistory {
         const covered = start === undefined ? null : coveredBy(start, early)
         for (const frame of early) {
           if (covered?.has(frame)) route.dropped(frame)
-          else this.offer(frame)
+          // The read that started the lane saw these frames' history.
+          else this.offer(frame, Number.POSITIVE_INFINITY, 'accounted')
         }
         return
       }
@@ -111,14 +128,14 @@ class LaneHistory {
   }
 
   /** A frame, decided by the first row that matches. `passedBefore` is the highest place its route brought the lane
-   *  before it; a frame the lane held has passed. */
-  offer(frame: LaneFrame, passedBefore = Number.POSITIVE_INFINITY): void {
+   *  before it; a frame the lane held has passed. `unplaced`: what the frame is if the lane can't place it. */
+  offer(frame: LaneFrame, passedBefore = Number.POSITIVE_INFINITY, unplaced: Unplaced = 'live'): void {
     // A lane with no commit when its route went live: every one of its commits is after.
     if (!this.started) {
       this.started = true
       this.follow(NO_START, null, 0)
     }
-    this.decide(frame, passedBefore)
+    this.decide(frame, passedBefore, unplaced)
     this.drain()
   }
 
@@ -146,7 +163,7 @@ class LaneHistory {
     if (this.parked !== null) this.release()
   }
 
-  private decide(frame: LaneFrame, passedBefore: number): void {
+  private decide(frame: LaneFrame, passedBefore: number, unplaced: Unplaced): void {
     const { place, id, prev, via } = frame
     // copy, or the owed start's own commit
     if (id === this.tip) return this.tipOwed ? this.deliver(frame, this.branch) : via.dropped(frame)
@@ -160,20 +177,32 @@ class LaneHistory {
     const branch = this.branchOf(prev)
     if (branch !== undefined) {
       if (!this.forks(frame, branch)) return this.deliver(frame, branch)
-      this.report(via, place)
-      return this.deliver(frame, ++this.branches)
+      return this.unplaced(frame, passedBefore, unplaced, () => this.deliver(frame, ++this.branches))
     }
     // unseen: a copy whose first delivery left the ring can't be told from a new frame. A frame at or below its own
-    // route's highest place is that route's rewind, one node's in-order stream going back, so it is decided below.
-    if (place <= this.evicted && place > passedBefore) {
-      if (!this.unseenReported) this.report(via, place)
-      this.unseenReported = true
-      return via.dropped(frame)
+    // route's highest place is that route's rewind, one node's in-order stream going back, so it is decided below. A
+    // frame offered again after its route's read was brought by that route once, before.
+    if (place <= this.evicted && place > (this.reread.get(frame) ?? passedBefore)) {
+      return this.unplaced(frame, passedBefore, unplaced, () => via.dropped(frame))
     }
     if (place > this.last + 1) return this.park(frame)
     // unknown
-    this.report(via, place)
-    this.deliver(frame, ++this.branches)
+    this.unplaced(frame, passedBefore, unplaced, () => this.deliver(frame, ++this.branches))
+  }
+
+  /** A frame the lane can't place, decided by `decide` once a read saw its history. Below a start the lane follows and
+   *  never delivered, or offered again after its route's read, it is of what a read saw. */
+  private unplaced(frame: LaneFrame, passedBefore: number, unplaced: Unplaced, decide: () => void): void {
+    const seen = (this.tipOwed && frame.place < this.last) || this.reread.has(frame)
+    if (unplaced === 'live' && !seen) {
+      this.reread.set(frame, passedBefore)
+      return frame.via.forked(frame)
+    }
+    if (unplaced === 'replaced' && this.delivered && !this.replacedTold) {
+      this.replacedTold = true
+      frame.via.replaced()
+    }
+    decide()
   }
 
   /** Whether `frame`, which continues a delivered frame on `branch`, splits that history: another delivered frame
@@ -191,7 +220,6 @@ class LaneHistory {
   private deliver(frame: LaneFrame, branch: number): void {
     const rewound = this.rewindPending || frame.place <= this.last
     this.rewindPending = false
-    this.unseenReported = false
     this.delivered = true
     this.follow(frame, frame.prev, branch)
     frame.via.deliver(frame, rewound)
@@ -239,18 +267,12 @@ class LaneHistory {
     return undefined
   }
 
-  /** A report of what another history replaced, which only a lane that delivered can have lost. A frame at `place`,
-   *  below the start the lane follows after a report and before that start's own frame, is of the change that report
-   *  told: the frames before the start in its history, or the replaced history's late ones. */
-  private report(route: LaneRoute, place = Number.POSITIVE_INFINITY): void {
-    if (this.delivered && !(this.tipOwed && place < this.last)) route.reportMissed(null)
-  }
-
   /** The route's lost connection ended at `start`: ahead of the lane, what reached the new subscription goes out and
    *  the rest is counted; at a place the lane knows, the next frame decides; anywhere else another history replaced
    *  what it delivered, and the lane follows the start. */
   private resume(route: LaneRoute, start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
     let rest = early
+    this.replacedTold = false
     if (start.place > this.last) {
       // From the lowest: below `last`, a history the lane never saw can have reached the new subscription too.
       const arrived = early.filter((frame) => frame.place <= start.place)
@@ -258,7 +280,8 @@ class LaneHistory {
       let missed = 0
       for (const frame of arrived.sort((a, b) => a.place - b.place)) {
         missed += this.skipTo(frame)
-        this.decide(frame, passed(frame))
+        // Below the start, on the history the route followed: one the lane can't place replaced what it delivered.
+        this.decide(frame, passed(frame), 'replaced')
       }
       if (start.place > this.last) {
         missed += start.place - this.last
@@ -266,7 +289,9 @@ class LaneHistory {
       }
       if (missed > 0) route.reportMissed(missed)
     } else if (!(start.place === this.last && start.id === this.tip) && !this.knowsAt(start.place, start.id)) {
-      this.report(route)
+      // Only a lane that delivered can have got what the record's new history replaced.
+      if (this.delivered) route.replaced()
+      this.replacedTold = true
       if (start.place < this.last) this.rewindPending = true
       this.follow(start, null, ++this.branches)
       this.tipOwed = start.id !== NO_ID
@@ -274,8 +299,9 @@ class LaneHistory {
     for (const frame of rest) this.offer(frame, passed(frame))
   }
 
-  /** The route's lost connection ended at `start` of another authority, which it reported: no count holds across
-   *  two authorities, so the lane follows the start as a history it never saw, unless it stands at the start. */
+  /** The route's lost connection ended at `start` of another authority, which its key was told of: no count holds
+   *  across two authorities, so the lane follows the start as a history it never saw, unless it stands at the start.
+   *  A frame at or below the start is of the change that read saw. */
   private switchTo(start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
     if (!(start.place === this.last && start.id === this.tip)) {
       if (start.place < this.last) this.rewindPending = true
@@ -283,7 +309,9 @@ class LaneHistory {
       this.follow(start, null, ++this.branches)
       this.tipOwed = owed
     }
-    for (const frame of [...early].sort((a, b) => a.place - b.place)) this.offer(frame, passed(frame))
+    for (const frame of [...early].sort((a, b) => a.place - b.place)) {
+      this.offer(frame, passed(frame), frame.place <= start.place ? 'accounted' : 'live')
+    }
   }
 
   /** Steps past the missing frames before `frame`, unless the ring knows its predecessor: how many it passed. */
@@ -309,7 +337,7 @@ class LaneHistory {
       const frames = this.parked.get(this.last + 1)
       if (frames === undefined) break
       this.parked.delete(this.last + 1)
-      for (const frame of frames) if (this.routes.has(frame.via)) this.decide(frame, Number.POSITIVE_INFINITY)
+      for (const frame of frames) if (this.routes.has(frame.via)) this.decide(frame, Number.POSITIVE_INFINITY, 'live')
     }
     if (this.parked?.size === 0) this.clearParked()
   }
@@ -331,7 +359,7 @@ class LaneHistory {
       // A consumer may close a route, which its frames leave with.
       if (!this.routes.has(frame.via)) continue
       missed += this.skipTo(frame)
-      this.decide(frame, Number.POSITIVE_INFINITY)
+      this.decide(frame, Number.POSITIVE_INFINITY, 'live')
     }
     this.drain()
     if (missed > 0 && !this.done) frames[0]!.via.reportMissed(missed)

@@ -47,7 +47,7 @@ type RedisAttemptOptions = {
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
-  /** Whom its unknown losses are told to: the attempts with one key are told of leaving a history once. */
+  /** Whom its unknown losses are told to: the attempts with one key are told once of each history they leave. */
   lossKey: string
 }
 
@@ -70,6 +70,31 @@ type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 
 /** A lane an attempt carries, and the highest place the attempt brought it. */
 type CarriedLane = { history: LaneHistory; passed: number }
+
+/** The attempts with one loss key, and the histories they were told they left. */
+class LossKey {
+  readonly key: string
+  attempts = 0
+  private readonly left = new Set<string>()
+
+  constructor(key: string) {
+    this.key = key
+  }
+
+  /** Whether leaving the history `from` for `to` is news to the key: it is told once of each history it leaves, until
+   *  one of its attempts is on that history again. */
+  leaves(from: string, to: string): boolean {
+    const news = !this.left.has(from)
+    this.left.add(from)
+    this.left.delete(to)
+    return news
+  }
+
+  /** An attempt started on, or moved without a loss to, `history`: leaving it is news again. */
+  entered(history: string): void {
+    this.left.delete(history)
+  }
+}
 
 const textDecoder = new TextDecoder()
 
@@ -97,6 +122,8 @@ class RedisSubscriptions {
   /** Each lane some attempt carries, by its consumer's receiver, then its channel. A consumer's attempts share its lanes
    *  (a renewal and the attempt it replaces); another consumer orders its own, so it gets every frame too. */
   private readonly lanes = new Map<BackendReceiver, Map<string, LaneHistory>>()
+  /** Each loss key some attempt has, by its name. */
+  private readonly lossKeys = new Map<string, LossKey>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
   private changedChannels = new Set<string>()
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
@@ -120,7 +147,9 @@ class RedisSubscriptions {
   }
 
   subscribe(options: RedisAttemptOptions): DriverAttempt {
-    const attempt = new RedisAttempt({ ...options, owner: this })
+    const loss = getOrCreate(this.lossKeys, options.lossKey, () => new LossKey(options.lossKey))
+    loss.attempts++
+    const attempt = new RedisAttempt({ ...options, owner: this, loss })
     this.establishingCount++
     const settled = () => this.establishingCount--
     void attempt.firstReady.then(settled, settled)
@@ -203,6 +232,7 @@ class RedisSubscriptions {
   /** Forgets an attempt that unsubscribed or ended. */
   detach(attempt: RedisAttempt): void {
     this.unconfirmed.delete(attempt)
+    if (--attempt.loss.attempts === 0) this.lossKeys.delete(attempt.loss.key)
     for (const channel of attempt.channels) {
       const attempts = this.byChannel.get(channel)
       attempts?.delete(attempt)
@@ -278,15 +308,13 @@ class RedisSubscriptions {
 
   /** Cluster slots whose master changed, each with the master it had. A ready attempt on one goes on, under its key's
    *  master now, where it already follows that master's history or the old master shows it lost nothing
-   *  (`lostNothing`). Anywhere else the old master may have accepted what the new one lacks, and the attempt resumes as
-   *  after a cut. `former` reaches a node. */
+   *  (`lostNothing`). Anywhere else the old master may have accepted what the new one lacks, and the attempt reads
+   *  where its key stands again (`reread`). `former` reaches a node. */
   async followMoves(moved: Map<number, string>, former: (node: string) => Promise<FormerMaster | null>): Promise<void> {
     const nodes = new Map<string, Promise<FormerMaster | null>>()
     const follow = async (attempt: RedisAttempt) => {
       const before = moved.get(slotOf(attempt.channel))
       if (before === undefined) return
-      // A fork its lanes told may be this move: its placement says.
-      await attempt.placing
       const history = attempt.history
       if (history === null || attempt.state() !== 'ready') return
       const old = await getOrCreate(nodes, before, () => former(before))
@@ -297,7 +325,7 @@ class RedisSubscriptions {
         // An answer it can't read proves nothing.
       }
       if (starts !== null) return attempt.followHistory(starts.authority)
-      this.resume(attempt, new Error(`The Redis Cluster master of '${attempt.channel}' failed over`))
+      this.reread(attempt)
     }
     try {
       await Promise.all([...this.attempts()].map(follow))
@@ -306,38 +334,12 @@ class RedisSubscriptions {
     }
   }
 
-  /** A lane of `attempt` met a history it couldn't continue, and told so. Where its key's master is of another history
-   *  than the attempt's now, that was the change away from it: the attempt follows the new one, and its key's attempts
-   *  tell no second loss of the one it left. */
-  place(attempt: RedisAttempt): void {
-    const history = attempt.history
-    if (history === null || attempt.state() !== 'ready') return
-    const placing = (async () => {
-      let starts: Starts | null = null
-      try {
-        starts = await attempt.readStarts()
-      } catch {
-        // A read that fails places nothing: a later check or resume compares.
-      }
-      if (starts !== null && attempt.history === history && historyOf(starts.authority) !== history)
-        attempt.leave(starts.authority)
-    })()
-    attempt.placing = placing
-    void placing.finally(() => {
-      if (attempt.placing === placing) attempt.placing = null
-    })
-  }
-
-  /** Whether an attempt with `lossKey` told that it left `history`. */
-  told(lossKey: string, history: string): boolean {
-    for (const attempt of this.attempts()) if (attempt.lossKey === lossKey && attempt.left === history) return true
-    return false
-  }
-
-  /** Resumes a ready attempt as after a cut: the commits awaiting its fences see `reason`. */
-  private resume(attempt: RedisAttempt, reason: unknown): void {
+  /** A ready attempt reads where its key stands again, on its connection, as a resume after a cut does; its key is told
+   *  if that read finds a history it left. Its fences stay, as their frames can still arrive, and a failed read is
+   *  tried again (`retryRead`). */
+  reread(attempt: RedisAttempt): void {
     if (attempt.state() !== 'ready') return
-    attempt.lose(reason)
+    attempt.reread()
     this.unconfirmed.add(attempt)
     this.syncChannels()
   }
@@ -525,12 +527,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   readonly invalidationChannel: string | null
   readonly readStarts: RedisAttemptOptions['readStarts']
   readonly channels: readonly string[]
-  readonly lossKey: string
-  /** A placement of a fork its lanes told (`RedisSubscriptions.place`), while it reads. */
-  placing: Promise<void> | null = null
+  readonly loss: LossKey
   private readonly tell: RedisAttemptOptions['reportMissed']
-  /** The history it told it left, since its last start. */
-  private leftHistory: string | null = null
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
   private readonly laneChannel: RedisAttemptOptions['laneChannel']
@@ -541,7 +539,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   /** The history of its last ready start, from its first: a start from another can lack what it missed. */
   private authority: string | null = null
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
-  private early: Buffer[] = []
+  private early: LaneFrame[] = []
   /** A frame in another form was dropped and reported. */
   private foreignReported = false
   private readonly firstReadiness = createDeferred()
@@ -558,8 +556,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     readStarts,
     receiver,
     reportMissed: tell,
-    lossKey,
-  }: RedisAttemptOptions & { owner: RedisSubscriptions }) {
+    loss,
+  }: RedisAttemptOptions & { owner: RedisSubscriptions; loss: LossKey }) {
     super()
     this.owner = owner
     this.channel = channel
@@ -569,7 +567,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     this.readStarts = readStarts
     this.receiver = receiver
     this.tell = tell
-    this.lossKey = lossKey
+    this.loss = loss
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     // Its first state change ends its establishment: ready, or closed.
     this.onStateChange(() => this.firstReadiness.resolve())
@@ -624,45 +622,42 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     return true
   }
 
-  /** The history it told it left, since its last start. */
-  get left(): string | null {
-    return this.leftHistory
+  /** `LaneRoute`: what a drop or the reorder wait passed by. */
+  reportMissed(count: number): void {
+    this.tell(count)
   }
 
-  /** A loss its lanes tell; an unknown one may be its key's history changing, which `place` asks. */
-  reportMissed(count: number | null): void {
-    this.tell(count)
-    if (count === null) this.owner.place(this)
+  /** `LaneRoute`: its start read found a lane's record replaced within the history it follows. */
+  replaced(): void {
+    this.tell(null)
+  }
+
+  /** `LaneRoute`: a frame its lane can't place. It reads where its key stands, and the frame waits for that read. */
+  forked(frame: LaneFrame): void {
+    this.owner.reread(this)
+    if (this.awaitsConfirmation()) this.early.push(frame)
+    else this.dropped(frame)
   }
 
   /** Its key's history goes on under `authority`, the master its key moved to, where it lost nothing in the move. */
   followHistory(authority: string): void {
-    if (this.state() === 'ready') this.authority = authority
-  }
-
-  /** Its lanes met the history of `authority`, its key's master now, as one they couldn't continue, and told so: it
-   *  left its own history for that one. */
-  leave(authority: string): void {
     if (this.state() !== 'ready') return
-    this.leftHistory = this.history
     this.authority = authority
+    this.loss.entered(historyOf(authority))
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
    *  before it is ready; on a resume, each lane it carried compares its start with what it delivered, unless the start
-   *  came from another history than its last: then its key's attempts report once that they don't know what they
-   *  missed. */
+   *  came from another history than its last: then its key is told, once for that history, that it doesn't know what
+   *  it missed. */
   markReady({ authority, starts }: Starts): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
-    const previous = this.history
-    const switched = resuming && this.authority !== authority
+    const left = resuming && this.authority !== authority ? this.history : null
+    const switched = left !== null
     this.authority = authority
     const early = new Map<string, LaneFrame[]>()
-    for (const message of this.early) {
-      const frame = this.decode(message)
-      if (frame !== null) getOrCreate(early, frame.lane, () => []).push(frame)
-    }
+    for (const frame of this.early) getOrCreate(early, frame.lane, () => []).push(frame)
     this.early = []
     const lanes = new Set([...starts.keys(), ...early.keys()])
     for (const [laneKey, { history }] of resuming ? this.lanes : []) {
@@ -676,8 +671,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       }
     }
     this.transition('ready')
-    if (switched && !this.owner.told(this.lossKey, previous!)) this.tell(null)
-    this.leftHistory = switched ? previous : null
+    if (left === null) this.loss.entered(historyOf(authority))
+    else if (this.loss.leaves(left, historyOf(authority))) this.tell(null)
     for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
@@ -695,6 +690,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     this.transition('closed', error)
   }
 
+  /** Its connection dropped: what its lanes wait for can't arrive, and the commits awaiting its fences see `error`. */
   lose(error: unknown): void {
     this.early = []
     if (this.state() !== 'ready') return
@@ -703,15 +699,23 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     this.transition('lost')
   }
 
+  /** It reads where its key stands again, on the connection it has: what arrives meanwhile waits for that read. */
+  reread(): void {
+    this.transition('lost')
+  }
+
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
-    if (this.state() === 'ready') {
-      const frame = this.decode(message)
-      if (frame === null) return
-      const lane = this.laneOf(frame.lane)
-      return lane.history.offer(frame, this.pass(lane, frame))
+    const state = this.state()
+    if (state === 'closed') return
+    const frame = this.decode(message)
+    if (frame === null) return
+    if (state !== 'ready') {
+      this.early.push(frame)
+      return
     }
-    if (this.awaitsConfirmation()) this.early.push(message)
+    const lane = this.laneOf(frame.lane)
+    lane.history.offer(frame, this.pass(lane, frame))
   }
 
   /** `LaneRoute`: a frame its lane delivers. */
