@@ -3,6 +3,7 @@ import { BackendError, createDeferred, type BackendListener, type BackendSubscri
 import { SEMANTIC_LANE } from './lanes.js'
 import { LaneSubscription, type LaneAddress, type LaneSubscriptionOwner } from './LaneSubscription.js'
 import type { RoomSubscriptionSource } from '../../backend/contract.js'
+import { assert } from '../../utils/assert.js'
 
 type AttemptState = ReturnType<BackendSubscription['state']>
 
@@ -64,10 +65,10 @@ function fakeSubscription() {
 
 function setup() {
   const subscriptions: ReturnType<typeof fakeSubscription>[] = []
-  const calls = { ended: 0, recovered: 0, terminal: 0 }
+  const calls = { ended: 0, recovered: 0 }
   /** What each subscription said registers it. */
   const registeredBy: Array<RoomSubscriptionSource['registeredBy']> = []
-  const owner = {
+  const owner: LaneSubscriptionOwner = {
     roomId: 'room',
     subscribeLane(_address: LaneAddress, _listener: BackendListener<Uint8Array>, by?: 'operation') {
       registeredBy.push(by)
@@ -78,11 +79,16 @@ function setup() {
     onLaneDelivery() {},
     onLaneEnded: () => void calls.ended++,
     onLaneRecovered: () => void calls.recovered++,
-    onLaneTerminal: () => void calls.terminal++,
     onLanePending() {},
-  } as LaneSubscriptionOwner
+  }
   const lane = new LaneSubscription({ owner, address: SEMANTIC_LANE })
-  return { lane, subscriptions, calls, registeredBy }
+  /** The lane's first subscription, which its `start()` made. */
+  const first = () => {
+    const [subscription] = subscriptions
+    assert(subscription !== undefined)
+    return subscription
+  }
+  return { lane, subscriptions, first, calls, registeredBy }
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -98,10 +104,10 @@ describe('a Room lane', () => {
   })
 
   it('that Redis refuses fails its consumer at once with the refusal itself, and nothing subscribes it again', async () => {
-    const { lane, subscriptions, calls } = setup()
+    const { lane, first, subscriptions, calls } = setup()
     lane.start()
     const refused = refusal()
-    subscriptions[0]!.close(refused)
+    first().close(refused)
     const failure = await Promise.race([
       lane.ready.then(
         () => 'ready',
@@ -114,7 +120,7 @@ describe('a Room lane', () => {
     lane.start()
     await tick()
     expect(subscriptions).toHaveLength(1)
-    expect(calls).toEqual({ ended: 1, recovered: 0, terminal: 0 })
+    expect(calls).toEqual({ ended: 1, recovered: 0 })
   })
 
   it('that its backend ends with a reason that is no store failure fails its consumer with that reason as the cause', async () => {
@@ -126,15 +132,15 @@ describe('a Room lane', () => {
   })
 
   it('whose driver lost it is ready again on the same subscription, and its owner catches up', async () => {
-    const { lane, subscriptions, calls } = setup()
+    const { lane, first, subscriptions, calls } = setup()
     lane.start()
-    subscriptions[0]!.ready()
+    first().ready()
     await lane.ready
-    subscriptions[0]!.lose()
-    subscriptions[0]!.ready()
+    first().lose()
+    first().ready()
     await lane.ready
     expect(subscriptions).toHaveLength(1)
-    expect(calls).toEqual({ ended: 0, recovered: 1, terminal: 0 })
+    expect(calls).toEqual({ ended: 0, recovered: 1 })
   })
 
   it('whose incarnation the backend dropped before it was ready fails its consumer at once with the closed room', async () => {
@@ -153,10 +159,10 @@ describe('a Room lane', () => {
   })
 
   it('whose incarnation the backend dropped tells its owner, which finds the close, and subscribes nothing again', async () => {
-    const { lane, subscriptions, calls } = setup()
+    const { lane, first, subscriptions, calls } = setup()
     lane.start()
-    subscriptions[0]!.ready()
-    subscriptions[0]!.close()
+    first().ready()
+    first().close()
     await tick()
     lane.start()
     expect(subscriptions).toHaveLength(1)

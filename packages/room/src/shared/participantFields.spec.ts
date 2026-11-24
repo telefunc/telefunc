@@ -3,6 +3,7 @@ import { Room } from '../index.js'
 import { pageRoom } from '../test/pageRoom.js'
 import { defineParticipantField, type ParticipantFieldView } from './participantFields.js'
 import type { RemoteParticipant } from '../types.js'
+import { assert } from '../utils/assert.js'
 
 type FieldRooms = Set<ParticipantFieldView<unknown>['room']>
 
@@ -106,10 +107,12 @@ describe("a package's field", () => {
     })
     const { room } = pageRoom({ ann: 0 })
     const value = Object.freeze({ tracks: ['camera'] })
-    views.at(-1)!.set('ann', value)
+    const view = views.at(-1)
+    assert(view !== undefined)
+    view.set('ann', value)
     const before = room.snapshot()
     value.tracks.push('screen')
-    expect((before.participants[0] as unknown as { ownCopy: Tracks }).ownCopy.tracks).toEqual(['camera'])
+    expect(before.participants[0]).toHaveProperty('ownCopy', { tracks: ['camera'] })
     expect(room.snapshot()).toBe(before)
   })
 
@@ -126,6 +129,6 @@ describe("a package's field", () => {
     }
     const { room } = pageRoom({ ann: 0 })
     expect(attached).toEqual(['first'])
-    expect((room.snapshot().participants[0] as unknown as { definedTwice: string }).definedTwice).toBe('first')
+    expect(room.snapshot().participants[0]).toHaveProperty('definedTwice', 'first')
   })
 })

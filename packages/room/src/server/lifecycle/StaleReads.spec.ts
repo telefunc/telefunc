@@ -28,7 +28,9 @@ describe('StaleReads', () => {
     reads.read()
     reads.read()
     expect(warn).toHaveBeenCalledOnce()
-    expect(warn.mock.calls[0]![0]).toContain("Room 'lobby' was read 30 s after it was last current on this server")
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("Room 'lobby' was read 30 s after it was last current on this server"),
+    )
   })
 
   it('stays quiet while followed, on a closed room, and after a Room.get() caught it up', () => {

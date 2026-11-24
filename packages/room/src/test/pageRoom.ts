@@ -1,6 +1,6 @@
 export { pageRoom }
 
-import type { ClientBroadcast, ChannelPublishInfo } from 'telefunc/__internal'
+import type { ChannelPublishInfo } from 'telefunc/__internal'
 import { ClientRoom } from '../client/room.js'
 import type { RoomStubRequest } from '../shared/protocol.js'
 
@@ -27,6 +27,16 @@ function pageRoom(members: Record<string, number> = {}) {
       if (kind === 'text') onText = callback
       return () => {}
     },
+    _sendReply: () => {
+      throw new Error('Unexpected DM reply')
+    },
+    _publishUnreported: async () => {
+      throw new Error('Unexpected publish')
+    },
+    _publishBinaryUnreported: async () => {
+      throw new Error('Unexpected publish')
+    },
+    _confirmSoon: () => {},
     _setSubscribed: () => {},
     _setWantParts: () => {},
     onClose: (callback: () => void) => {
@@ -37,7 +47,7 @@ function pageRoom(members: Record<string, number> = {}) {
     onReconnect: () => () => {},
   }
   const room = new ClientRoom({
-    end: end as unknown as ClientBroadcast,
+    end,
     snapshot: {
       channelId: 'channel',
       roomId: crypto.randomUUID(),

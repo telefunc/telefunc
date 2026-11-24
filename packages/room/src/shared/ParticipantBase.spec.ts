@@ -7,31 +7,28 @@ import { RoomDemand } from '../server/lanes/RoomDemand.js'
 import { ServerLocalParticipant } from '../server/ServerLocalParticipant.js'
 import { RoomReplica } from '../server/RoomReplica.js'
 import { RoomModel } from './RoomModel.js'
-import type { DemandChange, TrackWatch, TrackWatchState } from './protocol.js'
+import type { ParticipantBase } from './ParticipantBase.js'
+import { assert } from '../utils/assert.js'
+import type { TrackWatch } from './protocol.js'
 import type { LocalParticipant, RemoteParticipant, RoomSnapshotView, TrackDemand } from '../types.js'
 
-/** A member and who receives each of its tracks, as the room told it. */
-type DemandReader = LocalParticipant & { readonly _watches: ReadonlyMap<string, TrackWatch> }
-
-/** How the page's room hands its member who receives each of its tracks. */
-type DemandHolder = DemandReader & {
-  _applyDemand(track: string, change: DemandChange): void
-  _applyDemandState(tracks: TrackWatchState[]): void
-}
-
 /** The watchers of `me`'s default track, after the room reports `watchers` receiving it. */
-function watchersReported(me: DemandHolder, watchers: string[]): string[] {
+function watchersReported(me: ClientParticipant, watchers: string[]): string[] {
   me._applyDemandState([{ track: '', watchers, pages: [] }])
-  return me.demand[0]!.watchers.map((watcher) => watcher.id)
+  const [demand] = me.demand
+  assert(demand !== undefined)
+  return demand.watchers.map((watcher) => watcher.id)
 }
 
 /** `me`, joined to a page's room of `members`, with what ends its wire and what hands it an event. */
 async function joinedIn(members: Record<string, number>) {
   const page = pageRoom(members)
-  return { ...page, me: (await page.room.join()) as DemandHolder }
+  const me = await page.room.join()
+  assert(me instanceof ClientParticipant)
+  return { ...page, me }
 }
 
-async function joinedAmong(members: Record<string, number>): Promise<DemandHolder> {
+async function joinedAmong(members: Record<string, number>): Promise<ClientParticipant> {
   return (await joinedIn(members)).me
 }
 
@@ -438,7 +435,7 @@ describe("a participant's demand, as its room shows its watchers", () => {
     JSON.stringify(list.map(({ track, watchers, watcherCount }) => [track, watchers.map((w) => w.id), watcherCount]))
   /** A line where `me.demand` isn't each of its tracks with the participants `snapshot` lists among who receives it,
    *  the same objects in its order, and how many receive it; nothing once it left. */
-  function disagreement(me: DemandReader, left: boolean, participants: readonly RemoteParticipant[], at: string) {
+  function disagreement(me: ParticipantBase, left: boolean, participants: readonly RemoteParticipant[], at: string) {
     const watches: ReadonlyMap<string, TrackWatch> = left ? new Map() : me._watches
     const expected = Array.from(watches, ([key, watch]) => ({
       track: key === '' ? 'main' : key,
