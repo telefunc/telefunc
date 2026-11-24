@@ -469,7 +469,11 @@ function testRefusedDelivery() {
     const publish = async (message: string) => {
       const query = new URLSearchParams({ key, message })
       const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
-      return ((await response.json()) as { rejected: string | null }).rejected
+      const answer: unknown = await response.json()
+      if (typeof answer !== 'object' || answer === null || !('rejected' in answer) || !('cause' in answer)) {
+        throw new Error(`The publish answered ${JSON.stringify(answer)}`)
+      }
+      return { rejected: answer.rejected, cause: answer.cause }
     }
     const received = async () =>
       await Promise.all(
@@ -486,11 +490,14 @@ function testRefusedDelivery() {
       },
       { timeout: 10_000 },
     )
-    expect(await publish('refused')).toContain('lost to 1/2 Durable Objects')
+    const refused = await publish('refused')
+    expect(refused.rejected).toContain('lost to 1/2 Durable Objects')
+    // And why: the refusing session's own error.
+    expect(refused.cause).toBe('Error: Test: the session refused the delivery')
     await autoRetry(async () => {
       expect((await received()).map((got) => got.includes('refused')).sort()).deep.equal([false, true])
     })
-    expect(await publish('after')).toBe(null)
+    expect(await publish('after')).deep.equal({ rejected: null, cause: null })
     await autoRetry(async () => {
       for (const got of await received()) expect(got).toContain('after')
     })

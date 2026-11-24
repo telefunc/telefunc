@@ -87,7 +87,9 @@ type TelefuncDurableObjectWithPresence = new (
   fetch(request: Request): Promise<Response>
   telefuncBroadcastHold(request: PresenceRequest): Promise<string>
   telefuncBroadcastRenew(request: PresenceRequest): Promise<string>
-  telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
+  telefuncBroadcastForward(
+    request: DeliveryRequest & { members: string[] },
+  ): Promise<{ lost: number; reason: unknown } | null>
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
@@ -143,13 +145,17 @@ app.all('/__broadcast-publish-from-worker', async (c) => {
   await Broadcast.publish('worker-publish', { from: 'worker' })
   return c.body(null, 204)
 })
-// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what.
+// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what and why.
 app.all('/__refused-delivery-publish', async (c) => {
-  const rejected = await Promise.resolve(Broadcast.publish(c.req.query('key')!, c.req.query('message')!)).then(
-    () => null,
-    (error: unknown) => String(error),
-  )
-  return c.json({ rejected })
+  const key = c.req.query('key')
+  const message = c.req.query('message')
+  if (key === undefined || message === undefined) return c.text('Pass a key and a message', 400)
+  try {
+    await Broadcast.publish(key, message)
+    return c.json({ rejected: null, cause: null })
+  } catch (error) {
+    return c.json({ rejected: String(error), cause: error instanceof Error ? String(error.cause) : null })
+  }
 })
 app.all('/__broadcast-subscribe-from-worker', (c) => {
   try {

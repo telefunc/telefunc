@@ -8,6 +8,7 @@ export type {
   BroadcastNamespace,
   BroadcastPublishRequest,
   BroadcastReleaseRequest,
+  ForwardLoss,
   MemberPlacement,
   TelefuncBroadcastStub,
 }
@@ -64,6 +65,9 @@ type BroadcastPublishRequest = {
 
 /** A delivery, handed to one bucket coordinator for the member DOs it names by id. */
 type BroadcastForwardRequest = BroadcastDelivery & { members: string[] }
+/** What a bucket coordinator lost of a forward: how many member DOs failed to take it, with the routes an owed one had
+ *  no receiver for, and why: the first failure's error, else what had no receiver. */
+type ForwardLoss = { lost: number; reason: unknown }
 
 /** A member DO, by id, and the bucket its session was placed in, as it was stored or sent: `forward()` checks each
  *  bucket once. */
@@ -77,8 +81,8 @@ type BroadcastReleaseRequest = BroadcastLeaseRequest & { order: LeaseOrder }
 
 type TelefuncBroadcastStub = {
   telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
-  /** Resolves to how many of the member DOs it names failed to take the delivery. */
-  telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<number>
+  /** Resolves to what of the delivery the member DOs it names didn't take, or null where they took it all. */
+  telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<ForwardLoss | null>
   /** How many of an owed delivery's routes it had no receiver for. */
   telefuncBroadcastDeliver(delivery: BroadcastDelivery): Promise<number>
   /** A new grant for the member DO, for its writes of presence at this key's authority (`leases.ts`). */
@@ -614,10 +618,12 @@ class CloudflareBroadcast {
     const forwardThrough = async ([name, members]: [string, string[]]) => {
       const bucket = readLocationBucket(name)
       try {
-        const lostThere = await this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+        const loss = await this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ ...delivery, members }),
         )
-        lost += lostThere
+        if (loss === null) return
+        lost += loss.lost
+        reason ??= loss.reason
       } catch (error) {
         lost += members.length
         reason ??= error
@@ -630,9 +636,12 @@ class CloudflareBroadcast {
     })
   }
 
-  /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. Returns how many
-   *  failed to take it, or had no receiver for an owed one. */
-  async forwardToBucket(calls: BroadcastCalls, { members, ...delivery }: BroadcastForwardRequest): Promise<number> {
+  /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. Returns what they
+   *  lost of it, or null where none lost any. */
+  async forwardToBucket(
+    calls: BroadcastCalls,
+    { members, ...delivery }: BroadcastForwardRequest,
+  ): Promise<ForwardLoss | null> {
     const deliveries = await Promise.allSettled(
       members.map((member) =>
         calls.call(
@@ -678,9 +687,9 @@ class CloudflareBroadcast {
   }
 }
 
-/** Logs the deliveries that failed, with the first one's reason; returns how many, with the routes a member DO had no
- *  receiver for. */
-function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<number>[]): number {
+/** Logs the deliveries that failed, with the first one's reason; returns how many were lost, with the routes a member
+ *  DO had no receiver for, and why, or null where none was. */
+function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<number>[]): ForwardLoss | null {
   let failed = 0
   let missing = 0
   let reason: unknown
@@ -693,5 +702,10 @@ function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<n
     }
   }
   if (failed > 0) console.error(`${delivery} lost to ${failed}/${outcomes.length} Durable Objects: ${reason}`)
-  return failed + missing
+  const lost = failed + missing
+  if (lost === 0) return null
+  return {
+    lost,
+    reason: failed > 0 ? reason : new Error(`${delivery} had no receiver for ${missing} of its owed routes`),
+  }
 }

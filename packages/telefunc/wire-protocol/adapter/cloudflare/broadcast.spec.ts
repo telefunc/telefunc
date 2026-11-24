@@ -15,6 +15,7 @@ import type {
   BroadcastLeaseRequest,
   BroadcastNamespace,
   BroadcastReleaseRequest,
+  ForwardLoss,
   TelefuncBroadcastStub,
 } from './broadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
@@ -102,7 +103,7 @@ function createBasicBinding(
       return {
         telefuncBroadcastPublish: (request) =>
           overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() }),
-        telefuncBroadcastForward: (request) => overrides?.onForward?.(id, request) ?? Promise.resolve(0),
+        telefuncBroadcastForward: (request) => overrides?.onForward?.(id, request) ?? Promise.resolve(null),
         telefuncBroadcastDeliver: (delivery) => overrides?.onDeliver?.(id, delivery) ?? Promise.resolve(0),
         telefuncBroadcastGrant: (member) =>
           presence({ op: 'grant', member }, (authority) => authority.grant(member), 1),
@@ -271,7 +272,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
       }),
     )
@@ -297,7 +298,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
         // The key's authority, as a member's presence reaches it.
         onPresence: (_id, _call, apply) => apply(authorityState),
@@ -339,17 +340,42 @@ describe('cloudflare broadcast routing', () => {
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
   })
 
+  it("a publish its bucket's coordinator couldn't hand to a member rejects with that member's error as its cause", async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const authorityState = createAuthorityState()
+    const refused = new Error('The member Durable Object refused the delivery')
+    const broadcast: CloudflareBroadcast = createBroadcast(
+      createBasicBinding({
+        // The bucket's coordinator hands the delivery to each of its members, as `telefuncBroadcastForward` does.
+        onForward: (_id, request) => broadcast.forwardToBucket(new OrderedStubs(), request),
+        onDeliver: (id) => (id.name === 'telefunc-shard-weur-1' ? Promise.reject(refused) : Promise.resolve(0)),
+      }),
+    )
+    await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-0', 'weur')
+    await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-1', 'weur')
+    const publish = broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
+      key: 'room:test',
+      kind: 'text',
+      payload: '"hello"',
+    })
+    await expect(publish).rejects.toMatchObject({
+      message: "Cloudflare Broadcast delivery of 'room:test' lost to 1/2 Durable Objects",
+      cause: refused,
+    })
+    logged.mockRestore()
+  })
+
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorPublishes: string[] = []
-    const firstRemotePublish = Promise.withResolvers<number>()
+    const firstRemotePublish = Promise.withResolvers<ForwardLoss | null>()
     const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload: text }) {
           coordinatorPublishes.push(`${id.name}:${text}`)
           if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
       }),
     )
@@ -374,7 +400,7 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
 
-    firstRemotePublish.resolve(0)
+    firstRemotePublish.resolve(null)
     await Promise.all([firstPublish, secondPublish])
 
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
