@@ -207,7 +207,7 @@ const authorityOf = (roomId: string) => `__telefunc_room__:${roomId}`
 
 /** A call that registers a member's inbox: its route's registration, or the join that registers it in its own write. */
 function isInboxRegistration(method: string, [route]: unknown[]): boolean {
-  if (method === 'runOperationWithInbox') return true
+  if (method === 'runJoinWithInbox') return true
   if (method !== 'registerRoute' || typeof route !== 'object' || route === null || !('laneKey' in route)) return false
   return typeof route.laneKey === 'string' && route.laneKey.startsWith('inbox:')
 }

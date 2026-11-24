@@ -575,8 +575,11 @@ function testRoomJoinRoundTrip() {
         method: string
       }[]
       const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
-      const writes = methods.filter((method) => method === 'registerRoute(inbox)' || method.startsWith('runOperation'))
-      expect(writes).deep.equal(['runOperationWithInbox'])
+      // The join's own write, and any other write that could carry a join: an operation, or the inbox's route alone.
+      const writes = methods.filter(
+        (method) => method === 'runJoinWithInbox' || method === 'runOperation' || method === 'registerRoute(inbox)',
+      )
+      expect(writes).deep.equal(['runJoinWithInbox'])
     })
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
     await session!.context().close()
