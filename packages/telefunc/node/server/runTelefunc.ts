@@ -7,7 +7,7 @@ import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
-import { REQUEST_CONTEXT } from './context/requestContext.js'
+import { BODY_READ, REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
@@ -300,7 +300,9 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // at every response's end. So on Deno the response to a `Request` ends once the call's body is over, and from then on
   // nothing is read from the body: Deno's abort at that response's end isn't taken for the client leaving.
   if (held) void requestContext.bodyRead.then(held.unheld)
-  return createHttpResponse(response, held && { over: requestContext.bodyRead, unheld: held.unheld })
+  // A call with no body to read off (a text call) has nothing to hold its response for.
+  const holds = held !== null && requestContext.bodyRead !== BODY_READ
+  return createHttpResponse(response, holds ? { over: requestContext.bodyRead, unheld: held.unheld } : null)
 }
 
 /** On Deno, a `Request`'s `signal` while the response holds it: Deno's `request.signal` says the client left only while

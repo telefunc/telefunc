@@ -1,5 +1,5 @@
 export { createRequestContext }
-export { REQUEST_CONTEXT }
+export { REQUEST_CONTEXT, BODY_READ }
 export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
