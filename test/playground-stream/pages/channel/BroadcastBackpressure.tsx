@@ -264,7 +264,8 @@ function LossyBeforePlain({ show }: { show: Show }) {
       void broadcast.publish('plain')
       for (let n = 11; n <= 20; n++) void broadcast.publish(n, { lossy: true })
     })
-    // The test takes the page offline now.
+    // A channel that never opened has no connection to lose: the test takes the page offline once it opened.
+    await broadcast.opened
     show({ lossyBeforePlain: 'listening' })
     await newestArrived
     show({ lossyBeforePlain: { received, seqsAhead } })
