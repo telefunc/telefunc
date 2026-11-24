@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TelefuncExtensionNamespace } from 'telefunc/__internal'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import type { RoomOperationRequest } from '../server/store/roomOperations.js'
-import { sqliteStorage } from '../test/cloudflareSql.js'
+import { sqliteStorage } from '../../../telefunc/wire-protocol/test/cloudflareSql.js'
 import { RoomAuthority, type OperationWire } from './RoomAuthority.js'
 
 afterEach(() => vi.useRealTimers())
