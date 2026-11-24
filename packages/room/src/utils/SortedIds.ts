@@ -2,6 +2,9 @@ export { SortedIds, compareCodePoints }
 
 import { assert } from './assert.js'
 
+/** The pieces one `concat()` joins, well under the arguments a call takes in any engine. */
+const CONCAT_BATCH = 8192
+
 /** Ids in code point order. An add or a delete is recorded, and the next read merges the recorded ids in at once. */
 class SortedIds {
   private ids: string[]
@@ -29,25 +32,23 @@ class SortedIds {
     for (let at = positionOf(ids, start), id = ids[at]; id !== undefined; id = ids[++at]) yield id
   }
 
+  /** The held ids with the recorded changes merged in: the runs between changes are sliced and joined natively. */
   private merged(): string[] {
     if (this.added.size === 0 && this.deleted.size === 0) return this.ids
-    const ids: string[] = []
+    const pieces: string[][] = []
     let at = 0
-    /** Keeps the held ids from `at` up to `to`. */
-    const keep = (to: number) => {
-      for (; at < to; at++) {
-        const held = this.ids[at]
-        assert(held !== undefined)
-        ids.push(held)
-      }
-    }
     for (const id of [...this.added, ...this.deleted].sort(compareCodePoints)) {
-      keep(positionOf(this.ids, id, at))
+      const to = positionOf(this.ids, id, at)
+      pieces.push(this.ids.slice(at, to))
+      at = to
       // A deleted id is held at `at`.
-      if (this.added.has(id)) ids.push(id)
+      if (this.added.has(id)) pieces.push([id])
       else at++
     }
-    keep(this.ids.length)
+    pieces.push(this.ids.slice(at))
+    let ids: string[] = []
+    // A batch at a time, so no call passes more arguments than an engine takes.
+    for (let i = 0; i < pieces.length; i += CONCAT_BATCH) ids = ids.concat(...pieces.slice(i, i + CONCAT_BATCH))
     this.added.clear()
     this.deleted.clear()
     this.ids = ids

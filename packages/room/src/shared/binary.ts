@@ -43,9 +43,10 @@ function uuidToBytes(uuid: string): Uint8Array {
 /** First 16 bytes → canonical lowercase UUID string. */
 function bytesToUuid(bytes: Uint8Array): string {
   let uuid = ''
-  for (const [i, byte] of bytes.subarray(0, MEMBER_ID_BYTE_LENGTH).entries()) {
+  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) {
     if (i === 4 || i === 6 || i === 8 || i === 10) uuid += '-'
-    const hex = BYTE_TO_HEX[byte]
+    const byte = bytes[i]
+    const hex = byte === undefined ? undefined : BYTE_TO_HEX[byte]
     assert(hex !== undefined)
     uuid += hex
   }
@@ -167,7 +168,9 @@ function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undef
 }
 
 function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
-  const [high, low] = data.subarray(cursor.offset, cursor.offset + 2)
+  // Past the frame's end, a byte is undefined.
+  const high = data[cursor.offset]
+  const low = data[cursor.offset + 1]
   if (high === undefined || low === undefined) return undefined
   const length = (high << 8) | low
   cursor.offset += 2
