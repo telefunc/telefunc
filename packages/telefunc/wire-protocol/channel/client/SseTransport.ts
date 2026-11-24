@@ -633,6 +633,8 @@ class SseTransport implements UpgradeSource {
         head?.blob,
       )
       this.postOutBytes = body.size
+      const reconcile = queued.some(isReconcile)
+      if (reconcile) this.owner.onTransportReconcileSent(this, body.size)
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
       // refresh goes again whatever it was answered: its limit is cumulative.
@@ -643,6 +645,7 @@ class SseTransport implements UpgradeSource {
       if (answer?.tag === 'expected') {
         this.sizePosts(body.size, performance.now() - now)
         this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
+        if (reconcile) this.owner.onTransportAnswered(this)
         return
       }
       // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
@@ -1034,6 +1037,10 @@ function isDataOf(entry: OutboxEntry, ix: number): boolean {
 function isSequenced({ frame }: OutboxEntry): boolean {
   const tag = frame[0]
   return tag !== undefined && isSequencedTag(tag)
+}
+
+function isReconcile({ frame }: OutboxEntry): boolean {
+  return frame[0] === TAG.RECONCILE
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {

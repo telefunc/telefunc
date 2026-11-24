@@ -66,7 +66,8 @@ type TransportEnd = {
 interface TransportOwner {
   /** `startedAt`: when the socket or request that opened started. */
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void
-  /** The server answered the attempt: a WebSocket's open, or the event stream's head before the wire opens. */
+  /** The server answered the attempt (a WebSocket's open, or the event stream's head before the wire opens), or the
+   *  batch POST that carried a later RECONCILE. */
   onTransportAnswered(transport: ClientChannelTransport): void
   onTransportClosed(transport: ClientChannelTransport, end?: TransportEnd): void
   /** A request carrying `frames` was refused with `answer`. Whether the connection is to be established again, so that
@@ -81,7 +82,7 @@ interface TransportOwner {
   /** The wire's upload fell back to batch POSTs; a channel may have opened before that (see `onTransportOpen`). */
   onTransportBatched(transport: ClientChannelTransport): void
   /** An SSE wire's RECONCILE went out with the request that opens it, of `bytes`, before the wire opens (see
-   *  `beatFromReconcile`). */
+   *  `beatFromReconcile`), or a later one in a batch POST of `bytes`. */
   onTransportReconcileSent(transport: ClientChannelTransport, bytes: number): void
   /** The most a batch POST carries, which a 413 taught the connection: `Infinity` before one. */
   readonly ssePostLimit: number
@@ -364,7 +365,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   onTransportAnswered(transport: ClientChannelTransport): void {
-    if (transport === this.transport) this.attemptAnswered()
+    if (transport !== this.transport) return
+    if (this.underWay === null) this.exchange.restartReconcileDeadline()
+    else this.attemptAnswered()
   }
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
@@ -471,6 +474,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportReconcileSent(transport: ClientChannelTransport, bytes: number): void {
     if (this.closed || transport !== this.transport) return
+    if (this.underWay === null) return this.exchange.reconcileCarried(bytes)
     this.allowForBody(bytes)
     this.liveness.beatFromReconcile(transport, this.exchange.sessionId)
   }
