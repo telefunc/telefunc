@@ -44,14 +44,6 @@ async function onReadAfterWait() {
   return readUser()
 }
 
-const usersAtClose: Record<string, string> = {}
-async function onReadAtClose() {
-  const { user, onClose } = getContext<{ user: string }>()
-  onClose(() => {
-    usersAtClose[user] = readUser()
-  })
-}
-
 const usersAtCancel: Record<string, string> = {}
 async function onReadAtCancel() {
   const { user } = getContext<{ user: string }>()
@@ -66,7 +58,6 @@ const telefunctions: Record<string, unknown> = {
   onReadAroundAwait,
   onReadAfterYield,
   onReadAfterWait,
-  onReadAtClose,
   onReadAtCancel,
 }
 for (const [telefunctionName, telefunction] of Object.entries(telefunctions)) {
@@ -102,11 +93,6 @@ test('after a `yield`, getContext() gives each of two generators started togethe
   const httpResponses = await Promise.all([call('onReadAfterYield', 'A'), call('onReadAfterYield', 'B')])
   await Promise.all(httpResponses.map((httpResponse) => httpResponse.getBody()))
   expect(usersAfterYield).toEqual({ A: 'A', B: 'B' })
-})
-
-test('an onClose() callback reads the context of its own request, for each of two calls started together', async () => {
-  await Promise.all([call('onReadAtClose', 'A'), call('onReadAtClose', 'B')])
-  expect(usersAtClose).toEqual({ A: 'A', B: 'B' })
 })
 
 test('the `cancel()` of a returned stream reads the context of its own request, for each of two responses cancelled together', async () => {

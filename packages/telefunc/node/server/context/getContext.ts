@@ -27,7 +27,7 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
 
   const reqCtx = raw[REQUEST_CONTEXT] as RequestContext | undefined
   const builtins: TelefuncBuiltins = reqCtx
-    ? { onClose: (cb) => reqCtx.onClose(() => restoreContext(raw, cb)), signal: reqCtx.signal }
+    ? { onClose: (cb) => reqCtx.onClose(cb), signal: reqCtx.signal }
     : // SSR — no request context available
       { onClose: () => {}, signal: new AbortController().signal }
 
