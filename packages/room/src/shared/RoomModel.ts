@@ -1,5 +1,5 @@
 export { RoomModel, departureCause }
-export type { MemberEntry, MembershipEvent, ResolvedSender, RosterRead, RoomModelOwner, ServerModelOwner }
+export type { MemberEntry, MembershipEvent, ResolvedSender, SenderClaim, RosterRead, RoomModelOwner, ServerModelOwner }
 
 import { assert } from '../utils/assert.js'
 import { Slice } from './Slice.js'
@@ -48,6 +48,9 @@ type MemberEntry = {
 
 /** A message's sender: the member's entry, or the snapshot of a sender this model doesn't have. */
 type ResolvedSender = { entry: MemberEntry } | { sender: Sender }
+/** Who a message says sent it, and the sender's meta where it was stamped: a DM's `fromMeta` is null where the room
+ *  sent it. */
+type SenderClaim = { from: string } & Partial<Omit<SenderStamp, 'fromMeta'>> & { fromMeta?: ParticipantMeta | null }
 
 const NO_FIELDS: Readonly<Record<string, unknown>> = Object.freeze({})
 /** A member's leave when its room closed, and how a room closes by default. */
@@ -407,15 +410,9 @@ class RoomModel {
 
   /** A message's sender as of its send: a stamp newer than the member's meta here applies first, as the meta
    *  update it is. Unstamped, the sender is one this model was sent, maybe in a roster still applying. */
-  resolveSender({
-    from,
-    fromMeta,
-    fromMetaSeq,
-    fromIdentity,
-    fromDisconnected,
-  }: { from: string } & Partial<SenderStamp>): ResolvedSender {
+  resolveSender({ from, fromMeta, fromMetaSeq, fromIdentity, fromDisconnected }: SenderClaim): ResolvedSender {
     const entry = this.members.get(from)
-    if (fromMeta !== undefined && fromMetaSeq !== undefined) {
+    if (fromMeta !== undefined && fromMeta !== null && fromMetaSeq !== undefined) {
       if (!entry) return { sender: senderSnapshot(from, fromMeta, fromIdentity ?? null) }
       if (entry.meta.newerStamp(fromMetaSeq)) {
         this.applyParticipantMeta(from, wholeUpdate(fromMetaSeq, fromMeta, fromDisconnected === true))

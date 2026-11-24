@@ -4,7 +4,14 @@ import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/c
 import { ClientRoom } from './room.js'
 import { LoneMember } from './LoneMember.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
-import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../shared/protocol.js'
+import type {
+  ParticipantStubMetadata,
+  ParticipantStubNotice,
+  RemoteParticipantMetadata,
+  RoomDataPublish,
+  RoomSnapshotMetadata,
+} from '../shared/protocol.js'
+import type { ClientRoomEvent } from './ClientRoomHandle.js'
 import { assert } from '../utils/assert.js'
 import type { ClientBroadcast } from 'telefunc/__internal'
 import {
@@ -18,12 +25,12 @@ type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, Part
 type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemoteParticipantMetadata>
 type ChannelMetadata = { channelId: string; roomId: string; maxFrameBytes?: number }
 
-const roomReviver = channelReviver<RoomReviverContract>(
+const roomReviver = channelReviver<RoomReviverContract, ClientRoomEvent, RoomDataPublish>(
   SERIALIZER_PREFIX_ROOM,
   (end, metadata) => new ClientRoom({ end, snapshot: metadata }),
 )
 
-const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
+const roomParticipantReviver = channelReviver<RoomParticipantReviverContract, ParticipantStubNotice, never>(
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   (end, metadata) => new LoneMember({ end, metadata }).participant,
 )
@@ -49,14 +56,14 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
 const roomTypes = [roomReviver, roomParticipantReviver, roomRemoteReviver]
 
 /** The reviver of a value that holds its own Broadcast channel to the server, which its close and abort end. */
-function channelReviver<Contract extends TypeContract<never, unknown, ChannelMetadata>>(
+function channelReviver<Contract extends TypeContract<never, unknown, ChannelMetadata>, Receive, Publish>(
   prefix: string,
-  create: (end: ClientBroadcast, metadata: Contract['metadata']) => Contract['result'],
+  create: (end: ClientBroadcast<Receive, Publish>, metadata: Contract['metadata']) => Contract['result'],
 ): ReviverType<Contract, ClientReviverContext> {
   return {
     prefix,
     revive(metadata, context) {
-      const end = context.createBroadcastChannel({
+      const end = context.createBroadcastChannel<Receive, Publish>({
         channelId: metadata.channelId,
         key: metadata.roomId,
         maxFrameBytes: metadata.maxFrameBytes,

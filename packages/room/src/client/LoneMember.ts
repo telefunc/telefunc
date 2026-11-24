@@ -3,7 +3,6 @@ export { LoneMember }
 import { assert } from '../utils/assert.js'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import {
-  hasRoomTag,
   inboxMessageFromWire,
   leaveCauseFromWire,
   type MemberRequest,
@@ -16,7 +15,6 @@ import { RoomState, type RoomStateOwner } from '../shared/RoomState.js'
 import { RoomRemotes } from '../shared/RoomView.js'
 import {
   ClientParticipant,
-  acceptedMeta,
   reportClientCallbackError,
   request,
   sendDmReply,
@@ -26,13 +24,15 @@ import { RoomMirror } from './RoomMirror.js'
 import { roomsOf } from './page.js'
 import type { Sender } from '../types.js'
 
-type LoneMemberOptions = { end: ClientBroadcast; metadata: ParticipantStubMetadata }
+/** A participant stub's channel: it relays the stub's notices, and takes no text publish (one goes as a request). */
+type LoneMemberChannel = ClientBroadcast<ParticipantStubNotice, never>
+type LoneMemberOptions = { end: LoneMemberChannel; metadata: ParticipantStubMetadata }
 
 /** A server's `LocalParticipant` that a telefunction returned alone: the page's participant, on a channel of its own
  *  to the participant's stub, and the room it lists its watchers by. */
 class LoneMember implements PageLink {
   readonly participant: ClientParticipant
-  private readonly end: ClientBroadcast
+  private readonly end: LoneMemberChannel
   private readonly room: LoneRoom
 
   constructor({ end, metadata }: LoneMemberOptions) {
@@ -56,9 +56,9 @@ class LoneMember implements PageLink {
 
   /** Its stub takes a text publish as a request. */
   async publishText(_from: string, data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
-    const req: ParticipantStubRequest = { __r: 'req-publish', data }
+    const req: Extract<ParticipantStubRequest, { __r: 'req-publish' }> = { __r: 'req-publish', data }
     if (retain) req.retain = true
-    return publishAck(await request(this.end, req))
+    return await request(this.end, req)
   }
 
   async publishFrame(framed: Uint8Array, stream: string, lossy: boolean): Promise<ChannelPublishAck> {
@@ -68,9 +68,12 @@ class LoneMember implements PageLink {
   /** Its own meta, as the room accepted it, lands here as its stub's `p-meta` notices of it do; its leave ends it and
    *  its channel. */
   async request(_from: string, req: MemberRequest): Promise<unknown> {
+    if (req.__r === 'req-set-meta' || req.__r === 'req-update-meta') {
+      const accepted = await request(this.end, req)
+      this.participant._acceptMeta(accepted)
+      return accepted
+    }
     const value = await request(this.end, req)
-    const accepted = acceptedMeta(req, value)
-    if (accepted) this.participant._acceptMeta(accepted)
     if (req.__r === 'req-leave') {
       this.participant._onLeft({ type: 'left' })
       void this.end.close().catch(() => {})
@@ -91,9 +94,7 @@ class LoneMember implements PageLink {
     for (const room of roomsOf(this.room.id)) room.state.applyPrivate(field, from, data)
   }
 
-  private onNotice(notice: unknown): void {
-    assert(hasRoomTag(notice))
-    const msg = notice as ParticipantStubNotice
+  private onNotice(msg: ParticipantStubNotice): void {
     const { participant } = this
     switch (msg.__r) {
       case 'roster':

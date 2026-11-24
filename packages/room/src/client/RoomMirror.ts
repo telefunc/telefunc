@@ -11,7 +11,7 @@ import {
   type RoomSnapshotMetadata,
   type SenderStamp,
 } from '../shared/protocol.js'
-import { RoomModel, type RoomModelOwner } from '../shared/RoomModel.js'
+import { RoomModel, type RoomModelOwner, type SenderClaim } from '../shared/RoomModel.js'
 import { RosterIntake } from './RosterIntake.js'
 import { heldConnection } from './page.js'
 import type { LeaveCause, Sender } from '../types.js'
@@ -72,7 +72,7 @@ class RoomMirror implements RoomModelOwner {
 
   /** The meta and identity a message's sender had at its send, a newer meta it was stamped with applied first (see
    *  `RoomModel.resolveSender`). */
-  senderOf(stamp: { from: string } & Partial<SenderStamp>): Pick<Sender, 'meta' | 'identity'> {
+  senderOf(stamp: SenderClaim): Pick<Sender, 'meta' | 'identity'> {
     const resolved = this.model.resolveSender(stamp)
     if (!('entry' in resolved)) return resolved.sender
     return { meta: resolved.entry.meta.object, identity: resolved.entry.identity }

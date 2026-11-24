@@ -1,5 +1,5 @@
 export { ClientRoomHandle }
-export type { ClientRoomHandleOptions }
+export type { ClientRoomEvent, ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
@@ -7,7 +7,6 @@ import { isObject } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
-  hasRoomTag,
   inboxMessageFromWire,
   leaveCauseFromWire,
   type InboxMessage,
@@ -30,7 +29,6 @@ import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
 import {
   ClientParticipant,
-  acceptedMeta,
   reportClientCallbackError,
   request,
   sendDmReply,
@@ -47,7 +45,7 @@ type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoi
 /** What a page's room uses of its Broadcast channel. */
 type RoomChannel = AckedChannel &
   Pick<
-    ClientBroadcast,
+    ClientBroadcast<ClientRoomEvent, RoomDataPublish>,
     | '_sendReply'
     | '_publishUnreported'
     | '_publishBinaryUnreported'
@@ -131,10 +129,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const reqId = this.joins.start()
     try {
-      const joined = await request(this.end, { __r: 'req-join', reqId, meta, selfDelivery })
-      assert(isObject(joined), 'A join was answered with no member')
-      const { id, joinedAt } = joined
-      assert(typeof id === 'string' && typeof joinedAt === 'number', 'A join was answered with no member')
+      const { id, joinedAt } = await request(this.end, { __r: 'req-join', reqId, meta, selfDelivery })
       const participant = new ClientParticipant({
         link: this,
         // A page's join carries no identity: it's server-assigned (see JoinOptions.identity).
@@ -159,9 +154,12 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
    *  participant its accepted meta, as each member meta it applies, and its leave ends the participant (the relayed one
    *  is absorbed). */
   async request(from: string, req: MemberRequest): Promise<unknown> {
+    if (req.__r === 'req-set-meta' || req.__r === 'req-update-meta') {
+      const accepted = await request(this.end, { ...req, id: from })
+      this.mirror.model.applyParticipantMeta(from, accepted)
+      return accepted
+    }
     const value = await request(this.end, { ...req, id: from })
-    const accepted = acceptedMeta(req, value)
-    if (accepted) this.mirror.model.applyParticipantMeta(from, accepted)
     if (req.__r === 'req-leave') this.mirror.model.applyLeave(from, { type: 'left' })
     return value
   }
@@ -262,9 +260,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
     sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(msg))
   }
 
-  private onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
-    assert(hasRoomTag(envelope))
-    const event = envelope as ClientRoomEvent
+  private onEnvelope(event: ClientRoomEvent, rawInfo: ChannelPublishInfo): void {
     if (this.joins.hold(event, rawInfo)) return
     switch (event.__r) {
       case 'joined':
@@ -298,7 +294,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
         const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
         if (event.from !== '') {
-          const sender = this.mirror.senderOf(event as RoomDmEnvelope & Partial<SenderStamp>)
+          const sender = this.mirror.senderOf(event)
           msg.fromMeta = sender.meta
           msg.fromIdentity = sender.identity
         }
@@ -326,7 +322,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
 
 /** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that
  *  member. */
-type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
+type PendingJoin = { id: string | null; held: Array<{ envelope: ClientRoomEvent; rawInfo: ChannelPublishInfo }> }
 
 /** The joins awaiting their ack, by request, and by the member `joined` named. The server relays to a member from its
  *  admission, before the ack registers it on the page, so the events naming it wait for its ack. */

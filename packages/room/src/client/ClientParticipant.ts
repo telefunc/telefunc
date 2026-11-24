@@ -1,8 +1,8 @@
-export { ClientParticipant, acceptedMeta, reportClientCallbackError, request, sendDmReply }
+export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
 export type { AckedChannel, PageLink }
 
 import { getOrCreate, isObject } from 'telefunc/__internal'
-import type { ClientBroadcast } from 'telefunc/__internal'
+import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import type { TrackKey } from '../shared/binary.js'
 import type {
   RoomResult,
@@ -14,7 +14,7 @@ import type {
   TrackWatchState,
   RoomStubRequest,
 } from '../shared/protocol.js'
-import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../shared/errors.js'
+import { CLIENT_ROOM_BUG_MESSAGE, publishAck, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
 import type { RoomRemotes } from '../shared/RoomView.js'
 import { isRecord } from '../shared/arguments.js'
@@ -32,19 +32,53 @@ function sendDmReply(end: Pick<ClientBroadcast, '_sendReply'>, ackId: string, re
   )
 }
 
-/** An acked request on a room's or a participant's channel, as its value or the error it failed with. */
+/** A request a page sends on a room's or a participant's channel. */
+type PageRequest = RoomStubRequest | ParticipantStubRequest
+
 /** A channel a page's requests go out on, each answered. */
 type AckedChannel = {
-  send(req: RoomStubRequest | ParticipantStubRequest, opts: { ack: true }): Promise<unknown>
+  send(req: PageRequest, opts: { ack: true }): Promise<unknown>
 }
 
-async function request(end: AckedChannel, req: RoomStubRequest | ParticipantStubRequest): Promise<unknown> {
-  return roomResultValue(end.send(req, { ack: true }))
+/** What the server answers each kind of request with: a join's member, a meta write's update, a publish's place. */
+type RequestAnswers = {
+  'req-join': { id: string; joinedAt: number }
+  'req-set-meta': MemberMetaUpdate
+  'req-update-meta': MemberMetaUpdate
+  'req-publish': ChannelPublishAck
+  'req-leave': unknown
+  'req-dm': unknown
+  'req-private': unknown
+  'dm-reply': unknown
 }
 
-/** The meta the room accepted, which a meta write resolves to. */
-function acceptedMeta(req: MemberRequest, value: unknown): MemberMetaUpdate | null {
-  return req.__r === 'req-set-meta' || req.__r === 'req-update-meta' ? memberMetaUpdate(value) : null
+/** Reads each kind's answer as the channel hands it over, which no type carries across the wire. */
+const ANSWERS: { [Kind in PageRequest['__r']]: (value: unknown) => RequestAnswers[Kind] } = {
+  'req-join': joinedMember,
+  'req-set-meta': memberMetaUpdate,
+  'req-update-meta': memberMetaUpdate,
+  'req-publish': publishAck,
+  'req-leave': (value) => value,
+  'req-dm': (value) => value,
+  'req-private': (value) => value,
+  'dm-reply': (value) => value,
+}
+
+/** An acked request, as the answer its kind gets, or the error it failed with. */
+async function request<Kind extends PageRequest['__r']>(
+  end: AckedChannel,
+  req: PageRequest & { __r: Kind },
+): Promise<RequestAnswers[Kind]> {
+  const answer = ANSWERS[req.__r]
+  return answer(await roomResultValue(end.send(req, { ack: true })))
+}
+
+/** A join's answer: the member it made. */
+function joinedMember(value: unknown): { id: string; joinedAt: number } {
+  assert(isObject(value), 'A join was answered with no member')
+  const { id, joinedAt } = value
+  assert(typeof id === 'string' && typeof joinedAt === 'number', 'A join was answered with no member')
+  return { id, joinedAt }
 }
 
 /** A meta write's answer: the member's meta at the write's seq, whole or as the write merged it
