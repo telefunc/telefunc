@@ -401,6 +401,23 @@ describe('bytes given to `send()` and `publish()`', () => {
     unsubscribe()
   })
 
+  test('a `Blob` or a `File`, alone or nested, is a usage error naming `sendBinary()` or `publishBinary()`, and nothing is published', async () => {
+    const channel = new Channel()
+    expect(() => channel.send(new Blob(['x']))).toThrow(
+      'turns this `Blob` into a plain object. Bytes go through `sendBinary()`',
+    )
+    expect(() => channel.send({ f: new File(['x'], 'a.txt') }, { ack: true })).toThrow('turns the `File` at `f` into')
+    const key = `room:blob:${crypto.randomUUID()}`
+    const received: unknown[] = []
+    const unsubscribe = Broadcast.subscribe(key, (data) => received.push(data))
+    const room = new BroadcastChannel({ key })
+    expect(() => room.publish({ a: [new Blob(['x'])] })).toThrow('the `Blob` at `a[0]`')
+    expect(() => Broadcast.publish(key, new File(['x'], 'a.txt'))).toThrow('Bytes go through `publishBinary()`')
+    await Broadcast.publish(key, 'R')
+    expect(received).toEqual(['R'])
+    unsubscribe()
+  })
+
   test('are a usage error naming `publishBinary()`, and nothing is published', async () => {
     const key = `room:bytes:${crypto.randomUUID()}`
     const received: unknown[] = []

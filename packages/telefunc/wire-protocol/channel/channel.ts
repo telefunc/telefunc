@@ -77,7 +77,7 @@ function stringifyValue(value: unknown, by: ValueBy): string {
   return stringify(value, {
     replacer(key, slot) {
       if (typeof slot !== 'object' || slot === null) return undefined
-      if (!ArrayBuffer.isView(slot) && !isBuffer(slot)) return undefined
+      if (!ArrayBuffer.isView(slot) && !isBytes(slot)) return undefined
       let name = toTag.call(slot).slice('[object '.length, -1)
       let at: string | null = null
       // The refusal is what matters: naming the bytes, or where they are, may fail on an app's object.
@@ -119,13 +119,13 @@ function serializeBoundedAbortReason(value: unknown, limit: AbortReasonLimit): A
 }
 
 const toTag = Object.prototype.toString
-/** Whether `value` is an `ArrayBuffer` or a `SharedArrayBuffer`, of any realm, by its tag. A plain object or an array
- *  of this realm is none, which one prototype read tells. */
-function isBuffer(value: object): boolean {
+const BYTES_TAGS = new Set(['[object ArrayBuffer]', '[object SharedArrayBuffer]', '[object Blob]', '[object File]'])
+/** Whether `value` is an `ArrayBuffer`, a `SharedArrayBuffer`, a `Blob` or a `File`, of any realm, by its tag. A plain
+ *  object or an array of this realm is none, which one prototype read tells. */
+function isBytes(value: object): boolean {
   const proto = Object.getPrototypeOf(value)
   if (proto === Object.prototype || proto === Array.prototype) return false
-  const tag = toTag.call(value)
-  return tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]'
+  return BYTES_TAGS.has(toTag.call(value))
 }
 
 /** Where `holder[key]` is in `value`, as `a.b[0]`; searched only for a value refused. It reads data properties only, so

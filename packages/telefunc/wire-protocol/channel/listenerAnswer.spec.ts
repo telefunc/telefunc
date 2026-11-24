@@ -47,6 +47,7 @@ const ANSWERS = {
     answer: () => ({ frame: new Uint8Array([1, 2, 255]) }),
     which: 'the `Uint8Array` at `frame`',
   },
+  'a Blob': { answer: () => new Blob(['x']), which: 'this `Blob`' },
 }
 /** What the end that answers reports, and what the sender's acknowledged send rejects with. */
 const ENDS = {

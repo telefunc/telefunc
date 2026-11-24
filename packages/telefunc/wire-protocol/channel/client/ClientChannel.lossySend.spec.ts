@@ -252,6 +252,19 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
     expect(held(channel)).toEqual(['R'])
   })
 
+  test('a `Blob` or a `File`, alone or nested, is a usage error naming `sendBinary()`', () => {
+    const page = new ClientChannel<unknown, never>({
+      channelId: crypto.randomUUID(),
+      connection: {
+        transports: [CHANNEL_TRANSPORT.SSE],
+        telefuncUrl: 'http://test.local/_telefunc',
+        connectionKey: crypto.randomUUID(),
+      },
+    })
+    expect(() => page.send(new File(['x'], 'a.txt'))).toThrow('turns this `File` into a plain object. Bytes go through')
+    expect(() => page.send({ b: [new Blob(['x'])] }, { lossy: true })).toThrow('the `Blob` at `b[0]`')
+  })
+
   test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', async () => {
     const channel = await newChannel()
     const page = channel as unknown as ClientChannelType
