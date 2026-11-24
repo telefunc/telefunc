@@ -59,7 +59,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
   /** The attempt's socket, not open yet. */
   private connecting: Connecting | null = null
-  /** The live wire's, set with it by `setupHandlers`: none before the first. */
+  /** The live wire's, set with it by `setupHandlers`: none before the first, nor once disposed. */
   private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
   /** The server's, once a RECONCILED said it. */
@@ -397,6 +397,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
       } catch {}
     }
     this.closeAbandonedTransport()
+    // What its sender held unsent goes too, though a channel the app keeps still holds this transport.
+    this.pieces = null
     this.settleDrained()
   }
 }
