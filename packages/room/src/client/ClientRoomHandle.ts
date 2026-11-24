@@ -29,7 +29,7 @@ import {
   ClientParticipant,
   reportClientCallbackError,
   request,
-  sendDmReply,
+  deliverDm,
   type PageLink,
   type RoomChannel,
 } from './ClientParticipant.js'
@@ -233,14 +233,6 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   }
 
   /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
-  private deliverDm(participant: ClientParticipant, msg: InboxMessage): void {
-    if (msg.ackId === undefined) {
-      participant._deliverMessage(msg)
-      return
-    }
-    sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(msg))
-  }
-
   private onEnvelope(event: ClientRoomEvent, rawInfo: ChannelPublishInfo): void {
     if (this.joins.hold(event, rawInfo)) return
     switch (event.__r) {
@@ -279,7 +271,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
           msg.fromMeta = sender.meta
           msg.fromIdentity = sender.identity
         }
-        this.deliverDm(local, msg)
+        deliverDm(this.end, local, msg)
         return
       }
     }

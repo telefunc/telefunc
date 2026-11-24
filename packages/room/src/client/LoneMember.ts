@@ -16,7 +16,7 @@ import {
   ClientParticipant,
   reportClientCallbackError,
   request,
-  sendDmReply,
+  deliverDm,
   type PageLink,
   type RoomChannel,
 } from './ClientParticipant.js'
@@ -114,8 +114,7 @@ class LoneMember implements PageLink {
       case 'demand-state':
         return participant._applyDemandState(msg.tracks)
       case 'dm':
-        if (msg.ackId === undefined) return participant._deliverMessage(inboxMessageFromWire(msg))
-        return sendDmReply(this.end, msg.ackId, participant._deliverMessageAck(inboxMessageFromWire(msg)))
+        return deliverDm(this.end, participant, inboxMessageFromWire(msg))
       case 'left':
         return participant._onLeft(leaveCauseFromWire(msg))
     }

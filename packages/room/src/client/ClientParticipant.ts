@@ -1,4 +1,4 @@
-export { ClientParticipant, reportClientCallbackError, request, sendDmReply }
+export { ClientParticipant, reportClientCallbackError, request, deliverDm }
 export type { AckedChannel, RoomChannel, PageLink, PageRequest }
 
 import { getOrCreate } from 'telefunc/__internal'
@@ -12,6 +12,7 @@ import type {
   TrackWatch,
   TrackWatchState,
   RoomStubRequest,
+  InboxMessage,
 } from '../shared/protocol.js'
 import { CLIENT_ROOM_BUG_MESSAGE, publishAck, roomResultValue } from '../shared/errors.js'
 import { ParticipantBase, type MemberLink } from '../shared/ParticipantBase.js'
@@ -21,17 +22,20 @@ import { heldConnectionChanged, holdMember, holdRoomOpen, letGoOfMember, release
 import { withChange } from '../utils/sets.js'
 import type { LeaveCause, LocalParticipant, RemoteParticipant, Sender } from '../types.js'
 
-/** A reply that can't be sent is reported, and the sender gets an error instead. */
-function sendDmReply(end: Pick<ClientBroadcast, '_sendReply'>, ackId: string, reply: Promise<RoomResult>): void {
+/** A DM to `participant`, delivered; one whose sender awaits its answer is answered on `end`. A reply that can't be
+ *  sent is reported, and the sender gets an error instead. */
+function deliverDm(end: Pick<ClientBroadcast, '_sendReply'>, participant: ClientParticipant, msg: InboxMessage): void {
+  const { ackId } = msg
+  if (ackId === undefined) return participant._deliverMessage(msg)
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
   end._sendReply(
-    reply.then(declare),
+    participant._deliverMessageAck(msg).then(declare),
     declare({ ok: false, kind: 'error', code: 'INTERNAL', message: CLIENT_ROOM_BUG_MESSAGE }),
   )
 }
 
-/** A request a page sends on a room's or a participant's channel and awaits the answer of. A DM's reply is sent with
- *  `sendDmReply()`, and nothing answers it. */
+/** A request a page sends on a room's or a participant's channel and awaits the answer of. A DM's reply is sent by
+ *  `deliverDm()`, and nothing answers it. */
 type PageRequest = Exclude<RoomStubRequest | ParticipantStubRequest, { __r: 'dm-reply' }>
 
 /** A channel a page's requests go out on, each answered. */
