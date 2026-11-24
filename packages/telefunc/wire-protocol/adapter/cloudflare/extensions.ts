@@ -34,6 +34,7 @@ import type {
 import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import { currentCloudflareSession } from './session.js'
 import { DEFAULT_BROADCAST_BUCKETS } from './routing.js'
+import type { DurableStorage } from './sqlStorage.js'
 
 // The types name no Cloudflare global, so that telefunc/__internal type-checks without @cloudflare/workers-types.
 
@@ -105,10 +106,13 @@ type CloudflareExtensionDurableObject = {
 
 type CloudflareExtension = {
   name: string
-  /** Builds the extension's part of a Durable Object, once, on its first `telefuncDurableObjectCall()`; `ctx` and
-   *  `env` are the Durable Object's `DurableObjectState` and `Cloudflare.Env`. Its `alarm()` gets the Durable Object's
-   *  alarms. */
-  durableObject?: (ctx: never, env: never, kit: CloudflareExtensionKit) => CloudflareExtensionDurableObject
+  /** Builds the extension's part of a Durable Object, once, on its first `telefuncDurableObjectCall()`; `ctx` holds the
+   *  Durable Object's storage, and `env` is its `Cloudflare.Env`. Its `alarm()` gets the Durable Object's alarms. */
+  durableObject?: (
+    ctx: { storage: DurableStorage },
+    env: never,
+    kit: CloudflareExtensionKit,
+  ) => CloudflareExtensionDurableObject
   /** The backend planes the Cloudflare backend serves for the extension; `serveCloudflarePlane()` makes each. */
   planes?: readonly CloudflarePlane[]
 }

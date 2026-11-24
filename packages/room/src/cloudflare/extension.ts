@@ -1,5 +1,3 @@
-/// <reference types="@cloudflare/workers-types" />
-
 // Room on Cloudflare: a room authority, and each region's room directory, are Room's parts of the Telefunc Durable
 // Object, its frames reach session Durable Objects through Broadcast's regions, and Room's storage driver is
 // `CloudflareRoomDriver`.
@@ -14,7 +12,7 @@ import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
 registerCloudflareExtension({
   name: ROOM_CLOUDFLARE_EXTENSION,
-  durableObject: (ctx: DurableObjectState, _env, kit) => {
+  durableObject: (ctx, _env, kit) => {
     const authority = new RoomAuthority(ctx, kit)
     const methods = Object.fromEntries(
       ROOM_AUTHORITY_METHODS.map((method) => [method, authority[method].bind(authority)]),
@@ -26,7 +24,7 @@ registerCloudflareExtension({
 
 registerCloudflareExtension({
   name: ROOM_DIRECTORY_CLOUDFLARE_EXTENSION,
-  durableObject: (ctx: DurableObjectState) => {
+  durableObject: (ctx) => {
     const directory = new RegionDirectory(ctx)
     return {
       methods: Object.fromEntries(

@@ -257,7 +257,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       )
       const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
       const getNamespace = () => telefuncNamespace(this.env)
-      const durableObject = extension.durableObject(this.ctx as never, this.env as never, { regions, getNamespace })
+      const durableObject = extension.durableObject(this.ctx, this.env as never, { regions, getNamespace })
       this.durableObjects.set(name, durableObject)
       return durableObject
     }
