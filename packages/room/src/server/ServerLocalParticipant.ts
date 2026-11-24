@@ -19,6 +19,7 @@ import type { RoomDemand } from './lanes/RoomDemand.js'
 import { reportRoomError } from './reportRoomError.js'
 import type { RemoteParticipant, Sender } from '../types.js'
 import { RoomHandle } from './RoomHandle.js'
+import type { RoomRemotes } from '../shared/RoomView.js'
 assertIsNotBrowser()
 
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
@@ -59,16 +60,8 @@ class ServerLocalParticipant extends ParticipantBase {
     return this.incomingDemand.watchesOf(this.id)
   }
 
-  protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
-    return this.room.remotes.shownOf(ids)
-  }
-
-  protected get _rosterVersion(): number {
-    return this.room.remotes.state.model.version
-  }
-
-  protected _followRoom(onChange: () => void): () => void {
-    return this.room.state.onChange(onChange, undefined, 'app')
+  protected get _remotes(): RoomRemotes {
+    return this.room.remotes
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {

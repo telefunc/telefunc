@@ -28,6 +28,7 @@ import {
   senderSnapshot,
 } from './arguments.js'
 import { MemberMeta, type MetaRewinds, type MetaWrite } from './MemberMeta.js'
+import type { RoomRemotes } from './RoomView.js'
 import { DEFAULT_TRACK, encodeBinaryFrame, encodeMessageFrame, publicTrack, trackKey, type TrackKey } from './binary.js'
 import type {
   MemberMetaUpdate,
@@ -370,7 +371,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   /** Reads again the entries of the tracks that may have changed, and only those: every one where its room's roster
    *  changed since. */
   private refreshDemand(): void {
-    const rosterVersion = this._rosterVersion
+    const rosterVersion = this._remotes.state.model.version
     if (rosterVersion !== this.demandRosterVersion) this.allTracksStale = true
     this.demandRosterVersion = rosterVersion
     const watches = this.watchesNow
@@ -451,7 +452,7 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
 
   /** The participants `watch` names as its room lists them, and how many receive the track. */
   private watchersIn({ watchers, pages }: TrackWatch): TracksWatchers {
-    return { watchers: this._shownParticipants(watchers), watcherCount: watchers.size + pages.size }
+    return { watchers: this._remotes.shownOf(watchers), watcherCount: watchers.size + pages.size }
   }
 
   /** @internal Who receives each of its tracks, as the room told it. */
@@ -461,20 +462,16 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
   private get watchesNow(): ReadonlyMap<TrackKey, TrackWatch> {
     return this._left ? NO_WATCHES : this._watches
   }
-  /** The participants of `ids` as its room lists them now, in its order: none that left, is hidden, or whose join this
-   *  side hasn't seen yet. */
-  protected abstract _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[]
-  /** The version of the roster `_shownParticipants` reads: the same while it shows the same participants. */
-  protected abstract get _rosterVersion(): number
-  /** Calls `onChange` at each change of the room it lists participants by; returns what stops it. */
-  protected abstract _followRoom(onChange: () => void): () => void
+  /** The participants of the room it lists its watchers by, as this side holds them: it shows them in the room's
+   *  order, reads them again when the room's model changes version, and follows the room's changes. */
+  protected abstract get _remotes(): RoomRemotes
 
   onChange(callback: () => void, options?: ListenerOptions): () => void {
     if (options?.signal?.aborted) return makeDisposer()
     if (!this.changeListeners?.size) this.seen = this.shown()
     if (this.changeListeners === null) {
       this.changeListeners = new Listeners()
-      ;(this.listenerCleanups ??= new Set()).add(this._followRoom(() => this._changed()))
+      ;(this.listenerCleanups ??= new Set()).add(this._remotes.state.onChange(() => this._changed(), undefined, 'app'))
     }
     return this.register(this.changeListeners, callback, options)
   }

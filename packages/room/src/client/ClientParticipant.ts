@@ -201,16 +201,8 @@ class ClientParticipant extends ParticipantBase<PageLink> {
     return this.link.resolveSender(id)
   }
 
-  protected _shownParticipants(ids: ReadonlySet<string>): RemoteParticipant[] {
-    return this.link.remotes.shownOf(ids)
-  }
-
-  protected get _rosterVersion(): number {
-    return this.link.remotes.state.model.version
-  }
-
-  protected _followRoom(onChange: () => void): () => void {
-    return this.link.remotes.state.onChange(onChange, undefined, 'app')
+  protected get _remotes(): RoomRemotes {
+    return this.link.remotes
   }
 
   protected _deliverPrivate(field: string, from: string, data: unknown): void {
