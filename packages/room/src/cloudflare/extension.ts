@@ -32,6 +32,7 @@ registerCloudflareExtension({
       methods: Object.fromEntries(
         REGION_DIRECTORY_METHODS.map((method) => [method, directory[method].bind(directory)]),
       ),
+      alarm: () => directory.alarm(),
     }
   },
 })
