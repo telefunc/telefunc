@@ -5,6 +5,7 @@ export type {
   BroadcastForwardRequest,
   BroadcastHoldRequest,
   BroadcastLeaseRequest,
+  BroadcastNamespace,
   BroadcastPublishRequest,
   BroadcastReleaseRequest,
   MemberPlacement,

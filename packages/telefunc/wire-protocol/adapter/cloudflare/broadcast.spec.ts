@@ -13,10 +13,12 @@ import type {
   BroadcastCalls,
   BroadcastHoldRequest,
   BroadcastLeaseRequest,
+  BroadcastNamespace,
   BroadcastReleaseRequest,
+  TelefuncBroadcastStub,
 } from './broadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
-import type { TelefuncDurableObjectNamespace } from './namespace.js'
+import type { TelefuncExtensionNamespace } from './extensions.js'
 import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
@@ -36,13 +38,11 @@ onBug((bug) => bugs.push(bug))
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
 function createCloudflareRequest({ colo, continent }: { colo?: string; continent?: string } = {}): CloudflareRequest {
-  const request = new Request('https://telefunc.test') as CloudflareRequest
-  request.cf = { colo, continent }
-  return request
+  return Object.assign(new Request('https://telefunc.test'), { cf: { colo, continent } })
 }
 
 function createAuthorityState() {
-  return new CloudflareBroadcastAuthorityState({ storage: sqliteStorage().storage } as DurableObjectState)
+  return new CloudflareBroadcastAuthorityState({ storage: sqliteStorage().storage })
 }
 
 /** A member Durable Object's call about its presence at a key's authority. */
@@ -52,13 +52,14 @@ type PresenceCall =
   | ({ op: 'renew' } & BroadcastLeaseRequest)
   | ({ op: 'release' } & BroadcastReleaseRequest)
 
-/** The key's authority, as `call` reaches it. */
-function applyPresence(authority: CloudflareBroadcastAuthorityState, call: PresenceCall): unknown {
-  if (call.op === 'grant') return authority.grant(call.member)
-  if (call.op === 'hold') return authority.hold(call)
-  if (call.op === 'renew') return authority.renew(call)
-  return authority.release(call)
-}
+/** What a presence call does at the key's authority, once it reaches it. */
+type ApplyPresence<Answer> = (authority: CloudflareBroadcastAuthorityState) => Promise<Answer>
+
+/** A handler of the stub method `Method`, on the Durable Object named `id.name`. */
+type StubHandler<Method extends keyof TelefuncBroadcastStub> = (
+  id: { name: string },
+  ...args: Parameters<TelefuncBroadcastStub[Method]>
+) => ReturnType<TelefuncBroadcastStub[Method]>
 
 /** `member`'s presence on the text route of `key`, recorded at `authority` in `bucket`. */
 async function recordPresence(
@@ -77,47 +78,44 @@ async function flushMicrotasks(turns = 6): Promise<void> {
   }
 }
 
+/** The Telefunc Durable Object binding, by DO name: each Broadcast call goes to the handler `overrides` gives it, and
+ *  is answered at once otherwise. A presence call's handler gets what the call does at the key's authority. */
 function createBasicBinding(
   overrides?: Partial<{
-    onPublish: (id: { name: string }, request: any) => any
-    onForward: (id: { name: string }, request: any) => any
-    onDeliver: (id: { name: string }, request: any) => any
-    onPresence: (id: { name: string }, call: PresenceCall) => Promise<unknown>
+    onPublish: StubHandler<'telefuncBroadcastPublish'>
+    onForward: StubHandler<'telefuncBroadcastForward'>
+    onDeliver: StubHandler<'telefuncBroadcastDeliver'>
+    onPresence: <Answer>(id: { name: string }, call: PresenceCall, apply: ApplyPresence<Answer>) => Promise<Answer>
   }>,
-) {
+): BroadcastNamespace & TelefuncExtensionNamespace {
+  const named = (id: unknown): { name: string } => {
+    if (typeof id !== 'string') throw new Error('The spec names each Durable Object by a string')
+    return { name: id }
+  }
   return {
-    idFromName(name: string) {
-      return { name }
-    },
-    idFromString(id: string) {
-      return { name: id }
-    },
-    get(id: { name: string }) {
+    idFromName: (name: string) => name,
+    idFromString: (id: string) => id,
+    get(key: unknown) {
+      const id = named(key)
+      const presence = <Answer>(call: PresenceCall, apply: ApplyPresence<Answer>, otherwise: Answer) =>
+        overrides?.onPresence?.(id, call, apply) ?? Promise.resolve(otherwise)
       return {
-        telefuncBroadcastPublish(request: any) {
-          return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
-        },
-        telefuncBroadcastForward(request: any) {
-          return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
-        },
-        telefuncBroadcastDeliver(request: any) {
-          return overrides?.onDeliver?.(id, request) ?? Promise.resolve(0)
-        },
-        telefuncBroadcastGrant(member: string) {
-          return overrides?.onPresence?.(id, { op: 'grant', member }) ?? Promise.resolve(1)
-        },
-        telefuncBroadcastHold(request: BroadcastHoldRequest) {
-          return overrides?.onPresence?.(id, { op: 'hold', ...request }) ?? Promise.resolve('registered')
-        },
-        telefuncBroadcastRenew(request: BroadcastLeaseRequest) {
-          return overrides?.onPresence?.(id, { op: 'renew', ...request }) ?? Promise.resolve('renewed')
-        },
-        telefuncBroadcastRelease(request: BroadcastReleaseRequest) {
-          return overrides?.onPresence?.(id, { op: 'release', ...request }) ?? Promise.resolve('removed')
-        },
+        telefuncBroadcastPublish: (request) =>
+          overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() }),
+        telefuncBroadcastForward: (request) => overrides?.onForward?.(id, request) ?? Promise.resolve(0),
+        telefuncBroadcastDeliver: (delivery) => overrides?.onDeliver?.(id, delivery) ?? Promise.resolve(0),
+        telefuncBroadcastGrant: (member) =>
+          presence({ op: 'grant', member }, (authority) => authority.grant(member), 1),
+        telefuncBroadcastHold: (request) =>
+          presence({ op: 'hold', ...request }, (authority) => authority.hold(request), 'registered'),
+        telefuncBroadcastRenew: (request) =>
+          presence({ op: 'renew', ...request }, async (authority) => authority.renew(request), 'renewed'),
+        telefuncBroadcastRelease: (request) =>
+          presence({ op: 'release', ...request }, (authority) => authority.release(request), 'removed'),
+        telefuncDurableObjectCall: () => Promise.reject(new Error("The spec's binding serves no extension call")),
       }
     },
-  } as unknown as TelefuncDurableObjectNamespace
+  }
 }
 
 function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
@@ -302,7 +300,7 @@ describe('cloudflare broadcast routing', () => {
           return Promise.resolve(0)
         },
         // The key's authority, as a member's presence reaches it.
-        onPresence: (_id, call) => Promise.resolve(applyPresence(authorityState, call)),
+        onPresence: (_id, _call, apply) => apply(authorityState),
       }),
     )
     const member = broadcast.member('telefunc-shard-weur-0', new OrderedStubs())
@@ -326,7 +324,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onDeliver(id) {
           deliveredTo.push(id.name)
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -414,21 +412,21 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     /** How many grants the members asked the authority for. */
     const grants = { asked: 0 }
     const binding = createBasicBinding({
-      onPresence(_id, call) {
+      onPresence(_id, call, apply) {
         if (call.op === 'grant') {
           grants.asked++
-          return Promise.resolve(applyPresence(authority, call))
+          return apply(authority)
         }
         if (state.throwAtOnce) throw state.throwAtOnce
         const { refuse, held } = state
         const fail = state.failOnly === undefined || state.failOnly === call.op ? state.fail : undefined
         presences.push(call)
         // The authority applies the calls one stub carries in the order they come, whenever its answer reaches the member.
-        const answer = refuse || fail ? null : applyPresence(authority, call)
+        const refusal = refuse ? new Error(REFUSAL) : fail
+        const answer = refusal === undefined ? apply(authority) : null
         return (async () => {
           await held
-          if (refuse) throw new Error(REFUSAL)
-          if (fail) throw fail
+          if (answer === null) throw refusal
           return answer
         })()
       },
