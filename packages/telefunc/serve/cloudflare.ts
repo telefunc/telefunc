@@ -238,8 +238,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     /** An extension's `durableObject` schedules its alarms; a Broadcast key's authority, which belongs to no extension,
      *  its sweep. */
     async alarm(): Promise<void> {
-      const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
-      if (name === undefined) return this.authorityState.alarm()
+      const name: unknown = await this.ctx.storage.get(EXTENSION_STORAGE_KEY)
+      if (typeof name !== 'string') return this.authorityState.alarm()
       this.storedExtension = name
       await this.#durableObject(name).alarm?.()
     }
