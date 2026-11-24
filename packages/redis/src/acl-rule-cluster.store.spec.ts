@@ -42,7 +42,7 @@ async function asUserOf(store: Store, rule: string[]): Promise<{ nodes: Nodes; r
   const nodes = await startCluster(store, proxies)
   const rules = await Promise.all(listed(nodes).map(({ admin }) => setUser(admin, rule)))
   for (const { admin } of listed(nodes)) await admin.call('ACL', 'LOG', 'RESET')
-  app = appCluster(proxies, nodes)
+  app = appCluster(proxies, listed(nodes))
   installRedis(app)
   await reaches(`the ${store.name} Cluster`)
   return { nodes, rules }

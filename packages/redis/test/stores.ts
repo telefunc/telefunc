@@ -4,9 +4,11 @@ export {
   runs,
   docker,
   startStore,
+  startServer,
   hostOf,
   removeStores,
   forwarder,
+  type Forwarder,
   reached,
   endReached,
   snapshot,
@@ -14,7 +16,6 @@ export {
   type Store,
 }
 
-import { connect, createServer, type Socket } from 'node:net'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { Redis } from 'ioredis'
@@ -23,6 +24,7 @@ import { BackendError } from 'telefunc'
 import { Room } from '@telefunc/room'
 import { installRedis } from '../src/index.js'
 import { docker, RUN_LABEL, removeInBackground, runs, STORES, type Store } from './docker.js'
+import { forwarder, pointNowhere, type Forwarder } from './forwarder.js'
 
 /** The stores this process started and hasn't removed, each with the admin client `startStore()` made of it. */
 const containers: { name: string; admin: Redis }[] = []
@@ -31,12 +33,22 @@ const containers: { name: string; admin: Redis }[] = []
  *  earlier one's. */
 let started = 0
 
-/** The forwarders this process made and hasn't closed: `removeStores()` points them nowhere. */
-const forwarders = new Set<{ to: (host: string) => void }>()
-
 /** The store in a container of its own, once it answers; the container's name, its address, and an admin client of it. */
-async function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
+function startStore(store: Store, ...options: string[]): Promise<{ name: string; host: string; admin: Redis }> {
+  return startServer(store, {
+    port: 6379,
+    command: [store.server, '--protected-mode', 'no', '--save', '', '--appendonly', 'no', ...options],
+  })
+}
+
+/** A server of the store's image in a container of its own, once it answers on `port`: `command` runs it, through
+ *  `entrypoint` if given. The container's name, its address, and an admin client of the server. */
+async function startServer(
+  store: Store,
+  { port, command, entrypoint }: { port: number; command: string[]; entrypoint?: string },
+): Promise<{ name: string; host: string; admin: Redis }> {
   const name = `tf-redis-stores-${process.pid}-${started++}`
+  const entry = entrypoint === undefined ? [] : ['--entrypoint', entrypoint]
   docker(
     'run',
     '--detach',
@@ -44,18 +56,12 @@ async function startStore(store: Store, ...options: string[]): Promise<{ name: s
     name,
     '--label',
     `${RUN_LABEL}=${storeSpecsRun()}`,
+    ...entry,
     store.image,
-    store.server,
-    '--protected-mode',
-    'no',
-    '--save',
-    '',
-    '--appendonly',
-    'no',
-    ...options,
+    ...command,
   )
   const host = hostOf(name)
-  const admin = new Redis({ host, retryStrategy: () => 50, maxRetriesPerRequest: null })
+  const admin = new Redis({ host, port, retryStrategy: () => 50, maxRetriesPerRequest: null })
   admin.on('error', () => {})
   containers.push({ name, admin })
   for (let tries = 0; (await admin.ping().catch(() => null)) !== 'PONG'; tries++) {
@@ -86,65 +92,15 @@ function storeSpecsRun(): string {
  *  then runs beside the row, which doesn't wait for Docker: those still there at the run's end go with its global
  *  teardown, as do those a spec file leaves at its end. */
 function removeStores(): void {
-  for (const proxy of forwarders) proxy.to('')
+  pointNowhere()
   const removed = containers.splice(0)
   for (const { admin } of removed) admin.disconnect()
   removeInBackground(removed.map(({ name }) => name))
 }
 
-/** The one place the app's client connects: a forwarder to the store under test, as the backend installs once per
- *  process. Pointing it at another store drops the connections to the last one, which the client then makes again;
- *  pointed nowhere (`''`), it ends each connection it takes. `connections` counts the connections made through it. */
-async function forwarder(): Promise<{
-  port: number
-  connections: () => number
-  to: (host: string) => void
-  close: () => void
-}> {
-  let upstream = ''
-  let connections = 0
-  const sockets = new Set<Socket>()
-  const server = createServer((client) => {
-    connections++
-    if (upstream === '') {
-      client.destroy()
-      return
-    }
-    const store = connect(6379, upstream)
-    for (const socket of [client, store]) {
-      sockets.add(socket)
-      socket.on('error', () => {})
-      socket.on('close', () => {
-        sockets.delete(socket)
-        client.destroy()
-        store.destroy()
-      })
-    }
-    client.pipe(store).pipe(client)
-  })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  if (address === null || typeof address === 'string') throw new Error('the forwarder has no port')
-  const made = {
-    port: address.port,
-    connections: () => connections,
-    to: (host: string) => {
-      upstream = host
-      for (const socket of sockets) socket.destroy()
-    },
-    close: () => {
-      forwarders.delete(made)
-      for (const socket of sockets) socket.destroy()
-      server.close()
-    },
-  }
-  forwarders.add(made)
-  return made
-}
-
 /** The app's client a spec file's backend is installed on, and the forwarder it reaches each row's store through: made
  *  by the file's first `reached()`. */
-let reach: { proxy: Awaited<ReturnType<typeof forwarder>>; app: Redis } | undefined
+let reach: { proxy: Forwarder; app: Redis } | undefined
 
 /** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last row's
  *  store goes first, so a file leaves only its last row's to the run's global teardown. */

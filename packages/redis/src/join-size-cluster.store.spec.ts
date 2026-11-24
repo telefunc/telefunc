@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster, Redis } from 'ioredis'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
-import { appCluster, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
+import { appCluster, listed, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
 import { changedKeys, forwarder, removeStores, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 import { RedisConnection } from './RedisConnection.js'
@@ -59,7 +59,7 @@ async function reached(store: Store): Promise<Nodes> {
   for (const { admin } of [nodes.primary, nodes.replica]) {
     await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
   }
-  app = appCluster(proxies, nodes)
+  app = appCluster(proxies, listed(nodes))
   installRedis(app)
   const answers = () =>
     Room.get('r-none').then(

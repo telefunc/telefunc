@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { Cluster, ClusterOptions, Redis } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Broadcast } from 'telefunc'
-import { appCluster, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
+import { appCluster, listed, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
 import { docker, forwarder, removeStores, runs, STORES, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 
@@ -78,7 +78,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
     const { nodes, proxies } = await newCluster(store)
     await login(nodes.primary.admin, primaryLogin)
     await login(nodes.replica.admin, replicaLogin)
-    app = appCluster(proxies, nodes, options)
+    app = appCluster(proxies, listed(nodes), options)
     installRedis(app)
     return nodes
   }
@@ -119,7 +119,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       // The app's client connects at once and stays logged in on its connections. The password then changes on each
       // node, and the backend's copy of the client, which connects at installRedis(), gives up at its first failed
       // connect, as the app's retry strategy says.
-      const eager = appCluster(proxies, nodes, { lazyConnect: false, clusterRetryStrategy: () => null })
+      const eager = appCluster(proxies, listed(nodes), { lazyConnect: false, clusterRetryStrategy: () => null })
       app = eager
       expect(await settled(new Promise((resolve) => eager.once('ready', resolve)), 10_000)).toBe('resolved')
       await login(nodes.primary.admin, false)

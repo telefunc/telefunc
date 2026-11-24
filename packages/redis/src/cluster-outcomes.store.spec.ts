@@ -6,7 +6,7 @@ import type { Cluster } from 'ioredis'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Broadcast } from 'telefunc'
 import { reaches } from '../test/acl.js'
-import { appCluster, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
+import { appCluster, listed, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
 import { forwarder, removeStores, runs, STORES, type Store } from '../test/stores.js'
 import { installRedis } from './index.js'
 
@@ -27,7 +27,7 @@ async function following(store: Store): Promise<{ nodes: Nodes; where: string }>
   for (const { admin } of [nodes.primary, nodes.replica]) {
     await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
   }
-  app = appCluster(proxies, nodes, { maxRedirections: 0 })
+  app = appCluster(proxies, listed(nodes), { maxRedirections: 0 })
   installRedis(app)
   await reaches(`the ${store.name} Cluster`)
   return { nodes, where: proxies.map(({ port }) => `127.0.0.1:${port}`).join(', ') }
