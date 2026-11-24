@@ -654,6 +654,14 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     expect({ carried: carried.length, grants: grants.asked }).toEqual({ carried: 1, grants: 2 })
   })
 
+  it('whose renewals the room answered keeps its grant there for a write made more than 60 s after its first', async () => {
+    const { grants, subscribe } = setup({ register: ['registered', 'registered'], renew: ['renewed', 'renewed'] })
+    await vi.advanceTimersByTimeAsync(2 * ROUTE_RENEW_EVERY_MS + 5_000)
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(grants.asked).toBe(1)
+  })
+
   it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {
     const held = Promise.withResolvers<RegisterWire>()
     // The first lane's registration fails while the second's is on the same stub; the first's next try waits for it.
