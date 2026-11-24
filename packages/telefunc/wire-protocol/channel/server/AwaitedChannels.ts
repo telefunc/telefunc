@@ -30,11 +30,10 @@ type AwaitedChannel = {
 }
 
 /** The awaited channel didn't register within `connectTtl`, or shut down as it registered: its wire gets an
- *  ATTACH_RESULT null. */
+ *  ATTACH_RESULT null. A refused one's wire closed with its refusal, and sends it nothing. */
 function expireAwaited(awaited: AwaitedChannel): void {
   awaited.entry.state.awaited.expire(awaited)
-  // A refused one's page learnt its end from the refusal.
-  if (awaited.refused === null) awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
+  awaited.entry.sender.send(encode.attachResult(awaited.open.ix, null))
 }
 
 type AwaitedChannelsOptions = {
