@@ -34,14 +34,13 @@ type TrackFilter = TrackKey | EveryTrack
 /** A track listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<TrackKey, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
+/** A track listener's call with what a frame carries, its info and its sender. */
+type TrackCallback<Data> = (data: Data, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) => unknown
 /** A listener on tracks: `subscribeBinary()`'s gets their binary frames, `subscribe({ track })`'s their messages. */
-type TrackListener = {
-  // `any`: the list holds `subscribeBinary()`'s listeners, which take bytes, and `subscribe({ track })`'s, which take a
-  // message; `text` tells them apart, and `unknown` refuses the first.
-  cb: (data: any, info: ChannelPublishInfo & BinaryFrameInfo, from: ResolvedSender) => unknown
-  track: TrackFilter
-  text: boolean
-}
+type TrackListener = { track: TrackFilter } & (
+  | { text: false; cb: TrackCallback<Uint8Array> }
+  | { text: true; cb: TrackCallback<unknown> }
+)
 
 /** Who adds a listener: the app, or a package's field, through the view `attachFields()` hands it. Only the app's
  *  listeners make a server's view observed. */
@@ -365,15 +364,25 @@ class RoomState {
     const entry = this.model.entry(frame.from)
     const from: ResolvedSender = entry ? { entry } : { sender: senderSnapshot(frame.from, {}, null) }
     for (const { listener } of this.roomTrackListeners.list()) {
-      if (listener && hearsFrame(listener, frame))
-        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, from], this.reportError)
+      if (listener && hearsFrame(listener, frame)) this.fireTrack(listener, frame, frameInfo, from)
     }
     const tracks = entry && this.memberListeners.get(entry)?.tracks
     if (!tracks) return
     for (const { listener } of tracks.listeners.list()) {
-      if (listener && hearsFrame(listener, frame))
-        invokeChannelListener(listener.cb, [listenerData(frame), frameInfo, from], this.reportError)
+      if (listener && hearsFrame(listener, frame)) this.fireTrack(listener, frame, frameInfo, from)
     }
+  }
+
+  /** `frame` to a listener that hears it: its message, or bytes of the listener's own, which it may write into or
+   *  transfer. */
+  private fireTrack(
+    listener: TrackListener,
+    frame: BinaryFrame,
+    info: ChannelPublishInfo & BinaryFrameInfo,
+    from: ResolvedSender,
+  ): void {
+    if (listener.text) invokeChannelListener(listener.cb, [decodeFrameMessage(frame), info, from], this.reportError)
+    else invokeChannelListener(listener.cb, [new Uint8Array(frame.payload), info, from], this.reportError)
   }
 
   private listenersOf(entry: MemberEntry): MemberListeners {
@@ -489,22 +498,17 @@ function normalizeTrackFilter(opts: TrackListenerOptions | undefined): TrackFilt
   return trackKey(track)
 }
 
-function binaryListener(cb: TrackListener['cb'], opts: TrackListenerOptions | undefined): TrackListener {
+function binaryListener(cb: TrackCallback<Uint8Array>, opts: TrackListenerOptions | undefined): TrackListener {
   return { cb, track: normalizeTrackFilter(opts), text: false }
 }
 
-function textListener(cb: TrackListener['cb'], track: unknown): TrackListener {
+function textListener(cb: TrackCallback<unknown>, track: unknown): TrackListener {
   assertUsage(isNamedTrack(track), 'subscribe() track should be a valid non-empty string')
   return { cb, track: trackKey(track), text: true }
 }
 
 function hearsFrame({ track, text }: Omit<TrackListener, 'cb'>, frame: BinaryFrame): boolean {
   return text === frame.text && (track === EVERY_TRACK || track === frame.track)
-}
-
-/** Of the listener's own: one may write into its bytes or transfer their buffer. */
-function listenerData(frame: BinaryFrame): unknown {
-  return frame.text ? decodeFrameMessage(frame) : new Uint8Array(frame.payload)
 }
 
 function newTrackCounts(): TrackCounts {
