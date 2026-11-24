@@ -1,6 +1,7 @@
 // The stores the store specs (`pnpm run test:redis-stores`) run against, each in Docker, and what they share.
 export {
   STORES,
+  STORE_START_MS,
   runs,
   docker,
   startStore,
@@ -101,6 +102,10 @@ function removeStores(): void {
 /** The app's client a spec file's backend is installed on, and the forwarder it reaches each row's store through: made
  *  by the file's first `reached()`. */
 let reach: { proxy: Forwarder; app: Redis } | undefined
+
+/** The budget of a store's start (`startStore()`, `reached()`) in a spec's `beforeAll`, which a loaded machine can stretch
+ *  well past a row's 5 s. */
+const STORE_START_MS = 60_000
 
 /** A new store of the row's, which the backend reaches through the forwarder, logging in as `telefunc`. The last row's
  *  store goes first, so a file leaves only its last row's to the run's global teardown. */

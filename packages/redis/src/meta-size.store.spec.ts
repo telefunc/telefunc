@@ -12,16 +12,15 @@
 // the replacement it closed, and a first write another first write overtook writes as a replacement.
 import { isDeepStrictEqual } from 'node:util'
 import type { Redis } from 'ioredis'
-import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
 import { getRoomPlane } from '@telefunc/room/backend'
-import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
+import { endReached, reached, runs, snapshot, STORE_START_MS, STORES, type Store } from '../test/stores.js'
 import { REDIS_COMMANDS } from './commands.js'
 import { RedisConnection } from './RedisConnection.js'
 
 /** The most a commit takes on a room's control lane: `PUBLISH_MAX_BYTES` in commands.ts. */
 const MAX = 28 * 1024 * 1024
-
 afterEach(() => vi.restoreAllMocks())
 afterAll(() => endReached())
 
@@ -236,51 +235,56 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
 
 describe.runIf(runs)('the value that numbers a room meta update', () => {
   for (const store of STORES) {
-    it(`${store.name}: a replacement whose room closed and opened again before its exchange is told it closed, and writes nothing`, async () => {
-      const admin = await reached(store)
-      const id = 'meta-reopened'
-      await Room.create(id)
-      await Room.updateMeta(id, { a: 'x' })
-      const write = metaWrites(id, true)
-      const replacing = told(Room.setMeta(id, { big: 'y' }))
-      await write.held
-      await Room.close(id)
-      await Room.create(id)
-      await Room.updateMeta(id, { seed: 's' })
-      const seeded = write.commits.length
-      const before = await snapshot(admin)
-      write.release()
-      const answer = await replacing
-      const unchanged = isDeepStrictEqual(await snapshot(admin), before)
-      const commits = write.commits.slice(seeded)
-      const meta = Object.keys((await Room.get(id)).meta)
-      admin.disconnect()
+    describe(store.name, () => {
+      // The store starts once, on a budget of its own: no row's 5 s takes a store start.
+      let admin: Redis
+      beforeAll(async () => {
+        admin = await reached(store)
+      }, STORE_START_MS)
+      afterAll(() => admin.disconnect())
 
-      expect({ answer, unchanged, commits, meta }).toEqual({
-        answer: expect.objectContaining({ class: 'RoomError', message: `Room is closed: ${id}` }),
-        unchanged: true,
-        commits: [],
-        meta: ['seed'],
+      it(`a replacement whose room closed and opened again before its exchange is told it closed, and writes nothing`, async () => {
+        const id = 'meta-reopened'
+        await Room.create(id)
+        await Room.updateMeta(id, { a: 'x' })
+        const write = metaWrites(id, true)
+        const replacing = told(Room.setMeta(id, { big: 'y' }))
+        await write.held
+        await Room.close(id)
+        await Room.create(id)
+        await Room.updateMeta(id, { seed: 's' })
+        const seeded = write.commits.length
+        const before = await snapshot(admin)
+        write.release()
+        const answer = await replacing
+        const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+        const commits = write.commits.slice(seeded)
+        const meta = Object.keys((await Room.get(id)).meta)
+
+        expect({ answer, unchanged, commits, meta }).toEqual({
+          answer: expect.objectContaining({ class: 'RoomError', message: `Room is closed: ${id}` }),
+          unchanged: true,
+          commits: [],
+          meta: ['seed'],
+        })
       })
-    })
 
-    it(`${store.name}: a first write another first write overtook writes as a replacement, at the next seq`, async () => {
-      const admin = await reached(store)
-      const id = 'meta-first-overtaken'
-      await Room.create(id)
-      const write = metaWrites(id, true)
-      const replacing = told(Room.setMeta(id, { big: 'y' }))
-      await write.held
-      await Room.setMeta(id, { seed: 's' })
-      write.release()
-      const answer = await replacing
-      const meta = Object.keys((await Room.get(id)).meta)
-      admin.disconnect()
+      it(`a first write another first write overtook writes as a replacement, at the next seq`, async () => {
+        const id = 'meta-first-overtaken'
+        await Room.create(id)
+        const write = metaWrites(id, true)
+        const replacing = told(Room.setMeta(id, { big: 'y' }))
+        await write.held
+        await Room.setMeta(id, { seed: 's' })
+        write.release()
+        const answer = await replacing
+        const meta = Object.keys((await Room.get(id)).meta)
 
-      expect({ answer, seqs: write.commits.map(({ seq }) => seq), meta }).toEqual({
-        answer: 'resolved',
-        seqs: ['1', '2'],
-        meta: ['big'],
+        expect({ answer, seqs: write.commits.map(({ seq }) => seq), meta }).toEqual({
+          answer: 'resolved',
+          seqs: ['1', '2'],
+          meta: ['big'],
+        })
       })
     })
   }
