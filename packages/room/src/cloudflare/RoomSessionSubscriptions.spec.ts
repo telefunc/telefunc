@@ -32,8 +32,9 @@ function setup(
   const calls = { register: 0, renew: 0 }
   /** The routes the session removed at the authority. */
   const removed: unknown[] = []
-  /** The operations that carried an inbox's route, as the authority got them. */
+  /** The operations that carried an inbox's route, as the authority got them, and the order each was sent under. */
   const carried: unknown[] = []
+  const carriedOrders: unknown[] = []
   const startedAt = Date.now()
   /** When each registration was made, in ms after the lane subscribed. */
   const registeredAt: number[] = []
@@ -46,7 +47,11 @@ function setup(
   /** The authority's answer to each call the session makes, by method. */
   const authority: Record<string, (args: unknown[]) => Promise<unknown>> = {
     grantHolder: () => answers.grant ?? Promise.resolve(1),
-    runOperationWithInbox: (args) => (carried.push(args[1]), answer(answers.carry ?? [])),
+    runOperationWithInbox: (args) => {
+      carried.push(args[1])
+      if (typeof args[2] === 'object' && args[2] !== null && 'order' in args[2]) carriedOrders.push(args[2].order)
+      return answer(answers.carry ?? [])
+    },
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
     unsubscribeRoute: (args) => (removed.push(args[0]), Promise.resolve('removed')),
@@ -104,6 +109,7 @@ function setup(
     attempt,
     calls,
     carried,
+    carriedOrders,
     removed,
     registeredAt,
     states,
@@ -510,6 +516,52 @@ describe('a call of a Cloudflare Room lane to its room', () => {
       removed: 1,
       timers: 0,
     })
+  })
+
+  // Cloudflare marks a call whose answer was lost `.retryable`: the room may have applied the join, which its other
+  // participants then saw.
+  it("that is a member's join whose answer was lost is sent again under the same order, and answered as the room answered the join", async () => {
+    const { attempt, carriedOrders, states, subscriptions, attemptOn } = setup(
+      { register: [], renew: ['renewed'], carry: [transient(false, 'answer lost'), joined] },
+      inbox,
+      'operation',
+    )
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await carrying).toBe(joined)
+    expect({ carriedOrders, states, state: attempt.state() }).toEqual({
+      carriedOrders: [
+        { grant: 1, seq: 1 },
+        { grant: 1, seq: 1 },
+      ],
+      states: ['ready'],
+      state: 'ready',
+    })
+  })
+
+  it("that is a member's join whose answer was lost each time it was sent fails with the last loss, sent 3 times", async () => {
+    const last = transient(false, 'third')
+    const { carried, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [transient(false, 'first'), transient(false, 'second'), last] },
+      inbox,
+      'operation',
+    )
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    carrying.catch(() => {})
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expect(carrying).rejects.toBe(last)
+    expect(carried).toHaveLength(3)
+  })
+
+  it("that is a member's join whose answer was lost, as one Cloudflare says not to retry, fails with it, sent once", async () => {
+    const failed = new Error('reset')
+    const { carried, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [failed, joined] },
+      inbox,
+      'operation',
+    )
+    await expect(subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })).rejects.toBe(failed)
+    expect(carried).toHaveLength(1)
   })
 
   it("that is a member's join that wrote nothing, its hosting lease lost, leaves the inbox waiting, and the join sent again registers it", async () => {
