@@ -12,7 +12,10 @@ import { historyOf, type Starts } from './orderRecord.js'
 import { isLoginRefusal, isRefusal, redisFailure } from './redisFailure.js'
 import type { RedisConnection } from './RedisConnection.js'
 
-type RedisSubscriptionsOptions = { connection: RedisConnection }
+/** What the subscriptions read of the backend's connection: their socket, how many nodes it may sit on, and the client
+ *  a failure is told against. */
+type SubscriberSource = Pick<RedisConnection, 'openSubscriberSocket' | 'subscriberNodeCount' | 'client'>
+type RedisSubscriptionsOptions = { connection: SubscriberSource }
 
 /** What a driver's frames carry, and how long its lanes' order lasts. */
 type FrameShape = {
@@ -83,7 +86,7 @@ const SUBSCRIBER_PING_MS = 10_000
  * incarnation is still the open head).
  */
 class RedisSubscriptions {
-  private readonly connection: RedisConnection
+  private readonly connection: SubscriberSource
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisAttempt>>()
   /** Each lane some attempt carries, by its consumer's receiver, then its channel. A consumer's attempts share its lanes

@@ -45,7 +45,7 @@ describe('a client installed again', () => {
     const first = connection.client
     connection.holdFor(client({ username: 'bob', password: 'two' }))
     expect(connection.client.options).toMatchObject({ username: 'bob', password: 'two' })
-    expect((await connection.openSubscriberSocket()) as Redis).toMatchObject({
+    expect(await connection.openSubscriberSocket()).toMatchObject({
       options: { username: 'bob', password: 'two' },
     })
     expect(first.status).toBe('end')

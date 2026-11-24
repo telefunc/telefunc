@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
+import { assert } from './assert.js'
 import { NO_ID, type LaneStart } from './orderRecord.js'
 
+/** Each commit's id by its name, and its name by its id. */
 const ids = new Map<string, bigint>()
-const idOf = (name: string) => ids.get(name) ?? ids.set(name, BigInt(ids.size + 1)).get(name)!
+const names = new Map<bigint, string>()
+function idOf(name: string): bigint {
+  const known = ids.get(name)
+  if (known !== undefined) return known
+  const id = BigInt(ids.size + 1)
+  ids.set(name, id)
+  names.set(id, name)
+  return id
+}
 
 /** A Redis node's history of one lane: each commit names the one before it, as commands.ts's scripts write it. */
 class Node {
@@ -14,7 +24,7 @@ class Node {
     return Object.assign(new Node(), { place: from.place, last: from.last })
   }
   commit(name: string, via: LaneRoute): LaneFrame {
-    const frame = { place: ++this.place, id: idOf(name), prev: this.last, name, via }
+    const frame = { place: ++this.place, id: idOf(name), prev: this.last, via }
     this.last = frame.id
     return { lane: '', payload: new Uint8Array(), info: { seq: frame.place, timestamp: 0 }, token: null, ...frame }
   }
@@ -43,7 +53,7 @@ function route(log: string[]) {
   }
   return route
 }
-const name = (frame: LaneFrame) => (frame as LaneFrame & { name: string }).name
+const name = (frame: LaneFrame) => names.get(frame.id)
 
 function lane(...routes: LaneRoute[]): LaneHistory {
   const history = new LaneHistory()
@@ -96,11 +106,12 @@ describe('LaneHistory', () => {
         M.offer(history, { ...frame, via: M })
       }
       const B = Node.promoted(A)
-      const frames = { x11: A.commit('x11', E), y11: B.commit('y11', E) }
+      const x11 = A.commit('x11', E)
+      const y11 = B.commit('y11', E)
       for (const step of order) {
-        const [via, which] = step.split(':') as ['E' | 'M', 'x11' | 'y11']
+        const [via, which] = step.split(':')
         const brought = via === 'E' ? E : M
-        brought.offer(history, { ...frames[which], via: brought })
+        brought.offer(history, { ...(which === 'x11' ? x11 : y11), via: brought })
       }
       const y12 = B.commit('y12', E)
       E.offer(history, y12)
@@ -143,7 +154,9 @@ describe('LaneHistory', () => {
     history.establish(M, fresh, [], false, M.pass)
     const frames = Array.from({ length: 34 }, (_, i) => A.commit(`x${i + 1}`, E))
     for (const frame of frames) E.offer(history, frame)
-    M.offer(history, { ...frames[0]!, via: M })
+    const [first] = frames
+    assert(first !== undefined)
+    M.offer(history, { ...first, via: M })
     expect(log.slice(34)).toEqual(['lost null'])
   })
 
@@ -154,7 +167,9 @@ describe('LaneHistory', () => {
     const A = new Node()
     const history = lane(E)
     history.establish(E, fresh, [], false, E.pass)
-    const [x1, x2, x3] = ['x1', 'x2', 'x3'].map((name) => A.commit(name, E)) as [LaneFrame, LaneFrame, LaneFrame]
+    const x1 = A.commit('x1', E)
+    const x2 = A.commit('x2', E)
+    const x3 = A.commit('x3', E)
     E.offer(history, x1)
     E.offer(history, x3)
     vi.advanceTimersByTime(1_000)

@@ -1,9 +1,10 @@
 import { inspect } from 'node:util'
+import { Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
-import type { RedisConnection } from './RedisConnection.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 import type { Starts } from './orderRecord.js'
 
@@ -75,17 +76,22 @@ function setup(
     unsubscribe: async () => {},
     ping: async () => {},
     disconnect() {},
-    on(event: string, listener: (channel: Buffer, frame: Buffer) => void) {
-      if (event === 'messageBuffer') publish = (channel, frame) => listener(Buffer.from(channel), frame)
-      if (event === 'close') close = listener as unknown as () => void
-      return socket
-    },
+    on,
+  }
+  function on(event: 'messageBuffer', listener: (channel: Buffer, frame: Buffer) => void): SubscriberSocket
+  function on(event: 'error', listener: (error: unknown) => void): SubscriberSocket
+  function on(event: 'close', listener: () => void): SubscriberSocket
+  function on(event: string, listener: (...args: Buffer[]) => void): SubscriberSocket {
+    if (event === 'messageBuffer') publish = (channel, frame) => listener(Buffer.from(channel), frame)
+    if (event === 'close') close = () => listener()
+    return socket
   }
   const connection = {
     openSubscriberSocket: async () => socket,
     subscriberNodeCount: () => nodes,
-    client: { options: { host: '127.0.0.1', port: 6390 } },
-  } as unknown as RedisConnection
+    // Never connects: a failure is only told against its address.
+    client: new Redis({ host: '127.0.0.1', port: 6390, lazyConnect: true }),
+  }
   const subscriptions = new RedisSubscriptions({ connection })
   const delivered: string[] = []
   const listen = (
@@ -118,6 +124,13 @@ function setup(
     publish: (channel: string, frame: Buffer) => publish(channel, frame),
     sends: new NewSubscriptionWait({ subscriptions }),
   }
+}
+
+/** A text publish's turn: it waits on the subscriptions `listen()` started. */
+function waitingHello(sends: NewSubscriptionWait) {
+  const waiting = sends.waitTurn(RULE, 'hello', (payload) => payload)
+  assert(waiting !== null)
+  return waiting
 }
 
 /** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
@@ -251,15 +264,20 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     const { subscriptions, listen, sends } = setup()
     listen(TEXT)
     await Promise.all(subscriptions.establishingOn([TEXT]))
-    const reads = [createDeferred<Starts>(), createDeferred<Starts>()]
+    const [first, second] = [createDeferred<Starts>(), createDeferred<Starts>()]
+    const reads = [first, second]
     let read = 0
-    const binary = listen(BINARY, () => reads[read++]!.promise)
+    const binary = listen(BINARY, () => {
+      const next = reads[read++]
+      assert(next !== undefined)
+      return next.promise
+    })
 
-    const waiting = sends.waitTurn(RULE, 'hello', (payload) => payload)!
-    reads[0]!.reject(new Error('the command connection dropped'))
+    const waiting = waitingHello(sends)
+    first.reject(new Error('the command connection dropped'))
     await expect.poll(() => read, { timeout: 3_000 }).toBe(2)
     expect(binary.state()).toBe('establishing')
-    reads[1]!.resolve(none())
+    second.resolve(none())
 
     await expect(waiting.turn).resolves.toBe('hello')
     expect(binary.state()).toBe('ready')
@@ -272,10 +290,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello', (payload) => payload)!.turn).rejects.toMatchObject({
-      name: 'BackendError',
-      code: 'denied',
-    })
+    await expect(waitingHello(sends).turn).rejects.toMatchObject({ name: 'BackendError', code: 'denied' })
   })
 
   it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
@@ -285,7 +300,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello', (payload) => payload)!.turn).resolves.toBe('hello')
+    await expect(waitingHello(sends).turn).resolves.toBe('hello')
   })
 })
 
