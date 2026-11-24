@@ -17,13 +17,9 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 
 > This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
-> Behind a reverse proxy, set Node.js's [`server.keepAliveTimeout`](https://nodejs.org/api/http.html#serverkeepalivetimeout) (5 seconds by default) above how long your proxy keeps an idle connection. Otherwise the proxy can reuse a connection Node.js just closed and answer 502, which the page recovers from by reconnecting.
-
-> Behind a reverse proxy, also pass on the `session` query parameter the client adds to every request to `/_telefunc`. Without it, a telefunction the page calls after <Link href="/channel#broadcast">`subscribe()`</Link> doesn't wait for the subscription to be in effect, so the page can miss what that telefunction publishes.
-
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
 
-> Sanity check: after deploying behind a sticky load balancer, open the browser network tab and refresh once. With a cookie (HAProxy below), confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions. With `ip_hash` there's no cookie to read, so add `add_header X-Upstream $upstream_addr always;` to your Nginx `location` and confirm every `/_telefunc` response shows the same address.
+> Sanity check: after deploying behind a sticky load balancer, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions.
 
 
 ### Nginx — `ip_hash`
@@ -87,30 +83,9 @@ type BroadcastTransport = {
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 ```
 
-`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
+`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function, and Telefunc calls each at most once per key at a time.
 
-If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }`. Resolve `opened` once the listener can receive what any server publishes to the key, and reject it if the broker refuses the subscription. The <Link href="/channel#chat-example">`opened`</Link> of the server's subscribers then resolves or rejects with it, and a `BroadcastChannel` closes: on the server with the error, and on its page with a `ChannelClosedError` that says its subscription didn't take effect.
-
-```ts
-// server/broadcastTransport.ts
-// Environment: server
-
-import type { BroadcastTransport } from 'telefunc'
-import { broker } from './broker'
-
-const listen: BroadcastTransport['listen'] = (key, onMessage) => {
-  // Your broker's subscribe() resolves once the broker confirmed the subscription
-  const subscribing = broker.subscribe(`text:${key}`, (message) => onMessage(message.payload, message.info))
-  return {
-    unsubscribe: () => void subscribing.then((subscription) => subscription.unsubscribe()).catch(() => {}),
-    opened: subscribing.then(() => {}),
-  }
-}
-```
-
-> Where the listener receives what any server publishes from the moment `listen()` returns, return just the function that stops listening.
-
-A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }` instead, and resolve `opened` once the listener receives what any server publishes to the key.
 
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 

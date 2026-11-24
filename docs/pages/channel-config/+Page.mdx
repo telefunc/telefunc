@@ -11,27 +11,22 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,  // How long a client may be gone and get its channels back (ms)
-  pingInterval: 5_000,       // How often a client pings; it counts as gone after twice this, 2.5× over SSE (ms)
-  maxMemory: '4g',           // The most this server's channels hold for clients, all together (bytes, or a size)
-  connectTtl: 15_000,        // How long a new channel waits for its client, and a call for a subscription it carries (ms)
-  allowedOrigins: [],        // Origins of other sites' pages that may open a WebSocket to this server
+  reconnectTimeout: 60_000,  // Hold channels open after disconnect (ms)
+  pingInterval: 5_000,       // Client ping interval (ms)
+  connectTtl: 15_000,        // Wait for client to connect to new channel (ms)
+  allowedOrigins: [],        // Origins of other sites' pages that may open a WebSocket
 }
 ```
 
-> **You rarely need any of these.** A channel that awaits each `send()` before the next builds no backlog, whatever the client does. A publish waits for no subscriber, so a `BroadcastChannel` has <Link href="/channel#backpressure">limits of its own</Link>.
+> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
-> - `reconnectTimeout`: a client that comes back within it finds its channels open, and gets the messages held for it. It never gets a `send()` refused past the per-channel limit or `maxMemory`, or the messages a lossy `BroadcastChannel` skipped. Past `reconnectTimeout`, its channels close with `NetworkError`. Raise it for clients on bad networks. Lower it to free a gone client's channels sooner.
-> - `pingInterval`: how fast a client that stopped answering counts as gone, which starts its `reconnectTimeout`. Raise it to save a phone's battery. Lower it to notice sooner.
-> - `connectTtl`: a channel your telefunction returns closes if its client doesn't connect to it within this time. A telefunction call that carries a <Link href="/channel#chat-example">broadcast subscription</Link> its client made just before also waits at most this long for it to take effect: past it, that broadcast closes with an error, and the telefunction runs. Raise it for clients on slow networks. Lower it to free unclaimed channels sooner.
-> - `allowedOrigins`: origins such as `'https://app.example.com'`, for an app whose pages are on another origin than its server. A page of the server's own origin needs no entry: see <Link href="/transport#websocket">which pages open a WebSocket</Link>.
-> - `maxMemory`: a number of bytes, or a size such as `'4g'` or `'512m'`. It defaults to a quarter of the memory the process may use, so `'4g'` above is the default of a 16 GB machine. It counts what the server holds, not what clients hold, including what a client sent while your `listen()` callbacks work on it, and a stream's chunks until your telefunction reads them: a client that sends more than fits has that channel closed, or that stream ended, with `ChannelOverflowError`. A channel counts toward it from when its telefunction returns it: what was sent on it before is admitted then, and a `send()` that doesn't fit is refused. A File your telefunction hadn't read when it returned a channel or a stream counts toward it too, as the server reads that upload to its end so that the browser gets the answer: past what fits, the rest of the upload is dropped, and reading the File fails. Read a File before your telefunction returns to keep all of it: a read while what it returns streams fails too once the upload gets further ahead of it than fits. Near it, the clients furthest behind a <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> are closed first, with `ChannelOverflowError`. A lossy `BroadcastChannel` holds only the newest message waiting for each client. The server keeps the top of `maxMemory`, one channel's limit and at most an eighth of it, for `send()`s waiting for room: past what it may hold, a `send()` waits behind its own channel's earlier sends, and goes once clients confirm what they got; another channel's `send()` may go first. A `send()` <Link href="/channel#backpressure">is refused</Link> once the waiting sends hold that room, as is one past the per-channel limit, which is 320 MiB by default and at most `maxMemory` less that room. Lower it to use less memory. Below 128 MiB, it also slows large transfers to and from a distant client.
+> `config.channel.maxMemory` is what all channels together may hold for their clients, in bytes or as a size such as `'512m'`. It defaults to a quarter of the memory the process may use, and to 64 MiB on Cloudflare.
 
-> On Cloudflare, `maxMemory` defaults to 64 MiB, as <Link href="/stream/cloudflare">a Durable Object's memory</Link> is limited to 128 MB.
-
-> Telefunc refuses a value that can't work when you assign it: `reconnectTimeout` or `pingInterval` under 1 second, `maxMemory` under 2 MiB, or an `allowedOrigins` entry that isn't an origin a page can have. Assign `config.channel` before your server handles its first request: once the server has used it, from its first channel or page connection on, a change is refused, as those already open would keep the old values.
-
-> This is the **server-side** `config.channel`, a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
+> **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
+> - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
+> - `ChannelOverflowError` → apply backpressure by `await`-ing your `send()`s.
+> - Want to use less memory → lower `maxMemory`.
+> - WebSocket for pages on another origin than your server → list that origin in `allowedOrigins`, see <Link href="/transport#websocket" />.
 
 <ConfigWhereServer />
 

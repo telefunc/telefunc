@@ -23,8 +23,6 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 
 > See <Link href="/close" /> to manually close streams.
 
-> On the server, an `onClose()` callback that throws, or returns a promise that rejects, is logged with its stack and passed to <Link href="/onBug">`onBug()`</Link> listeners. A channel's `onClose()` callback that throws `Abort` during a close aborts the channel instead, and one that rejects with the error its channel ended with reports nothing: see <Link href="/channel#how-a-channel-ends" />.
-
 
 ## `context.onClose()`
 
@@ -76,7 +74,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 **Environment**: server & client.
 
-The `onClose()` hook defined on a `new Channel()` instance is that channel's cleanup: it is called once the channel stops, with `null` where it is closing gracefully, else the error it ended with. `channel.closed` and `channel.close()` give the final outcome: see <Link href="/channel#how-a-channel-ends" />.
+The `onClose()` hook defined on a `new Channel()` instance is called when that channel closes.
 
 > To listen for all streams to close, use <Link href="#context-onclose" /> instead.
 
@@ -115,19 +113,6 @@ export async function onLoad() {
   return response.json()
 }
 ```
-
-On Cloudflare Workers, a client that disconnects before the telefunction answers aborts `signal` only with the `enable_request_signal` [compatibility flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/):
-
-```jsonc
-// wrangler.jsonc
-{
-  "compatibility_flags": ["enable_request_signal"]
-}
-```
-
-> Without the flag, `signal` doesn't abort and `onClose()` doesn't run: your Worker's code just stops, and Telefunc logs a warning about it. The flag is on by default from the `compatibility_date` `2026-11-17`.
-
-> Under `wrangler dev`, `signal` aborts only for a client that disconnects while the response streams, not for one that disconnects before the telefunction answers.
 
 
 ## See also

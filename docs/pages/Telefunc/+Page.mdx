@@ -134,8 +134,6 @@ Deno.serve({ port: 3000 }, async (request, info) => {
   return new Response('Not found', { status: 404 })
 })
 ```
-
-> On Deno, add `"unstable": ["no-legacy-abort"]` to your `deno.json`, otherwise Deno logs a warning — see [Deno's docs](https://docs.deno.com/runtime/reference/deno_serve_legacy_abort/).
 :::
 
 :::Choice{#Cloudflare}
@@ -169,7 +167,7 @@ export default {
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
-The `wrangler.jsonc` it needs, with its Durable Object binding and migration, its KV namespace and its compatibility flags, is in <Link href="/stream/cloudflare#setup" />.
+Add the Durable Object and KV bindings, and the compatibility flags, to your `wrangler.jsonc`: see <Link href="/stream/cloudflare#setup" />.
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 
