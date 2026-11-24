@@ -18,6 +18,8 @@ function restoreContext_sync<T>(context: Context, fn: () => T): T {
   try {
     return fn()
   } finally {
+    // Only while fn() runs synchronously, because any form of queuing leaks the context to other requests
+    // https://github.com/telefunc/telefunc/pull/520#issuecomment-7134162671
     syncState.context = previous
   }
 }
