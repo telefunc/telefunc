@@ -1,6 +1,6 @@
 // A reply as the backend reads it: each reader asserts the shape its command or script answers with, so a reply of
-// another shape is a bug told where it is read.
-export { bytes, text, number, list, texts, bytesList, twoOf, pairs, triples, json }
+// another shape is a bug told where it is read. They read a reply where it lies, building only the value they return.
+export { bytes, text, number, list, texts, bytesList, twoOf, eachPair, eachTriple, json }
 
 import { assert } from './assert.js'
 
@@ -27,42 +27,50 @@ function list(reply: unknown): unknown[] {
 }
 
 function texts(reply: unknown): string[] {
-  return list(reply).map(text)
+  const items = list(reply)
+  assert(isTexts(items), 'A Redis reply is not a list of text')
+  return items
+}
+
+function isTexts(items: unknown[]): items is string[] {
+  for (const item of items) if (typeof item !== 'string') return false
+  return true
 }
 
 function bytesList(reply: unknown): Buffer[] {
-  return list(reply).map(bytes)
+  const items = list(reply)
+  assert(isBytesList(items), 'A Redis reply is not a list of bytes')
+  return items
+}
+
+function isBytesList(items: unknown[]): items is Buffer[] {
+  for (const item of items) if (!Buffer.isBuffer(item)) return false
+  return true
 }
 
 /** The two items of `items`, which holds no other. */
 function twoOf<T>(items: readonly T[]): [T, T] {
-  const [first, second, ...rest] = items
-  assert(first !== undefined && second !== undefined && rest.length === 0, 'A Redis reply is not a pair')
+  assert(items.length === 2, 'A Redis reply is not a pair')
+  const first = items[0]
+  const second = items[1]
+  assert(first !== undefined && second !== undefined, 'A Redis reply is not a pair')
   return [first, second]
 }
 
-/** `items` two at a time. */
-function pairs<T>(items: readonly T[]): [T, T][] {
-  assert(items.length % 2 === 0, 'A Redis reply has an odd number of items')
-  const out: [T, T][] = []
-  for (let i = 0; i < items.length; i += 2) {
-    const [first, second] = items.slice(i, i + 2)
-    assert(first !== undefined && second !== undefined)
-    out.push([first, second])
-  }
-  return out
+/** `visit` with each two items of `items` from `start` on. */
+function eachPair(items: readonly unknown[], start: number, visit: (first: unknown, second: unknown) => void): void {
+  assert((items.length - start) % 2 === 0, 'A Redis reply has an odd number of items')
+  for (let i = start; i < items.length; i += 2) visit(items[i], items[i + 1])
 }
 
-/** `items` three at a time. */
-function triples<T>(items: readonly T[]): [T, T, T][] {
-  assert(items.length % 3 === 0, 'A Redis reply has a number of items that is not a multiple of three')
-  const out: [T, T, T][] = []
-  for (let i = 0; i < items.length; i += 3) {
-    const [first, second, third] = items.slice(i, i + 3)
-    assert(first !== undefined && second !== undefined && third !== undefined)
-    out.push([first, second, third])
-  }
-  return out
+/** `visit` with each three items of `items` from `start` on. */
+function eachTriple(
+  items: readonly unknown[],
+  start: number,
+  visit: (first: unknown, second: unknown, third: unknown) => void,
+): void {
+  assert((items.length - start) % 3 === 0, 'A Redis reply has a number of items that is not a multiple of three')
+  for (let i = start; i < items.length; i += 3) visit(items[i], items[i + 1], items[i + 2])
 }
 
 /** A script's JSON reply, its shape still to be read. */

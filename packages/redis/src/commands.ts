@@ -32,7 +32,7 @@ import type {
   StaleIncarnation,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
-import { bytes, bytesList, json, list, number, pairs, text, texts, triples, twoOf } from './replies.js'
+import { bytes, bytesList, eachPair, eachTriple, json, list, number, text, texts, twoOf } from './replies.js'
 import {
   decodeBroadcastOrder,
   decodeLaneOrder,
@@ -1375,8 +1375,8 @@ const REDIS_COMMANDS = {
     },
     parse: (reply) => {
       // The ordering itself is checked by core, as every driver's is.
-      const [seq, timestamp] = twoOf(list(reply).map(number))
-      return { seq, timestamp }
+      const [seq, timestamp] = twoOf(list(reply))
+      return { seq: number(seq), timestamp: number(timestamp) }
     },
   }),
   headExchange: command({
@@ -1462,11 +1462,10 @@ const REDIS_COMMANDS = {
       argv: [inc, ...keys],
     }),
     parse: (reply): ExpiringCellsRead => {
-      const [tag, ...found] = bytesList(reply)
-      assert(tag !== undefined, 'Expiring cells script returned no tag')
-      if (tag.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      const found = list(reply)
+      if (bytes(found[0]).toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
       const cells = new Map<string, Uint8Array>()
-      for (const [key, value] of pairs(found)) cells.set(key.toString(), Uint8Array.from(value))
+      eachPair(found, 1, (key, value) => cells.set(bytes(key).toString(), Uint8Array.from(bytes(value))))
       return { kind: 'read', cells }
     },
   }),
@@ -1553,9 +1552,10 @@ const REDIS_COMMANDS = {
       if (reply === null) return null
       const [authority, page] = twoOf(list(reply))
       const [cursor, fields] = twoOf(list(page))
-      const starts = pairs(bytesList(fields)).map(([lane, record]): [string, LaneStart] => {
-        const laneKey = lane.toString()
-        return [laneKey, decodeLaneOrder(record, laneWhere(roomId, laneKey))]
+      const starts: Array<[string, LaneStart]> = []
+      eachPair(list(fields), 0, (lane, record) => {
+        const laneKey = bytes(lane).toString()
+        starts.push([laneKey, decodeLaneOrder(bytes(record), laneWhere(roomId, laneKey))])
       })
       return { authority: bytes(authority).toString(), read: { cursor: bytes(cursor).toString(), starts } }
     },
@@ -1590,10 +1590,12 @@ const REDIS_COMMANDS = {
       const [authority, records] = twoOf(list(reply))
       return {
         authority: bytes(authority).toString(),
-        read: bytesList(records).map((record, i) => {
+        read: list(records).map((record, i) => {
+          const mark = bytes(record)
+          if (mark.byteLength === 0) return null
           const laneKey = lanes[i]
           assert(laneKey !== undefined, 'Lane marks script returned more marks than lanes')
-          return record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, laneKey))
+          return decodeLaneOrder(mark, laneWhere(roomId, laneKey))
         }),
       }
     },
@@ -1676,7 +1678,8 @@ const REDIS_COMMANDS = {
       }
     },
     parse: (reply): CellsExchangeResult => {
-      const [tag, ...counted] = texts(reply)
+      const counted = list(reply)
+      const tag = counted[0]
       if (tag === 'conflict' || tag === 'stale-incarnation') return { kind: tag }
       assert(tag === 'committed', 'Cells exchange script returned an unexpected reply')
       return { kind: 'committed', counters: countersOf(counted) }
@@ -1778,8 +1781,8 @@ const REDIS_COMMANDS = {
         assert(kind === 'conflict' || kind === 'stale-incarnation', 'Operation script returned an unexpected reply')
         return { kind }
       }
-      const [commit, ...counted] = texts(reply)
-      assert(commit !== undefined, 'Operation script returned no commit')
+      const counted = list(reply)
+      const commit = text(counted[0])
       return {
         kind: 'done',
         counters: countersOf(counted),
@@ -1820,7 +1823,11 @@ const REDIS_COMMANDS = {
       keys: [directoryChecksKey(prefix), directoryTagsKey(prefix)],
       argv: [String(limit)],
     }),
-    parse: (reply) => pairs(texts(reply)).map(([roomId, listing]) => ({ roomId, listing })),
+    parse: (reply) => {
+      const entries: { roomId: string; listing: string }[] = []
+      eachPair(list(reply), 0, (roomId, listing) => entries.push({ roomId: text(roomId), listing: text(listing) }))
+      return entries
+    },
   }),
 }
 
@@ -1865,11 +1872,14 @@ function commitReply(reply: unknown): CommitReply {
   return { kind, seq, timestamp }
 }
 
-/** The counters a write script returns, three items each: its key, its value and when it changed. */
-function countersOf(counted: readonly string[]): Map<string, CellCounter> {
-  return new Map(
-    triples(counted).map(([key, value, changedAt]) => [key, { value: Number(value), changedAt: Number(changedAt) }]),
+/** The counters a write script returns after its first item, three items each: its key, its value and when it
+ *  changed. */
+function countersOf(counted: readonly unknown[]): Map<string, CellCounter> {
+  const counters = new Map<string, CellCounter>()
+  eachTriple(counted, 1, (key, value, changedAt) =>
+    counters.set(text(key), { value: number(value), changedAt: number(changedAt) }),
   )
+  return counters
 }
 
 /** The next head as the script reads it, with the revision its caller minted. */
