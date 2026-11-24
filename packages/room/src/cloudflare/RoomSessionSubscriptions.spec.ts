@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   LEASE_RENEW_EVERY_MS as ROUTE_RENEW_EVERY_MS,
-  OrderedStubs,
   type BackendReceiver,
   type CloudflareMember,
   type TelefuncExtensionNamespace,
@@ -725,11 +724,12 @@ describe('a call of a Cloudflare Room lane to its room', () => {
   })
 
   it('whose renewal falls in a pause another call of the session caused stays ready, is tried no more while the pause lasts, and renews once it ends', async () => {
-    const tried = vi.spyOn(OrderedStubs.prototype, 'call')
-    const { attempt, calls, states, subscribe } = setup(
+    const { attempt, calls, states, subscribe, subscriptions } = setup(
       { register: ['registered', transient(true)], renew: ['renewed'] },
       { kind: 'control' },
     )
+    // This session's calls to the room: `callAuthority` is the one way into its ordered stub.
+    const tried = vi.spyOn(subscriptions, 'callAuthority')
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS - 1_000)
     // Another lane's first registration is answered overloaded, 1 s before this lane's renewal: the room is paused 10 s.
