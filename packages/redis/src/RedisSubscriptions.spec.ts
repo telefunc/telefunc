@@ -247,7 +247,7 @@ describe('a Cluster slot whose master changed', () => {
     }
   })
 
-  it('resumes without a second report where its lane met the new history in its frames, and reports where it went on', async () => {
+  it('tells a failover once where its frames reach the lane before the check: the lane tells it, and follows the new history', async () => {
     const { subscriptions, listen, publish, delivered, missed } = setup()
     let start = lane(3)
     const attempt = listen(TEXT, async () => start)
@@ -255,20 +255,52 @@ describe('a Cluster slot whose master changed', () => {
     const states: string[] = []
     attempt.onStateChange((state) => states.push(state))
     publish(TEXT, frameOf(4, 'm4'))
-    // The new master's first frame takes m4's place: the lane tells, reports, and follows it.
+    // The new master's first frame takes m4's place: the lane reports, and the attempt finds its key's master of
+    // another history now.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
     publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
     expect(missed).toEqual([null])
-    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
     await subscriptions.followMoves(moved, async () => null)
-    await expect.poll(() => states).toEqual(['lost', 'ready'])
+    expect(states).toEqual([])
     expect(missed).toEqual([null])
     // y5 goes on from y4, and another failover's master stands at y5: nothing in the frames told the lane of it.
     publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
     start = { authority: 'c', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
     await subscriptions.followMoves(moved, async () => null)
-    await expect.poll(() => states).toEqual(['lost', 'ready', 'lost', 'ready'])
+    await expect.poll(() => states).toEqual(['lost', 'ready'])
     expect(missed).toEqual([null, null])
     expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('tells a failover once where the check comes before its frames: the frames before the new start are of the change told', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    // The new master forked at m3 and has y4, y5; neither has reached the lane when the check reads its start.
+    start = { authority: 'b', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => missed).toEqual([null])
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    expect(missed).toEqual([null])
+    expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('tells a failover once to a loss key whose other attempt met it in its frames first', async () => {
+    const { subscriptions, listen, publish, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    expect(missed).toEqual([null])
+    // BINARY carried nothing: only the old master, gone, could show it lost nothing.
+    await subscriptions.followMoves(new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']]), async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
   })
 
   it('reports where the lane went on, as next, from the start of the last switch or resharding into a failover', async () => {

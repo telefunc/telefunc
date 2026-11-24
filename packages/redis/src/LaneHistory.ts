@@ -66,8 +66,6 @@ class LaneHistory {
   /** The tip is a start a resume followed after a report, whose own commit the lane never delivered. */
   private tipOwed = false
   private readonly ring: Entry[] = []
-  /** Each route's branch count where its last start left the lane: a branch above it is a history met since. */
-  private readonly anchors = new Map<LaneRoute, number>()
   /** The ring's oldest entry, once it is full. */
   private oldest = 0
   /** The frames past a missing one, by place, until it arrives or the wait ends. */
@@ -95,7 +93,6 @@ class LaneHistory {
       // A lane new to a resuming route had no commit when the route was last ready.
       this.follow(resuming ? NO_START : (start ?? NO_START), null, 0)
       if (!resuming) {
-        this.anchor(route)
         const covered = start === undefined ? null : coveredBy(start, early)
         for (const frame of early) {
           if (covered?.has(frame)) route.dropped(frame)
@@ -104,9 +101,8 @@ class LaneHistory {
         return
       }
     }
-    if (resuming && switched) return this.switchTo(route, start ?? NO_START, early, passed)
+    if (resuming && switched) return this.switchTo(start ?? NO_START, early, passed)
     if (resuming) return this.resume(route, start ?? NO_START, early, passed)
-    this.anchor(route)
     const covered = start === undefined ? null : coveredBy(start, early)
     for (const frame of early) {
       if (covered?.has(frame)) route.dropped(frame)
@@ -126,27 +122,14 @@ class LaneHistory {
     this.drain()
   }
 
-  /** `route` stands where the lane is now: what it meets from here on is new to it. */
-  anchor(route: LaneRoute): void {
-    this.anchors.set(route, this.branches)
-  }
-
   /** Whether the lane delivered `start`'s commit, or started or stands at it. */
   knows({ place, id }: LaneStart): boolean {
     return (place === this.last && id === this.tip) || this.knowsAt(place, id)
   }
 
-  /** Whether the lane holds `start` on a history it met since `route`'s anchor: it decided on that history then. */
-  metSince(route: LaneRoute, start: LaneStart = NO_START): boolean {
-    const anchor = this.anchors.get(route)
-    if (anchor === undefined) return false
-    return this.ring.some((entry) => entry.place === start.place && entry.id === start.id && entry.branch > anchor)
-  }
-
   /** The route is gone: its parked frames go with it, as every route of the lane brings each of its frames. */
   leave(route: LaneRoute): void {
     this.routes.delete(route)
-    this.anchors.delete(route)
     if (this.parked !== null) {
       for (const [place, frames] of this.parked) {
         const kept = frames.filter((frame) => frame.via !== route)
@@ -177,19 +160,19 @@ class LaneHistory {
     const branch = this.branchOf(prev)
     if (branch !== undefined) {
       if (!this.forks(frame, branch)) return this.deliver(frame, branch)
-      this.report(via)
+      this.report(via, place)
       return this.deliver(frame, ++this.branches)
     }
     // unseen: a copy whose first delivery left the ring can't be told from a new frame. A frame at or below its own
     // route's highest place is that route's rewind, one node's in-order stream going back, so it is decided below.
     if (place <= this.evicted && place > passedBefore) {
-      if (!this.unseenReported) this.report(via)
+      if (!this.unseenReported) this.report(via, place)
       this.unseenReported = true
       return via.dropped(frame)
     }
     if (place > this.last + 1) return this.park(frame)
     // unknown
-    this.report(via)
+    this.report(via, place)
     this.deliver(frame, ++this.branches)
   }
 
@@ -256,9 +239,11 @@ class LaneHistory {
     return undefined
   }
 
-  /** A report of what another history replaced, which only a lane that delivered can have lost. */
-  private report(route: LaneRoute): void {
-    if (this.delivered) route.reportMissed(null)
+  /** A report of what another history replaced, which only a lane that delivered can have lost. A frame at `place`,
+   *  below the start the lane follows after a report and before that start's own frame, is of the change that report
+   *  told: the frames before the start in its history, or the replaced history's late ones. */
+  private report(route: LaneRoute, place = Number.POSITIVE_INFINITY): void {
+    if (this.delivered && !(this.tipOwed && place < this.last)) route.reportMissed(null)
   }
 
   /** The route's lost connection ended at `start`: ahead of the lane, what reached the new subscription goes out and
@@ -286,20 +271,18 @@ class LaneHistory {
       this.follow(start, null, ++this.branches)
       this.tipOwed = start.id !== NO_ID
     }
-    this.anchor(route)
     for (const frame of rest) this.offer(frame, passed(frame))
   }
 
   /** The route's lost connection ended at `start` of another authority, which it reported: no count holds across
    *  two authorities, so the lane follows the start as a history it never saw, unless it stands at the start. */
-  private switchTo(route: LaneRoute, start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
+  private switchTo(start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
     if (!(start.place === this.last && start.id === this.tip)) {
       if (start.place < this.last) this.rewindPending = true
       const owed = start.id !== NO_ID && !this.knowsAt(start.place, start.id)
       this.follow(start, null, ++this.branches)
       this.tipOwed = owed
     }
-    this.anchor(route)
     for (const frame of [...early].sort((a, b) => a.place - b.place)) this.offer(frame, passed(frame))
   }
 
