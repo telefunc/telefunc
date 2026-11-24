@@ -19,7 +19,8 @@ function producerOfStream(
         yield chunk
       }
     } finally {
-      await reader.cancel()
+      // The stream is the app's: at its end, it is let go of for the app's own `cancel()` or another read.
+      await reader.cancel().finally(() => reader.releaseLock())
     }
   })()
   return {

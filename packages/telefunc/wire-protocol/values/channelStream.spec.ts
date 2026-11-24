@@ -6,6 +6,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
+import { readableStreamReplacer } from './client/request/readableStream.js'
+import { createStreamProducer } from './server/response/createStreamProducer.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
 import { sendChunks } from './sendChunks.js'
 import {
@@ -222,5 +224,31 @@ describe("a client's upload stream that fails", () => {
     const failure = await failed
     expect(failure).toBeInstanceOf(Error)
     expect(failure).toHaveProperty('message', "Stream ended: the client's ReadableStream failed before its end")
+  })
+})
+
+describe('a stream sent over transport channel and read to its end', () => {
+  test.each([
+    [
+      "a page's upload argument",
+      (stream: ReadableStream<Uint8Array<ArrayBuffer>>) => readableStreamReplacer.createProducer(stream),
+    ],
+    ["a telefunction's returned stream", createStreamProducer],
+  ])('%s is let go of: unlocked, and its own cancel() resolves', async (_, producerOf) => {
+    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(4, 5, 6))
+        controller.close()
+      },
+    })
+    const producer = producerOf(stream)
+    const channel = memoryChannel()
+    const source = ChannelStreamSource.create(channel)
+    const sent = sendChunks(channel, producer, new Promise(() => {}))
+    expect(await source.readNextChunk()).toEqual(Uint8Array.of(4, 5, 6))
+    expect(await source.readNextChunk()).toBe(null)
+    await sent
+    expect(stream.locked).toBe(false)
+    await expect(stream.cancel('the caller is done with it')).resolves.toBeUndefined()
   })
 })
