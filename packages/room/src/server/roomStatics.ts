@@ -4,7 +4,7 @@ export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
-import { DIRECTORY_PAGE_SIZE, type RoomHead } from '../backend/contract.js'
+import { DIRECTORY_PAGE_SIZE, type DirectoryEntry, type RoomHead } from '../backend/contract.js'
 import type { RoomStore } from '../backend/RoomStore.js'
 import { RoomError, isRoomError, messageLostError, participantGoneError, roomClosedError } from '../shared/errors.js'
 import {
@@ -282,7 +282,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       // `DIRECTORY_PAGE_SIZE` reads at once, each at its room's authority: a Cloudflare page holds a page per region.
       for (let at = 0; at < page.entries.length; at += DIRECTORY_PAGE_SIZE) {
         const chunk = page.entries.slice(at, at + DIRECTORY_PAGE_SIZE)
-        const listed = await allSettledOrThrow(chunk.map(({ roomId, incTag }) => listedRoom(store, roomId, incTag)))
+        const listed = await allSettledOrThrow(chunk.map((entry) => listedRoom(store, entry)))
         for (const info of listed) if (info !== null) rooms.push(info)
       }
     } while (cursor !== undefined)
@@ -292,12 +292,10 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 
 /** A directory entry as `Room.list()` lists it, while its listing is repaired; null once the room isn't open. Its
  *  reads and writes are steps of the list's call. */
-async function listedRoom(store: RoomStore, roomId: string, incTag: string): Promise<RoomInfo | null> {
+async function listedRoom(store: RoomStore, entry: DirectoryEntry): Promise<RoomInfo | null> {
+  const { roomId } = entry
   const head = await store.reads.readHead(roomId)
-  const [, info] = await allSettledOrThrow([
-    repairRoomIndex(store, roomId, incTag, head),
-    openRoomInfo(store, roomId, head),
-  ])
+  const [, info] = await allSettledOrThrow([repairRoomIndex(store, entry, head), openRoomInfo(store, roomId, head)])
   return info
 }
 

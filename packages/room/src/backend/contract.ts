@@ -15,6 +15,7 @@ export type {
   CommitOptions,
   RequiredCells,
   CommitTarget,
+  DirectoryEntry,
   DirectoryPage,
   EveryMemberLane,
   EveryTrackLane,
@@ -194,7 +195,12 @@ type RetainedFrame = OrderingInfo & { payload: Uint8Array }
 /** One member's binary lanes, or one track's across members. */
 type RetainedOf = { member: string } | { track: string }
 
-type DirectoryPage = { entries: { roomId: string; incTag: string }[]; cursor?: string }
+/** A room's listing: the incarnation it is listed under, at the version its last put wrote. A put writes a new version
+ *  each time, which no earlier put of any room wrote, so a delete given the version it read deletes nothing a put
+ *  wrote since. */
+type DirectoryEntry = { roomId: string; incTag: string; version: string }
+
+type DirectoryPage = { entries: DirectoryEntry[]; cursor?: string }
 
 type CommitAccepted = {
   kind: 'accepted'
@@ -313,21 +319,21 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
   /** Drops what incarnation `inc` left, which its caller read as one no head names, and nothing while the live head
    *  names it: the caller's read may come before a turn that named it. */
   dropIncarnation(roomId: string, inc: string): Promise<void>
-  /** Lists `roomId` under `incTag`, due at `checkAt` (authority ms) and no sooner than `minDelayMs` from the
-   *  authority's now; an entry due at Infinity is never due. Where the heads are the listing (memory), it only
-   *  schedules the check: of the tag the live head names, or, while it names none, of a tag the next head exchange
-   *  keeps if it names it. */
+  /** Lists `roomId` under `incTag` at a new version, due at `checkAt` (authority ms) and no sooner than `minDelayMs`
+   *  from the authority's now; an entry due at Infinity is never due. Where the heads are the listing (memory), it
+   *  only schedules the check: of the tag the live head names, or, while it names none, of a tag the next head
+   *  exchange keeps if it names it. */
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void>
-  /** Deletes the entry listed under `incTag`; where the heads are the listing, the check of a tag no live head
-   *  names. */
-  directoryDelete(roomId: string, incTag: string): Promise<void>
-  /** The tag `roomId` is listed under, if it is listed; where the heads are the listing, its live head's
-   *  incarnation. */
-  directoryGet(roomId: string): Promise<string | undefined>
+  /** Deletes `roomId`'s entry while it is at `version`, the version a list, a due read or a get read: once a put
+   *  wrote it again, nothing. Where the heads are the listing (memory), the room's checks; where its authority keeps
+   *  it (Cloudflare), what its region's directory shows of a version the authority moved past. */
+  directoryDelete(roomId: string, version: string): Promise<void>
+  /** `roomId`'s entry, if it is listed; where the heads are the listing, its live head's incarnation. */
+  directoryGet(roomId: string): Promise<Omit<DirectoryEntry, 'roomId'> | undefined>
   directoryList(prefix: string, cursor?: string): Promise<DirectoryPage>
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
    *  or deleted. */
-  directoryDue(): Promise<DirectoryPage['entries']>
+  directoryDue(): Promise<DirectoryEntry[]>
   /** As a Broadcast driver's `subscribe`; an incarnation that isn't open is a refusal. */
   subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt
 }

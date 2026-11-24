@@ -5,7 +5,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 
 import { getRoomPlane } from '../../backend/plane.js'
 import { assert } from '../../utils/assert.js'
-import type { RoomHead } from '../../backend/contract.js'
+import type { DirectoryEntry, RoomHead } from '../../backend/contract.js'
 import type { RoomPlane } from '../../backend/RoomPlane.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { Slice } from '../../shared/Slice.js'
@@ -31,14 +31,16 @@ async function listRoom(
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
- *  tombstone lapsed), so it is dropped with its listing. Its writes are steps of the call `store` is of, which a
- *  listing that needs no repair doesn't mark as having written. */
-async function repairRoomIndex(store: RoomStore, id: string, listedInc: string, head: RoomHead | null): Promise<void> {
-  if (head?.currentInc === listedInc) return
-  await store.dropIncarnation(id, listedInc)
+ *  tombstone lapsed), so it is dropped with its listing, at the version read with it: a create whose head exchange
+ *  came after `head` was read lists its room again, which that delete leaves. Its writes are steps of the call
+ *  `store` is of, which a listing that needs no repair doesn't mark as having written. */
+async function repairRoomIndex(store: RoomStore, listed: DirectoryEntry, head: RoomHead | null): Promise<void> {
+  const { roomId: id, incTag, version } = listed
+  if (head?.currentInc === incTag) return
+  await store.dropIncarnation(id, incTag)
   const live = openConfig(head)
   if (live && head) await listRoom(store, { id, inc: live.inc, hold: live.hold }, head.expiresAt)
-  else await store.directoryDelete(id, listedInc)
+  else await store.directoryDelete(id, version)
 }
 
 const globalObject = getGlobalObject('server/store/directory.ts', {
@@ -68,9 +70,10 @@ async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
 /** A due room whose head no longer names it is repaired. A closing one is due at its close lease's end: once the lease
  *  ran out, its closer stopped, and the sweep takes the close over; a replica drops the second `closed` frame a
  *  takeover commits after a closer that committed its own. Any other is due again. */
-async function sweepDueRoom(plane: RoomPlane, { roomId, incTag }: { roomId: string; incTag: string }): Promise<void> {
+async function sweepDueRoom(plane: RoomPlane, due: DirectoryEntry): Promise<void> {
+  const { roomId, incTag } = due
   const head = await plane.direct.reads.readHead(roomId)
-  if (head?.currentInc !== incTag) return await plane.call((store) => repairRoomIndex(store, roomId, incTag, head))
+  if (head?.currentInc !== incTag) return await plane.call((store) => repairRoomIndex(store, due, head))
   if (head.state !== 'closing') {
     return await listRoom(plane.direct, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
   }

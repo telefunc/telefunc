@@ -1203,10 +1203,11 @@ if plan.commit[1] then commit = tf_commit(CK, CA) end
 return {commit, unpack(counters)}
 `
 
-// Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record,
-// so stale cleanup cannot erase (or de-index) a concurrent newer tag.
+// Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record, so a delete
+// given the listing it read erases nothing a put wrote since: each put writes a listing no put wrote before.
 //   KEYS: [1]=index [2]=tags [3]=checks
-//   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
+//   ARGV: [1]=room id [2]=the listing, its tag and version (`directoryListing()` in RedisRoomDriver.ts) [3]=when it is
+//         due, '' for never [4]=the least delay from authority time (put only)
 const DIRECTORY_HOLDS = ['zset', 'hash', 'zset'] as const
 const DIRECTORY_PUT_LUA = `${ALLOWED_LUA}${NOW_LUA}
 tf_allowed('HSET', KEYS[2], '', '')
@@ -1247,7 +1248,7 @@ redis.call('ZREM', KEYS[3], ARGV[1])
 return 1
 `
 
-// Up to ARGV[1] entries due at authority time, earliest first: each room id, then its tag.
+// Up to ARGV[1] entries due at authority time, earliest first: each room id, then its listing.
 //   KEYS: [1]=checks [2]=tags
 const DIRECTORY_DUE_LUA = `${NOW_LUA}
 local reply = {}
@@ -1284,7 +1285,7 @@ const command = <Input, Output, Name extends string>(
 type CommandName = (typeof REDIS_COMMANDS)[keyof typeof REDIS_COMMANDS]['name']
 
 type RoomInc = { roomId: string; inc: string }
-type DirectoryPutInput = { roomId: string; incTag: string; checkAt: number; minDelayMs: number }
+type DirectoryPutInput = { roomId: string; listing: string; checkAt: number; minDelayMs: number }
 
 type CommitInput = RoomInc & {
   lane: LaneId
@@ -1780,9 +1781,9 @@ const REDIS_COMMANDS = {
     holds: DIRECTORY_HOLDS,
     lua: DIRECTORY_PUT_LUA,
     numberOfKeys: 3,
-    invoke: (prefix, { roomId, incTag, checkAt, minDelayMs }: DirectoryPutInput) => ({
+    invoke: (prefix, { roomId, listing, checkAt, minDelayMs }: DirectoryPutInput) => ({
       keys: [directoryIndexKey(prefix), directoryTagsKey(prefix), directoryChecksKey(prefix)],
-      argv: [roomId, incTag, checkAt === Infinity ? '' : String(checkAt), String(minDelayMs)],
+      argv: [roomId, listing, checkAt === Infinity ? '' : String(checkAt), String(minDelayMs)],
     }),
     parse: () => {},
   }),
@@ -1792,9 +1793,9 @@ const REDIS_COMMANDS = {
     holds: DIRECTORY_HOLDS,
     lua: DIRECTORY_DELETE_LUA,
     numberOfKeys: 3,
-    invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
+    invoke: (prefix, { roomId, listing }: { roomId: string; listing: string }) => ({
       keys: [directoryIndexKey(prefix), directoryTagsKey(prefix), directoryChecksKey(prefix)],
-      argv: [roomId, incTag],
+      argv: [roomId, listing],
     }),
     parse: () => {},
   }),
@@ -1809,8 +1810,8 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply) => {
       const found = reply as string[]
-      const entries: { roomId: string; incTag: string }[] = []
-      for (let i = 0; i < found.length; i += 2) entries.push({ roomId: found[i]!, incTag: found[i + 1]! })
+      const entries: { roomId: string; listing: string }[] = []
+      for (let i = 0; i < found.length; i += 2) entries.push({ roomId: found[i]!, listing: found[i + 1]! })
       return entries
     },
   }),

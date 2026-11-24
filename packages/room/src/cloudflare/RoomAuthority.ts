@@ -21,6 +21,7 @@ import type {
   RetainedFrame,
   RetainedOf,
   ExpiringCellsRead,
+  DirectoryEntry,
 } from '../backend/contract.js'
 import {
   LEASE_CALL_DEADLINE_MS,
@@ -69,7 +70,7 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
-  readListedInc,
+  readListedEntry,
   readUnsentListing,
   readOrder,
   listWithHead,
@@ -409,21 +410,21 @@ class RoomAuthority {
   }
 
   /** Sends the listing to its region's directory, waiting for the directory's answer; a call that fails leaves it due
-   *  for the alarm. With `staleInc`, which the directory was found listing and the head doesn't, it sends it also when
-   *  the directory has it. */
-  async directoryShow(staleInc?: string): Promise<void> {
+   *  for the alarm. With `readVersion`, the version a repair found the directory showing, it sends it also when the
+   *  directory has it, unless the listing is still at that version. */
+  async directoryShow(readVersion?: string): Promise<void> {
     const now = Date.now()
     this.transaction((sql) => {
       settleListing(sql, now)
-      if (staleInc !== undefined) relistOver(sql, staleInc, now)
+      if (readVersion !== undefined) relistOver(sql, Number(readVersion), now)
     })
     await this.scheduleMaintenanceIfNeeded()
     // The listing is stored: what the directory shows of it follows, here or from the alarm.
     await this.showInDirectory().catch(() => {})
   }
 
-  async directoryGet(): Promise<string | undefined> {
-    return readListedInc(this.sql())
+  async directoryGet(): Promise<Omit<DirectoryEntry, 'roomId'> | undefined> {
+    return readListedEntry(this.sql())
   }
 
   async alarm(): Promise<void> {

@@ -52,7 +52,7 @@ async function tryCreateRoom(
     }
     const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsedInc = current === null ? await store.reads.directoryGet(id) : undefined
+    const lapsedInc = current === null ? (await store.reads.directoryGet(id))?.incTag : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
     if (lapsedInc === undefined) await listRoom(store, incarnation, undefined)
     const next = { head: openHead(created), ...newRoomHold(incarnation.hold) }

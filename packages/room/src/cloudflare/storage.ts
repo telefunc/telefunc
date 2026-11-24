@@ -2,7 +2,7 @@
 export {
   initSchema,
   listWithHead,
-  readListedInc,
+  readListedEntry,
   readUnsentListing,
   settleListing,
   resendListing,
@@ -48,6 +48,7 @@ import {
   type ExpiringCell,
   type ExpiringCellsRead,
   type StaleIncarnation,
+  type DirectoryEntry,
 } from '../backend/contract.js'
 import { dropLeaseScopes, initLeaseSchema, nextLeaseSweep } from 'telefunc/__internal'
 import { incarnationScopes } from './routes.js'
@@ -152,8 +153,12 @@ function settleListing(sql: SqlStorage, now: number): void {
   listWithHead(sql, readLiveHead(sql, now), now)
 }
 
-function readListedInc(sql: SqlStorage): string | undefined {
-  return readListingRow(sql)?.incTag ?? undefined
+/** The incarnation the listing names, at its version. */
+function readListedEntry(sql: SqlStorage): Omit<DirectoryEntry, 'roomId'> | undefined {
+  const listing = readListingRow(sql)
+  return listing === null || listing.incTag === null
+    ? undefined
+    : { incTag: listing.incTag, version: String(listing.version) }
 }
 
 /** The listing while its directory may not have its version: the alarm sends it at `dueAt`, any send before. */
@@ -167,13 +172,13 @@ function resendListing(sql: SqlStorage, version: number, dueAt: number | null): 
   sql.exec('UPDATE listing SET due_at = ? WHERE id = 1 AND version = ?', dueAt, version)
 }
 
-/** A new version of a listing the directory has, due `now`, unless it names `staleInc`: the directory was found
- *  listing that incarnation, as after a call delivered later than its successors. */
-function relistOver(sql: SqlStorage, staleInc: string, now: number): void {
+/** A new version of a listing the directory has, due `now`, unless it is at `readVersion`: the directory was found
+ *  showing that version, which the listing moved past, as after a call delivered later than its successors. */
+function relistOver(sql: SqlStorage, readVersion: number, now: number): void {
   sql.exec(
-    'UPDATE listing SET version = version + 1, due_at = ? WHERE id = 1 AND due_at IS NULL AND inc_tag IS NOT ?',
+    'UPDATE listing SET version = version + 1, due_at = ? WHERE id = 1 AND due_at IS NULL AND version IS NOT ?',
     now,
-    staleInc,
+    readVersion,
   )
 }
 

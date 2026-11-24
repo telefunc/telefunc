@@ -11,6 +11,7 @@ import type {
   CommitOptions,
   CommitTarget,
   CommitResult,
+  DirectoryEntry,
   DirectoryPage,
   HeadExchangeResult,
   HeadExpectation,
@@ -177,11 +178,11 @@ class CloudflareRoomDriver implements RoomDriver {
     return this.stub(roomId).directoryShow()
   }
 
-  async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.stub(roomId).directoryShow(incTag)
+  async directoryDelete(roomId: string, version: string): Promise<void> {
+    return this.stub(roomId).directoryShow(version)
   }
 
-  async directoryGet(roomId: string): Promise<string | undefined> {
+  async directoryGet(roomId: string): Promise<Omit<DirectoryEntry, 'roomId'> | undefined> {
     return this.stub(roomId).directoryGet()
   }
 
@@ -194,7 +195,7 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   /** Never any: each room's authority settles its own listing on its alarm. */
-  async directoryDue(): Promise<DirectoryPage['entries']> {
+  async directoryDue(): Promise<DirectoryEntry[]> {
     return []
   }
 

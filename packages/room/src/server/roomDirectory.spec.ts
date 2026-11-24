@@ -250,7 +250,7 @@ describe("the memory store's listing", () => {
     const loser = await first
     vi.restoreAllMocks()
     const winner = await currentInc(id)
-    expect({ second, loser, listed: await getRoomPlane().direct.reads.directoryGet(id) }).toEqual({
+    expect({ second, loser, listed: (await getRoomPlane().direct.reads.directoryGet(id))?.incTag }).toEqual({
       second: 'resolved',
       loser: `Room already exists: ${id}`,
       listed: winner,
@@ -274,7 +274,9 @@ describe("the memory store's listing", () => {
     const winner = await currentInc(id)
     const listed = (await Room.list({ prefix: id })).map((room) => room.id)
     vi.setSystemTime(Date.now() + ROOM_LEASE_TTL_MS + 1_000)
-    const due = (await getRoomPlane().direct.reads.directoryDue()).filter((entry) => entry.roomId === id)
+    const due = (await getRoomPlane().direct.reads.directoryDue())
+      .filter((entry) => entry.roomId === id)
+      .map(({ roomId, incTag }) => ({ roomId, incTag }))
     expect({ between, outcomes, listed, due }).toEqual({
       between: [],
       outcomes: [`Room already exists: ${id}`, 'resolved'],
@@ -345,13 +347,15 @@ describe("the memory store's listing", () => {
     if (tombstone === null) throw new Error(`room ${id} has no tombstone`)
     const second = await openHead(driver, id, undefined, tombstone.rev)
     await listOpened(driver, id, second)
-    // The core's repair from its page's entry: drop the listed incarnation, re-list or delete under its tag.
+    // The core's repair from its page's entry: drop the listed incarnation, re-list it or delete at the version read.
+    const [listed] = page.entries
+    if (listed === undefined) throw new Error(`room ${id} isn't listed`)
     await driver.dropIncarnation(id, first.inc)
     await driver.directoryPut(id, first.inc, 0, ROOM_LEASE_TTL_MS)
-    await driver.directoryDelete(id, first.inc)
+    await driver.directoryDelete(id, listed.version)
     expect({
       listedFirst: page.entries.map((entry) => entry.incTag),
-      get: await driver.directoryGet(id),
+      get: (await driver.directoryGet(id))?.incTag,
       listed: (await driver.directoryList(id)).entries.map((entry) => entry.incTag),
       data: (await driver.readLaneOrder(id, second.inc, SEMANTIC))?.seq,
     }).toEqual({ listedFirst: [first.inc], get: second.inc, listed: [second.inc], data: 1 })
@@ -867,8 +871,10 @@ describe("a room's due check", () => {
     const listed = await reads.directoryGet(id)
     const inc = await currentInc(id)
     vi.setSystemTime(Date.now() + ROOM_LEASE_TTL_MS + 1_000)
-    const due = (await reads.directoryDue()).filter((entry) => entry.roomId === id)
-    expect({ created, listed: listed === inc, due }).toEqual({
+    const due = (await reads.directoryDue())
+      .filter((entry) => entry.roomId === id)
+      .map(({ roomId, incTag }) => ({ roomId, incTag }))
+    expect({ created, listed: listed?.incTag === inc, due }).toEqual({
       created: 'the reply was refused',
       listed: true,
       due: [{ roomId: id, incTag: inc }],
@@ -1020,7 +1026,7 @@ describe("a room's due check", () => {
     expect({
       whileClosing,
       afterClose,
-      get: await driver.directoryGet(id),
+      get: (await driver.directoryGet(id))?.incTag,
       due: (await driver.directoryDue()).map((entry) => entry.incTag),
       nodes: driver['dueChecks'].size,
     }).toEqual({

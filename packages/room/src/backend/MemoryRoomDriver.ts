@@ -30,6 +30,7 @@ import type {
   RetainedFrame,
   RetainedOf,
   RoomOperation,
+  DirectoryEntry,
   DirectoryPage,
 } from './contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from './contract.js'
@@ -97,7 +98,7 @@ type Incarnation = {
 type LapseTimer = { firesAt: number; timer: ReturnType<typeof setTimeout> }
 
 /** When room `roomId` is due under `incTag`, and where it is in the due heap (-1: not in it). */
-type DueCheck = { at: number; roomId: string; incTag: string; place: number }
+type DueCheck = { at: number; roomId: string; room: RoomRecord; incTag: string; place: number }
 
 type RoomRecord = {
   head: StoredHead | null
@@ -105,6 +106,8 @@ type RoomRecord = {
   lapse: LapseTimer | null
   /** Its due checks by tag: the tag its head names, or, while it names none, those of the creates waiting for it. */
   due: Map<string, DueCheck>
+  /** Its listing's version: a new one at each put and each head turn that names another incarnation. */
+  version: string
 }
 
 /** About 10 ms of commits. */
@@ -317,6 +320,8 @@ class MemoryRoomDriver implements RoomDriver {
    *  server that never lists pays nothing per head turn. */
   private sortedIds: SortedIds | null = null
   private readonly dueChecks = new DueChecks()
+  /** The listing versions written so far, so no two puts or turns of any room write the same one. */
+  private listingVersions = 0
   private readonly commits = new MemoryCommitQueue({ commitsBetweenTurns: COMMITS_BETWEEN_TURNS })
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -562,27 +567,31 @@ class MemoryRoomDriver implements RoomDriver {
     this.endIncarnation(room, inc)
   }
 
-  /** The heads are the listing, so this only schedules: the check of the tag the head names, or, while it names
-   *  none, of a create's tag, which the next head turn keeps if it names it. */
+  /** The heads are the listing, so this only schedules, at a new version: the check of the tag the head names, or,
+   *  while it names none, of a create's tag, which the next head turn keeps if it names it. */
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
     const named = this.liveHead(roomId, this.rooms.get(roomId))?.currentInc ?? null
     if (named !== null && named !== incTag) return
     const room = at === Infinity ? this.rooms.get(roomId) : this.roomFor(roomId)
     if (room === undefined) return
+    room.version = this.nextListingVersion()
     if (at === Infinity) this.unschedule(roomId, room, incTag)
     else this.schedule(room, roomId, incTag, at)
   }
 
-  /** Only a check no live head names: a repair acting on an earlier read can't unschedule what a head took since. */
-  async directoryDelete(roomId: string, incTag: string): Promise<void> {
+  /** The room's checks, while its listing is at `version`: a repair acting on an earlier read can't unschedule what a
+   *  put or a head turn did since. */
+  async directoryDelete(roomId: string, version: string): Promise<void> {
     const room = this.rooms.get(roomId)
-    if (room === undefined || this.liveHead(roomId, room)?.currentInc === incTag) return
-    this.unschedule(roomId, room, incTag)
+    if (room === undefined || room.version !== version) return
+    for (const incTag of [...room.due.keys()]) this.unschedule(roomId, room, incTag)
   }
 
-  async directoryGet(roomId: string): Promise<string | undefined> {
-    return this.liveHead(roomId, this.rooms.get(roomId))?.currentInc ?? undefined
+  async directoryGet(roomId: string): Promise<Omit<DirectoryEntry, 'roomId'> | undefined> {
+    const room = this.rooms.get(roomId)
+    const incTag = this.liveHead(roomId, room)?.currentInc ?? null
+    return room === undefined || incTag === null ? undefined : { incTag, version: room.version }
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
@@ -595,23 +604,39 @@ class MemoryRoomDriver implements RoomDriver {
       if (!roomId.startsWith(prefix)) break
       if (roomId === cursor) continue
       // A lapsed head goes here, before it counts toward the page.
-      const incTag = this.liveHead(roomId, this.rooms.get(roomId), now)?.currentInc ?? null
-      if (incTag === null) continue
+      const room = this.rooms.get(roomId)
+      const incTag = this.liveHead(roomId, room, now)?.currentInc ?? null
+      if (room === undefined || incTag === null) continue
       if (entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: entries.at(-1)!.roomId }
-      entries.push({ roomId, incTag })
+      entries.push({ roomId, incTag, version: room.version })
     }
     return { entries }
   }
 
   /** Still due until put again, or retired with the tag its head stops naming. */
-  async directoryDue(): Promise<DirectoryPage['entries']> {
-    return this.dueChecks.due(Date.now(), DIRECTORY_PAGE_SIZE).map(({ roomId, incTag }) => ({ roomId, incTag }))
+  async directoryDue(): Promise<DirectoryEntry[]> {
+    return this.dueChecks.due(Date.now(), DIRECTORY_PAGE_SIZE).map(({ roomId, incTag, room }) => ({
+      roomId,
+      incTag,
+      version: room.version,
+    }))
   }
 
   // ── internals ──
 
   private roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this.rooms, roomId, () => ({ head: null, incarnations: new Map(), lapse: null, due: new Map() }))
+    return getOrCreate(this.rooms, roomId, () => ({
+      head: null,
+      incarnations: new Map(),
+      lapse: null,
+      due: new Map(),
+      version: this.nextListingVersion(),
+    }))
+  }
+
+  private nextListingVersion(): string {
+    this.listingVersions += 1
+    return String(this.listingVersions)
   }
 
   private *listedIds(): Generator<string> {
@@ -623,6 +648,7 @@ class MemoryRoomDriver implements RoomDriver {
    *  lapse, or the create's put if that is sooner. */
   private followHead(roomId: string, room: RoomRecord, before: string | null): void {
     const named = room.head?.currentInc ?? null
+    if (named !== before) room.version = this.nextListingVersion()
     if (before === null && named !== null) this.sortedIds?.add(roomId)
     if (before !== null && named === null) this.sortedIds?.delete(roomId)
     for (const tag of [...room.due.keys()]) if (tag !== named) this.unschedule(roomId, room, tag)
@@ -633,7 +659,7 @@ class MemoryRoomDriver implements RoomDriver {
 
   private schedule(room: RoomRecord, roomId: string, incTag: string, at: number): void {
     this.dueChecks.set(
-      getOrCreate(room.due, incTag, () => ({ at, roomId, incTag, place: -1 })),
+      getOrCreate(room.due, incTag, () => ({ at, roomId, room, incTag, place: -1 })),
       at,
     )
   }

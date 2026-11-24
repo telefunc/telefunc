@@ -30,14 +30,15 @@ class RegionDirectory {
       .exec<{
         room_id: string
         inc_tag: string
+        version: number
       }>(
-        `SELECT room_id, inc_tag FROM room WHERE ${range.where} AND inc_tag IS NOT NULL ORDER BY room_id LIMIT ?`,
+        `SELECT room_id, inc_tag, version FROM room WHERE ${range.where} AND inc_tag IS NOT NULL ORDER BY room_id LIMIT ?`,
         ...range.args,
         DIRECTORY_PAGE_SIZE + 1,
       )
       .toArray()
     const page = matching.slice(0, DIRECTORY_PAGE_SIZE)
-    const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
+    const entries = page.map((row) => ({ roomId: row.room_id, incTag: row.inc_tag, version: String(row.version) }))
     const last = page[page.length - 1]
     const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
     return more ? { entries, cursor: last.room_id } : { entries }

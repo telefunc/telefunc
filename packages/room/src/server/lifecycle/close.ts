@@ -77,16 +77,18 @@ async function finishClose(store: RoomStore, roomId: string, closing: RoomHead):
   return true
 }
 
-/** Drops what a closed room's incarnation left, then its listing. The close is done once its head is finalized: a drop
- *  that fails is reported, and the listing stays, so a sweep drops it again, as its close made the room due by its
- *  close lease's end (`acquireClosingLease()`), or `Room.list()` or a later create of the room does. */
+/** Drops what a closed room's incarnation left, then its listing, while it lists that incarnation. The close is done
+ *  once its head is finalized: a drop that fails is reported, and the listing stays, so a sweep drops it again, as its
+ *  close made the room due by its close lease's end (`acquireClosingLease()`), or `Room.list()` or a later create of
+ *  the room does. */
 async function cleanupFinalizedIncarnation(store: RoomStore, roomId: string, closed: RoomHead): Promise<void> {
   // A closed tombstone's incarnation, which a random `inc` never makes current again.
   assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
   const inc = configFromHead(closed).inc
   try {
     await store.dropIncarnation(roomId, inc)
-    await store.directoryDelete(roomId, inc)
+    const listed = await store.reads.directoryGet(roomId)
+    if (listed?.incTag === inc) await store.directoryDelete(roomId, listed.version)
   } catch (error) {
     reportRoomError(error)
   }

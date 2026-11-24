@@ -27,6 +27,7 @@ import type {
   CommitTarget,
   RetainedFrame,
   RetainedOf,
+  DirectoryEntry,
   DirectoryPage,
   RoomPlaneKit,
   RoomSubscriptionSource,
@@ -469,18 +470,18 @@ class RedisRoomDriver implements RoomDriver {
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    return this.connection.run(REDIS_COMMANDS.directoryPut, { roomId, incTag, checkAt, minDelayMs })
+    const listing = directoryListing(incTag, crypto.randomUUID())
+    return this.connection.run(REDIS_COMMANDS.directoryPut, { roomId, listing, checkAt, minDelayMs })
   }
 
-  directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.connection.run(REDIS_COMMANDS.directoryDelete, { roomId, incTag })
+  directoryDelete(roomId: string, version: string): Promise<void> {
+    return this.connection.run(REDIS_COMMANDS.directoryDelete, { roomId, listing: version })
   }
 
-  async directoryGet(roomId: string): Promise<string | undefined> {
-    return (
-      (await this.connection.send('hget', (client) => client.hget(directoryTagsKey(this.connection.prefix), roomId))) ??
-      undefined
-    )
+  async directoryGet(roomId: string): Promise<Omit<DirectoryEntry, 'roomId'> | undefined> {
+    const tagsKey = directoryTagsKey(this.connection.prefix)
+    const listing = await this.connection.send('hget', (client) => client.hget(tagsKey, roomId))
+    return listing === null ? undefined : directoryEntry(roomId, listing)
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
@@ -501,14 +502,15 @@ class RedisRoomDriver implements RoomDriver {
       client.hmget(directoryTagsKey(this.connection.prefix), ...roomIds),
     )
     const entries = roomIds.flatMap((roomId, i) => {
-      const incTag = tags[i]
-      return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
+      const listing = tags[i]
+      return listing === null || listing === undefined ? [] : [directoryEntry(roomId, listing)]
     })
     return matching.length > this.kit.DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
   }
 
-  directoryDue(): Promise<DirectoryPage['entries']> {
-    return this.connection.run(REDIS_COMMANDS.directoryDue, { limit: this.kit.DIRECTORY_PAGE_SIZE })
+  async directoryDue(): Promise<DirectoryEntry[]> {
+    const due = await this.connection.run(REDIS_COMMANDS.directoryDue, { limit: this.kit.DIRECTORY_PAGE_SIZE })
+    return due.map(({ roomId, listing }) => directoryEntry(roomId, listing))
   }
 
   private async memberLaneStarts(roomId: string, inc: string, member: string): Promise<Starts | null> {
@@ -565,4 +567,16 @@ function commitWaitRule({ lane, everyTrack, everyMember }: CommitChannels): Wait
 /** The turn a Cluster's commits to one lane take. */
 function laneTurnKey(roomId: string, inc: string, laneKey: string): string {
   return JSON.stringify([roomId, inc, laneKey])
+}
+
+/** A room's listing as the directory's tags hash holds it: its tag, then the version its put minted, which no put of any
+ *  room minted before, so the listing itself is the version a delete compares. */
+function directoryListing(incTag: string, version: string): string {
+  return `${incTag} ${version}`
+}
+
+/** The entry of `roomId`'s `listing`: the tag before its version. */
+function directoryEntry(roomId: string, listing: string): DirectoryEntry {
+  const [incTag = listing] = listing.split(' ', 1)
+  return { roomId, incTag, version: listing }
 }

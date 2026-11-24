@@ -116,11 +116,15 @@ and returns the refusal its result type names (`conflict`, `stale-incarnation` o
 - A cell written with `lapsesInMs` lapses that long after the write, by the authority's clock. A read lists it among
   `lapsed` and gives no `beside` target that lapsed; a plan sees it through `tx.lapsed()`. Room's leases and their
   claims are such cells, so the store, not Room, judges when one lapsed.
-- `directoryPut()` writes one room's entry, with its tag and when it is due. `directoryDelete()` deletes it if it is
-  still listed under `incTag`. On Cloudflare a room's authority writes its entry with the head's exchange instead, as
-  its head lists it, and the two send it to its region's directory. In memory the heads are the listing: a room is
-  listed while its live head names an incarnation, and the two only schedule its due check, never one of a tag
-  another live head names.
+- `directoryPut()` writes one room's entry, with its tag and when it is due, at a new version: no put of any room
+  wrote it before. A list, a due read and `directoryGet()` read an entry with its version, and `directoryDelete()`
+  deletes it only while it is at the version given, so a repair from an earlier read deletes nothing a put wrote
+  since, as a create's put after its head exchange. Redis writes the version into the entry, which its delete script
+  compares in the directory's slot. On Cloudflare a room's authority writes its entry with the head's exchange
+  instead, as its head lists it, at a new version each time, and the two send it to its region's directory, which
+  lists it with that version; a delete sends it again only once the authority moved past the version given. In memory
+  the heads are the listing: a room is listed while its live head names an incarnation, at a new version at each put
+  and each turn that names another, and the two only schedule its due check.
 
 The other calls are each atomic only on their own. A cell read, and each page of `readCellPages()`, is taken at once,
 but nothing holds between two of them. `subscribe()` delivers each lane's commits in seq order from when it confirms;

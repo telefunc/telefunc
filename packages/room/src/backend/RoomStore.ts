@@ -92,8 +92,8 @@ class RoomStore {
     return this.driver.directoryPut(roomId, incTag, checkAt, minDelayMs)
   }
 
-  directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.driver.directoryDelete(roomId, incTag)
+  directoryDelete(roomId: string, version: string): Promise<void> {
+    return this.driver.directoryDelete(roomId, version)
   }
 
   /** The value of `work`, which runs on the store `shared` and may be shared with other calls, once it settled. */
@@ -144,8 +144,8 @@ class CallStore extends RoomStore {
     return this.account.write(() => super.directoryPut(roomId, incTag, checkAt, minDelayMs))
   }
 
-  override directoryDelete(roomId: string, incTag: string): Promise<void> {
-    return this.account.write(() => super.directoryDelete(roomId, incTag))
+  override directoryDelete(roomId: string, version: string): Promise<void> {
+    return this.account.write(() => super.directoryDelete(roomId, version))
   }
 
   /** A write of `shared`'s call counts as this call's, and this call's close waits for `work`. */
