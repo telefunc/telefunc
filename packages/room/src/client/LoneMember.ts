@@ -12,14 +12,8 @@ import {
 import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomState, type RoomStateOwner } from '../shared/RoomState.js'
 import { RoomRemotes } from '../shared/RoomView.js'
-import {
-  ClientParticipant,
-  reportClientCallbackError,
-  request,
-  deliverDm,
-  type PageLink,
-  type RoomChannel,
-} from './ClientParticipant.js'
+import { ClientParticipant, reportClientCallbackError, type PageLink } from './ClientParticipant.js'
+import { deliverDm, request, type RoomChannel } from './stubChannel.js'
 import { RoomMirror } from './RoomMirror.js'
 import { roomsOf } from './page.js'
 import type { Sender } from '../types.js'

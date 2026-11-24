@@ -25,14 +25,8 @@ import { RoomRemotes } from '../shared/RoomView.js'
 import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
-import {
-  ClientParticipant,
-  reportClientCallbackError,
-  request,
-  deliverDm,
-  type PageLink,
-  type RoomChannel,
-} from './ClientParticipant.js'
+import { ClientParticipant, reportClientCallbackError, type PageLink } from './ClientParticipant.js'
+import { deliverDm, request, type RoomChannel } from './stubChannel.js'
 import { addRoom } from './page.js'
 import { toggle } from '../utils/sets.js'
 import type { JoinOptions, LeaveCause, Sender } from '../types.js'

@@ -4,7 +4,7 @@ import type { ChannelPublishInfo } from 'telefunc/__internal'
 import { ClientRoom } from '../client/room.js'
 import { LoneMember } from '../client/LoneMember.js'
 import type { ClientRoomEvent } from '../client/ClientRoomHandle.js'
-import type { PageRequest } from '../client/ClientParticipant.js'
+import type { PageRequest } from '../client/stubChannel.js'
 import type { ParticipantStubNotice } from '../shared/protocol.js'
 
 /** What a stub's channel answers in place of the server's answer: a join's, a meta write's, a publish's. */
