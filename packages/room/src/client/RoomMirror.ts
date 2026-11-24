@@ -9,7 +9,6 @@ import {
   type RoomCtrlEnvelope,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
-  type SenderStamp,
 } from '../shared/protocol.js'
 import { RoomModel, type RoomModelOwner, type SenderClaim } from '../shared/RoomModel.js'
 import { RosterIntake } from './RosterIntake.js'

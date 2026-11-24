@@ -3,7 +3,6 @@ export type { ClientRoomEvent, ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
 import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
-import { isObject } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
@@ -14,7 +13,6 @@ import {
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
-  type SenderStamp,
   type RoomEnvelope,
   type RoomJoinedEvent,
   type RoomRosterEvent,

@@ -8,7 +8,6 @@ import type {
   RoomResult,
   ParticipantStubRequest,
   MemberMetaUpdate,
-  MemberRequest,
   DemandChange,
   TrackWatch,
   TrackWatchState,

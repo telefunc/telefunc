@@ -1,6 +1,5 @@
 export { LoneMember }
 
-import { assert } from '../utils/assert.js'
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import {
   inboxMessageFromWire,
