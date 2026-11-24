@@ -1,4 +1,4 @@
-export { roomStatics }
+export { roomStatics, sendToParticipantRef }
 export type { ParticipantInfo, RoomGuardHooks, RoomGuards, RoomStatic }
 
 import { assert, assertUsage } from '../utils/assert.js'
@@ -444,7 +444,16 @@ async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt
 /** One receipt for `{ id }`; for `{ identity }`, one per tab it reached, in the order they were delivered. */
 function sendToParticipant(id: string, target: { id: string }, data: unknown): Promise<RoomSendReceipt>
 function sendToParticipant(id: string, target: { identity: string }, data: unknown): Promise<RoomSendReceipt[]>
-async function sendToParticipant(
+function sendToParticipant(
+  id: string,
+  target: ParticipantRef,
+  data: unknown,
+): Promise<RoomSendReceipt | RoomSendReceipt[]> {
+  return sendToParticipantRef(id, target, data)
+}
+
+/** `Room.send()` to a participant by id, or to each by identity, for a caller that holds either. */
+async function sendToParticipantRef(
   id: string,
   target: ParticipantRef,
   data: unknown,
