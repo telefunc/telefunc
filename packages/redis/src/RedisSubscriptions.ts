@@ -706,16 +706,15 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
 
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) return this.end()
-    const state = this.state()
-    if (state === 'closed') return
-    const frame = this.decode(message)
-    if (frame === null) return
-    if (state !== 'ready') {
-      this.early.push(frame)
-      return
+    if (this.state() === 'ready') {
+      const frame = this.decode(message)
+      if (frame === null) return
+      const lane = this.laneOf(frame.lane)
+      return lane.history.offer(frame, this.pass(lane, frame))
     }
-    const lane = this.laneOf(frame.lane)
-    lane.history.offer(frame, this.pass(lane, frame))
+    if (!this.awaitsConfirmation()) return
+    const frame = this.decode(message)
+    if (frame !== null) this.early.push(frame)
   }
 
   /** `LaneRoute`: a frame its lane delivers. */
