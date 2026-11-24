@@ -65,8 +65,9 @@ type BroadcastPublishRequest = {
 /** A delivery, handed to one bucket coordinator for the member DOs it names by id. */
 type BroadcastForwardRequest = BroadcastDelivery & { members: string[] }
 
-/** A member DO, by id, and the bucket its session was placed in. */
-type MemberPlacement = { member: string; bucket: LocationBucket }
+/** A member DO, by id, and the bucket its session was placed in, as it was stored or sent: `forward()` checks each
+ *  bucket once. */
+type MemberPlacement = { member: string; bucket: string }
 
 /** A member DO's presence on a route, at the key's authority, by DO id and the lease of its subscription there. */
 type BroadcastLeaseRequest = { key: string; kind: BroadcastRoute['kind']; member: string; lease: string }
@@ -285,7 +286,7 @@ class CloudflareBroadcastAuthorityState {
 
   /** The route's member DOs whose presence is unexpired, each with its bucket. */
   livePresence(routeKey: string, now: number): MemberPlacement[] {
-    return liveLeases(this.sql(), [routeKey], now, (member, bucket) => ({ member, bucket: readLocationBucket(bucket) }))
+    return liveLeases(this.sql(), [routeKey], now, (member, bucket) => ({ member, bucket }))
   }
 
   private transaction<T>(fn: (sql: SqlStore) => T): T {
@@ -602,7 +603,7 @@ class CloudflareBroadcast {
     delivery: BroadcastDelivery,
     members: Iterable<MemberPlacement>,
   ): Promise<void> {
-    const membersByBucket = new Map<LocationBucket, string[]>()
+    const membersByBucket = new Map<string, string[]>()
     let total = 0
     for (const { member, bucket } of members) {
       getOrCreate(membersByBucket, bucket, () => []).push(member)
@@ -610,7 +611,8 @@ class CloudflareBroadcast {
     }
     let lost = 0
     let reason: unknown
-    const forwardThrough = async ([bucket, members]: [LocationBucket, string[]]) => {
+    const forwardThrough = async ([name, members]: [string, string[]]) => {
+      const bucket = readLocationBucket(name)
       try {
         const lostThere = await this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ ...delivery, members }),
