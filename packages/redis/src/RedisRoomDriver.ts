@@ -230,7 +230,7 @@ class RedisRoomDriver implements RoomDriver {
     const lane = this.kit.OPERATION_COMMIT_LANE
     const laneKey = this.kit.encodeLaneKey(lane)
     const channels = commitChannels(prefix, roomId, inc, lane, laneKey, this.kit)
-    const waiting = sends.sendsMayWait ? sends.waitTurn(commitWaitRule(channels), writes.commit) : null
+    const waiting = sends.sendsMayWait ? sends.waitTurn(commitWaitRule(channels), writes.commit, ownBytes) : null
     const payload = waiting === null ? writes.commit : await waiting.turn
     const fence = this.connection.subscriptions.prepareFence(channels)
     const commit: CommitInput = {
@@ -280,7 +280,7 @@ class RedisRoomDriver implements RoomDriver {
     if (!sends.sendsMayWait || opts?.closingLease !== undefined) return this.commitNow(target, payload, opts)
     const { roomId, inc, lane } = target
     const channels = commitChannels(prefix, roomId, inc, lane, this.kit.encodeLaneKey(lane), this.kit)
-    const waiting = sends.waitTurn(commitWaitRule(channels), payload)
+    const waiting = sends.waitTurn(commitWaitRule(channels), payload, ownBytes)
     if (waiting === null) return this.commitNow(target, payload, opts)
     return this.commitInTurn(target, waiting, opts)
   }
@@ -531,7 +531,8 @@ class RedisRoomDriver implements RoomDriver {
         if (this.kit.decodeLaneKey(laneKey).kind === 'binary') starts.set(laneKey, start)
       }
     } while (cursor !== '0')
-    return { authority: authority!, starts }
+    assert(authority !== null)
+    return { authority, starts }
   }
 
   private async trackLaneStarts(roomId: string, inc: string, track: string): Promise<Starts | null> {
@@ -551,10 +552,13 @@ class RedisRoomDriver implements RoomDriver {
         kit: this.kit,
       })
       authority = this.sameAuthority(authority, marks)
-      for (const [i, laneKey] of page.read.lanes.entries())
-        if (marks.read[i] !== null) starts.set(laneKey, marks.read[i]!)
+      for (const [i, laneKey] of page.read.lanes.entries()) {
+        const mark = marks.read[i]
+        if (mark !== undefined && mark !== null) starts.set(laneKey, mark)
+      }
     } while (cursor !== '0')
-    return { authority: authority!, starts }
+    assert(authority !== null)
+    return { authority, starts }
   }
 }
 
@@ -566,6 +570,11 @@ function commitWaitRule({ lane, everyTrack, everyMember }: CommitChannels): Wait
   }
   const channels = [lane, everyTrack, everyMember]
   return { queue: lane, channels, failsOn: channels, budget: everyTrack }
+}
+
+/** A waiting commit's own copy of its payload, which its caller may reuse. */
+function ownBytes(payload: Uint8Array): Uint8Array {
+  return new Uint8Array(payload)
 }
 
 /** The turn a Cluster's commits to one lane take. */

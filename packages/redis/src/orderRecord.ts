@@ -3,6 +3,7 @@ export type { LaneStart, StartRead, Starts }
 
 import { randomFillSync } from 'node:crypto'
 import type { BroadcastKind } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { orderRecordRefusal } from './redisFailure.js'
 
 /** Where a lane stands: its last commit's place and id, `NO_ID` before its first. */
@@ -14,7 +15,9 @@ type StartRead<T> = { authority: string; read: T }
 
 /** The history an authority names: its node's replication id, without a Cluster's config epoch. */
 function historyOf(authority: string): string {
-  return authority.split(':')[0]!
+  const [history] = authority.split(':')
+  assert(history !== undefined)
+  return history
 }
 
 /** Where each lane of a route starts, by its lane key, and the history that says so. */

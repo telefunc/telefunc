@@ -3,6 +3,7 @@ export { RedisSubscriptions, neverReachedSubscription }
 import { randomUUID } from 'node:crypto'
 import type { BackendReceiver } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, getOrCreate, unrefTimer, type Deferred } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
 import { LaneHistory, type LaneFrame, type LaneRoute } from './LaneHistory.js'
@@ -428,7 +429,9 @@ class RedisSubscriptions {
       if (channels.length > 1) {
         await Promise.all(channels.map((channel) => this.subscribeMissing(connection, [channel])))
       } else {
-        for (const attempt of [...(this.byChannel.get(channels[0]!) ?? [])]) attempt.fail(error)
+        const [channel] = channels
+        assert(channel !== undefined)
+        for (const attempt of [...(this.byChannel.get(channel) ?? [])]) attempt.fail(error)
       }
       return
     }

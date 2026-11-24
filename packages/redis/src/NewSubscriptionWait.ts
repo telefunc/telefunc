@@ -62,9 +62,14 @@ class NewSubscriptionWait {
     return this.subscriptions.establishing || this.waits.size > 0
   }
 
-  /** A send's turn, with its own copy of `payload`: the caller reuses its bytes. Null when it has nothing to wait for.
-   *  Throws `ChannelOverflowError` when others wait and the server's memory ledger doesn't admit it. */
-  waitTurn<Payload extends string | Uint8Array>(rule: WaitRule, payload: Payload): WaitingSend<Payload> | null {
+  /** A send's turn, with the copy `own(payload)` makes of `payload`: the caller reuses its bytes. Null when it has
+   *  nothing to wait for. Throws `ChannelOverflowError` when others wait and the server's memory ledger doesn't admit
+   *  it. */
+  waitTurn<Payload extends string | Uint8Array>(
+    rule: WaitRule,
+    payload: Payload,
+    own: (payload: Payload) => Payload,
+  ): WaitingSend<Payload> | null {
     const { queue, channels, failsOn, budget } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
@@ -84,7 +89,7 @@ class NewSubscriptionWait {
     wait.sends++
     waiting.bytes += charged
     this.waitingBytes.set(budget, waiting)
-    const owned = (typeof payload === 'string' ? payload : new Uint8Array(payload)) as Payload
+    const owned = own(payload)
     const sent = () => this.endWait(queue, wait, budget, waiting, charged)
     return { turn: this.turnOf(wait, failsOn, owned, sent), sent }
   }

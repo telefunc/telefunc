@@ -3,6 +3,7 @@ export type { LaneFrame, LaneRoute }
 
 import type { OrderingInfo } from 'telefunc/__internal'
 import { unrefTimer } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { NO_ID, type LaneStart } from './orderRecord.js'
 
 /** A frame as its route decoded it: its lane key on the route's channel (`''` on a channel of one lane), its place, its
@@ -201,7 +202,8 @@ class LaneHistory {
       this.ring.push({ place, id, prev, branch })
       return
     }
-    const entry = this.ring[this.oldest]!
+    const entry = this.ring[this.oldest]
+    assert(entry !== undefined)
     this.evicted = Math.max(this.evicted, entry.place)
     entry.place = place
     entry.id = id
@@ -228,8 +230,8 @@ class LaneHistory {
   /** The branch of the newest entry with `id`, if the ring holds one. */
   private branchOf(id: bigint): number | undefined {
     for (let i = 1; i <= this.ring.length; i++) {
-      const entry = this.ring[(this.oldest - i + this.ring.length) % this.ring.length]!
-      if (entry.id === id) return entry.branch
+      const entry = this.ring[(this.oldest - i + this.ring.length) % this.ring.length]
+      if (entry?.id === id) return entry.branch
     }
     return undefined
   }
@@ -317,7 +319,9 @@ class LaneHistory {
 
   /** Every parked frame goes out in place order, past what never arrived. */
   private release(): void {
-    const frames = [...this.parked!.values()].flat().sort((a, b) => a.place - b.place)
+    const { parked } = this
+    assert(parked !== null)
+    const frames = [...parked.values()].flat().sort((a, b) => a.place - b.place)
     this.clearParked()
     let missed = 0
     for (const frame of frames) {
@@ -327,7 +331,8 @@ class LaneHistory {
       this.decide(frame, Number.POSITIVE_INFINITY)
     }
     this.drain()
-    if (missed > 0 && !this.done) frames[0]!.via.reportMissed(missed)
+    const [first] = frames
+    if (missed > 0 && !this.done && first !== undefined) first.via.reportMissed(missed)
   }
 
   private clearParked(): void {

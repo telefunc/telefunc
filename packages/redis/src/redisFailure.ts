@@ -282,7 +282,16 @@ function isLoginRefusal(error: unknown): error is BackendError {
   return error instanceof BackendError && refusals.get(error) === 'login'
 }
 
-const { refusals } = getGlobalObject('redisFailure.ts', () => ({
-  /** The failures that are a refusal that stands, with their reply's kind (`isRefusal()`, `isLoginRefusal()`). */
-  refusals: new WeakMap<BackendError, Kind | 'guard' | 'order record'>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    /** The failures that are a refusal that stands, with their reply's kind (`isRefusal()`, `isLoginRefusal()`). */
+    refusals: new WeakMap<BackendError, Kind | 'guard' | 'order record'>(),
+  }
+}
+declare module './getGlobalObject.js' {
+  interface GlobalObjects {
+    'redisFailure.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { refusals } = getGlobalObject('redisFailure.ts', createGlobalObject)

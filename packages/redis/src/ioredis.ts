@@ -31,6 +31,7 @@ import { hasFlag } from '@ioredis/commands'
 import { Cluster, Command, Redis } from 'ioredis'
 import { isObject } from 'telefunc/__internal'
 import { assert } from './assert.js'
+import { twoOf } from './replies.js'
 import { getGlobalObject } from './getGlobalObject.js'
 
 type RedisClient = Redis | Cluster
@@ -385,9 +386,11 @@ async function masterView(cluster: Cluster, node: string, key: string): Promise<
   try {
     await redis.connect()
     const replies = await redis.pipeline().info('replication').exists(key).exec()
-    const [[infoError, info], [keyError]] = replies as [[Error | null, string], [Error | null, unknown]]
-    const history = infoError === null ? /^master_replid:(\w+)/m.exec(info)?.[1] : undefined
-    if (history === undefined || !/^role:master\r?$/m.test(info)) return null
+    assert(replies !== null)
+    const [[infoError, info], [keyError]] = twoOf(replies)
+    const replication = infoError === null && typeof info === 'string' ? info : ''
+    const history = /^master_replid:(\w+)/m.exec(replication)?.[1]
+    if (history === undefined || !/^role:master\r?$/m.test(replication)) return null
     if (keyError === null) return { history, serves: true }
     return /^(?:MOVED|ASK) /.test(keyError.message) ? { history, serves: false } : null
   } catch {
@@ -442,14 +445,23 @@ type Attempt = {
   nodeErrors: Map<string, unknown>
 }
 
-const { subscriberNodes, readyWaits, attempts } = getGlobalObject('ioredis.ts', () => ({
-  /** The node each Cluster's subscriber was last duplicated from. */
-  subscriberNodes: new WeakMap<Cluster, Redis>(),
-  /** Each client's wait for its next `ready` (`nextReady()`). */
-  readyWaits: new WeakMap<RedisClient, Promise<void>>(),
-  /** What each backend client's connection attempt ended with (`recordAttempts()`). */
-  attempts: new WeakMap<RedisClient, Attempt>(),
-}))
+/** This file's state on `globalThis`. */
+function createGlobalObject() {
+  return {
+    /** The node each Cluster's subscriber was last duplicated from. */
+    subscriberNodes: new WeakMap<Cluster, Redis>(),
+    /** Each client's wait for its next `ready` (`nextReady()`). */
+    readyWaits: new WeakMap<RedisClient, Promise<void>>(),
+    /** What each backend client's connection attempt ended with (`recordAttempts()`). */
+    attempts: new WeakMap<RedisClient, Attempt>(),
+  }
+}
+declare module './getGlobalObject.js' {
+  interface GlobalObjects {
+    'ioredis.ts': ReturnType<typeof createGlobalObject>
+  }
+}
+const { subscriberNodes, readyWaits, attempts } = getGlobalObject('ioredis.ts', createGlobalObject)
 
 /** A Cluster's connect that closed after its nodes failed, with each node's last error (`endedWith()`): what the nodes
  *  replied tells a refused login from a node that is only unreachable (`redisFailure()`). Only the backend reads it. */

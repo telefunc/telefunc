@@ -36,7 +36,7 @@ class RedisBackend implements BroadcastDriver {
   /** Publishes `payload` as it is at the call. */
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     const { sends, prefix } = this.connection
-    const waiting = sends.sendsMayWait ? sends.waitTurn(broadcastWaitRule(prefix, route), payload) : null
+    const waiting = sends.sendsMayWait ? sends.waitTurn(broadcastWaitRule(prefix, route), payload, ownPayload) : null
     if (waiting === null) return this.connection.run(REDIS_COMMANDS.publish, { route, payload })
     return this.publishInTurn(route, waiting)
   }
@@ -76,4 +76,9 @@ function broadcastWaitRule(prefix: string, { key, kind }: BroadcastRoute): WaitR
   const binary = broadcastChannel(prefix, { key, kind: 'binary' })
   const own = kind === 'text' ? text : binary
   return { queue: text, channels: [text, binary], failsOn: [own], budget: own }
+}
+
+/** A waiting publish's own copy of its payload, which its caller may reuse. */
+function ownPayload(payload: BroadcastPayload): BroadcastPayload {
+  return typeof payload === 'string' ? payload : new Uint8Array(payload)
 }

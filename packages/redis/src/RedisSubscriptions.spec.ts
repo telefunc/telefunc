@@ -255,7 +255,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     let read = 0
     const binary = listen(BINARY, () => reads[read++]!.promise)
 
-    const waiting = sends.waitTurn(RULE, 'hello')!
+    const waiting = sends.waitTurn(RULE, 'hello', (payload) => payload)!
     reads[0]!.reject(new Error('the command connection dropped'))
     await expect.poll(() => read, { timeout: 3_000 }).toBe(2)
     expect(binary.state()).toBe('establishing')
@@ -272,7 +272,10 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello')!.turn).rejects.toMatchObject({ name: 'BackendError', code: 'denied' })
+    await expect(sends.waitTurn(RULE, 'hello', (payload) => payload)!.turn).rejects.toMatchObject({
+      name: 'BackendError',
+      code: 'denied',
+    })
   })
 
   it('goes out when Redis refuses only the other kind’s subscription, which it waited for', async () => {
@@ -282,7 +285,7 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     listen(TEXT)
     listen(BINARY)
 
-    await expect(sends.waitTurn(RULE, 'hello')!.turn).resolves.toBe('hello')
+    await expect(sends.waitTurn(RULE, 'hello', (payload) => payload)!.turn).resolves.toBe('hello')
   })
 })
 

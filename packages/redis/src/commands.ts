@@ -10,7 +10,7 @@ export type { CommitInput, Hold, OperationOutcome, RedisCommand }
 // Every Lua script and the one command table that registers and invokes them.
 
 import type { BroadcastPayload, BroadcastRoute } from 'telefunc/__internal'
-import { ChannelOverflowError, publishedData } from 'telefunc/__internal'
+import { ChannelOverflowError, isObject, publishedData } from 'telefunc/__internal'
 import type {
   CellCounter,
   CellSelector,
@@ -32,6 +32,7 @@ import type {
   StaleIncarnation,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
+import { bytes, bytesList, json, list, number, pairs, text, texts, triples, twoOf } from './replies.js'
 import {
   decodeBroadcastOrder,
   decodeLaneOrder,
@@ -768,9 +769,18 @@ const COMMIT_ARGS = {
 /** Each name of `table` as the script reads it from the table `array` names: index 0 is `KEYS[1]` or `ARGV[1]`.
  *  Built once, at module load. */
 function luaRefs<Name extends string>(array: string, table: Record<Name, number>): Record<Name, string> {
-  const refs = {} as Record<Name, string>
-  for (const name in table) refs[name] = `${array}[${table[name] + 1}]`
+  const refs: Record<string, string> = {}
+  for (const [name, index] of Object.entries<number>(table)) refs[name] = `${array}[${index + 1}]`
+  assert(namesEach(refs, table))
   return refs
+}
+
+/** `refs` holds each name of `table`. */
+function namesEach<Name extends string>(
+  refs: Record<string, string>,
+  table: Record<Name, number>,
+): refs is Record<Name, string> {
+  return Object.keys(table).every((name) => name in refs)
 }
 
 const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
@@ -1364,11 +1374,8 @@ const REDIS_COMMANDS = {
       }
     },
     parse: (reply) => {
-      // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
-      const values = Array.isArray(reply) ? reply.map(Number) : []
       // The ordering itself is checked by core, as every driver's is.
-      assert(values.length === 2, 'Publish script returned an unexpected reply')
-      const [seq, timestamp] = values as [number, number]
+      const [seq, timestamp] = twoOf(list(reply).map(number))
       return { seq, timestamp }
     },
   }),
@@ -1402,11 +1409,11 @@ const REDIS_COMMANDS = {
       }
     },
     parse: (reply): HeadExchangeResult => {
-      const parsed = JSON.parse(reply as string) as
-        | { tag: 'head'; head: ScriptHead }
-        | { tag: 'conflict'; current: ScriptHead | null }
-      if (parsed.tag === 'head') return { kind: 'committed', head: toPublicHead(parsed.head) }
-      return { kind: 'conflict', current: parsed.current === null ? null : toPublicHead(parsed.current) }
+      const parsed = json(reply)
+      assert(isObject(parsed), 'Head exchange script returned an unexpected reply')
+      if (parsed.tag === 'head') return { kind: 'committed', head: publicHead(parsed.head) }
+      assert(parsed.tag === 'conflict', 'Head exchange script returned an unexpected reply')
+      return { kind: 'conflict', current: parsed.current === null ? null : publicHead(parsed.current) }
     },
   }),
   readHead: command({
@@ -1416,8 +1423,9 @@ const REDIS_COMMANDS = {
     numberOfKeys: 1,
     invoke: (prefix, roomId: string) => ({ keys: [headKey(prefix, roomId)], argv: [] }),
     parse: (reply): RoomHead | null => {
-      const { head } = JSON.parse(reply as string) as { head: ScriptHead | null }
-      return head === null ? null : toPublicHead(head)
+      const parsed = json(reply)
+      assert(isObject(parsed), 'Head read script returned an unexpected reply')
+      return parsed.head === null ? null : publicHead(parsed.head)
     },
   }),
   readCells: command({
@@ -1454,10 +1462,11 @@ const REDIS_COMMANDS = {
       argv: [inc, ...keys],
     }),
     parse: (reply): ExpiringCellsRead => {
-      const [tag, ...found] = reply as Buffer[]
-      if (tag!.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
+      const [tag, ...found] = bytesList(reply)
+      assert(tag !== undefined, 'Expiring cells script returned no tag')
+      if (tag.toString() === 'stale-incarnation') return { kind: 'stale-incarnation' }
       const cells = new Map<string, Uint8Array>()
-      for (let i = 0; i < found.length; i += 2) cells.set(found[i]!.toString(), Uint8Array.from(found[i + 1]!))
+      for (const [key, value] of pairs(found)) cells.set(key.toString(), Uint8Array.from(value))
       return { kind: 'read', cells }
     },
   }),
@@ -1522,7 +1531,7 @@ const REDIS_COMMANDS = {
     },
     parse: (reply, { roomId, laneKey }): StartRead<Map<string, LaneStart>> | null => {
       if (reply === null) return null
-      const [authority, record] = reply as [Buffer, Buffer]
+      const [authority, record] = twoOf(bytesList(reply))
       return {
         authority: authority.toString(),
         read:
@@ -1542,13 +1551,13 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply, { roomId }): StartRead<{ cursor: string; starts: Array<[string, LaneStart]> }> | null => {
       if (reply === null) return null
-      const [authority, [cursor, fields]] = reply as [Buffer, [Buffer, Buffer[]]]
-      const starts: Array<[string, LaneStart]> = []
-      for (let i = 0; i < fields.length; i += 2) {
-        const laneKey = fields[i]!.toString()
-        starts.push([laneKey, decodeLaneOrder(fields[i + 1]!, laneWhere(roomId, laneKey))])
-      }
-      return { authority: authority.toString(), read: { cursor: cursor.toString(), starts } }
+      const [authority, page] = twoOf(list(reply))
+      const [cursor, fields] = twoOf(list(page))
+      const starts = pairs(bytesList(fields)).map(([lane, record]): [string, LaneStart] => {
+        const laneKey = lane.toString()
+        return [laneKey, decodeLaneOrder(record, laneWhere(roomId, laneKey))]
+      })
+      return { authority: bytes(authority).toString(), read: { cursor: bytes(cursor).toString(), starts } }
     },
   }),
   trackLanes: command({
@@ -1562,8 +1571,9 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): StartRead<{ cursor: string; lanes: string[] }> | null => {
       if (reply === null) return null
-      const [authority, [cursor, lanes]] = reply as [string, [string, string[]]]
-      return { authority, read: { cursor, lanes } }
+      const [authority, page] = twoOf(list(reply))
+      const [cursor, lanes] = twoOf(list(page))
+      return { authority: text(authority), read: { cursor: text(cursor), lanes: texts(lanes) } }
     },
   }),
   laneMarks: command({
@@ -1577,12 +1587,14 @@ const REDIS_COMMANDS = {
       argv: lanes,
     }),
     parse: (reply, { roomId, lanes }): StartRead<Array<LaneStart | null>> => {
-      const [authority, records] = reply as [Buffer, Buffer[]]
+      const [authority, records] = twoOf(list(reply))
       return {
-        authority: authority.toString(),
-        read: records.map((record, i) =>
-          record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, lanes[i]!)),
-        ),
+        authority: bytes(authority).toString(),
+        read: bytesList(records).map((record, i) => {
+          const laneKey = lanes[i]
+          assert(laneKey !== undefined, 'Lane marks script returned more marks than lanes')
+          return record.byteLength === 0 ? null : decodeLaneOrder(record, laneWhere(roomId, laneKey))
+        }),
       }
     },
   }),
@@ -1597,7 +1609,7 @@ const REDIS_COMMANDS = {
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
     // The lane of a route counts its kind's publishes, in which a hole is a lost message.
     parse: (reply, { key, kind }): StartRead<Map<string, LaneStart>> => {
-      const [authority, record] = reply as [Buffer, Buffer]
+      const [authority, record] = twoOf(bytesList(reply))
       return {
         authority: authority.toString(),
         read: new Map([['', decodeBroadcastOrder(record, kind, `the Broadcast key '${key}'`)]]),
@@ -1664,13 +1676,10 @@ const REDIS_COMMANDS = {
       }
     },
     parse: (reply): CellsExchangeResult => {
-      const [tag, ...counted] = reply as string[]
-      if (tag !== 'committed') return { kind: tag as 'conflict' | 'stale-incarnation' }
-      const counters = new Map<string, CellCounter>()
-      for (let i = 0; i < counted.length; i += 3) {
-        counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
-      }
-      return { kind: 'committed', counters }
+      const [tag, ...counted] = texts(reply)
+      if (tag === 'conflict' || tag === 'stale-incarnation') return { kind: tag }
+      assert(tag === 'committed', 'Cells exchange script returned an unexpected reply')
+      return { kind: 'committed', counters: countersOf(counted) }
     },
   }),
   commit: command({
@@ -1681,7 +1690,7 @@ const REDIS_COMMANDS = {
     numberOfKeys: Object.keys(COMMIT_KEYS).length,
     invoke: commitInvocation,
     parse: (reply, { required }): CommitOutcome => {
-      const parsed = JSON.parse(reply as string) as CommitReply
+      const parsed = commitReply(json(reply))
       if (parsed.kind !== 'stale-cell') return parsed
       const key = required?.keys[parsed.index]
       assert(key !== undefined)
@@ -1762,13 +1771,20 @@ const REDIS_COMMANDS = {
       return { keys, argv }
     },
     parse: (reply): OperationOutcome => {
-      if (typeof reply === 'string') return JSON.parse(reply) as StaleIncarnation | { kind: 'conflict' }
-      const [commit, ...counted] = reply as string[]
-      const counters = new Map<string, CellCounter>()
-      for (let i = 0; i < counted.length; i += 3) {
-        counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
+      if (typeof reply === 'string') {
+        const parsed = json(reply)
+        assert(isObject(parsed), 'Operation script returned an unexpected reply')
+        const { kind } = parsed
+        assert(kind === 'conflict' || kind === 'stale-incarnation', 'Operation script returned an unexpected reply')
+        return { kind }
       }
-      return { kind: 'done', counters, commit: commit === 'null' ? null : (JSON.parse(commit!) as CommitReply) }
+      const [commit, ...counted] = texts(reply)
+      assert(commit !== undefined, 'Operation script returned no commit')
+      return {
+        kind: 'done',
+        counters: countersOf(counted),
+        commit: commit === 'null' ? null : commitReply(json(commit)),
+      }
     },
   }),
   directoryPut: command({
@@ -1804,35 +1820,56 @@ const REDIS_COMMANDS = {
       keys: [directoryChecksKey(prefix), directoryTagsKey(prefix)],
       argv: [String(limit)],
     }),
-    parse: (reply) => {
-      const found = reply as string[]
-      const entries: { roomId: string; listing: string }[] = []
-      for (let i = 0; i < found.length; i += 2) entries.push({ roomId: found[i]!, listing: found[i + 1]! })
-      return entries
-    },
+    parse: (reply) => pairs(texts(reply)).map(([roomId, listing]) => ({ roomId, listing })),
   }),
 }
 
-/** A head as the scripts store it: JSON, config base64, lease deadline minted from Redis TIME. */
-type ScriptHead = {
-  rev: string
-  state: 'open' | 'closing' | 'closed'
-  config: string
-  inc?: string
-  lease?: { id: string; until: number }
-  exp?: number
+/** A head as the scripts store it, JSON: `rev`, `state`, `config` in base64, `inc`, a `lease` whose `until` was minted
+ *  from Redis TIME, and `exp`. */
+function publicHead(stored: unknown): RoomHead {
+  assert(isObject(stored), 'A stored head is not an object')
+  const { rev, state, config, inc, lease, exp } = stored
+  assert(typeof rev === 'string' && typeof config === 'string', 'A stored head has no revision or config')
+  assert(state === 'open' || state === 'closing' || state === 'closed', 'A stored head has no state')
+  assert(inc === undefined || typeof inc === 'string', "A stored head's incarnation is not text")
+  const head: RoomHead = {
+    rev,
+    currentInc: inc ?? null,
+    state,
+    config: Uint8Array.from(Buffer.from(config, 'base64')),
+  }
+  if (lease !== undefined) {
+    assert(isObject(lease) && typeof lease.id === 'string' && typeof lease.until === 'number', "A stored head's lease")
+    head.closeLease = { id: lease.id, until: lease.until }
+  }
+  if (exp !== undefined) {
+    assert(typeof exp === 'number', "A stored head's expiry is not a number")
+    head.expiresAt = exp
+  }
+  return head
 }
 
-function toPublicHead(stored: ScriptHead): RoomHead {
-  const head: RoomHead = {
-    rev: stored.rev,
-    currentInc: stored.inc ?? null,
-    state: stored.state,
-    config: Uint8Array.from(Buffer.from(stored.config, 'base64')),
+/** The commit script's JSON reply. */
+function commitReply(reply: unknown): CommitReply {
+  assert(isObject(reply), 'Commit script returned an unexpected reply')
+  const { kind, index, seq, timestamp } = reply
+  if (kind === 'stale-incarnation') return { kind }
+  if (kind === 'stale-cell') {
+    assert(typeof index === 'number', 'Commit script returned a stale cell with no index')
+    return { kind, index }
   }
-  if (stored.lease !== undefined) head.closeLease = { id: stored.lease.id, until: stored.lease.until }
-  if (stored.exp !== undefined) head.expiresAt = stored.exp
-  return head
+  assert(
+    kind === 'accepted' && typeof seq === 'number' && typeof timestamp === 'number',
+    'Commit script returned an unexpected reply',
+  )
+  return { kind, seq, timestamp }
+}
+
+/** The counters a write script returns, three items each: its key, its value and when it changed. */
+function countersOf(counted: readonly string[]): Map<string, CellCounter> {
+  return new Map(
+    triples(counted).map(([key, value, changedAt]) => [key, { value: Number(value), changedAt: Number(changedAt) }]),
+  )
 }
 
 /** The next head as the script reads it, with the revision its caller minted. */
