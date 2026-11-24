@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_TRANSPORT,
+  RECONCILE_FLOOR_BYTES_PER_MS,
   RECONCILE_TIMEOUT_MS,
   SSE_RECONCILE_DEADLINE_MS,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
@@ -41,7 +42,9 @@ function sseResponse() {
 }
 
 /** The frames of an SSE POST's body, its metadata first. */
-async function postFrames(body: Blob): Promise<{ metadata: { streamResponse?: boolean }; frames: DecodedFrame[] }> {
+async function postFrames(
+  body: Blob,
+): Promise<{ metadata: { streamResponse?: boolean }; frames: DecodedFrame[]; sizes: number[] }> {
   const buf = new Uint8Array(await body.arrayBuffer())
   const raw: Uint8Array<ArrayBuffer>[] = []
   for (let off = 0; off + 4 <= buf.length; ) {
@@ -50,7 +53,11 @@ async function postFrames(body: Blob): Promise<{ metadata: { streamResponse?: bo
     off += 4 + len
   }
   const [head, ...rest] = raw
-  return { metadata: JSON.parse(new TextDecoder().decode(head)), frames: rest.map((frame) => decode(frame)) }
+  return {
+    metadata: JSON.parse(new TextDecoder().decode(head)),
+    frames: rest.map((frame) => decode(frame)),
+    sizes: rest.map((frame) => frame.byteLength),
+  }
 }
 
 function reconciled(ix: number, upgradeId?: string) {
@@ -115,6 +122,8 @@ function defined<T>(value: T | null | undefined, what: string): T {
 }
 
 let opens: Open[] = []
+/** The size of each RECONCILE the page sent this test's SSE server. */
+let reconcileSizes: number[] = []
 let channel: ClientChannel<unknown, unknown> | null = null
 /** This test's server: a page an earlier test left behind reaches nothing. */
 let telefuncUrl = ''
@@ -130,6 +139,7 @@ function stubFetch(handle: (init: RequestInit) => Promise<Response>): void {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
   opens = []
+  reconcileSizes = []
   telefuncUrl = `http://telefunc.invalid/${crypto.randomUUID()}/_telefunc`
   FakeWebSocket.made = []
   vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -158,7 +168,8 @@ function openChannel(transports: ('sse' | 'ws')[]): ClientChannel<unknown, unkno
 function stubSseServer(): void {
   stubFetch(async (init) => {
     if (!(init.body instanceof Blob)) throw new TypeError('Failed to fetch')
-    const { metadata } = await postFrames(init.body)
+    const { metadata, frames, sizes } = await postFrames(init.body)
+    for (const [i, frame] of frames.entries()) if (frame.tag === TAG.RECONCILE) reconcileSizes.push(sizes[i] ?? 0)
     if (!metadata.streamResponse) return new Response(null)
     const open: Open = { at: Date.now(), wire: sseResponse() }
     opens.push(open)
@@ -180,11 +191,14 @@ describe('a wire that never answers the RECONCILE is given up at its deadline, w
       if (comments) first.wire.comment()
       await vi.advanceTimersByTimeAsync(1_000)
     }
-    // The page leaves the open at the RECONCILE deadline and opens another after the first reconnect's delay.
+    // The page leaves the open at the RECONCILE deadline, which over SSE also gives the RECONCILE and its RECONCILED
+    // their time at the floor, and opens another after the first reconnect's delay.
+    const deadline =
+      RECONCILE_TIMEOUT_MS + (2 * defined(reconcileSizes[0], 'the RECONCILE')) / RECONCILE_FLOOR_BYTES_PER_MS
     const next = defined(opens[1], 'the page to open another SSE connection')
-    expect(next.at - first.at).toBeGreaterThanOrEqual(RECONCILE_TIMEOUT_MS)
+    expect(next.at - first.at).toBeGreaterThanOrEqual(deadline)
     expect(next.at - first.at).toBeLessThanOrEqual(
-      RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + SSE_RECONCILE_DEADLINE_MS,
+      deadline + CHANNEL_RECONNECT_INITIAL_DELAY_MS + SSE_RECONCILE_DEADLINE_MS,
     )
     expect(page.isClosed).toBe(false)
   })
