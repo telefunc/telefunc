@@ -3,7 +3,6 @@ export type {
   CellMutation,
   CellExpectation,
   CellCount,
-  ControlRecord,
   CellCounter,
   CellsExchange,
   CellsExchangeResult,
@@ -176,15 +175,6 @@ type CellCount = { key: string; delta: number; create?: true }
 /** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
 type CellsExchange = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
 
-/** The control lane's record the caller commits once its exchange has committed, numbered by the value the exchange's
- *  count of `counter` leaves: the record is `bytes` long besides that value's decimal digits. The Redis store refuses
- *  an exchange whose record its commit on the control lane would refuse, before its first write, with the error that
- *  commit would throw. The in-memory store has no size rule. The Cloudflare store's SQLite refuses a cell over its
- *  row limit inside the exchange's transaction, which then writes nothing, and the store throws `ChannelOverflowError`;
- *  the platform refuses an RPC argument over 32 MiB. The caller owns the match between `bytes` and the record it then
- *  commits. */
-type ControlRecord = { counter: string; bytes: number }
-
 /** A committed exchange returns each counted counter as it left it. */
 type CellsExchangeResult =
   | { kind: 'committed'; counters: Map<string, CellCounter> }
@@ -292,13 +282,7 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *    Any other key written or removed during the read may or may not come.
    *  - A `stale-incarnation` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string, beside?: CellsBeside): AsyncIterable<CellsRead>
-  /** With `record`, the control record the caller commits once the exchange has committed (`ControlRecord`). */
-  compareExchangeCells(
-    roomId: string,
-    inc: string,
-    exchange: CellsExchange,
-    record?: ControlRecord,
-  ): Promise<CellsExchangeResult>
+  compareExchangeCells(roomId: string, inc: string, exchange: CellsExchange): Promise<CellsExchangeResult>
   /** Runs `operation`'s plan while `inc` is open, and applies the writes of the run it validates:
    *  - The plan may run more than once. Redis runs it in this process, again after a run read a cell it hadn't read
    *    yet, and again from the start when a cell it read changed before the writes applied. Cloudflare and memory run

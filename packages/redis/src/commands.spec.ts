@@ -145,32 +145,6 @@ describe('a call Redis does not refuse', () => {
   })
 })
 
-describe("the cells exchange's control record", () => {
-  const input = { roomId: 'r', inc: 'i', exchange: { expect: [], mutations: [] }, record: { counter: 'c', bytes: 1 } }
-  const parsed = (reply: string[]) =>
-    Promise.resolve()
-      .then(() => REDIS_COMMANDS.cellsExchange.parse(reply, input))
-      .then(
-        (result) => result,
-        (error: unknown) => error,
-      )
-
-  it("refused for its size: the error the record's commit throws", async () => {
-    const told = await parsed(['record-overflow', '1'])
-    expect(told).toMatchObject({
-      name: 'ChannelOverflowError',
-      message: "Telefunc's Redis backend takes a message of 29360128 bytes at most, and this one has 29360129",
-    })
-    expect(told).not.toHaveProperty('outcome')
-  })
-
-  it('numbered by a counter the exchange leaves absent: a bug', async () => {
-    expect(String(await parsed(['record-unnumbered']))).toMatch(
-      /\[Bug\].*cells exchange: its control record is numbered by a counter it leaves absent/,
-    )
-  })
-})
-
 describe('a cells read script reply of another shape', () => {
   const input = { roomId: 'r', inc: 'i', sel: { keys: ['k'] } }
   const told = (reply: unknown) =>

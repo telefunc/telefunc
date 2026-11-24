@@ -17,7 +17,6 @@ import type {
   CellsBeside,
   CellsExchange,
   CellsExchangeResult,
-  ControlRecord,
   HeadExchangeResult,
   HeadExpectation,
   HeadNext,
@@ -663,8 +662,7 @@ return 1
 //   KEYS: [1]=head [2]=rev [3]=incarnation-keys [4]=cell-index [5]=values [6]=versions [7]=lapses
 //   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del'),
 //         value and lapse in ms ('' for none), per expected cell its key and version ('' while absent), per counted
-//         cell its key, delta and create ('1' or ''), then, with a control record, which counted cell numbers it (from
-//         0) and how many digits that cell's value may take
+//         cell its key, delta and create ('1' or '')
 const CELLS_EXCHANGE_LUA = `${ALLOWED_LUA}${HEAD_PRELUDE}${cellWritesLua('KEYS[7]')}
 local head_key, rev_key, incarnation_keys_key, cell_index_key, values_key, versions_key, lapses_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6], KEYS[7]
@@ -688,17 +686,6 @@ ${incrementableLua('rev_key')}
 for at = first_counted, first_counted + 3 * counted - 1, 3 do
   local delta = tonumber(ARGV[at + 1])
   ${countableLua('values_key', 'ARGV[at]', 'delta')}
-end
--- The control record's commit would refuse it when the value numbering it takes more digits than were left; a count
--- that leaves its counter absent numbers nothing.
-local record = first_counted + 3 * counted
-if ARGV[record] then
-  local at = first_counted + 3 * tonumber(ARGV[record])
-  local counter = tf_checked[ARGV[at]].counter
-  if not counter and ARGV[at + 2] ~= '1' then return {'record-unnumbered'} end
-  local digits = #string.format('%d', (counter and counter.value or 0) + tonumber(ARGV[at + 1]))
-  local over = digits - tonumber(ARGV[record + 1])
-  if over > 0 then return {'record-overflow', tostring(over)} end
 end
 -- The keys the writes below reach that no command above read.
 ${holdsCheckLua('incarnation_keys_key', CELL_HOLDS[2])}
@@ -1654,10 +1641,7 @@ const REDIS_COMMANDS = {
     holds: CELL_HOLDS,
     lua: CELLS_EXCHANGE_LUA,
     numberOfKeys: 7,
-    invoke: (
-      prefix,
-      { roomId, inc, exchange, record }: RoomInc & { exchange: CellsExchange; record: ControlRecord | undefined },
-    ) => {
+    invoke: (prefix, { roomId, inc, exchange }: RoomInc & { exchange: CellsExchange }) => {
       const { counts = [] } = exchange
       return {
         keys: [
@@ -1679,20 +1663,11 @@ const REDIS_COMMANDS = {
           ),
           ...exchange.expect.flatMap(({ key, version }) => [key, version ?? '']),
           ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
-          ...(record === undefined
-            ? []
-            : [String(counts.findIndex(({ key }) => key === record.counter)), String(digitsLeft(record))]),
         ],
       }
     },
     parse: (reply): CellsExchangeResult => {
       const [tag, ...counted] = reply as string[]
-      // Refused before the first write: the record's commit would refuse it, or no value numbers it.
-      if (tag === 'record-overflow') throw overflowError(PUBLISH_MAX_BYTES + Number(counted[0]))
-      assert(
-        tag !== 'record-unnumbered',
-        'cells exchange: its control record is numbered by a counter it leaves absent',
-      )
       if (tag !== 'committed') return { kind: tag as 'conflict' | 'stale-incarnation' }
       const counters = new Map<string, CellCounter>()
       for (let i = 0; i < counted.length; i += 3) {
@@ -1952,12 +1927,6 @@ function overflowError(bytes: number): ChannelOverflowError {
   return new ChannelOverflowError(
     `Telefunc's Redis backend takes a message of ${PUBLISH_MAX_BYTES} bytes at most, and this one has ${bytes}`,
   )
-}
-
-/** How many digits the value numbering a control record may take, for the record to stay committable: the limit less
- *  the record's other bytes. A control record's whole length counts as published (`assertCommittable`). */
-function digitsLeft({ bytes }: ControlRecord): number {
-  return PUBLISH_MAX_BYTES - bytes
 }
 
 /** A Room commit's ceiling counts what its publisher published, as a broadcast's does, and bounds what Room puts beside
