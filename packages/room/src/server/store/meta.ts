@@ -242,7 +242,7 @@ type SetRoomMetaArgs = { write: RoomMetaWrite; created: RoomMeta }
  *    at the `meta:seq` the merge read.
  *  - Replace: writes the whole meta as a new generation, marks the old one to drop and flags a drop pending.
  *  Returns whether the write leaves a drop: a replace's own, or a pending one a merge read. */
-const SET_ROOM_META: RoomOperation<SetRoomMetaArgs, { drop: boolean }> = {
+const SET_ROOM_META: RoomOperation<'setRoomMeta', SetRoomMetaArgs, { drop: boolean }> = {
   name: 'setRoomMeta',
   plan(tx, { write, created }) {
     const raw = tx.cell(META_SEQ_CELL_KEY)
@@ -361,7 +361,7 @@ type MemberMetaWritten = { update: MemberMetaUpdate; event: Extract<RoomCtrlEnve
 /** A member's meta write and its event, counted in the record's `metaSeq`; `'gone'` once the member left. A merge
  *  writes its keys, a key already there keeping its place; a replace writes its keys and its mark into a new
  *  generation, which the old one's cells leave with. New keys are placed at the write's own `metaSeq`. */
-const SET_MEMBER_META: RoomOperation<SetMemberMetaArgs, MemberMetaWritten | 'gone'> = {
+const SET_MEMBER_META: RoomOperation<'setMemberMeta', SetMemberMetaArgs, MemberMetaWritten | 'gone'> = {
   name: 'setMemberMeta',
   plan(tx, { id, write }) {
     const memberKey = memberCellKey(id)
@@ -415,7 +415,11 @@ type SetMemberConnectionArgs = { id: string; connected: boolean }
 
 /** The connection of the page holding member `id`, at the next `metaSeq`, and its event; null when the record already
  *  has it, `'gone'` once the member left. */
-const SET_MEMBER_CONNECTION: RoomOperation<SetMemberConnectionArgs, MemberMetaWritten | null | 'gone'> = {
+const SET_MEMBER_CONNECTION: RoomOperation<
+  'setMemberConnection',
+  SetMemberConnectionArgs,
+  MemberMetaWritten | null | 'gone'
+> = {
   name: 'setMemberConnection',
   plan(tx, { id, connected }) {
     const memberKey = memberCellKey(id)

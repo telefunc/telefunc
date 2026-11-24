@@ -5,6 +5,7 @@ import type {
   CellCount,
   CellMutation,
   ExpiringCell,
+  JoinOperationOptions,
   LaneId,
   OperationOptions,
   OperationTx,
@@ -32,15 +33,15 @@ type OperationWrites = {
   commit: Uint8Array | null
 }
 
-/** Waits for what `options` names, then throws if the operation is no longer wanted: an executor that sends an
- *  operation as soon as it is called runs this first. */
-async function beforeOperation(options: OperationOptions | undefined): Promise<void> {
-  if (options?.inbox !== undefined) await options.inbox.ready
+/** Waits for what `options` names, a join's inbox, then throws if the operation is no longer wanted: an executor that
+ *  sends an operation as soon as it is called runs this first. */
+async function beforeOperation(options: OperationOptions | JoinOperationOptions | undefined): Promise<void> {
+  if (options !== undefined && 'inbox' in options) await options.inbox.ready
   if (options?.wanted?.() === false) throw new Error('A Room operation was not sent: it was no longer wanted')
 }
 
 function recordOperation<Args, Value>(
-  operation: RoomOperation<Args, Value>,
+  operation: RoomOperation<string, Args, Value>,
   args: Args,
   reads: OperationReads,
 ): { value: Value; writes: OperationWrites } {

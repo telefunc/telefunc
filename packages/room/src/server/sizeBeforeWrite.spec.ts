@@ -159,7 +159,8 @@ async function joinedElsewhere(id: string, identity?: string): Promise<{ member:
       meta: {},
       join: { __r: 'join', id: member, meta: {}, joinedAt, ...identified },
     },
-    {},
+    // Its inbox already delivers.
+    { inbox: { member, ready: Promise.resolve() } },
   )
   const lapse = async () => {
     const mutations = [{ key: leaseCellKey(lease.id), bytes: new Uint8Array(), lapsesInMs: -1 }]

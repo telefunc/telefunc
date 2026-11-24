@@ -23,7 +23,7 @@ const ROOM_AUTHORITY_METHODS = [
   'compareExchangeCells',
   'commitLane',
   'runOperation',
-  'runOperationWithInbox',
+  'runJoinWithInbox',
   'readLaneOrder',
   'readRetained',
   'listRetained',

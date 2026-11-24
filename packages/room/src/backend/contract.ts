@@ -30,6 +30,11 @@ export type {
   HeadNext,
   LaneId,
   OperationOptions,
+  JoinOperationOptions,
+  OperationName,
+  OperationArgs,
+  OperationValue,
+  OperationOf,
   OperationResult,
   OperationTx,
   RoomDriver,
@@ -43,6 +48,7 @@ export type {
 import type { reportLaneLost } from '../server/config.js'
 import type { BackendReceiver, DriverAttempt, OrderingInfo, PlaneKey, SubscriptionDriver } from 'telefunc/__internal'
 import type { beforeOperation, recordOperation } from './operation.js'
+import type { OperationArgs, OperationName, OperationOf, OperationValue } from '../server/store/roomOperations.js'
 import type { publishedBytes } from '../server/lanes/lanes.js'
 
 /** The cells a prefix read's page holds. */
@@ -244,18 +250,22 @@ type ExpiringCell = { key: string; bytes: Uint8Array; ttlMs: number }
 type ExpiringCellsRead = { kind: 'read'; cells: Map<string, Uint8Array> } | StaleIncarnation
 
 /** A pure plan, by the name a Cloudflare room authority runs it by. Its args and value cross an RPC there. */
-type RoomOperation<Args, Value> = { readonly name: string; plan(tx: OperationTx, args: Args): Value }
+type RoomOperation<Name extends string, Args, Value> = { readonly name: Name; plan(tx: OperationTx, args: Args): Value }
 
-/** An operation that ran: its plan's value, each counted counter as it left it, and its commit. */
-/** What an operation waits for before it applies. */
+/** What an operation checks before it is sent. */
 type OperationOptions = {
-  /** A member's inbox, which delivers before the operation applies: a member's join is visible only once its private
-   *  messages reach it. Cloudflare registers the inbox in the operation's own transaction. */
-  inbox?: { member: string; ready: Promise<void> }
   /** Checked before the operation is sent: one no longer wanted isn't, and rejects. */
   wanted?: () => boolean
 }
 
+/** What a join waits for before it applies. */
+type JoinOperationOptions = OperationOptions & {
+  /** The member's inbox, which delivers before the join applies: a member's join is visible only once its private
+   *  messages reach it. Cloudflare registers the inbox in the join's own transaction. */
+  inbox: { member: string; ready: Promise<void> }
+}
+
+/** An operation that ran: its plan's value, each counted counter as it left it, and its commit. */
 type OperationResult<Value> =
   | { kind: 'done'; value: Value; counters: Map<string, CellCounter>; commit?: CommitAccepted }
   | StaleIncarnation
@@ -268,7 +278,7 @@ type RoomSubscriptionSource = {
   inc: string
   lane: LaneId | EveryTrackLane | EveryMemberLane
   /** Set where a member's admission opens its inbox: the caller promises to send the operation that carries the inbox
-   *  (`OperationOptions.inbox`) or to unsubscribe it, so a driver that registers the inbox in that operation sends no
+   *  (`JoinOperationOptions.inbox`) or to unsubscribe it, so a driver that registers the inbox in that operation sends no
    *  registration of its own. */
   registeredBy?: 'operation'
 }
@@ -297,14 +307,23 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  - `tx.cell()` reads the state the operation found, never the run's own writes.
    *  - Only the validated run's writes are applied, all at once; none if the plan throws.
    *  - The commit's delivery comes after the writes, separately (`CommitAccepted.delivery`).
-   *  - With `options.inbox`, the writes apply once the inbox delivers, and not at all if it never does. */
-  runOperation<Args, Value>(
+   *  Each of Room's operations has a name, which types its args and its value (`OperationOf<N>`). */
+  runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>>
+  ): Promise<OperationResult<OperationValue[N]>>
+  /** Runs `join` as `runOperation()` does, once the member's inbox delivers (`options.inbox`), and not at all if it
+   *  never does. */
+  runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>>
   /** Keeps `payload` past the call only as a copy: the caller reuses its bytes. */
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
   /** Throws the `ChannelOverflowError` the write of `payload` on `lane` that `kept` names rejects with, and returns

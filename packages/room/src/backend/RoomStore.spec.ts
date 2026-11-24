@@ -17,6 +17,7 @@ const WRITES = {
   compareExchangeCells: true,
   commitLane: true,
   runOperation: true,
+  runJoin: true,
   dropIncarnation: true,
   directoryPut: true,
   directoryDelete: true,

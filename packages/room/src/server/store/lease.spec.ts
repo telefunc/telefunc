@@ -4,7 +4,14 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import { MemoryRoomDriver } from '../../backend/MemoryRoomDriver.js'
-import type { OperationOptions, OperationResult, RoomOperation } from '../../backend/contract.js'
+import type {
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '../../backend/contract.js'
 import { Room } from '../../index.js'
 import { ROOM_CLOSE_LEASE_MS } from '../constants.js'
 import { configFromHead } from '../lanes/lanes.js'
@@ -35,21 +42,22 @@ it('a reap whose eviction the store refuses leaves a claim that lapses within a 
       meta: {},
       join: { __r: 'join', id: member, meta: {}, joinedAt },
     },
-    {},
+    // Its inbox already delivers.
+    { inbox: { member, ready: Promise.resolve() } },
   )
   await plane.direct.compareExchangeCells(id, room.inc, {
     expect: [],
     mutations: [{ key: leaseCellKey(lease.id), bytes: new Uint8Array(), lapsesInMs: -1 }],
   })
   const { runOperation } = MemoryRoomDriver.prototype
-  async function refusingLeaves<Args, Value>(
+  async function refusingLeaves<N extends OperationName>(
     this: MemoryRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (roomId === id && operation.name === 'leave') {
       throw new BackendError({ code: 'denied', outcome: 'not-run', message: 'refused before dispatch' })
     }

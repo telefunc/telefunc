@@ -13,8 +13,13 @@ import type {
   HeadNext,
   CommitKept,
   LaneId,
+  JoinOperationOptions,
+  OperationArgs,
+  OperationName,
+  OperationOf,
   OperationOptions,
   OperationResult,
+  OperationValue,
   OperationWrites,
   RoomDriver,
   RoomHead,
@@ -140,14 +145,35 @@ class RedisRoomDriver implements RoomDriver {
    *  5. One script checks that the record is still at the version read and the lanes as counted, then applies every
    *     write and the commit (`OPERATION_LUA`). If one changed meanwhile, the operation starts again at 1.
    *  So a leave takes three round trips. A plan whose reads depend on what it read takes one more per step. */
-  async runOperation<Args, Value>(
+  async runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     await this.kit.beforeOperation(options)
+    return this.operate(roomId, inc, operation, args)
+  }
+
+  async runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>> {
+    await this.kit.beforeOperation(options)
+    return this.operate(roomId, inc, join, args)
+  }
+
+  /** Plans and applies `operation` until it applies over the cells it read, or its incarnation is gone. */
+  private async operate<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<string, Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
     for (;;) {
       const planned = await this.planOperation(roomId, inc, operation, args)
       if (planned === null) return { kind: 'stale-incarnation' }
@@ -165,7 +191,7 @@ class RedisRoomDriver implements RoomDriver {
   private async planOperation<Args, Value>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
+    operation: RoomOperation<string, Args, Value>,
     args: Args,
   ): Promise<PlannedOperation<Value> | null> {
     const cells = new Map<string, Uint8Array | undefined>()

@@ -25,8 +25,13 @@ import type {
   CommitAccepted,
   CommitOptions,
   CommitTarget,
+  JoinOperationOptions,
+  OperationArgs,
+  OperationName,
+  OperationOf,
   OperationOptions,
   OperationResult,
+  OperationValue,
   RetainedFrame,
   RetainedOf,
   RoomOperation,
@@ -413,15 +418,35 @@ class MemoryRoomDriver implements RoomDriver {
     return { kind: 'committed', counters: applyCells(incarnation, exchange.mutations, exchange.counts ?? []) }
   }
 
-  /** Synchronous from its read to its commit's seq, so nothing runs between. */
-  async runOperation<Args, Value>(
+  async runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     await beforeOperation(options)
+    return this.operate(roomId, inc, operation, args)
+  }
+
+  async runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>> {
+    await beforeOperation(options)
+    return this.operate(roomId, inc, join, args)
+  }
+
+  /** Synchronous from its read to its commit's seq, so nothing runs between. */
+  private async operate<Args, Value>(
+    roomId: string,
+    inc: string,
+    operation: RoomOperation<string, Args, Value>,
+    args: Args,
+  ): Promise<OperationResult<Value>> {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(roomId, room), inc)) return { kind: 'stale-incarnation' }
     const incarnation = this.incarnation(room, inc)

@@ -5,7 +5,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getRoomPlane } from '../../backend/plane.js'
 import { MemoryRoomDriver } from '../../backend/MemoryRoomDriver.js'
 import { BackendError } from 'telefunc/__internal'
-import type { CellMutation, OperationOptions, OperationResult, RoomOperation } from '../../backend/contract.js'
+import type {
+  CellMutation,
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '../../backend/contract.js'
 import { Room } from '../../index.js'
 import { configFromHead } from '../lanes/lanes.js'
 import type { RoomIncarnation } from '../protocol.js'
@@ -64,7 +72,9 @@ async function joinedByAnotherServer(room: RoomIncarnation): Promise<string> {
   const joinedAt = Date.now()
   const record = { joinedAt, metaSeq: 0, metaGen: 0 }
   const join = { __r: 'join', id: member, meta: {}, joinedAt } as const
-  await joinMember(getRoomPlane().direct, room, new RoomLease(), { id: member, record, meta: {}, join }, {})
+  // Its inbox already delivers.
+  const inbox = { member, ready: Promise.resolve() }
+  await joinMember(getRoomPlane().direct, room, new RoomLease(), { id: member, record, meta: {}, join }, { inbox })
   return member
 }
 
@@ -90,14 +100,14 @@ function clockAt(at: number): void {
 /** From here on, the store refuses every leave in room `id` before it runs, as a reap's eviction can be. */
 function refusingLeaves(id: string): void {
   const { runOperation: run } = MemoryRoomDriver.prototype
-  async function refusing<Args, Value>(
+  async function refusing<N extends OperationName>(
     this: MemoryRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (roomId === id && operation.name === 'leave') {
       throw new BackendError({ code: 'denied', outcome: 'not-run', message: 'refused before dispatch' })
     }

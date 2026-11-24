@@ -1,9 +1,8 @@
 export { ROOM_OPERATIONS, operationRequest, recordRequest }
-export type { RoomOperationRequest }
+export type { OperationName, OperationArgs, OperationValue, OperationOf, RoomOperationRequest }
 
 import type { RoomOperation } from '../../backend/contract.js'
 import { recordOperation, type OperationReads, type OperationWrites } from '../../backend/operation.js'
-import { assert } from '../../utils/assert.js'
 import { STORE_DM_REPLY } from './dmReplies.js'
 import { CLAIM_LEASE, HOLD_VIEWS, REMOVE_LEASE, REMOVE_VIEW, RENEW_CLAIM, RENEW_LEASE } from './lease.js'
 import { JOIN, LEAVE } from './members.js'
@@ -24,28 +23,32 @@ const OPERATIONS = {
   storeDmReply: STORE_DM_REPLY,
 }
 
-type OperationArgs = { [Name in keyof typeof OPERATIONS]: Parameters<(typeof OPERATIONS)[Name]['plan']>[1] }
+type OperationName = keyof typeof OPERATIONS
+type OperationArgs = { [N in OperationName]: Parameters<(typeof OPERATIONS)[N]['plan']>[1] }
+type OperationValue = { [N in OperationName]: ReturnType<(typeof OPERATIONS)[N]['plan']> }
+/** Room's operation named `N`. */
+type OperationOf<N extends OperationName> = RoomOperation<N, OperationArgs[N], OperationValue[N]>
 
-/** Room's operations by name, which a Cloudflare room authority runs by the name its call carries. */
-const ROOM_OPERATIONS: { readonly [Name in keyof OperationArgs]: RoomOperation<OperationArgs[Name], unknown> } =
-  OPERATIONS
+/** Room's operations by name, each under its own: a Cloudflare room authority runs the one a call names. */
+const ROOM_OPERATIONS: { readonly [N in OperationName]: OperationOf<N> } = OPERATIONS
 
 /** An operation as a call to a room authority carries it. */
-type RoomOperationRequest<Name extends keyof OperationArgs = keyof OperationArgs> = {
-  [N in Name]: { name: N; args: OperationArgs[N] }
-}[Name]
+type RoomOperationRequest<N extends OperationName = OperationName> = {
+  [K in N]: { name: K; args: OperationArgs[K] }
+}[N]
 
-/** `operation`, one of Room's, with `args`, as a request. */
-function operationRequest<Args>(operation: RoomOperation<Args, unknown>, args: Args): RoomOperationRequest {
-  const name = operation.name as keyof OperationArgs
-  assert(ROOM_OPERATIONS[name] === operation)
-  return { name, args } as RoomOperationRequest
+/** `operation` with `args`, as a request. */
+function operationRequest<N extends OperationName>(
+  operation: OperationOf<N>,
+  args: OperationArgs[N],
+): RoomOperationRequest<N> {
+  return { name: operation.name, args }
 }
 
 /** Runs the plan of the operation `request` names over `reads`. */
-function recordRequest<Name extends keyof OperationArgs>(
-  request: RoomOperationRequest<Name>,
+function recordRequest<N extends OperationName>(
+  request: RoomOperationRequest<N>,
   reads: OperationReads,
-): { value: unknown; writes: OperationWrites } {
+): { value: OperationValue[N]; writes: OperationWrites } {
   return recordOperation(ROOM_OPERATIONS[request.name], request.args, reads)
 }

@@ -6,7 +6,16 @@ import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
-import type { CellsRead, OperationOptions, OperationResult, RoomOperation } from '@telefunc/room/backend'
+import type {
+  CellsRead,
+  JoinOperationOptions,
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '@telefunc/room/backend'
 import { hostingLease, joinedByAnotherServer } from '../test/servers.js'
 import { endReached, reached, runs, STORES } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
@@ -55,14 +64,14 @@ async function removeCell(admin: Redis, values: string, key: string) {
 /** From here on, each operation named `name` in room `id` first runs `before`, then runs as it would. */
 function beforeOperation(id: string, name: string, before: () => Promise<void>): void {
   const { runOperation } = RedisRoomDriver.prototype
-  async function first<Args, Value>(
+  async function first<N extends OperationName>(
     this: RedisRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (roomId === id && operation.name === name) await before()
     return await runOperation.bind(this)(roomId, inc, operation, args, options)
   }
@@ -175,23 +184,23 @@ describe.runIf(runs)('a lease id that its server reused after the lease was remo
       await Room.create(id)
       // The first join commits and its reply is lost, so this server still holds its lease as never created.
       let lost = true
-      const { runOperation } = RedisRoomDriver.prototype
-      async function losingReply<Args, Value>(
+      const { runJoin } = RedisRoomDriver.prototype
+      async function losingReply(
         this: RedisRoomDriver,
         roomId: string,
         inc: string,
-        operation: RoomOperation<Args, Value>,
-        args: Args,
-        options?: OperationOptions,
-      ): Promise<OperationResult<Value>> {
-        const result = await runOperation.bind(this)(roomId, inc, operation, args, options)
-        if (roomId === id && operation.name === 'join' && lost) {
+        join: OperationOf<'join'>,
+        args: OperationArgs['join'],
+        options: JoinOperationOptions,
+      ): Promise<OperationResult<OperationValue['join']>> {
+        const result = await runJoin.bind(this)(roomId, inc, join, args, options)
+        if (roomId === id && lost) {
           lost = false
           throw new BackendError({ code: 'unreachable', outcome: 'may-have-run', message: 'the reply was lost' })
         }
         return result
       }
-      vi.spyOn(RedisRoomDriver.prototype, 'runOperation').mockImplementation(losingReply)
+      vi.spyOn(RedisRoomDriver.prototype, 'runJoin').mockImplementation(losingReply)
       await Room.join(id).catch(() => {})
       vi.restoreAllMocks()
       // A reap claims the lease, and the lease is removed.

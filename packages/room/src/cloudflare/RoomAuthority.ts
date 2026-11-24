@@ -45,7 +45,14 @@ import {
 } from 'telefunc/__internal'
 import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE, type OperationWrites } from '../backend/operation.js'
-import { ROOM_OPERATIONS, recordRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
+import {
+  ROOM_OPERATIONS,
+  recordRequest,
+  type OperationArgs,
+  type OperationName,
+  type OperationValue,
+  type RoomOperationRequest,
+} from '../server/store/roomOperations.js'
 import { decodeRoomRecord, encodeRoomRecord, lostReason } from '../server/lanes/lanes.js'
 import { fieldsOf, numberOf, textOf } from '../shared/readers.js'
 import { reportLaneLost } from '../server/config.js'
@@ -103,10 +110,10 @@ type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]
 type CommitWire = AcceptedCommitWire | StaleCommit
 /** An operation that ran, with its commit's receipt, or its incarnation stale, or the inbox lease it carried overtaken
  *  by a later write of its session's on that inbox. */
-type OperationWire =
+type OperationWire<Value> =
   | {
       kind: 'done'
-      value: unknown
+      value: Value
       counters: Map<string, CellCounter>
       commit?: AcceptedCommitWire
       /** Set where it registered the inbox lease it carried, now or when it came before. */
@@ -114,14 +121,26 @@ type OperationWire =
     }
   | { kind: 'stale-incarnation' }
   | { kind: 'overtaken' }
-/** A member's exact inbox lease, which an operation registers in its own transaction, under the session's `order`. */
+/** A member's exact inbox lease, which a join registers in its own transaction, under the session's `order`. */
 type InboxLease = { route: RouteInstallation; order: LeaseOrder }
-/** What an operation that registered its inbox lease answered, kept with that lease for a copy of it that comes
- *  again. */
-type StoredAnswer = { value: unknown; counters: Map<string, CellCounter>; commit?: { seq: number; timestamp: number } }
+/** What a join that registered its inbox lease answered, kept with that lease for a copy of it that comes again. */
+type StoredAnswer<Value> = {
+  value: Value
+  counters: Map<string, CellCounter>
+  commit?: { seq: number; timestamp: number }
+}
+/** The inbox lease an operation registers, and how its stored answer's value reads back: a join's, the one operation
+ *  that carries an inbox. */
+type CarriedInbox<Value> = { lease: InboxLease; valueOf(stored: unknown): Value }
 
-/** A `StoredAnswer` as `encodeRoomRecord()` wrote it, its counters rebuilt key by key. */
-function storedAnswerOf(bytes: Uint8Array): StoredAnswer {
+/** A join's value as `encodeRoomRecord()` stored it. */
+function joinValueOf(value: unknown): OperationValue['join'] {
+  assert(value === 'joined' || value === 'lease-lost', "A stored join's value is neither 'joined' nor 'lease-lost'")
+  return value
+}
+
+/** A `StoredAnswer` as `encodeRoomRecord()` wrote it, its counters rebuilt key by key and its value by `valueOf`. */
+function storedAnswerOf<Value>(bytes: Uint8Array, valueOf: (stored: unknown) => Value): StoredAnswer<Value> {
   const fields = fieldsOf(decodeRoomRecord(bytes), 'A stored answer')
   const stored = fields.counters
   assert(stored instanceof Map, "A stored answer's counters are not a map")
@@ -133,7 +152,7 @@ function storedAnswerOf(bytes: Uint8Array): StoredAnswer {
       changedAt: numberOf(changedAt, "A stored counter's change time"),
     })
   }
-  const answer: StoredAnswer = { value: fields.value, counters }
+  const answer: StoredAnswer<Value> = { value: valueOf(fields.value), counters }
   if (fields.commit !== undefined) {
     const { seq, timestamp } = fieldsOf(fields.commit, "A stored answer's commit")
     answer.commit = {
@@ -242,43 +261,48 @@ class RoomAuthority {
 
   /** Runs the operation `request` names in one transaction, which a plan that throws rolls back, then hands its commit
    *  on. */
-  async runOperation(inc: string, request: RoomOperationRequest): Promise<OperationWire> {
+  async runOperation<N extends OperationName>(
+    inc: string,
+    request: RoomOperationRequest<N>,
+  ): Promise<OperationWire<OperationValue[N]>> {
     const wire = await this.operate(inc, request, undefined)
     assert(wire !== 'regrant') // only an inbox lease's write is under a grant
     return wire
   }
 
-  /** As `runOperation()`, and the same transaction registers the member's exact inbox lease, and keeps the answer
-   *  with it: a copy of the call that comes again answers it and changes nothing. A plan that writes nothing registers
-   *  nothing. */
-  async runOperationWithInbox(
+  /** Runs a join as `runOperation()` does, and the same transaction registers the member's exact inbox lease, and
+   *  keeps the answer with it: a copy of the call that comes again answers it and changes nothing. A join that writes
+   *  nothing registers nothing. */
+  async runJoinWithInbox(
     inc: string,
-    request: RoomOperationRequest,
+    args: OperationArgs['join'],
     inbox: InboxLease,
-  ): Promise<OperationWire | 'regrant'> {
-    return this.operate(inc, request, inbox)
+  ): Promise<OperationWire<OperationValue['join']> | 'regrant'> {
+    return this.operate(inc, { name: 'join', args }, { lease: inbox, valueOf: joinValueOf })
   }
 
-  private async operate(
+  private async operate<N extends OperationName>(
     inc: string,
-    request: RoomOperationRequest,
-    inbox: InboxLease | undefined,
-  ): Promise<OperationWire | 'regrant'> {
+    request: RoomOperationRequest<N>,
+    inbox: CarriedInbox<OperationValue[N]> | undefined,
+  ): Promise<OperationWire<OperationValue[N]> | 'regrant'> {
     assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
-    const lease = inbox === undefined ? null : routeLease(inbox.route)
-    let outcome: OperationOutcome
+    const lease = inbox === undefined ? null : routeLease(inbox.lease.route)
+    // The value of a plan that wrote nothing, whose transaction then rolls back the inbox lease it registered.
+    const unwritten: { plan: { value: OperationValue[N] } | null } = { plan: null }
+    let outcome: OperationOutcome<OperationValue[N]>
     try {
-      outcome = this.transaction((sql): OperationOutcome => {
+      outcome = this.transaction((sql): OperationOutcome<OperationValue[N]> => {
         if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' }
         if (inbox !== undefined && lease !== null) {
-          const written: LeaseWritten = registerLease(sql, lease, inbox.order, now)
+          const written: LeaseWritten = registerLease(sql, lease, inbox.lease.order, now)
           if (written === 'regrant') return { kind: 'regrant' }
           if (written === 'stale') return { kind: 'overtaken' }
           if (written === 'repeated') {
             const answer = leaseAnswer(sql, lease.scope, lease.holder)
             assert(answer !== null) // only an operation registers under its own order, and stores its answer with it
-            return { kind: 'repeated', answer: storedAnswerOf(answer) }
+            return { kind: 'repeated', answer: storedAnswerOf(answer, inbox.valueOf) }
           }
         }
         const { value, writes } = recordRequest(request, {
@@ -286,18 +310,21 @@ class RoomAuthority {
           cell: (key) => heldCell(sql, inc, key, now)?.bytes,
           lapsed: (key) => heldCell(sql, inc, key, now)?.lapsed === true,
         })
-        if (lease !== null && writesNothing(writes)) throw new NothingWritten(value)
+        if (lease !== null && writesNothing(writes)) {
+          unwritten.plan = { value }
+          throw new NothingWritten()
+        }
         const done = applyOperation(sql, inc, value, writes, now)
         if (inbox !== undefined && lease !== null) {
-          const answer: StoredAnswer = { value, counters: done.counters }
+          const answer: StoredAnswer<OperationValue[N]> = { value, counters: done.counters }
           if (done.handoff !== null) answer.commit = { seq: done.handoff.seq, timestamp: done.handoff.timestamp }
-          setLeaseAnswer(sql, lease.scope, lease.holder, inbox.order, encodeRoomRecord(answer))
+          setLeaseAnswer(sql, lease.scope, lease.holder, inbox.lease.order, encodeRoomRecord(answer))
         }
         return done
       })
     } catch (error) {
-      if (!(error instanceof NothingWritten)) throw error
-      return { kind: 'done', value: error.value, counters: new Map() }
+      if (!(error instanceof NothingWritten) || unwritten.plan === null) throw error
+      return { kind: 'done', value: unwritten.plan.value, counters: new Map() }
     }
     if (outcome.kind === 'regrant') return 'regrant'
     if (outcome.kind !== 'done' && outcome.kind !== 'repeated') return outcome
@@ -318,7 +345,7 @@ class RoomAuthority {
     // The alarm deletes the expiring cells, as no server may be on the room by then, and hands on a commit whose
     // hand-on didn't settle.
     if (outcome.expiring || handoff !== null) await this.scheduleMaintenanceIfNeeded()
-    const done: OperationWire = { kind: 'done', value, counters }
+    const done: OperationWire<OperationValue[N]> = { kind: 'done', value, counters }
     if (inbox !== undefined) done.registered = true
     if (handoff !== null && handing !== null) done.commit = await receiptOf(handoff, handing)
     return done
@@ -562,15 +589,15 @@ function commitIn(
 }
 
 /** An operation's outcome in its transaction. */
-type OperationOutcome =
-  | OperationApplied
+type OperationOutcome<Value> =
+  | OperationApplied<Value>
   | { kind: 'stale-incarnation' }
   | { kind: 'overtaken' }
   | { kind: 'regrant' }
-  | { kind: 'repeated'; answer: StoredAnswer }
-type OperationApplied = {
+  | { kind: 'repeated'; answer: StoredAnswer<Value> }
+type OperationApplied<Value> = {
   kind: 'done'
-  value: unknown
+  value: Value
   counters: Map<string, CellCounter>
   /** Its commit, stored until handed on, or null where it committed nothing. */
   handoff: Handoff | null
@@ -578,19 +605,20 @@ type OperationApplied = {
 }
 
 /** A plan that wrote nothing, whose transaction rolls back the inbox lease it registered. */
-class NothingWritten {
-  readonly value: unknown
-  constructor(value: unknown) {
-    this.value = value
-  }
-}
+class NothingWritten {}
 
 function writesNothing({ prefixes, members, mutations, counts, expiring, commit }: OperationWrites): boolean {
   return [prefixes, members, mutations, counts, expiring].every((writes) => writes.length === 0) && commit === null
 }
 
 /** Applies a plan's writes in a transaction that found `inc` open; its commit is stored until handed on. */
-function applyOperation(sql: SqlStorage, inc: string, value: unknown, writes: OperationWrites, now: number) {
+function applyOperation<Value>(
+  sql: SqlStorage,
+  inc: string,
+  value: Value,
+  writes: OperationWrites,
+  now: number,
+): OperationApplied<Value> {
   for (const prefix of writes.prefixes) dropCellPrefix(sql, inc, prefix)
   const exchange = { expect: [], mutations: writes.mutations, counts: writes.counts }
   const exchanged = compareExchangeCells(sql, inc, exchange, now)
@@ -608,14 +636,7 @@ function applyOperation(sql: SqlStorage, inc: string, value: unknown, writes: Op
     handoff = { inc, laneKey, seq, timestamp, payload: writes.commit }
     storeHandoff(sql, handoff, now + ROOM_HANDOFF_RESUME_MS)
   }
-  const applied: OperationApplied = {
-    kind: 'done',
-    value,
-    counters: exchanged.counters,
-    handoff,
-    expiring: writes.expiring.length > 0,
-  }
-  return applied
+  return { kind: 'done', value, counters: exchanged.counters, handoff, expiring: writes.expiring.length > 0 }
 }
 
 /** A stored commit's receipt, once its hand-on settled. */

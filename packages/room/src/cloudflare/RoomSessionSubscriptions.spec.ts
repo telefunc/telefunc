@@ -10,8 +10,10 @@ import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 import type { OperationWire, RegisterWire, RenewWire } from './RoomAuthority.js'
 import type { LaneId } from '../backend/contract.js'
-import type { RoomOperationRequest } from '../server/store/roomOperations.js'
+import type { OperationArgs, OperationValue } from '../server/store/roomOperations.js'
 
+/** A join's answer, as the authority sends it. */
+type JoinWire = OperationWire<OperationValue['join']>
 /** A session's Room subscriptions against an authority that answers each call from `answers`, in order; opening a stub
  *  to it throws the next of `answers.open`, while one is left. Its lane is `lane`, subscribed as `registeredBy` says. */
 function setup(
@@ -19,8 +21,8 @@ function setup(
     register: Array<RegisterWire | Error | Promise<RegisterWire>>
     renew: Array<RenewWire | Error | Promise<RenewWire>>
     open?: Array<Error | undefined>
-    /** The answers to operations that carry an inbox's route. */
-    carry?: Array<OperationWire | Error | Promise<OperationWire>>
+    /** The answers to joins that carry an inbox's route. */
+    carry?: Array<JoinWire | Error | Promise<JoinWire>>
     /** The grant's answer, where it isn't at once. */
     grant?: Promise<number>
     /** The answers to the session's commits. */
@@ -32,7 +34,7 @@ function setup(
   const calls = { register: 0, renew: 0 }
   /** The routes the session removed at the authority. */
   const removed: unknown[] = []
-  /** The operations that carried an inbox's route, as the authority got them. */
+  /** The joins that carried an inbox's route, as the authority got them. */
   const carried: unknown[] = []
   const startedAt = Date.now()
   /** When each registration was made, in ms after the lane subscribed. */
@@ -46,7 +48,7 @@ function setup(
   /** The authority's answer to each call the session makes, by method. */
   const authority: Record<string, (args: unknown[]) => Promise<unknown>> = {
     grantHolder: () => answers.grant ?? Promise.resolve(1),
-    runOperationWithInbox: (args) => (carried.push(args[1]), answer(answers.carry ?? [])),
+    runJoinWithInbox: (args) => (carried.push(args[1]), answer(answers.carry ?? [])),
     registerRoute: () => (calls.register++, registeredAt.push(Date.now() - startedAt), answer(answers.register)),
     renewRoutes: () => (calls.renew++, answer(answers.renew).then((renewal) => [renewal])),
     unsubscribeRoute: (args) => (removed.push(args[0]), Promise.resolve('removed')),
@@ -370,18 +372,15 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     expect(got.filter((call) => call === 'register' || call === 'commit')).toEqual(['register', 'commit'])
   })
 
-  const join: RoomOperationRequest = {
-    name: 'join',
-    args: {
-      lease: { id: 'server', created: false },
-      hold: null,
-      id: 'm',
-      record: { joinedAt: 0, metaSeq: 0, metaGen: 0 },
-      meta: {},
-      join: { __r: 'join', id: 'm', meta: {}, joinedAt: 0 },
-    },
+  const join: OperationArgs['join'] = {
+    lease: { id: 'server', created: false },
+    hold: null,
+    id: 'm',
+    record: { joinedAt: 0, metaSeq: 0, metaGen: 0 },
+    meta: {},
+    join: { __r: 'join', id: 'm', meta: {}, joinedAt: 0 },
   }
-  const joined: OperationWire = { kind: 'done', value: 'joined', counters: new Map(), registered: true }
+  const joined: JoinWire = { kind: 'done', value: 'joined', counters: new Map(), registered: true }
 
   const inbox: LaneId = { kind: 'inbox', member: 'm' }
   const refused = () => new Error('Test: the room refused the join')
@@ -407,7 +406,7 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     ['overloaded', () => transient(true)],
   ] as const) {
     it(`that is a member's join keeps the inbox it registered where the room would refuse the inbox's own registration (${label})`, async () => {
-      const answer = Promise.withResolvers<OperationWire>()
+      const answer = Promise.withResolvers<JoinWire>()
       const { attempt, calls, removed, reasons, subscriptions, attemptOn } = setup(
         { register: [refusal()], renew: ['renewed'], carry: [answer.promise] },
         inbox,
@@ -491,7 +490,7 @@ describe('a call of a Cloudflare Room lane to its room', () => {
   })
 
   it("that is a member's join unsubscribed while the join is sent removes the inbox's route behind the join", async () => {
-    const answer = Promise.withResolvers<OperationWire>()
+    const answer = Promise.withResolvers<JoinWire>()
     const { attempt, carried, removed, subscriptions, attemptOn } = setup(
       { register: [], renew: [], carry: [answer.promise] },
       inbox,
@@ -513,7 +512,7 @@ describe('a call of a Cloudflare Room lane to its room', () => {
   })
 
   it("that is a member's join that wrote nothing, its hosting lease lost, leaves the inbox waiting, and the join sent again registers it", async () => {
-    const wroteNothing: OperationWire = { kind: 'done', value: 'lease-lost', counters: new Map() }
+    const wroteNothing: JoinWire = { kind: 'done', value: 'lease-lost', counters: new Map() }
     const { attempt, calls, carried, states, subscriptions, attemptOn } = setup(
       { register: [], renew: ['renewed'], carry: [wroteNothing, joined] },
       inbox,

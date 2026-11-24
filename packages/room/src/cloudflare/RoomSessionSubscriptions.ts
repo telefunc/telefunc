@@ -23,7 +23,7 @@ import { encodeLaneKey } from '../backend/laneKey.js'
 import { assert } from '../utils/assert.js'
 import { laneRoute, routeScope, type RouteInstallation } from './routes.js'
 import type { OperationWire, RegisterWire, RenewWire } from './RoomAuthority.js'
-import type { RoomOperationRequest } from '../server/store/roomOperations.js'
+import type { OperationArgs, OperationValue } from '../server/store/roomOperations.js'
 import type { CloudflareRoomAuthorityStub } from './objects.js'
 import type { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
 
@@ -101,20 +101,20 @@ class RoomSessionSubscriptions {
     return attempt?.route.roomId === roomId ? attempt : undefined
   }
 
-  /** Runs `request` at the room's authority with `attempt`'s exact route registered in the same transaction, under
-   *  this session's next order there, behind what it sent the room before; `attempt`, which its operation registers,
+  /** Runs a join of `args` at the room's authority with `attempt`'s exact route registered in the same transaction,
+   *  under this session's next order there, behind what it sent the room before; `attempt`, which the join registers,
    *  is ready once that is answered registered. Obeys the room's overload pause, as a first registration does. */
   async runCarrying(
     attempt: CloudflareRoomAttempt,
-    request: RoomOperationRequest,
+    args: OperationArgs['join'],
     options: Pick<CallOptions, 'deadline' | 'wanted'>,
-  ): Promise<OperationWire> {
+  ): Promise<OperationWire<OperationValue['join']>> {
     const { roomId, inc } = attempt.route
     const wire = await this.writeRoute(
       roomId,
       (authority, order) => {
         attempt.sending()
-        return authority.runOperationWithInbox(inc, request, { route: attempt.route, order })
+        return authority.runJoinWithInbox(inc, args, { route: attempt.route, order })
       },
       { ...options, wanted: () => attempt.state() !== 'closed' && options.wanted?.() !== false, paused: true },
     )

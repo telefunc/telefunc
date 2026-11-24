@@ -29,7 +29,14 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { installRedis } from './index.js'
 import { RedisConnection } from './RedisConnection.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
-import type { OperationOptions, OperationResult, RoomOperation } from '@telefunc/room/backend'
+import type {
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '@telefunc/room/backend'
 
 afterAll(() => endReached())
 
@@ -380,14 +387,14 @@ function holdingReap(id: string) {
   let holding = 0
   const startedAfterRelease: string[] = []
   const renewals: unknown[] = []
-  async function holdingRemovals<Args, Value>(
+  async function holdingRemovals<N extends OperationName>(
     this: RedisRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (roomId === id && isReleased) startedAfterRelease.push(operation.name)
     else if (roomId === id && REAP_REMOVALS.has(operation.name)) {
       if (++holding === REAP_REMOVALS_HELD) allHeld.resolve()
@@ -562,14 +569,14 @@ describe.runIf(runs)('a Room call whose leaves the store refuses, one still on i
       const firstEvictionRead = Promise.withResolvers<void>()
       let leavesIn = 0
       const refusals: unknown[] = []
-      async function leavesInOrder<Args, Value>(
+      async function leavesInOrder<N extends OperationName>(
         this: RedisRoomDriver,
         roomId: string,
         inc: string,
-        operation: RoomOperation<Args, Value>,
-        args: Args,
+        operation: OperationOf<N>,
+        args: OperationArgs[N],
         options?: OperationOptions,
-      ): Promise<OperationResult<Value>> {
+      ): Promise<OperationResult<OperationValue[N]>> {
         if (roomId !== room.id || operation.name !== 'leave') {
           return await runOperation.bind(this)(roomId, inc, operation, args, options)
         }

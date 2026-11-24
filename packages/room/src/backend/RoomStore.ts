@@ -13,11 +13,15 @@ import type {
   HeadNext,
   CommitKept,
   LaneId,
+  JoinOperationOptions,
+  OperationArgs,
+  OperationName,
+  OperationOf,
   OperationOptions,
   OperationResult,
+  OperationValue,
   RetainedFrame,
   RoomDriver,
-  RoomOperation,
 } from './contract.js'
 import { assert } from '../utils/assert.js'
 
@@ -72,16 +76,24 @@ class RoomStore {
     this.driver.assertCommittable(lane, payload, kept)
   }
 
-  async runOperation<Args, Value>(
+  async runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
-    const result = await this.driver.runOperation(roomId, inc, operation, args, options)
-    if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
-    return result
+  ): Promise<OperationResult<OperationValue[N]>> {
+    return checkedOperation(await this.driver.runOperation(roomId, inc, operation, args, options))
+  }
+
+  async runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>> {
+    return checkedOperation(await this.driver.runJoin(roomId, inc, join, args, options))
   }
 
   dropIncarnation(roomId: string, inc: string): Promise<void> {
@@ -126,14 +138,24 @@ class CallStore extends RoomStore {
     return this.account.write(() => super.commitLane(target, payload, opts))
   }
 
-  override runOperation<Args, Value>(
+  override runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     return this.account.write(() => super.runOperation(roomId, inc, operation, args, options))
+  }
+
+  override runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>> {
+    return this.account.write(() => super.runJoin(roomId, inc, join, args, options))
   }
 
   override dropIncarnation(roomId: string, inc: string): Promise<void> {
@@ -200,4 +222,10 @@ function assertHeadNextWellFormed(next: HeadNext): void {
     head.state === 'closed' || head.currentInc !== null,
     `head exchange: a '${head.state}' head must name an incarnation`,
   )
+}
+
+/** `result`, its commit's order checked. */
+function checkedOperation<Value>(result: OperationResult<Value>): OperationResult<Value> {
+  if (result.kind === 'done' && result.commit !== undefined) assertDriverOrdering(result.commit)
+  return result
 }

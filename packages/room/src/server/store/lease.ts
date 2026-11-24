@@ -22,7 +22,7 @@ export type { LeaseState }
 // last write: the store keeps both deadlines on its own clock, and its reads and commits judge them.
 
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import type { CellCounter, CellMutation, OperationOptions, OperationTx, RoomOperation } from '../../backend/contract.js'
+import type { CellCounter, CellMutation, OperationTx, RoomOperation } from '../../backend/contract.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_LEASE_TTL_MS } from '../constants.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
@@ -103,20 +103,15 @@ function leaseHosting({ id, created }: LeaseState, tx: OperationTx): CellMutatio
   return tx.lapsed(key) ? [leaseMutation(id)] : []
 }
 
-/** Runs `operation`, which hosts something under the lease it takes as `lease`. A lease found lost is replaced, and the
- *  operation runs again under the replacement, whose cell it writes. */
-async function runHosted<Args, Value>(
-  store: RoomStore,
-  room: RoomIncarnation,
+/** Runs an operation that hosts something under `lease`, as `run` runs it under the lease's state. A lease found lost
+ *  is replaced, and the operation runs again under the replacement, whose cell it writes. */
+async function runHosted<Value>(
   lease: RoomLease,
-  operation: RoomOperation<Args & { lease: LeaseState }, Value | 'lease-lost'>,
-  args: Args,
-  options?: OperationOptions,
+  run: (state: LeaseState) => Promise<{ value: Value | 'lease-lost'; counters: Map<string, CellCounter> }>,
 ): Promise<{ value: Value; counters: Map<string, CellCounter> }> {
   for (;;) {
     const id = lease.id
-    const hosted = { ...args, lease: { id, created: lease.created } }
-    const { value, counters } = await runOperation(store, room, operation, hosted, options)
+    const { value, counters } = await run({ id, created: lease.created })
     if (value !== 'lease-lost') {
       lease.hosted(id)
       return { value, counters }
@@ -129,7 +124,7 @@ type HoldViewsArgs = { lease: LeaseState; ids: string[]; hold: HoldConfig }
 
 /** Writes pages' views under a lease; each holds the room. Writing views already held changes nothing. It reads the
  *  views before the lease, so Redis reads them all in one round trip. */
-const HOLD_VIEWS: RoomOperation<HoldViewsArgs, { keys: string[]; added: number } | 'lease-lost'> = {
+const HOLD_VIEWS: RoomOperation<'holdViews', HoldViewsArgs, { keys: string[]; added: number } | 'lease-lost'> = {
   name: 'holdViews',
   plan(tx, { lease, ids, hold }) {
     const keys = ids.map((id) => viewCellKey(lease.id, id))
@@ -144,7 +139,7 @@ const HOLD_VIEWS: RoomOperation<HoldViewsArgs, { keys: string[]; added: number }
 }
 
 /** Removes a view; false once it was gone. */
-const REMOVE_VIEW: RoomOperation<{ key: string; hold: HoldConfig | null }, boolean> = {
+const REMOVE_VIEW: RoomOperation<'removeView', { key: string; hold: HoldConfig | null }, boolean> = {
   name: 'removeView',
   plan(tx, { key, hold }) {
     if (tx.cell(key) === undefined) return false
@@ -155,7 +150,7 @@ const REMOVE_VIEW: RoomOperation<{ key: string; hold: HoldConfig | null }, boole
 }
 
 /** Renews a lease; false once it was lost. */
-const RENEW_LEASE: RoomOperation<{ id: string }, boolean> = {
+const RENEW_LEASE: RoomOperation<'renewLease', { id: string }, boolean> = {
   name: 'renewLease',
   plan(tx, { id }) {
     if (tx.cell(leaseCellKey(id)) === undefined) return false
@@ -167,7 +162,7 @@ const RENEW_LEASE: RoomOperation<{ id: string }, boolean> = {
 type LeaseCleanArgs = { lease: string; cleaner: string }
 
 /** Moves lease `lease`, lapsed, to `cleaner`'s claim, or gives `cleaner` a claim that lapsed; false once neither had. */
-const CLAIM_LEASE: RoomOperation<LeaseCleanArgs, boolean> = {
+const CLAIM_LEASE: RoomOperation<'claimLease', LeaseCleanArgs, boolean> = {
   name: 'claimLease',
   plan(tx, { lease, cleaner }) {
     const key = leaseCellKey(lease)
@@ -181,7 +176,7 @@ const CLAIM_LEASE: RoomOperation<LeaseCleanArgs, boolean> = {
 }
 
 /** Writes `cleaner`'s claim again; false once it no longer names `cleaner`. */
-const RENEW_CLAIM: RoomOperation<LeaseCleanArgs, boolean> = {
+const RENEW_CLAIM: RoomOperation<'renewClaim', LeaseCleanArgs, boolean> = {
   name: 'renewClaim',
   plan(tx, { lease, cleaner }) {
     if (!claimedBy(tx, lease, cleaner)) return false
@@ -191,7 +186,7 @@ const RENEW_CLAIM: RoomOperation<LeaseCleanArgs, boolean> = {
 }
 
 /** Removes the claim on lease `lease` while it names `cleaner`. */
-const REMOVE_LEASE: RoomOperation<LeaseCleanArgs, void> = {
+const REMOVE_LEASE: RoomOperation<'removeLease', LeaseCleanArgs, void> = {
   name: 'removeLease',
   plan(tx, { lease, cleaner }) {
     if (claimedBy(tx, lease, cleaner)) tx.write({ key: leaseClaimCellKey(lease), bytes: null })
@@ -203,7 +198,9 @@ const REMOVE_LEASE: RoomOperation<LeaseCleanArgs, void> = {
 async function holdViews(store: RoomStore, room: RoomIncarnation, lease: RoomLease, ids: string[]): Promise<string[]> {
   const { hold } = room
   if (hold === null) return []
-  const { value, counters } = await runHosted(store, room, lease, HOLD_VIEWS, { ids, hold })
+  const { value, counters } = await runHosted(lease, (state) =>
+    runOperation(store, room, HOLD_VIEWS, { lease: state, ids, hold }),
+  )
   if (value.added > 0) afterHoldChange(room, holdDelta(hold, value.added).after(counters))
   return value.keys
 }

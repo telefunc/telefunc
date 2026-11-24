@@ -27,7 +27,10 @@ import {
   type CommitTarget,
   type OperationOptions,
   type OperationResult,
-  type RoomOperation,
+  type OperationArgs,
+  type OperationName,
+  type OperationOf,
+  type OperationValue,
 } from '@telefunc/room/backend'
 import { changedKeys, endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
 import { RedisRoomDriver } from './RedisRoomDriver.js'
@@ -136,13 +139,13 @@ async function acknowledged(
   }
   const run = direct.runOperation.bind(direct)
   const storeHeld = Promise.withResolvers<void>()
-  vi.spyOn(direct, 'runOperation').mockImplementation(async function <Args, Value>(
+  vi.spyOn(direct, 'runOperation').mockImplementation(async function <N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (operation.name === 'storeDmReply') {
       await beforeStore?.({ id, sender: bob.id })
       if (store !== 'at once') await storeHeld.promise

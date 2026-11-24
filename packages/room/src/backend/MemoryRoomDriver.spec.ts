@@ -4,8 +4,10 @@
 // - An operation that writes nothing, such as a join's rollback leave of a member that was never written, writes no
 //   revision either.
 import { afterEach, expect, it, vi } from 'vitest'
-import type { OperationTx, RoomSubscriptionSource } from './contract.js'
+import type { RoomSubscriptionSource } from './contract.js'
 import { MemoryRoomDriver } from './MemoryRoomDriver.js'
+import { STORE_DM_REPLY } from '../server/store/dmReplies.js'
+import { dmReplyCellKey, memberCellKey } from '../server/store/cells.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -54,19 +56,20 @@ it('leaves the revision as it was for an operation that writes nothing, as Redis
     { form: 'absent' },
     { head: { rev: crypto.randomUUID(), currentInc: inc, state: 'open', config: new Uint8Array() } },
   )
-  const writing = (key: string) => ({
-    name: 'write',
-    plan(tx: OperationTx) {
-      tx.write({ key, bytes: new Uint8Array([1]) })
-    },
-  })
   const versionOf = async (key: string) => {
     const read = await driver.readCells(roomId, inc, { keys: [key] })
     return read.kind === 'read' ? Number(read.versions.get(key)) : Number.NaN
   }
-  await driver.runOperation(roomId, inc, writing('a'), undefined)
-  await driver.runOperation(roomId, inc, { name: 'nothing', plan() {} }, undefined)
-  await driver.runOperation(roomId, inc, writing('b'), undefined)
+  await driver.compareExchangeCells(roomId, inc, {
+    expect: [],
+    mutations: [{ key: memberCellKey('member'), bytes: new Uint8Array() }],
+  })
+  const storeReply = (sender: string, ackId: string) =>
+    driver.runOperation(roomId, inc, STORE_DM_REPLY, { sender, ackId, reply: new Uint8Array([1]) })
+  await storeReply('member', 'a')
+  // No member sent it, so the operation writes nothing.
+  await storeReply('no-member', 'nothing')
+  await storeReply('member', 'b')
 
-  expect((await versionOf('b')) - (await versionOf('a'))).toBe(1)
+  expect((await versionOf(dmReplyCellKey('member', 'b'))) - (await versionOf(dmReplyCellKey('member', 'a')))).toBe(1)
 })

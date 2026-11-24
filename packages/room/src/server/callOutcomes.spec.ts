@@ -5,7 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc/__internal'
 import { getRoomPlane } from '../backend/plane.js'
 import { MemoryRoomDriver } from '../backend/MemoryRoomDriver.js'
-import type { OperationOptions, OperationResult, RoomOperation } from '../backend/contract.js'
+import type {
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '../backend/contract.js'
 import { Room } from '../index.js'
 import { configFromHead, encodeRoomRecord } from './lanes/lanes.js'
 import { newRoomHold } from './lifecycle/hold.js'
@@ -79,7 +86,8 @@ async function otherServersMember(
       meta: {},
       join: { __r: 'join', id: member, meta: {}, joinedAt },
     },
-    {},
+    // Its inbox already delivers.
+    { inbox: { member, ready: Promise.resolve() } },
   )
   const key = leaseCellKey(lease.id)
   const lapse = async () => {
@@ -112,14 +120,14 @@ function refuseMetaReads(): void {
 /** The store refuses each removal of a member. */
 function refuseLeaves(): void {
   const { runOperation } = MemoryRoomDriver.prototype
-  async function refusingLeaves<Args, Value>(
+  async function refusingLeaves<N extends OperationName>(
     this: MemoryRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (operation.name === 'leave') throw refused()
     return await runOperation.bind(this)(roomId, inc, operation, args, options)
   }
@@ -262,14 +270,14 @@ describe('a Room call whose eviction found the room closed meanwhile', () => {
     const tabs = [await room.join({ identity: 'u1' }), await room.join({ identity: 'u1' })]
     const { runOperation, readHead } = MemoryRoomDriver.prototype
     let leavesRefused = 0
-    async function refusingLeaves<Args, Value>(
+    async function refusingLeaves<N extends OperationName>(
       this: MemoryRoomDriver,
       roomId: string,
       inc: string,
-      operation: RoomOperation<Args, Value>,
-      args: Args,
+      operation: OperationOf<N>,
+      args: OperationArgs[N],
       options?: OperationOptions,
-    ): Promise<OperationResult<Value>> {
+    ): Promise<OperationResult<OperationValue[N]>> {
       if (operation.name !== 'leave') return await runOperation.bind(this)(roomId, inc, operation, args, options)
       leavesRefused++
       throw refused()

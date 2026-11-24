@@ -18,13 +18,17 @@ import type {
   HeadNext,
   CommitKept,
   LaneId,
+  JoinOperationOptions,
+  OperationArgs,
+  OperationName,
+  OperationOf,
   OperationOptions,
   OperationResult,
+  OperationValue,
   RetainedFrame,
   RetainedOf,
   RoomDriver,
   RoomHead,
-  RoomOperation,
   RoomSubscriptionSource,
   ExpiringCellsRead,
 } from '../backend/contract.js'
@@ -40,7 +44,7 @@ import {
 import type { AcceptedCommitWire, OperationWire } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 import { openRegionDirectory, openRoomAuthority, type CloudflareRoomAuthorityStub } from './objects.js'
-import { operationRequest } from '../server/store/roomOperations.js'
+import { operationRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
 import { OPERATION_COMMIT_LANE, beforeOperation } from '../backend/operation.js'
@@ -119,40 +123,52 @@ class CloudflareRoomDriver implements RoomDriver {
     )
   }
 
-  /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. An
-   *  operation that waits for this session's inbox of a member, which the operation registers (a member's join),
-   *  carries the inbox's exact route instead, which the authority registers in the operation's own transaction: the
-   *  inbox's one write, so both or neither hold. */
-  async runOperation<Args, Value>(
+  /** In the room's authority, by the operation's name, through the session's ordered stub as a commit goes. */
+  async runOperation<N extends OperationName>(
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
-    const request = operationRequest(operation, args)
+  ): Promise<OperationResult<OperationValue[N]>> {
+    await beforeOperation(options)
+    return this.sentOperation(roomId, inc, operationRequest(operation, args))
+  }
+
+  /** As `runOperation()`. A join that waits for this session's inbox of its member, which the join registers, carries
+   *  the inbox's exact route instead, which the authority registers in the join's own transaction: the inbox's one
+   *  write, so both or neither hold. */
+  async runJoin(
+    roomId: string,
+    inc: string,
+    join: OperationOf<'join'>,
+    args: OperationArgs['join'],
+    options: JoinOperationOptions,
+  ): Promise<OperationResult<OperationValue['join']>> {
     const session = currentRoomSessionSubscriptions(this)
-    const inbox =
-      options?.inbox === undefined
-        ? undefined
-        : session?.attemptOf(roomId, inc, { kind: 'inbox', member: options.inbox.member })
-    let wire: OperationWire
-    if (session !== null && inbox?.registeredByOperation === true) {
-      wire = await rowLimited(
-        session.runCarrying(inbox, request, { deadline: Date.now() + LEASE_CALL_DEADLINE_MS, wanted: options?.wanted }),
-      )
-    } else {
+    const inbox = session?.attemptOf(roomId, inc, { kind: 'inbox', member: options.inbox.member })
+    if (session === null || inbox?.registeredByOperation !== true) {
       await beforeOperation(options)
-      const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, request)
-      wire = await rowLimited(session ? session.callAuthority(roomId, run) : run(this.stub(roomId)))
+      return this.sentOperation(roomId, inc, operationRequest(join, args))
     }
-    // A later write of this session's on the member's inbox, as the removal that rolls a failed join back, came first.
-    if (wire.kind === 'overtaken') throw new Error(`Cloudflare Room operation '${request.name}' was overtaken`)
-    if (wire.kind !== 'done') return wire
-    const { value, counters, commit } = wire
-    const done: OperationResult<Value> = { kind: 'done', value: value as Value, counters }
-    if (commit !== undefined) done.commit = acceptedCommit(OPERATION_COMMIT_LANE, commit)
-    return done
+    const deadline = Date.now() + LEASE_CALL_DEADLINE_MS
+    return operationResult(
+      'join',
+      await rowLimited(session.runCarrying(inbox, args, { deadline, wanted: options.wanted })),
+    )
+  }
+
+  private async sentOperation<N extends OperationName>(
+    roomId: string,
+    inc: string,
+    request: RoomOperationRequest<N>,
+  ): Promise<OperationResult<OperationValue[N]>> {
+    const session = currentRoomSessionSubscriptions(this)
+    const run = (stub: CloudflareRoomAuthorityStub) => stub.runOperation(inc, request)
+    return operationResult(
+      request.name,
+      await rowLimited(session ? session.callAuthority(roomId, run) : run(this.stub(roomId))),
+    )
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
@@ -252,4 +268,15 @@ function mergeRegionPages(pages: DirectoryPage[]): DirectoryPage {
     .filter(({ roomId }) => cursor === undefined || compareCodePoints(roomId, cursor) <= 0)
     .sort((a, b) => compareCodePoints(a.roomId, b.roomId))
   return cursor === undefined ? { entries } : { entries, cursor }
+}
+
+/** An operation's result as its authority answered it. */
+function operationResult<Value>(name: OperationName, wire: OperationWire<Value>): OperationResult<Value> {
+  // A later write of this session's on the member's inbox, as the removal that rolls a failed join back, came first.
+  if (wire.kind === 'overtaken') throw new Error(`Cloudflare Room operation '${name}' was overtaken`)
+  if (wire.kind !== 'done') return wire
+  const { value, counters, commit } = wire
+  const done: OperationResult<Value> = { kind: 'done', value, counters }
+  if (commit !== undefined) done.commit = acceptedCommit(OPERATION_COMMIT_LANE, commit)
+  return done
 }

@@ -1,6 +1,6 @@
 export { JOIN, LEAVE, joinMember, evictMember, leaveCommits }
 
-import type { OperationOptions, RoomOperation } from '../../backend/contract.js'
+import type { JoinOperationOptions, RoomOperation } from '../../backend/contract.js'
 import type { SizedCommit } from '../lanes/lanes.js'
 import { OPERATION_COMMIT_LANE } from '../../backend/operation.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
@@ -14,7 +14,7 @@ import {
 import type { HoldConfig, RoomMemberRecord, RoomIncarnation } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../../types.js'
 import { memberMetaMutations } from './meta.js'
-import { runOperation } from './operations.js'
+import { runOperation, settledOperation } from './operations.js'
 import { encodeRoomRecord, memberRecordOf } from '../lanes/lanes.js'
 import { afterHoldChange, holdDelta } from '../lifecycle/hold.js'
 import { ROOM_DEPARTING_RECORD_MS } from '../constants.js'
@@ -43,7 +43,7 @@ type JoinArgs = {
 
 /** A join: the member's record under the lease, its mark, its meta's keys and identity marker, and its join event; a
  *  non-hidden member holds the room. `'lease-lost'` once the lease's cell was claimed or removed. */
-const JOIN: RoomOperation<JoinArgs, 'joined' | 'lease-lost'> = {
+const JOIN: RoomOperation<'join', JoinArgs, 'joined' | 'lease-lost'> = {
   name: 'join',
   plan(tx, { lease, hold, id, record, meta, join }) {
     const leaseWrites = leaseHosting(lease, tx)
@@ -68,7 +68,7 @@ type LeaveArgs = { id: string; cause: WireLeaveCause }
 /** A leave: the member's record, identity marker, lease mark, meta, DM replies, lanes and the frames it retained go,
  *  with its leave event, and its departing record is written. Null once the member was gone; else whether it was
  *  hidden, as a hidden one held nothing. */
-const LEAVE: RoomOperation<LeaveArgs & { hold: HoldConfig | null }, { hidden: boolean } | null> = {
+const LEAVE: RoomOperation<'leave', LeaveArgs & { hold: HoldConfig | null }, { hidden: boolean } | null> = {
   name: 'leave',
   plan(tx, { id, cause, hold }) {
     const memberKey = memberCellKey(id)
@@ -117,9 +117,14 @@ async function joinMember(
   room: RoomIncarnation,
   lease: RoomLease,
   member: Omit<JoinArgs, 'lease' | 'hold'>,
-  options: OperationOptions,
+  options: JoinOperationOptions,
 ): Promise<void> {
-  const joined = await runHosted(store, room, lease, JOIN, { ...member, hold: room.hold }, options)
+  const joined = await runHosted(lease, async (state) =>
+    settledOperation(
+      room,
+      await store.runJoin(room.id, room.inc, JOIN, { ...member, hold: room.hold, lease: state }, options),
+    ),
+  )
   afterHoldChange(room, holdDelta(member.record.hidden ? null : room.hold, 1, { joining: true }).after(joined.counters))
 }
 

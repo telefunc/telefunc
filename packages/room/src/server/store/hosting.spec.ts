@@ -5,7 +5,15 @@ import { BackendError, ChannelOverflowError } from 'telefunc/__internal'
 import { getRoomPlane } from '../../backend/plane.js'
 import { MemoryRoomDriver } from '../../backend/MemoryRoomDriver.js'
 import { RoomStore } from '../../backend/RoomStore.js'
-import type { CellsRead, OperationOptions, OperationResult, RoomOperation } from '../../backend/contract.js'
+import type {
+  CellsRead,
+  OperationArgs,
+  OperationName,
+  OperationOf,
+  OperationOptions,
+  OperationResult,
+  OperationValue,
+} from '../../backend/contract.js'
 import { Room } from '../../index.js'
 import { RoomModel, type RosterRead } from '../../shared/RoomModel.js'
 import { configFromHead, encodeRoomRecord } from '../lanes/lanes.js'
@@ -40,7 +48,8 @@ async function joinUnder(
     room,
     lease,
     { id: member, record, meta: {}, join: { __r: 'join', id: member, meta: {}, joinedAt } },
-    {},
+    // Its inbox already delivers.
+    { inbox: { member, ready: Promise.resolve() } },
   )
   return member
 }
@@ -89,14 +98,14 @@ async function claimLease(room: RoomIncarnation, lease: string, cleaner: string)
 /** From here on, the store refuses every leave in `room` before it runs, as a reap's eviction can be. */
 function refusingLeaves(room: RoomIncarnation): void {
   const { runOperation: run } = MemoryRoomDriver.prototype
-  async function refusing<Args, Value>(
+  async function refusing<N extends OperationName>(
     this: MemoryRoomDriver,
     roomId: string,
     inc: string,
-    operation: RoomOperation<Args, Value>,
-    args: Args,
+    operation: OperationOf<N>,
+    args: OperationArgs[N],
     options?: OperationOptions,
-  ): Promise<OperationResult<Value>> {
+  ): Promise<OperationResult<OperationValue[N]>> {
     if (roomId === room.id && operation.name === 'leave') {
       throw new BackendError({ code: 'denied', outcome: 'not-run', message: 'refused before dispatch' })
     }
@@ -175,14 +184,14 @@ describe('a reader whose claim on a lapsed lease another reap took first', () =>
     // Just before this reader's claim, another reap claims the lease, and its eviction is refused.
     const { runOperation: run } = MemoryRoomDriver.prototype
     let first = true
-    async function claimedFirst<Args, Value>(
+    async function claimedFirst<N extends OperationName>(
       this: MemoryRoomDriver,
       roomId: string,
       inc: string,
-      operation: RoomOperation<Args, Value>,
-      args: Args,
+      operation: OperationOf<N>,
+      args: OperationArgs[N],
       options?: OperationOptions,
-    ): Promise<OperationResult<Value>> {
+    ): Promise<OperationResult<OperationValue[N]>> {
       if (roomId === room.id && operation.name === 'claimLease' && first) {
         first = false
         await run.bind(this)(roomId, inc, CLAIM_LEASE, { lease: lease.id, cleaner: 'another' })
@@ -374,14 +383,14 @@ describe('a view whose roster read leaves out a member whose reap is stalled', (
     const evicting = Promise.withResolvers<void>()
     const stalled = Promise.withResolvers<void>()
     const { runOperation: run } = MemoryRoomDriver.prototype
-    async function stalling<Args, Value>(
+    async function stalling<N extends OperationName>(
       this: MemoryRoomDriver,
       roomId: string,
       inc: string,
-      operation: RoomOperation<Args, Value>,
-      args: Args,
+      operation: OperationOf<N>,
+      args: OperationArgs[N],
       options?: OperationOptions,
-    ): Promise<OperationResult<Value>> {
+    ): Promise<OperationResult<OperationValue[N]>> {
       if (roomId === id && operation.name === 'leave') {
         evicting.resolve()
         await stalled.promise

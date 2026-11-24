@@ -16,7 +16,7 @@ import { ackIdOfDmReplyCellKey, dmReplyCellKey, dmReplyCellPrefix, memberCellKey
 type StoreDmReplyArgs = { sender: string; ackId: string; reply: Uint8Array }
 
 /** Kept only while its sender is a member, whose leave drops what it never settled. */
-const STORE_DM_REPLY: RoomOperation<StoreDmReplyArgs, void> = {
+const STORE_DM_REPLY: RoomOperation<'storeDmReply', StoreDmReplyArgs, void> = {
   name: 'storeDmReply',
   plan(tx, { sender, ackId, reply }) {
     if (tx.cell(memberCellKey(sender)) !== undefined) tx.write({ key: dmReplyCellKey(sender, ackId), bytes: reply })
