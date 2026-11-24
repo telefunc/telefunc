@@ -13,6 +13,7 @@ function getContext_sync(): Context | null {
 }
 
 function restoreContext_sync<T>(context: Context, fn: () => T): T {
+  // Calls can be nested: a callback given to `getContext().onClose()` runs inside the telefunction when the request is already aborted
   const previous = syncState.context
   syncState.context = context
   try {
