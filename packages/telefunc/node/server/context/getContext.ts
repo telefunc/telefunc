@@ -57,5 +57,9 @@ function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
     '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
   )
   if (fn) return restoreContext({ [PROVIDED_CONTEXT]: context }, fn)
+  assertUsage(
+    isAsyncMode(),
+    '[provideTelefuncContext(context, fn)] Argument `fn` missing, see https://telefunc.com/provideTelefuncContext',
+  )
   provideContext(context)
 }

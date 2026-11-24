@@ -1,9 +1,7 @@
 export { getContext_sync }
-export { provideTelefuncContext_sync }
 export { restoreContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { assertUsage } from '../../../utils/assert.js'
 import type { Context } from './context.js'
 
 const syncState = getGlobalObject<{ context: Context | null }>('context/sync.ts', {
@@ -12,13 +10,6 @@ const syncState = getGlobalObject<{ context: Context | null }>('context/sync.ts'
 
 function getContext_sync(): Context | null {
   return syncState.context
-}
-
-function provideTelefuncContext_sync(): void {
-  assertUsage(
-    false,
-    "[provideTelefuncContext(context)] The context object cannot be provided this way without Async Hooks. Pass a callback instead: `provideTelefuncContext(context, () => someTelefunction())`. Alternatively, add `import 'telefunc/async_hooks'`, or pass `context` to serve(). See https://telefunc.com/provideTelefuncContext",
-  )
 }
 
 function restoreContext_sync<T>(context: Context, fn: () => T): T {
