@@ -4,8 +4,6 @@ export type { ParticipantField, ParticipantFieldView }
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { freezeMeta } from './freezeMeta.js'
 import { ownMessage, recipientId } from './arguments.js'
-import { ParticipantBase } from './ParticipantBase.js'
-import { assert } from '../utils/assert.js'
 import type { LocalParticipant, Room, Sender } from '../types.js'
 
 /** What a package's field gets on each view of a room: the room, how to set a member's value there, and the package's
@@ -55,7 +53,6 @@ function defineParticipantField<T>(name: string, field: ParticipantField<T>): vo
 /** A package's message to `to`, which `to`'s side hands to the field `field`'s `onPrivate()`, never to the app's
  *  `listen()`. It goes through the room's send guards as any message a member sends. */
 function sendPrivate(me: LocalParticipant, to: string | Sender, field: string, data: unknown): Promise<void> {
-  assert(ParticipantBase.isParticipantBase(me))
   return me._sendPrivate(recipientId(to), field, data)
 }
 

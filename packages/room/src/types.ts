@@ -11,6 +11,7 @@ export type {
   LocalParticipant,
   RemoteParticipant,
   TrackDemand,
+  TracksWatchers,
   Sender,
   SendGuard,
   PublishGuard,
@@ -324,7 +325,18 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   onDisconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
   /** The page holding you reaches the room again. */
   onReconnect(callback: () => void, options?: { signal?: AbortSignal }): () => void
+
+  /** @internal Who receives any of `tracks` (a package's `watchersOf()`). */
+  _watchersOf(tracks: readonly string[]): TracksWatchers<P, Pub>
+  /** @internal A package's message to `to`, for its field `field` there (a package's `sendPrivate()`). */
+  _sendPrivate(to: string, field: string, data: unknown): Promise<void>
 } & RoomShield<Pub>
+
+/** Who receives some of your tracks: each person, and each page or server-side room with nobody to name, once. */
+type TracksWatchers<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
+  readonly watchers: RemoteParticipant<P, Pub>[]
+  readonly watcherCount: number
+}
 
 /** One of your tracks that someone receives now. */
 type TrackDemand<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
