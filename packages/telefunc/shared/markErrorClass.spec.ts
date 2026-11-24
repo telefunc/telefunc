@@ -62,3 +62,22 @@ test.for([...thisCopy.keys()])("%s takes no other class's error, nor what only l
   expect(Object.assign(new Error(), { name })).not.toBeInstanceOf(errorClass)
   for (const thing of [null, undefined, name, 0]) expect(thing).not.toBeInstanceOf(errorClass)
 })
+
+test.for([...thisCopy.keys()])(
+  "an app's own subclass of %s answers as JavaScript does: its own errors, not the class's others, in both copies",
+  (name) => {
+    const errorClass = thisCopy.get(name)
+    const other = otherCopy.get(name)
+    if (!errorClass || !other) throw new Error(`${name} isn't in both copies`)
+    // As `class AppError extends ${name} {}` makes it, without running a constructor: `Abort` is a factory.
+    function AppError() {}
+    Object.setPrototypeOf(AppError, errorClass)
+    AppError.prototype = Object.create(errorClass.prototype)
+    const ownError = Object.create(AppError.prototype)
+    expect(instanceOf(errorClass)).not.toBeInstanceOf(AppError)
+    expect(instanceOf(other)).not.toBeInstanceOf(AppError)
+    expect(ownError).toBeInstanceOf(AppError)
+    expect(ownError).toBeInstanceOf(errorClass)
+    expect(ownError).toBeInstanceOf(other)
+  },
+)
