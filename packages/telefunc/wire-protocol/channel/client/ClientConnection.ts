@@ -141,8 +141,9 @@ type ClientChannelTransport = {
   cancelAttempt(): void
   hasWire(): boolean
   isConnecting(): boolean
-  /** Send a wire-level ping on this wire. Heartbeat's send callback calls this. */
-  sendPing(frame: Uint8Array<ArrayBuffer>): void
+  /** Send a wire-level ping on this wire. Heartbeat's send callback calls this; `now` sends it without the heartbeat's
+   *  hold. */
+  sendPing(frame: Uint8Array<ArrayBuffer>, now?: boolean): void
   sendFrame(frame: OutboundFrame): void
   /** How many bytes of data frames it accepts now, `Infinity` if nothing bounds them. Other frames go at once. */
   headroom(): number

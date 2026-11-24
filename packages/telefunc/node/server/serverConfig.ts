@@ -111,7 +111,8 @@ type ChannelConfigUser = {
   reconnectTimeout?: number
   /**
    * How long, in milliseconds, to keep the shared channel connection alive
-   * after the last channel closes.
+   * after the last channel closes. `0` closes it as soon as the server has
+   * what the channels sent.
    */
   idleTimeout?: number
   /**

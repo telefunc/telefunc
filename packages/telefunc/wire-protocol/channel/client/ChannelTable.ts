@@ -58,6 +58,12 @@ class ChannelTable {
     return this.byChannel.size === 0
   }
 
+  /** Every closed channel kept has at the server all the page sent on it, or the server ended it. */
+  get delivered(): boolean {
+    for (const { state } of this.closed) if (state.tag === 'closed' && !state.delivered) return false
+    return true
+  }
+
   get hasUndeclared(): boolean {
     return this.undeclared.size > 0
   }

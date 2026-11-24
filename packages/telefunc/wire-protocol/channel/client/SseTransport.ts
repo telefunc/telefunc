@@ -955,9 +955,9 @@ class SseTransport implements UpgradeSource {
     this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
   }
 
-  sendPing(frame: Uint8Array<ArrayBuffer>): void {
+  sendPing(frame: Uint8Array<ArrayBuffer>, now = false): void {
     if (!this.hasWire()) return
-    this.sendFrame({ kind: 'heartbeat', frame })
+    this.sendFrame({ kind: now ? 'control' : 'heartbeat', frame })
   }
 
   /** Its PINGs wait for a POST as long as the ping deadline allows the page to hold them. */

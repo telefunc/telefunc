@@ -304,24 +304,42 @@ for (const transport of ['sse', 'ws'] as const) {
       expect(await page.closed).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
     })
 
-    test('a page whose verdict the network lost reconnects, and the server reads it', async () => {
-      const [channel, page] = await pair(transport, 60_000)
-      // The server's CLOSE_DONE has gone; what the page sends after it, its verdict, the server never reads.
-      channel.onClose(() => void setImmediate(deafenServer))
-      expect(await page.close({ timeout: 10_000 })).toBe(null)
-      const connections = dropConnections()
-      connections.reconnect()
-      expect(await channel.closed).toBe(null)
-    })
+    // An idle timeout shorter than the heartbeat's next PONG ends the connection before that PONG could tell the page.
+    for (const idleTimeout of [60_000, 1_000, 0]) {
+      /** Past the idle time, where it is shorter than the row: the page's connection was idle that long. */
+      const pastIdle = () =>
+        idleTimeout < 60_000 ? new Promise((resolve) => setTimeout(resolve, idleTimeout + 100)) : null
+      test(`a page whose verdict the network lost reconnects, and the server reads it, at idleTimeout ${idleTimeout}`, async () => {
+        const [channel, page] = await pair(transport, idleTimeout)
+        // The server's CLOSE_DONE has gone; what the page sends after it, its verdict, the server never reads.
+        channel.onClose(() => void setImmediate(deafenServer))
+        expect(await page.close({ timeout: 10_000 })).toBe(null)
+        await pastIdle()
+        const connections = dropConnections()
+        connections.reconnect()
+        expect(await channel.closed).toBe(null)
+      })
 
-    test('a page whose abort the network lost reconnects, and the server reads it', async () => {
-      const [channel, page] = await pair(transport, 60_000)
-      deafenServer()
-      page.abort('bye')
-      const connections = dropConnections()
-      connections.reconnect()
-      const closed = await channel.closed
-      expect(closed instanceof Abort && closed.abortValue).toBe('bye')
+      test(`a page whose abort the network lost reconnects, and the server reads it, at idleTimeout ${idleTimeout}`, async () => {
+        const [channel, page] = await pair(transport, idleTimeout)
+        deafenServer()
+        page.abort('bye')
+        await page.closed
+        await pastIdle()
+        const connections = dropConnections()
+        connections.reconnect()
+        const closed = await channel.closed
+        expect(closed instanceof Abort && closed.abortValue).toBe('bye')
+      })
+    }
+
+    test('at idleTimeout 0 with nothing lost, a closed page ends its connection within a round trip, not at the next heartbeat', async () => {
+      const [channel, page] = await pair(transport, 0)
+      const disposed = vi.spyOn(ClientConnection.prototype, 'onDisposed')
+      onTestFinished(() => disposed.mockRestore())
+      expect(await page.close({ timeout: 10_000 })).toBe(null)
+      expect(await channel.closed).toBe(null)
+      await vi.waitFor(() => expect(disposed.mock.contexts).toContain(page._connection))
     })
   })
 }

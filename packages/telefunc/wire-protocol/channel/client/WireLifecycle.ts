@@ -161,6 +161,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
    *  fallback after it make new transports, behind the same proxy. */
   private postLimit = Infinity
   private ttl: ReturnType<typeof setTimeout> | null = null
+  /** The expired idle timer whose PING asked the server for what the closed channels sent (`disposeOnceDrained`). */
+  private confirming: ReturnType<typeof setTimeout> | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
   }
@@ -492,6 +494,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.readAt = performance.now()
     this.ownFramesRefusedOn = null
     this.liveness.onPong(ended)
+    if (this.confirming !== null) this.startTtlIfIdle()
   }
 
   onTransportReconciledPiece(transport: ClientChannelTransport): void {
@@ -913,6 +916,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
   private startTtlIfIdle(): void {
+    // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
+    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) this.ttl = this.confirming = null
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
@@ -920,9 +925,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.ttl = ttl
   }
 
+  /** Disposes the connection once the server has what its closed channels sent. Till then the expired timer stays as
+   *  `ttl`, so nothing arms another, and one PING asks the server at once (`startTtlIfIdle` lets the timer go). */
   private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
     await this.transport.drained()
-    if (this.ttl === ttl && this.channels.idle) this.dispose()
+    if (this.ttl !== ttl || !this.channels.idle) return
+    if (this.channels.delivered) return this.dispose()
+    this.liveness.pingNow(this.transport)
+    this.confirming = ttl
   }
 
   private dispose(): void {

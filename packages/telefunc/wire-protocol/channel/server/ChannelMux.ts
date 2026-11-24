@@ -681,9 +681,19 @@ class ChannelMux implements UpgradeStagesOwner {
       assertProtocol(known, 'the page says it took more bytes than this wire sent it')
     }
     if (frame.tag === TAG.PING) {
+      const { ended } = frame
+      assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
       this.resetPingTimer(entry)
       this.acknowledgeArrivals(entry)
-      this.pong(entry, this.answerPing(entry, frame.ended))
+      if (ended.length === 0 || entry.state.recvChain === null) this.pong(entry, this.answerPing(entry, ended))
+      else {
+        // What it names, the page sent before it: answered once the frames ahead of it had their turn.
+        this.pong(entry, [])
+        void this.chainRecv(
+          entry,
+          async () => void (entry.closed === null && this.pong(entry, this.answerPing(entry, ended))),
+        )
+      }
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
@@ -792,7 +802,6 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Answers each closed channel the page lists on its session's wire: the last seq the server has from it, or null
    *  once the channel is gone. */
   private answerPing(entry: WireEntry, ended: PingEntry[]): PongEntry[] {
-    assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const session = entry.holds
     if (session === null) return []
     const answers: PongEntry[] = []

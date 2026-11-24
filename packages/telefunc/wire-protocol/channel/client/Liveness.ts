@@ -93,6 +93,11 @@ class Liveness {
     this.gate.sendRunnable()
   }
 
+  /** A PING at once, outside the heartbeat, naming the closed channels: its PONG tells how far the server has them. */
+  pingNow(transport: ClientChannelTransport): void {
+    transport.sendPing(this.buildPing(), true)
+  }
+
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
   private beat(transport: ClientChannelTransport): void {
     for (const { channel, state } of this.channels.values())
