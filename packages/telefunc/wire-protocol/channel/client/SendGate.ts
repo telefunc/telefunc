@@ -223,11 +223,12 @@ class SendGate {
   release(record: ChannelRecord): void {
     this.channels.release(record)
     this.dropQueue(record.ix)
-    this.owner.transport.dropQueued(record.ix)
   }
 
-  /** Drops the frames channel `ix` holds or has waiting, at the next read. */
+  /** Drops the frames of channel `ix` not yet sent: those it holds or has waiting, at the next read, and those the
+   *  transport holds. */
   dropQueue(ix: number): void {
+    this.owner.transport.dropQueued(ix)
     if (this.sendBuffer.length === 0 && this.waitingForHeadroom.length === 0) return
     this.droppedQueues.add(ix)
   }

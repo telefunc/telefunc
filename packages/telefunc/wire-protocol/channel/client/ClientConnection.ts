@@ -152,7 +152,7 @@ type ClientChannelTransport = {
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
   abandonActiveTransport(): void
-  /** Drops the data frames of channel `ix` it holds and hasn't sent: the page released the channel. */
+  /** Drops the data frames of channel `ix` it holds and hasn't sent: nothing more of that channel goes. */
   dropQueued(ix: number): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
