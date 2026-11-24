@@ -1,5 +1,5 @@
 export { RoomHandle }
-export type { RoomHandleOptions }
+export type { RoomHandleOptions, ServerJoin }
 
 import { type ChannelPublishAck, handleCallbackBug, type OrderingInfo } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
@@ -41,10 +41,14 @@ import { Admission } from './Admission.js'
 import { Admissions, type AdmissionsOwner } from './lifecycle/admit.js'
 import { evictMember } from './store/members.js'
 import { getRoomPlane } from '../backend/plane.js'
+import type { RoomStore } from '../backend/RoomStore.js'
 import type { JoinOptions, LeaveCause, LocalParticipant } from '../types.js'
 import type { RoomGuards } from './roomStatics.js'
 import { ServerLocalParticipant } from './ServerLocalParticipant.js'
 assertIsNotBrowser()
+
+/** A server participant admitted in a call, whose after-join hook is still to run (`RoomHandle.finishJoin()`). */
+type ServerJoin = { admission: Admission; participant: ServerLocalParticipant }
 
 type RoomHandleOptions = {
   replica: RoomReplica
@@ -135,6 +139,12 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
+    const joining = await getRoomPlane().call((store) => this.admitParticipant(store, options))
+    return await this.finishJoin(joining)
+  }
+
+  /** A server participant's join, as steps of the call `store` is of; `finishJoin()` finishes it once that call answered. */
+  async admitParticipant(store: RoomStore, options?: JoinOptions): Promise<ServerJoin> {
     this.assertNotKnownClosed()
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
@@ -143,10 +153,16 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
       participant: { id: admission.id, meta, selfDelivery, identity },
       incomingDemand: this.incomingDemand,
     })
-    await this.admissions.admit(admission, () => {
+    await this.admissions.admit(store, admission, () => {
       this.localParticipants.set(admission.id, participant)
       this.replica.own(admission.id, this)
     })
+    return { admission, participant }
+  }
+
+  /** The participant `admitParticipant()` admitted, after its after-join hook: app code after the join's call answered. */
+  async finishJoin({ admission, participant }: ServerJoin): Promise<LocalParticipant> {
+    await this.admissions.afterJoin(admission)
     return participant
   }
 
@@ -353,14 +369,17 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     }
     this.assertNotKnownClosed()
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
-    await this.admissions.admit(admission, () => {
-      stub.addMember(req.reqId, admission.id, req.selfDelivery)
-      this.replica.pageEndChanged(stub, admission.id)
-      if (this.stubs.has(stub)) {
-        this.stubOf.set(admission.id, stub)
-        this.replica.own(admission.id, this)
-      }
-    })
+    await getRoomPlane().call((store) =>
+      this.admissions.admit(store, admission, () => {
+        stub.addMember(req.reqId, admission.id, req.selfDelivery)
+        this.replica.pageEndChanged(stub, admission.id)
+        if (this.stubs.has(stub)) {
+          this.stubOf.set(admission.id, stub)
+          this.replica.own(admission.id, this)
+        }
+      }),
+    )
+    await this.admissions.afterJoin(admission)
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
 

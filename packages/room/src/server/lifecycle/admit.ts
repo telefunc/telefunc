@@ -16,6 +16,7 @@ import { runAfterHook } from '../RoomWrites.js'
 import { readOpenConfig } from '../lanes/lanes.js'
 import { reportRoomError } from '../reportRoomError.js'
 import { evictMember, joinMember } from '../store/members.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import type { LeaveCause } from '../../types.js'
 assertIsNotBrowser()
 
@@ -75,19 +76,24 @@ class Admissions {
     for (const admission of this.underWay.values()) admission.abandon()
   }
 
-  /** Both join paths: the guard passes, the holder takes the member, then the member commits. */
-  async admit(admission: Admission, hold: () => void): Promise<void> {
-    const { id, meta, identity, joinedAt, hidden } = admission
+  /** Both join paths, as steps of the call `store` is of: the guard passes, the holder takes the member, then the member
+   *  commits. Its after-join hook runs once that call answered (`afterJoin()`). */
+  async admit(store: RoomStore, admission: Admission, hold: () => void): Promise<void> {
+    const { id, meta, identity, hidden } = admission
     const { incarnation } = this.replica
     const onBeforeJoin = this.owner.guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) {
       // With no control lane, this handle hears of no close, however old it is: a closed room doesn't get its guard run.
-      const closed = !this.lanePlan.observing && (await readOpenConfig(getRoomPlane().direct, incarnation)) === null
+      const closed = !this.lanePlan.observing && (await readOpenConfig(store, incarnation)) === null
       if (closed) throw roomClosedError(incarnation.id)
       await onBeforeJoin({ id, meta, identity })
     }
     hold()
-    await this.commitAdmission(admission)
+    await this.commitAdmission(store, admission)
+  }
+
+  /** The after-join hook of `admission`, which committed: app code after its call answered. */
+  async afterJoin({ id, meta, identity, joinedAt, hidden }: Admission): Promise<void> {
     if (hidden) return // a hidden participant has no post-join hook
     const onAfterJoin = this.owner.guards?.onAfterJoin
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
@@ -95,7 +101,7 @@ class Admissions {
 
   /** The member's inbox delivers before its record is durable, and the join is announced after, so no DM or event is
    *  lost. */
-  private async commitAdmission(admission: Admission): Promise<void> {
+  private async commitAdmission(store: RoomStore, admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
     const join: Extract<RoomCtrlEnvelope, { __r: 'join' }> = { __r: 'join', id, meta, joinedAt }
@@ -112,21 +118,19 @@ class Admissions {
       admission.assertLive(this.model)
       // The member's record and its join event are one write, so its leave always follows its join. Not sent once the
       // admission was abandoned, whose own error it then rejects with.
-      await getRoomPlane().call(async (store) => {
-        await joinMember(
-          store,
-          this.replica.incarnation,
-          this.hosting.lease,
-          { id, record, meta, join },
-          { inbox, wanted: () => !admission.abandoned },
-        ).catch((error: unknown) => {
-          admission.assertLive(this.model)
-          throw error
-        })
-        // An inbox that fails after the join was written tells the join may have run, though the member is then
-        // evicted.
-        await inbox.ready
+      await joinMember(
+        store,
+        this.replica.incarnation,
+        this.hosting.lease,
+        { id, record, meta, join },
+        { inbox, wanted: () => !admission.abandoned },
+      ).catch((error: unknown) => {
+        admission.assertLive(this.model)
+        throw error
       })
+      // An inbox that fails after the join was written tells the join may have run, though the member is then
+      // evicted.
+      await inbox.ready
       admission.assertLive(this.model)
       admission.commit()
       this.underWay.delete(id)

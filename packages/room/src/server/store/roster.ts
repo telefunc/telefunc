@@ -53,7 +53,7 @@ async function readRoster(store: RoomStore, room: RoomIncarnation): Promise<Rost
   const { cells, left } = await readPrefixAt(store, room.id, room.inc, MEMBER_CELL_PREFIX, HOSTED_MEMBERS)
   // After the member read: each member's cells are as new as its record or newer, so the updates after the record's
   // seq bring a view to them.
-  const metaCells = await readMembersMetaCells(room, cells)
+  const metaCells = await readMembersMetaCells(store, room, cells)
   return { members: await liveMembers(memberRecords(cells), metaCells), leaving: new Set(left.map(memberIdOfCellKey)) }
 }
 
@@ -109,7 +109,7 @@ async function readMembersById(store: RoomStore, room: RoomIncarnation, ids: str
     return raw === undefined || !hosts(read, key) ? [] : [[id, raw] as const]
   })
   await eachInFlight(entries, async ([id]) => {
-    metaCells.set(id, (await readMembersMetaCells(room, cells, id)).get(id) ?? [])
+    metaCells.set(id, (await readMembersMetaCells(store, room, cells, id)).get(id) ?? [])
   })
   return await liveMembers(entries, metaCells)
 }

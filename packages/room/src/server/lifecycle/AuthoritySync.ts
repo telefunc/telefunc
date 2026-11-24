@@ -90,13 +90,13 @@ class AuthoritySync {
    *  that call's. */
   async catchUp(store: RoomStore): Promise<void> {
     if (this.model.closed || this.current()) return
-    if (!(await this.reconcileMeta())) return
+    if (!(await this.reconcileMeta(store))) return
     const refresh = this.refresh()
     await store.join(refresh.store, refresh.done)
   }
 
   async reconcileAuthority(): Promise<void> {
-    if (this.model.closed || !(await this.reconcileMeta())) return
+    if (this.model.closed || !(await this.reconcileMeta(getRoomPlane().direct))) return
     const { id, inc } = this.incarnation
     await Promise.all([
       getRoomPlane().call((store) => dropReplacedMetaGenerations(store, id, inc)),
@@ -108,12 +108,12 @@ class AuthoritySync {
    *  committed past what this view covers, or doesn't deliver to it. */
   async checkCoverage(): Promise<void> {
     const before = this.covered
-    const mark = await this.controlMark()
+    const mark = await this.controlMark(getRoomPlane().direct)
     if (this.model.closed) return
     // The authority's seq never goes below what a view covered, unless a failover rewound it.
     if (mark < before) {
       this.onControlLaneRewound()
-      if (!(await this.reconcileMeta())) return
+      if (!(await this.reconcileMeta(getRoomPlane().direct))) return
     }
     const covered = () => this.current() && mark <= this.covered
     if (covered()) return
@@ -178,11 +178,8 @@ class AuthoritySync {
     )
   }
 
-  private async controlMark(): Promise<number> {
-    return (
-      (await getRoomPlane().direct.reads.readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ??
-      0
-    )
+  private async controlMark(store: RoomStore): Promise<number> {
+    return (await store.reads.readLaneOrder(this.incarnation.id, this.incarnation.inc, CONTROL_LANE))?.seq ?? 0
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
@@ -190,7 +187,7 @@ class AuthoritySync {
   metaWaiting(): void {
     this.repairSoon('meta', () => {
       const model = this.model
-      if (model.metaWaiting && !model.closed) void this.reconcileMeta().catch(reportRoomError)
+      if (model.metaWaiting && !model.closed) void this.reconcileMeta(getRoomPlane().direct).catch(reportRoomError)
     })
   }
 
@@ -236,7 +233,7 @@ class AuthoritySync {
    *  nothing, waits for nothing. */
   private async deliveryBehind(): Promise<boolean> {
     if (!this.model.rosterKnown || !this.lanePlan.observing || !this.lanePlan.controlEstablished) return false
-    const [mark, baseline] = await Promise.all([this.controlMark(), this.subscriptionBaseline()])
+    const [mark, baseline] = await Promise.all([this.controlMark(getRoomPlane().direct), this.subscriptionBaseline()])
     if (mark <= Math.max(baseline, this.received)) return false
     const reached = createDeferred<boolean>()
     const waiter = { seq: mark, reached: () => reached.resolve(true) }
@@ -250,7 +247,7 @@ class AuthoritySync {
 
   /** The current subscription's baseline, read again after a failed read. */
   private subscriptionBaseline(): Promise<number> {
-    const read = (this.baseline ??= this.controlMark())
+    const read = (this.baseline ??= this.controlMark(getRoomPlane().direct))
     void this.forgetFailedBaseline(read)
     return read
   }
@@ -270,15 +267,15 @@ class AuthoritySync {
 
   /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits. Returns
    *  the head it read, null once the room is gone. */
-  async reconcileMeta(): Promise<RoomHead | null> {
+  async reconcileMeta(store: RoomStore): Promise<RoomHead | null> {
     const { id, inc } = this.incarnation
     const [head, seq] = await Promise.all([
-      getRoomPlane().direct.reads.readHead(id),
-      this.model.metaWaiting ? null : readRoomMetaSeq(id, inc),
+      store.reads.readHead(id),
+      this.model.metaWaiting ? null : readRoomMetaSeq(store, id, inc),
     ])
     const config = openConfig(head, inc)
     if (config !== null && seq !== null && seq <= this.model.metaSeq) return head
-    const stored = config === null ? null : await readRoomMeta(id, config)
+    const stored = config === null ? null : await readRoomMeta(store, id, config)
     if (stored === null) {
       this.owner.applyControl({ __r: 'closed' })
       return null
@@ -291,7 +288,7 @@ class AuthoritySync {
    *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
   private async runMemberRefresh(store: RoomStore): Promise<void> {
     if (this.model.closed) return
-    const mark = await this.controlMark()
+    const mark = await this.controlMark(store)
     // The events grow while the roster is read and reconciled.
     const events = this.model.recordMembership()
     try {

@@ -14,7 +14,6 @@ export {
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
-import { getRoomPlane } from '../../backend/plane.js'
 import type { RoomStore } from '../../backend/RoomStore.js'
 import { getOrCreate } from 'telefunc/__internal'
 import { CELL_PAGE_SIZE, type CellMutation, type RoomOperation } from '../../backend/contract.js'
@@ -135,20 +134,25 @@ async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): 
 /** Null once the incarnation is gone. Until its first write, the meta is the one the room was created with. A read
  *  pages its generation's keys between two reads of `meta:seq`, which every write counts, and keeps the pages only
  *  when no write landed between. */
-async function readRoomMeta(roomId: string, config: RoomConfigRecord): Promise<StoredRoomMeta | null> {
+async function readRoomMeta(
+  store: RoomStore,
+  roomId: string,
+  config: RoomConfigRecord,
+): Promise<StoredRoomMeta | null> {
   for (let attempt = 0; attempt < META_PAGED_READS; attempt++) {
-    const read = await readMetaPaged(roomId, config)
+    const read = await readMetaPaged(store, roomId, config)
     if (read !== 'raced') return read
   }
-  return await readMetaWhole(roomId, config.inc)
+  return await readMetaWhole(store, roomId, config.inc)
 }
 
 /** The meta paged between two reads of `meta:seq`; `'raced'` when a write landed between. */
 async function readMetaPaged(
+  store: RoomStore,
   roomId: string,
   { inc, meta }: RoomConfigRecord,
 ): Promise<StoredRoomMeta | null | 'raced'> {
-  const { reads } = getRoomPlane().direct
+  const { reads } = store
   const before = await reads.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY, META_GEN_CELL_KEY] })
   if (before.kind === 'stale-incarnation') return null
   const seq = before.cells.get(META_SEQ_CELL_KEY)
@@ -168,8 +172,8 @@ async function readMetaPaged(
 }
 
 /** The whole meta in one read, cut into runs of `CELL_PAGE_SIZE` as pages would be. */
-async function readMetaWhole(roomId: string, inc: string): Promise<StoredRoomMeta | null> {
-  const read = await getRoomPlane().direct.reads.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
+async function readMetaWhole(store: RoomStore, roomId: string, inc: string): Promise<StoredRoomMeta | null> {
+  const read = await store.reads.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if (read.kind === 'stale-incarnation') return null
   const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!))
   const runs: RoomMetaEntry[][] = []
@@ -187,8 +191,8 @@ async function readMetaWhole(roomId: string, inc: string): Promise<StoredRoomMet
 }
 
 /** How many writes the stored meta reflects; null once the incarnation is gone. */
-async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | null> {
-  const read = await getRoomPlane().direct.reads.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+async function readRoomMetaSeq(store: RoomStore, roomId: string, inc: string): Promise<number | null> {
+  const read = await store.reads.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
   if (read.kind === 'stale-incarnation') return null
   const seq = read.cells.get(META_SEQ_CELL_KEY)
   return seq === undefined ? 0 : decodeCellCounter(seq).value
@@ -362,8 +366,13 @@ const SET_MEMBER_META: RoomOperation<SetMemberMetaArgs, MemberMetaWritten | 'gon
 }
 
 /** Writes member `id`'s meta with its event. */
-async function setMemberMeta(room: RoomIncarnation, id: string, write: MemberMetaWrite): Promise<MemberMetaWritten> {
-  const { value } = await runOperation(getRoomPlane().direct, room, SET_MEMBER_META, { id, write })
+async function setMemberMeta(
+  store: RoomStore,
+  room: RoomIncarnation,
+  id: string,
+  write: MemberMetaWrite,
+): Promise<MemberMetaWritten> {
+  const { value } = await runOperation(store, room, SET_MEMBER_META, { id, write })
   if (value === 'gone') throw participantGoneError(id)
   return value
 }
@@ -394,11 +403,12 @@ const SET_MEMBER_CONNECTION: RoomOperation<SetMemberConnectionArgs, MemberMetaWr
 
 /** Writes the connection of member `id`'s page with its event; null when the record already has it. */
 async function setMemberConnection(
+  store: RoomStore,
   room: RoomIncarnation,
   id: string,
   connected: boolean,
 ): Promise<MemberMetaWritten | null> {
-  const { value } = await runOperation(getRoomPlane().direct, room, SET_MEMBER_CONNECTION, { id, connected })
+  const { value } = await runOperation(store, room, SET_MEMBER_CONNECTION, { id, connected })
   if (value === 'gone') throw participantGoneError(id)
   return value
 }
@@ -407,31 +417,35 @@ async function setMemberConnection(
  *  one read that holds a member's cells together, so a member's cells within a page are as one write left them; the
  *  member a page boundary cuts is settled by `settleMemberMetaCells`. */
 async function readMembersMetaCells(
+  store: RoomStore,
   room: RoomIncarnation,
   records: ReadonlyMap<string, Uint8Array>,
   id?: string,
 ): Promise<Map<string, MemberMetaCells>> {
   const { byMember, cut } = await readMetaCellPages(
+    store,
     room,
     id === undefined ? MEMBER_META_CELL_PREFIX : memberMetaCellPrefix(id),
   )
-  await eachInFlight(cut, (member) => settleCutMember(room, records, byMember, member))
+  await eachInFlight(cut, (member) => settleCutMember(store, room, records, byMember, member))
   return byMember
 }
 
 async function settleCutMember(
+  store: RoomStore,
   room: RoomIncarnation,
   records: ReadonlyMap<string, Uint8Array>,
   byMember: Map<string, MemberMetaCells>,
   member: string,
 ): Promise<void> {
   const seq = metaSeqOf(records.get(memberCellKey(member)))
-  byMember.set(member, await settleMemberMetaCells(room, member, seq, byMember.get(member)!))
+  byMember.set(member, await settleMemberMetaCells(store, room, member, seq, byMember.get(member)!))
 }
 
 /** The meta cells under `prefix` by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time, and the members that
  *  held a page's last cell with a page after it. */
 async function readMetaCellPages(
+  store: RoomStore,
   room: RoomIncarnation,
   prefix: string,
 ): Promise<{ byMember: Map<string, MemberMetaCells>; cut: Set<string> }> {
@@ -439,7 +453,7 @@ async function readMetaCellPages(
   const cut = new Set<string>()
   let last: string | undefined
   const slice = new Slice()
-  for await (const page of getRoomPlane().direct.reads.readCellPages(room.id, room.inc, prefix)) {
+  for await (const page of store.reads.readCellPages(room.id, room.inc, prefix)) {
     if (page.kind === 'stale-incarnation') throw roomClosedError(room.id)
     if (last !== undefined) cut.add(last)
     for (const cell of page.cells) {
@@ -454,6 +468,7 @@ async function readMetaCellPages(
 /** Member `id`'s `cells`, which a page boundary cut, read after its record was at `seq`: kept while the record is still
  *  at it, as every meta write moves it, else read again, up to `META_PAGED_READS` times, then in one call. */
 async function settleMemberMetaCells(
+  store: RoomStore,
   room: RoomIncarnation,
   id: string,
   seq: number | undefined,
@@ -461,17 +476,15 @@ async function settleMemberMetaCells(
 ): Promise<MemberMetaCells> {
   const memberKey = memberCellKey(id)
   for (let reads = 0; ; reads++) {
-    const now = metaSeqOf(
-      (await readOpenCells(getRoomPlane().direct, room.id, room.inc, [memberKey])).cells.get(memberKey),
-    )
+    const now = metaSeqOf((await readOpenCells(store, room.id, room.inc, [memberKey])).cells.get(memberKey))
     if (now === seq) return cells
     if (reads === META_PAGED_READS) break
     seq = now
-    const read = await readMetaCellPages(room, memberMetaCellPrefix(id))
+    const read = await readMetaCellPages(store, room, memberMetaCellPrefix(id))
     cells = read.byMember.get(id) ?? []
     if (read.cut.size === 0) return cells
   }
-  const read = await getRoomPlane().direct.reads.readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
+  const read = await store.reads.readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
   if (read.kind === 'stale-incarnation') throw roomClosedError(room.id)
   return Array.from(read.cells)
 }

@@ -1,6 +1,6 @@
-export { STORE_DM_REPLY, storeDmReply, takeDmReply, takeDmReplies, dropDmReply }
+export { STORE_DM_REPLY, storeDmReply, readDmReply, takeDmReplies, dropDmReply }
 
-import { getRoomPlane } from '../../backend/plane.js'
+import type { RoomStore } from '../../backend/RoomStore.js'
 import type { RoomOperation } from '../../backend/contract.js'
 import { Slice } from '../../shared/Slice.js'
 import { roomClosedError } from '../../shared/errors.js'
@@ -25,27 +25,36 @@ const STORE_DM_REPLY: RoomOperation<StoreDmReplyArgs, void> = {
 }
 
 async function storeDmReply(
+  store: RoomStore,
   roomId: string,
   inc: string,
   sender: string,
   ackId: string,
   reply: Uint8Array,
 ): Promise<void> {
-  await runOperation(getRoomPlane().direct, { id: roomId, inc }, STORE_DM_REPLY, { sender, ackId, reply })
+  await runOperation(store, { id: roomId, inc }, STORE_DM_REPLY, { sender, ackId, reply })
 }
 
-/** The reply stored for `ackId`, deleted as it is read, or null if none is. */
-async function takeDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<RoomResult | null> {
+/** The reply stored for `ackId`, or null if none is. */
+async function readDmReply(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  sender: string,
+  ackId: string,
+): Promise<RoomResult | null> {
   const key = dmReplyCellKey(sender, ackId)
-  const raw = (await readOpenCells(getRoomPlane().direct, roomId, inc, [key])).cells.get(key)
-  if (raw === undefined) return null
-  await dropDmReply(roomId, inc, sender, ackId)
-  return decodeRoomRecord<RoomDmAckEnvelope>(raw)
+  const raw = (await readOpenCells(store, roomId, inc, [key])).cells.get(key)
+  return raw === undefined ? null : decodeRoomRecord<RoomDmAckEnvelope>(raw)
 }
 
 /** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
-async function takeDmReplies(roomId: string, inc: string, sender: string): Promise<Map<string, RoomResult>> {
-  const store = getRoomPlane().direct
+async function takeDmReplies(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  sender: string,
+): Promise<Map<string, RoomResult>> {
   const replies = new Map<string, RoomResult>()
   const slice = new Slice()
   for await (const page of store.reads.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
@@ -58,7 +67,12 @@ async function takeDmReplies(roomId: string, inc: string, sender: string): Promi
   return replies
 }
 
-async function dropDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<void> {
-  if (!(await deleteCells(getRoomPlane().direct, roomId, inc, [dmReplyCellKey(sender, ackId)])))
-    throw roomClosedError(roomId)
+async function dropDmReply(
+  store: RoomStore,
+  roomId: string,
+  inc: string,
+  sender: string,
+  ackId: string,
+): Promise<void> {
+  if (!(await deleteCells(store, roomId, inc, [dmReplyCellKey(sender, ackId)]))) throw roomClosedError(roomId)
 }

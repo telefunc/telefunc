@@ -556,7 +556,7 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private async settleStoredReplies(member: string): Promise<void> {
     try {
-      const replies = await takeDmReplies(this.id, this.incarnation.inc, member)
+      const replies = await takeDmReplies(getRoomPlane().direct, this.id, this.incarnation.inc, member)
       for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
     } catch (error) {
       reportRoomError(error)
@@ -565,7 +565,9 @@ class RoomReplica implements ServerModelOwner, LanePlanOwner, AuthoritySyncOwner
 
   private dmAcked(envelope: RoomDmAckEnvelope): void {
     this.acks.settle(envelope.ackId, envelope)
-    void dropDmReply(this.id, this.incarnation.inc, envelope.to, envelope.ackId).catch(reportRoomError)
+    void dropDmReply(getRoomPlane().direct, this.id, this.incarnation.inc, envelope.to, envelope.ackId).catch(
+      reportRoomError,
+    )
   }
 
   private relayControl(event: PresenceEvent, carried: () => PublishBody): void {

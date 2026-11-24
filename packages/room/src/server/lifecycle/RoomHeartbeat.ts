@@ -83,7 +83,7 @@ class RoomHeartbeat {
     try {
       const [renewal, reconciled] = await Promise.allSettled([
         Promise.all([this.demandExchange.renew(), this.hosting.maintain()]),
-        this.model.closed ? null : this.authority.reconcileMeta(),
+        this.model.closed ? null : this.authority.reconcileMeta(getRoomPlane().direct),
       ])
       const head = reconciled.status === 'fulfilled' ? reconciled.value : null
       if (head !== null) {

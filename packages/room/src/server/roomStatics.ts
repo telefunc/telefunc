@@ -185,15 +185,15 @@ async function openRoom(store: RoomStore, incarnation: RoomIncarnation & RoomCon
   if (held !== undefined) return await held.sharedHandle(store)
   const [roster, meta] = await allSettledOrThrow([
     reapAndReadRoster(store, incarnation),
-    requireRoomMeta(id, incarnation),
+    requireRoomMeta(store, id, incarnation),
   ])
   const replica = RoomReplica.seeded(id, incarnation, meta, roster)
   // One seeded meanwhile for a join alone has read no roster: its catch-up is a step of the call too.
   return replica.model.rosterKnown ? replica.handle() : await replica.sharedHandle(store)
 }
 
-async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
-  const stored = await readRoomMeta(id, config)
+async function requireRoomMeta(store: RoomStore, id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
+  const stored = await readRoomMeta(store, id, config)
   if (stored === null) throw roomClosedError(id)
   return stored
 }
@@ -257,11 +257,17 @@ function guardRoom(
 }
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
-  const config = await requireRoom(getRoomPlane().direct, id)
-  // A view made for a join alone counts no member until a handle reads its roster.
-  const replica =
-    RoomReplica.of(config.inc) ?? RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count: 0 })
-  return await handleOf(replica.handle()).join(options)
+  // One call: the room's reads, then the join's, its guard among them.
+  const { handle, joining } = await getRoomPlane().call(async (store) => {
+    const config = await requireRoom(store, id)
+    // A view made for a join alone counts no member until a handle reads its roster.
+    const replica =
+      RoomReplica.of(config.inc) ??
+      RoomReplica.seeded(id, config, await requireRoomMeta(store, id, config), { count: 0 })
+    const handle = handleOf(replica.handle())
+    return { handle, joining: await handle.admitParticipant(store, options) }
+  })
+  return await handle.finishJoin(joining)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
@@ -304,7 +310,7 @@ async function openRoomInfo(store: RoomStore, roomId: string, head: RoomHead | n
   if (config === null) return null
   const [count, stored] = await allSettledOrThrow([
     countListedRoom(store, roomId, config),
-    readRoomMeta(roomId, config),
+    readRoomMeta(store, roomId, config),
   ])
   if (count === null || stored === null) return null
   return { id: roomId, meta: metaObject(stored.entries), count, isEmpty: count === 0 }
@@ -425,13 +431,12 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 
 async function publishToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const record = encodeRoomRecord({ __r: 'data', from: '', data } satisfies RoomDataEnvelope)
-  const { direct } = getRoomPlane()
-  const config = await requireRoom(direct, id)
-  const commit = acceptedOrThrow(
-    id,
-    await commitLane(direct, { roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record),
-  )
-  return { seq: commit.seq, timestamp: commit.timestamp }
+  return await getRoomPlane().call(async (store) => {
+    const config = await requireRoom(store, id)
+    const target = { roomId: id, inc: config.inc, lane: SEMANTIC_LANE }
+    const commit = acceptedOrThrow(id, await commitLane(store, target, record))
+    return { seq: commit.seq, timestamp: commit.timestamp }
+  })
 }
 
 /** One receipt for `{ id }`; for `{ identity }`, one per tab it reached, in the order they were delivered. */

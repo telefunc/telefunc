@@ -14,7 +14,7 @@ import { RoomStore } from '../backend/RoomStore.js'
 import type { CommitOptions, CommitResult, CommitTarget, LaneId } from '../backend/contract.js'
 import { Room } from '../index.js'
 import { configFromHead, decodeRoomRecord, encodeRoomRecord } from './lanes/lanes.js'
-import { leaseCellKey, memberCellKey } from './store/cells.js'
+import { leaseCellKey, MEMBER_CELL_PREFIX, memberCellKey } from './store/cells.js'
 import { RoomLease } from './store/lease.js'
 import { joinMember } from './store/members.js'
 
@@ -120,6 +120,23 @@ function countLookups(member: string): { count: number } {
   return lookups
 }
 
+/** From here on, every read of the members' records waits until `release()`. */
+function holdRosterReads(): { release: () => void } {
+  const held = Promise.withResolvers<void>()
+  const { readCellPages } = MemoryRoomDriver.prototype
+  vi.spyOn(MemoryRoomDriver.prototype, 'readCellPages').mockImplementation(async function* (
+    this: MemoryRoomDriver,
+    roomId,
+    inc,
+    prefix,
+    beside,
+  ) {
+    if (prefix === MEMBER_CELL_PREFIX) await held.promise
+    yield* readCellPages.call(this, roomId, inc, prefix, beside)
+  })
+  return { release: () => held.resolve() }
+}
+
 /** A participant that another server joined to room `id` with `identity` under its own lease, as its join writes it:
  *  no view this process opened before lists it. `lapse()` lets that lease lapse, as a server that stopped does. */
 async function joinedElsewhere(id: string, identity?: string): Promise<{ member: string; lapse: () => Promise<void> }> {
@@ -154,11 +171,15 @@ it("a participant's send() of data over the size, to a participant this server h
   const id = `participant-send-large-${crypto.randomUUID()}`
   await Room.create(id)
   const { member: recipient } = await joinedElsewhere(id)
+  // The roster read the sender's join starts would list the recipient in this server's view: it waits until the send
+  // settled.
+  const rosterRead = holdRosterReads()
   const sender = await Room.join(id)
   const lease = await lapsedLease(id)
   withSizeRule()
   const lookups = countLookups(recipient)
   const refused = await sender.send(recipient, LARGE).then(() => 'resolved', told)
+  rosterRead.release()
   vi.restoreAllMocks()
 
   expect({ refused, lookups: lookups.count, lease: await lease.read() }).toEqual({
