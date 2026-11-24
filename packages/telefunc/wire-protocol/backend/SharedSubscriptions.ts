@@ -13,10 +13,12 @@ import type {
   BackendListener,
   BackendPayload,
   BackendReceiver,
+  BroadcastPayload,
   DriverAttempt,
   SubscriptionDriver,
 } from './driver.js'
 import type { OrderingInfo } from './driverOrdering.js'
+import type { BroadcastKind } from '../wire/payloads.js'
 
 /** A consumer's subscription. */
 type BackendSubscription = {
@@ -27,12 +29,16 @@ type BackendSubscription = {
   unsubscribe(): void
 }
 
-/** How a plane's sources share attempts and what they deliver. */
+/** How a plane's sources share attempts. */
 type SourceRules<Source> = {
-  /** Subscriptions of one key on one host share an attempt. */
+  /** Subscriptions of one key and kind on one host share an attempt. */
   key(source: Source): string
-  /** A string for 'text', bytes for 'binary'. */
-  deliveryKind(source: Source): 'text' | 'binary'
+}
+
+/** Whether a payload is what a subscription of each kind delivers: a string for 'text', bytes for 'binary'. */
+const CARRIES: { readonly [Kind in BroadcastKind]: (payload: BackendPayload) => payload is BroadcastPayload<Kind> } = {
+  text: (payload) => typeof payload === 'string',
+  binary: (payload) => typeof payload !== 'string',
 }
 
 type SharedSubscriptionsOptions<Source> = {
@@ -44,20 +50,27 @@ type SharedSubscriptionsOptions<Source> = {
 class SharedSubscriptions<Source> {
   readonly driver: SubscriptionDriver<Source>
   private readonly sources: SourceRules<Source>
-  /** By host and source key. */
-  private readonly slots = new Map<string, SubscriptionSlot<Source>>()
+  /** By what they deliver, then by host and source key. */
+  private readonly slots: { readonly [Kind in BroadcastKind]: Map<string, SubscriptionSlot<Source, Kind>> } = {
+    text: new Map(),
+    binary: new Map(),
+  }
 
   constructor({ driver, sources }: SharedSubscriptionsOptions<Source>) {
     this.driver = driver
     this.sources = sources
   }
 
-  subscribe(source: Source, listener: BackendListener): BackendSubscription {
+  /** `listener` gets what `source` delivers: a string for `'text'`, bytes for `'binary'`. */
+  subscribe<Kind extends BroadcastKind>(
+    source: Source,
+    delivers: Kind,
+    listener: BackendListener<BroadcastPayload<Kind>>,
+  ): BackendSubscription {
     const key = this.sources.key(source)
     const slotKey = JSON.stringify([this.driver.hostKey?.() ?? '', key])
-    const delivers = this.sources.deliveryKind(source)
     const slot = getOrCreate(
-      this.slots,
+      this.slots[delivers],
       slotKey,
       () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers }),
     )
@@ -66,38 +79,44 @@ class SharedSubscriptions<Source> {
 
   /** Stops what is live and waits on none of it. */
   dispose(): void {
-    for (const slot of [...this.slots.values()]) slot.stop()
+    for (const slot of [...this.slots.text.values(), ...this.slots.binary.values()]) slot.stop()
   }
 
   /** Unmaps `slot`, if it is still the one its key maps. */
-  unmapSlot(slot: SubscriptionSlot<Source>): void {
-    if (this.slots.get(slot.slotKey) === slot) this.slots.delete(slot.slotKey)
+  unmapSlot<Kind extends BroadcastKind>(slot: SubscriptionSlot<Source, Kind>): void {
+    const slots = this.slots[slot.delivers]
+    if (slots.get(slot.slotKey) === slot) slots.delete(slot.slotKey)
   }
 }
 
 /** A message the attempt delivered before it was ready, and the consumers it would have reached then. */
-type EarlyMessage = { payload: BackendPayload; ordering: OrderingInfo; targets: readonly Consumer[] }
+type EarlyMessage<Kind extends BroadcastKind> = {
+  payload: BroadcastPayload<Kind>
+  ordering: OrderingInfo
+  targets: readonly Consumer<Kind>[]
+}
 
-type SubscriptionSlotOptions<Source> = {
+type SubscriptionSlotOptions<Source, Kind extends BroadcastKind> = {
   owner: SharedSubscriptions<Source>
   source: Source
   /** The source's key, and the key of the source on its host. */
   key: string
   slotKey: string
-  delivers: 'text' | 'binary'
+  delivers: Kind
 }
 
 /** One driver attempt, shared by the consumers of its source on its host. */
-class SubscriptionSlot<Source> implements BackendReceiver {
+class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendReceiver {
   readonly slotKey: string
+  readonly delivers: Kind
   private readonly owner: SharedSubscriptions<Source>
   private readonly source: Source
   private readonly key: string
-  private readonly delivers: 'text' | 'binary'
-  private readonly attached = new Set<Consumer>()
+  private readonly carries: (payload: BackendPayload) => payload is BroadcastPayload<Kind>
+  private readonly attached = new Set<Consumer<Kind>>()
   /** Taken at a delivery or a state change and dropped when a consumer comes or goes, so each reaches the consumers
    *  it started with. */
-  private snapshot: readonly Consumer[] | null = null
+  private snapshot: readonly Consumer<Kind>[] | null = null
   private current: AttemptState = 'establishing'
   private latestReadiness: Deferred<void> = createReadiness()
   private attempt: DriverAttempt | null = null
@@ -105,16 +124,17 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   /** What the attempt delivered before its first `ready`, as a consumer sees `ready` before any message, so a driver
    *  needn't order its acknowledgment before what it delivers. Null from then on: a message after a loss goes out as it
    *  arrives. */
-  private early: EarlyMessage[] | null = []
+  private early: EarlyMessage<Kind>[] | null = []
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
 
-  constructor({ owner, source, key, slotKey, delivers }: SubscriptionSlotOptions<Source>) {
+  constructor({ owner, source, key, slotKey, delivers }: SubscriptionSlotOptions<Source, Kind>) {
     this.owner = owner
     this.source = source
     this.key = key
     this.slotKey = slotKey
     this.delivers = delivers
+    this.carries = CARRIES[delivers]
   }
 
   get state(): AttemptState {
@@ -126,7 +146,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     return this.latestReadiness.promise
   }
 
-  attach(listener: BackendListener): BackendSubscription {
+  attach(listener: BackendListener<BroadcastPayload<Kind>>): BackendSubscription {
     const consumer = new Consumer({ slot: this, listener })
     this.attached.add(consumer)
     this.snapshot = null
@@ -134,7 +154,7 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     return consumer
   }
 
-  detach(consumer: Consumer): void {
+  detach(consumer: Consumer<Kind>): void {
     this.attached.delete(consumer)
     this.snapshot = null
     if (this.attached.size === 0) this.stop()
@@ -151,8 +171,10 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     if (attempt !== null) stopLogged(() => attempt.unsubscribe())
   }
 
-  deliver(payload: BackendPayload, ordering: OrderingInfo): void {
-    if (this.finished || !this.checked(payload, ordering)) return
+  deliver(delivered: BackendPayload, ordering: OrderingInfo): void {
+    if (this.finished) return
+    const payload = this.checked(delivered, ordering)
+    if (payload === null) return
     if (this.early !== null) {
       this.early.push({ payload, ordering, targets: this.targets() })
       return
@@ -234,14 +256,14 @@ class SubscriptionSlot<Source> implements BackendReceiver {
   }
 
   /** Checked once for all consumers; one that fails is reported and dropped. */
-  private checked(payload: BackendPayload, ordering: OrderingInfo): boolean {
+  private checked(payload: BackendPayload, ordering: OrderingInfo): BroadcastPayload<Kind> | null {
     try {
       assertDriverOrdering(ordering)
-      assert((this.delivers === 'text') === (typeof payload === 'string'))
-      return true
+      assert(this.carries(payload))
+      return payload
     } catch (error) {
       console.error(error)
-      return false
+      return null
     }
   }
 
@@ -260,22 +282,25 @@ class SubscriptionSlot<Source> implements BackendReceiver {
     for (const consumer of this.targets()) consumer.notify(state)
   }
 
-  private targets(): readonly Consumer[] {
+  private targets(): readonly Consumer<Kind>[] {
     return (this.snapshot ??= [...this.attached])
   }
 }
 
-type ConsumerOptions = { slot: SubscriptionSlot<unknown>; listener: BackendListener }
+type ConsumerOptions<Kind extends BroadcastKind> = {
+  slot: SubscriptionSlot<unknown, Kind>
+  listener: BackendListener<BroadcastPayload<Kind>>
+}
 
 /** One consumer's subscription on a slot. */
-class Consumer implements BackendSubscription {
-  readonly listener: BackendListener
+class Consumer<Kind extends BroadcastKind> implements BackendSubscription {
+  readonly listener: BackendListener<BroadcastPayload<Kind>>
   /** False from its `unsubscribe()` on: the slot calls its listener no more. */
   attached = true
-  private readonly slot: SubscriptionSlot<unknown>
+  private readonly slot: SubscriptionSlot<unknown, Kind>
   private readonly stateListeners = new Set<(state: AttemptState) => void>()
 
-  constructor({ slot, listener }: ConsumerOptions) {
+  constructor({ slot, listener }: ConsumerOptions<Kind>) {
     this.slot = slot
     this.listener = listener
   }

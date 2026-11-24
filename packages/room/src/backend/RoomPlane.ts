@@ -15,11 +15,7 @@ import { CallStore, RoomStore, type RoomReads } from './RoomStore.js'
 
 type RoomPlaneOptions = { driver: RoomDriver }
 
-const laneSources: SourceRules<RoomSubscriptionSource> = {
-  key: roomSubscriptionSourceKey,
-  // A lane carries bytes.
-  deliveryKind: () => 'binary',
-}
+const laneSources: SourceRules<RoomSubscriptionSource> = { key: roomSubscriptionSourceKey }
 
 /** What Room's server code reaches the store by: `call(work)` for a public call, whose writes are counted in its
  *  account, and `direct` for work that tells no answer; and the lane subscriptions, shared by source and host. */
@@ -70,11 +66,8 @@ class RoomPlane {
     listener: BackendListener<Uint8Array>,
     registeredBy?: RoomSubscriptionSource['registeredBy'],
   ): BackendSubscription {
-    // The shared subscriptions checked that a lane delivers bytes.
-    return this.subscriptions.subscribe({ roomId, inc, lane, registeredBy }, (payload, ordering) => {
-      assert(payload instanceof Uint8Array)
-      listener(payload, ordering)
-    })
+    // A lane carries bytes.
+    return this.subscriptions.subscribe({ roomId, inc, lane, registeredBy }, 'binary', listener)
   }
 
   dispose(): void {

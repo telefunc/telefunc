@@ -10,10 +10,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 
 type BroadcastPlaneOptions = { driver: BroadcastDriver }
 
-const broadcastSources: SourceRules<BroadcastRoute> = {
-  key: broadcastRouteKey,
-  deliveryKind: (route) => route.kind,
-}
+const broadcastSources: SourceRules<BroadcastRoute> = { key: broadcastRouteKey }
 
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */
 class BroadcastPlane {
@@ -38,13 +35,11 @@ class BroadcastPlane {
     route: BroadcastRoute<Kind>,
     listener: BackendListener<BroadcastPayload<Kind>>,
   ): BackendSubscription {
-    // The shared subscriptions checked that a route delivers its kind.
-    const deliver = listener as BackendListener
     const published = this.driver.published?.(route.key) ?? 0
-    if (published === 0) return this.subscriptions.subscribe(route, deliver)
+    if (published === 0) return this.subscriptions.subscribe(route, route.kind, listener)
     // A consumer gets only what is published after it subscribed, as the driver fixed each publish's recipients.
-    return this.subscriptions.subscribe(route, (payload, ordering) => {
-      if (ordering.seq > published) deliver(payload, ordering)
+    return this.subscriptions.subscribe(route, route.kind, (payload, ordering) => {
+      if (ordering.seq > published) listener(payload, ordering)
     })
   }
 
