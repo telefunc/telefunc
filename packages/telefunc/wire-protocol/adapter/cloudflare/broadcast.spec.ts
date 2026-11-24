@@ -654,23 +654,37 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     // A presence the authority refuses to store is a subscription that failed, as a refused one is on any other backend.
     describe("where the key's authority refuses the presence write", () => {
       it("a subscriber's `ready` rejects with the authority's error, the subscriber is removed, and a later one of the same Durable Object registers again", async () => {
-        const { state, presences, inObject } = worker()
+        vi.useFakeTimers()
+        const { state, presences, inObject, present } = worker()
         state.refuse = true
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(first.ready)).toBe(REFUSAL)
-        await new Promise((resolve) => setTimeout(resolve, 0))
+        const firstReady = outcome(first.ready)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await firstReady).toBe(REFUSAL)
         // Each refused first write is released after, which the authority refuses too until it takes it.
         const holds = () => presences.filter(({ op }) => op === 'hold')
         expect(holds()).toHaveLength(1)
         const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(second.ready)).toBe(REFUSAL)
+        const secondReady = outcome(second.ready)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await secondReady).toBe(REFUSAL)
         expect(holds()).toHaveLength(2)
         first()
         second()
         state.refuse = false
         const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(third.ready)).toBe('resolved')
+        const thirdReady = outcome(third.ready)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await thirdReady).toBe('resolved')
         third()
+        // Each release is made again until the authority takes it, at most 5 s after the last: none goes on past this row.
+        await vi.advanceTimersByTimeAsync(5_000)
+        const calls = presences.length
+        await vi.advanceTimersByTimeAsync(5_000)
+        expect({ present: present('room:test'), callsSince: presences.length - calls }).toEqual({
+          present: [],
+          callsSince: 0,
+        })
       })
 
       // Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. Neither appeared on
@@ -806,10 +820,11 @@ describe("a subscriber's `ready` on Cloudflare", () => {
 
       it('a held presence whose refresh falls in a pause a publish answered overloaded caused is not reported lost, is tried no more while the pause lasts, and is refreshed once it ends', async () => {
         vi.useFakeTimers()
-        const tried = vi.spyOn(OrderedStubs.prototype, 'call')
         const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
         const lost = () => reported.mock.calls.filter(([error]) => String(error).includes('presence for')).length
-        const { inObject, present, presences } = worker()
+        const { inObject, present, presences, sessions } = worker()
+        // This Durable Object's calls, which are all a spy on the prototype counts only while no other row's go on.
+        const tried = vi.spyOn(sessions.first.broadcast.calls, 'call')
         const renewals = () => presences.filter((call) => call.op === 'renew').length
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
