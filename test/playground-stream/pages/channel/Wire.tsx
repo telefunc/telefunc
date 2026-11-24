@@ -40,6 +40,12 @@ const RESUME_COUNT = 256
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
+const KiB = 1024
+/** Nearly all of the page's first credit, then nearly 64 MiB each: from the 6th on, past what one channel holds. */
+const burstSizes = (sends: number) => [2048 * KiB - KiB, ...Array.from({ length: sends - 1 }, () => 65536 * KiB - KiB)]
+/** On a server whose `maxMemory` is 2 MiB: one held, one that waits for the page to confirm it, and one that would carry
+ *  what is held and what waits past `maxMemory`. */
+const PAST_MEMORY_SIZES = [1200 * KiB, 700 * KiB, 200 * KiB]
 const SLOW_LINK_LARGE_BYTES = 4_000_000
 /** Past the 4,096 channels a connection holds at once. */
 const MANY_CHANNELS = 4_200
@@ -85,8 +91,8 @@ function WireDemo() {
     }
   }, [])
 
-  const burstOpen = useCallback(async (sends: number, kind: 'text' | 'binary') => {
-    const { channel, channelId } = await onWireBurst(sends, kind)
+  const burstOpen = useCallback(async (sizes: number[], kind: 'text' | 'binary') => {
+    const { channel, channelId } = await onWireBurst(sizes, kind)
     const received: number[] = []
     let onClose: string | null = null
     const show = () => setState((s) => ({ ...s, burst: { channelId, received: [...received], onClose } }))
@@ -262,13 +268,24 @@ function WireDemo() {
               key={`${kind}-${sends}`}
               id={`wire-burst-open-${kind}-${sends}`}
               type="button"
-              onClick={() => burstOpen(sends, kind)}
+              onClick={() => burstOpen(burstSizes(sends), kind)}
               className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
             >
               Open {kind} burst channel, {sends} large messages
             </button>
           )),
         )}
+        {(['text', 'binary'] as const).map((kind) => (
+          <button
+            key={`${kind}-past-memory`}
+            id={`wire-burst-open-${kind}-past-memory`}
+            type="button"
+            onClick={() => burstOpen(PAST_MEMORY_SIZES, kind)}
+            className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+          >
+            Open {kind} burst channel past a 2 MiB maxMemory
+          </button>
+        ))}
         <button
           id="wire-large"
           type="button"

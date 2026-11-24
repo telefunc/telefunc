@@ -24,13 +24,13 @@ import {
   sleep,
 } from '../../e2e-utils'
 import { cardOf } from './upload-refusal-e2e-test'
+import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
 import { sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
-  burst: { channelId: string; received: number[]; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
   many: { closed: number; next: string } | null
@@ -80,47 +80,32 @@ function testWire(isDev: boolean) {
     })
 
   for (const kind of canCutWire() ? (['text', 'binary'] as const) : []) {
-    const burstWhileOffline = async (sends: number) => {
-      await navigate(`${getServerUrl()}/channel`)
-      await page.click(`#wire-burst-open-${kind}-${sends}`)
-      let channelId = ''
-      await autoRetry(async () => {
-        const { burst } = await getResult<WireState>('#wire-state')
-        expect(burst).not.toBe(null)
-        channelId = burst!.channelId
-        expect((await getCleanupState())[`wireBurst_${channelId}_onOpen`]).toBe('true')
-      })
-      await page.context().setOffline(true)
-      await runServerAction(`wireBurst_${channelId}`)
-      await page.context().setOffline(false)
-      return channelId
-    }
-
     test(`channel: all that maxMemory lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
-      const channelId = await burstWhileOffline(5)
+      const channelId = await burstWhileOffline(`${kind}-5`)
       await autoRetry(
         async () => {
-          const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
-          expect(burst!.onClose).toBe(null)
+          expect(await burstOf()).deep.include({ received: [0, 1, 2, 3, 4], onClose: null })
         },
         { timeout: 60_000 },
       )
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
     })
 
-    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxMemory: it is refused, and the channel stays open`, async () => {
-      const channelId = await burstWhileOffline(6)
+    // 2 MiB and five of 64 MiB: the 6th is past the 320 MiB one channel holds till the page confirms the first.
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits, past what its channel holds, waits for the page to confirm the ones before it and arrives, the channel open and the server within maxMemory`, async () => {
+      const channelId = await burstWhileOffline(`${kind}-6`)
       await autoRetry(
         async () => {
-          const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.onClose).toBe(null)
-          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
+          expect(await burstOf()).deep.include({ received: [0, 1, 2, 3, 4, 5], onClose: null })
         },
         { timeout: 60_000 },
       )
-      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
-      expectLog(sendRefusedWarning)
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
+      const { held, heldWithWaiting, maxMemory } = await memoryPeakOf(channelId)
+      // Five held, the 6th waiting with them.
+      expect(held).greaterThanOrEqual((2 + 4 * 64) * 1024 * 1024 - 5 * 1024)
+      expect(heldWithWaiting).greaterThanOrEqual((2 + 5 * 64) * 1024 * 1024 - 6 * 1024)
+      expect(heldWithWaiting).lessThanOrEqual(maxMemory)
     })
   }
 

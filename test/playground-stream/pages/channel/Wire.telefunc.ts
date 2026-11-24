@@ -5,6 +5,7 @@ import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 import { forgetServerAction, onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
+import { watchChannelMemory } from '../../channel-memory'
 
 /**
  * Each end sends `count` numbered messages as text and as binary, awaiting each send; the server drops the page's
@@ -43,12 +44,14 @@ async function onWireResume(count: number) {
 }
 
 /**
- * At server action wireBurst_<id>, `sends` messages without awaiting them, each starting with its index: nearly all of the
- * page's first credit, then nearly 64 MiB each. The server drops the page's connections right after.
+ * At server action wireBurst_<id>, a message of each of `sizes` bytes without awaiting them, each starting with its
+ * index. The server drops the page's connections right after. At wireBurst_<id>_peak, it reports the most its channel
+ * memory held since the burst.
  *
- * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was
+ * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was;
+ * wireBurst_<id>_peak = the memory's peak (`ChannelMemoryPeak`), as JSON
  */
-async function onWireBurst(sends: number, kind: 'text' | 'binary') {
+async function onWireBurst(sizes: number[], kind: 'text' | 'binary') {
   const ch = new Channel<never, string>()
   ch.onOpen(() => {
     cleanupState[`wireBurst_${ch.id}_onOpen`] = 'true'
@@ -57,8 +60,11 @@ async function onWireBurst(sends: number, kind: 'text' | 'binary') {
     const refused = (err: Error) => {
       cleanupState[`wireBurst_${ch.id}`] = err.message
     }
-    for (let n = 0; n < sends; n++) {
-      const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
+    const peak = watchChannelMemory()
+    onServerAction(`wireBurst_${ch.id}_peak`, () => {
+      cleanupState[`wireBurst_${ch.id}_peak`] = JSON.stringify(peak())
+    })
+    for (const [n, bytes] of sizes.entries()) {
       if (kind === 'text') void ch.send(String(n).padEnd(bytes)).catch(refused)
       else {
         const message = new Uint8Array(bytes)

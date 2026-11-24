@@ -3,9 +3,29 @@ export { testSmallPending }
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult, getCleanupState, reconnectAtFullDelay } from '../../e2e-utils'
 import { sendRefusedWarning } from '../../../utils'
+import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
 function testSmallPending() {
+  // 1,200 KiB held, 700 KiB waiting for the page to confirm it, and 200 KiB that would carry both past 2 MiB.
+  for (const kind of ['text', 'binary'] as const) {
+    test(`channel: a ${kind} send nobody awaits that would carry what the server holds and what waits for room past maxMemory is refused, the one waiting arrives, and the channel stays open`, async () => {
+      const channelId = await burstWhileOffline(`${kind}-past-memory`)
+      await autoRetry(
+        async () => {
+          expect(await burstOf()).deep.include({ received: [0, 1], onClose: null })
+        },
+        { timeout: 30_000 },
+      )
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
+      expectLog(sendRefusedWarning)
+      const { held, heldWithWaiting, maxMemory } = await memoryPeakOf(channelId)
+      expect(held).greaterThanOrEqual(1200 * 1024)
+      expect(heldWithWaiting).greaterThanOrEqual(1900 * 1024)
+      expect(heldWithWaiting).lessThanOrEqual(maxMemory)
+    })
+  }
+
   // 1 MiB queued on each of eight channels before their telefunction returns: on 2 MiB, one fits and a second doesn't.
   test('channel: sends queued before a telefunction returns count against maxMemory together: those past it are refused with ChannelOverflowError, and every channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
