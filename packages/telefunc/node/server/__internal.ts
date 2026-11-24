@@ -134,9 +134,9 @@ type ServerBroadcastEnd = Pick<
 >
 
 /** The members of a page's `ClientBroadcast` that an add-on drives. A page holds the class as its `Broadcast`, so the
- *  internal ones are `_`-prefixed, as `ClientChannel`'s are. */
-type ClientBroadcast = Pick<
-  ClientBroadcastClass,
+ *  internal ones are `_`-prefixed, as `ClientChannel`'s are. It receives `T` and publishes `Publish`. */
+type ClientBroadcast<T = unknown, Publish = T> = Pick<
+  ClientBroadcastClass<T, Publish>,
   | '_publishUnreported'
   | '_publishBinaryUnreported'
   | '_setSubscribed'

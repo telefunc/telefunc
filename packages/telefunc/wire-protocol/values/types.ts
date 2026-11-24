@@ -149,11 +149,11 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcastChannel<T = unknown>(opts: {
+  createBroadcastChannel<T = unknown, Publish = T>(opts: {
     channelId: string
     key: string
     maxFrameBytes?: number
-  }): ClientBroadcast<T>
+  }): ClientBroadcast<T, Publish>
   receiveStream(metadata: StreamingMetadata): StreamSource
   /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
   shareLifecycle(child: object, owner: object): void

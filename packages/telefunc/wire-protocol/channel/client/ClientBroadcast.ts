@@ -29,7 +29,9 @@ import { forListener } from '../listenerAnswer.js'
 import { ClientChannel, reportChannelError, type ClientChannelOptions } from './ClientChannel.js'
 import { EVERY_STREAM } from '../ownStream.js'
 
-class ClientBroadcast<T = unknown> extends ClientChannel {
+/** A page's end of a Broadcast: it receives `T`, and publishes `Publish`, which is `T` unless the server takes another
+ *  message than it sends. */
+class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** Reads the parts that changed in this task, until it declares them. */
   private dueParts: (() => unknown) | null = null
@@ -91,14 +93,14 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this.connection.sendWant(this, this._attach.changeWant({ parts: parts() }))
   }
 
-  publish(data: ChannelData<T>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
+  publish(data: ChannelData<Publish>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
     const { lossy = false } = options ?? {}
     const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
+  _publishUnreported(data: ChannelData<Publish>): Promise<ChannelPublishAck> {
     return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), null, false)
   }
 
