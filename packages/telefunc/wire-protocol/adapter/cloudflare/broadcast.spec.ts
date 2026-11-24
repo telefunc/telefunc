@@ -619,6 +619,24 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       subscriber()
     })
 
+    it("a subscriber's `ready`, whose first presence write waits behind a publish the key's authority never answers, settles within 10 s", async () => {
+      vi.useFakeTimers()
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { state, inObject } = worker()
+      vi.spyOn(CloudflareBroadcast.prototype, 'publishToSubscribers').mockReturnValue(new Promise(() => {}))
+      void Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).catch(() => {})
+      // The presence write fails as one Cloudflare says to retry: the stub it went through may be broken.
+      state.fail = Object.assign(new Error('reset'), { retryable: true })
+      state.failOnly = 'hold'
+      const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      const ready = outcome(subscriber.ready)
+      await vi.advanceTimersByTimeAsync(0)
+      state.fail = undefined
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await Promise.race([ready, 'pending'])).toBe('reset')
+      subscriber()
+    })
+
     // A key's text and binary routes share its authority, which issues a grant in a round trip of its own.
     it("a Durable Object's text and binary subscriptions to one key, made at once, wait for one grant", async () => {
       const { grants, presences, inObject } = worker()

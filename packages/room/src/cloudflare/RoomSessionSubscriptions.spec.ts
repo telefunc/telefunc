@@ -24,7 +24,7 @@ function setup(
     /** The grant's answer, where it isn't at once, or the answers to each grant asked for, in order. */
     grant?: Promise<number> | Array<number | Error | Promise<number>>
     /** The answers to the session's commits. */
-    commit?: Array<Error>
+    commit?: Array<Error | Promise<never>>
   },
   lane: LaneId = { kind: 'semantic' },
   registeredBy?: 'operation',
@@ -687,6 +687,21 @@ describe('a call of a Cloudflare Room lane to its room', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     expect(attempt.state()).toBe('closed')
     expect(reasons).toEqual([['closed', failed]])
+  })
+
+  it('whose first registration waits, on a fresh stub, behind a commit the room never answers closes within 10 s of its first try', async () => {
+    const { attempt, calls, commit, reasons } = setup({
+      register: [transient(false, 'reset'), 'registered'],
+      renew: [],
+      commit: [new Promise<never>(() => {})],
+    })
+    void commit()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect({ state: attempt.state(), register: calls.register, reasons: reasons.map(String) }).toEqual({
+      state: 'closed',
+      register: 1,
+      reasons: ['closed,Error: reset'],
+    })
   })
 
   it('that the room never answers closes a first registration within 10 s of its first try', async () => {
