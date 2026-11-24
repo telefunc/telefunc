@@ -4,41 +4,18 @@
 // - Dropped before the call's first command: it didn't run, and the store is as before.
 // - Dropped while the call's write waits at the primary, which holds every write (`CLIENT PAUSE ... WRITE`): it may have
 //   run, as Telefunc can't tell whether the store ran it. Here the store didn't.
-import type { Cluster } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast } from 'telefunc'
-import { reaches } from '../test/acl.js'
-import { appCluster, listed, startCluster, type Forwarder, type Nodes } from '../test/cluster.js'
-import { changedKeys, forwarder, removeStores, runs, snapshot, STORES, type Store } from '../test/stores.js'
-import { installRedis } from './index.js'
+import { clusterBackend, listed, type Nodes } from '../test/cluster.js'
+import { changedKeys, runs, snapshot, STORES } from '../test/stores.js'
 import { RedisConnection } from './RedisConnection.js'
 import type { RedisCommand } from './commands.js'
 
-let app: Cluster | undefined
-let via: Forwarder[] | undefined
-afterAll(() => {
-  app?.disconnect()
-  for (const proxy of via ?? []) proxy.close()
-})
+const backend = clusterBackend()
+afterAll(() => backend.end())
 afterEach(() => {
   vi.restoreAllMocks()
 })
-
-/** A new Cluster whose nodes have a user of `+@all`, and the backend installed on a client of that user, once it reaches
- *  the Cluster. */
-async function reachedCluster(store: Store): Promise<Nodes> {
-  const proxies = (via ??= [await forwarder(), await forwarder()])
-  app?.disconnect()
-  removeStores()
-  const nodes = await startCluster(store, proxies)
-  for (const { admin } of listed(nodes)) {
-    await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
-  }
-  app = appCluster(proxies, nodes)
-  installRedis(app)
-  await reaches(`the ${store.name} Cluster`)
-  return nodes
-}
 
 /** The publish, as a promise whether it is synchronous or not. */
 async function publishing(channel: string): Promise<unknown> {
@@ -82,7 +59,7 @@ function droppingAt(
 describe.runIf(runs)('a publish whose connection to a Cluster drops', () => {
   for (const [i, store] of STORES.entries()) {
     it(`${store.name}: dropped before its first command, it didn't run`, async () => {
-      const nodes = await reachedCluster(store)
+      const nodes = await backend.reached(store)
       const held = await snapshot(nodes.primary.admin)
       droppingAt(
         () => true,
@@ -99,7 +76,7 @@ describe.runIf(runs)('a publish whose connection to a Cluster drops', () => {
     }, 120_000)
 
     it(`${store.name}: dropped while its write waits at the primary, it may have run`, async () => {
-      const nodes = await reachedCluster(store)
+      const nodes = await backend.reached(store)
       const held = await snapshot(nodes.primary.admin)
       let heldAtTheStore = false
       // The write is sent while the primary holds every write; every node drops the app's connections meanwhile.

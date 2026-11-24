@@ -1,9 +1,11 @@
 // A Cluster for the store specs, each node behind a forwarder, and an app client of it.
-export { startCluster, appCluster, listed, type Forwarder, type Nodes }
+export { startCluster, appCluster, clusterBackend, listed, type Forwarder, type Nodes }
 
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Cluster, type ClusterOptions } from 'ioredis'
-import { forwarder, startStore, type Store } from './stores.js'
+import { installRedis } from '../src/index.js'
+import { reaches } from './acl.js'
+import { forwarder, removeStores, startStore, type Store } from './stores.js'
 
 type Node = Awaited<ReturnType<typeof startStore>>
 type Forwarder = Awaited<ReturnType<typeof forwarder>>
@@ -117,4 +119,31 @@ function appCluster(via: readonly Forwarder[], nodes: Nodes, options: ClusterOpt
   app.on('error', () => {})
   app.on('node error', () => {})
   return app
+}
+
+/** A spec file's backend on a Cluster: `reached()` starts a new Cluster for a row, whose nodes have a user of `+@all`,
+ *  and installs the backend on a client of that user once it reaches the Cluster; `end()`, the file's `afterAll`, ends
+ *  the client and the forwarders. */
+function clusterBackend() {
+  let app: Cluster | undefined
+  let via: Forwarder[] | undefined
+  return {
+    async reached(store: Store): Promise<Nodes> {
+      const proxies = (via ??= [await forwarder(), await forwarder()])
+      app?.disconnect()
+      removeStores()
+      const nodes = await startCluster(store, proxies)
+      for (const { admin } of listed(nodes)) {
+        await admin.call('ACL', 'SETUSER', 'telefunc', 'on', '>pw', '~*', '&*', '+@all')
+      }
+      app = appCluster(proxies, nodes)
+      installRedis(app)
+      await reaches(`the ${store.name} Cluster`)
+      return nodes
+    },
+    end(): void {
+      app?.disconnect()
+      for (const proxy of via ?? []) proxy.close()
+    },
+  }
 }
