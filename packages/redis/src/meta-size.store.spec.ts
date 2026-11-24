@@ -50,13 +50,13 @@ function committed(outcome: unknown): boolean {
 }
 
 /** Room `id`'s meta writes as the store gets them, each an operation: the control commits they committed, each its
- *  length and `seq`; and, until released, the first one whose commit writes the meta key `big`, held once it read
- *  and planned, before it reaches the store. */
-function metaWrites(id: string) {
+ *  length and `seq`; and, where `hold` is true, the first one whose commit writes the meta key `big`, held until
+ *  released once it read and planned, before it reaches the store. */
+function metaWrites(id: string, hold: boolean) {
   const commits: { bytes: number; seq: string }[] = []
   const held = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
-  let holding = true
+  let holding = hold
   const { run } = RedisConnection.prototype
   vi.spyOn(RedisConnection.prototype, 'run').mockImplementation(async function (this: RedisConnection, command, input) {
     const payload = command.name === REDIS_COMMANDS.operation.name ? controlPayload(input, id) : undefined
@@ -113,7 +113,7 @@ async function overtakenMerge(admin: Redis, id: string, read: number, value: str
   await Room.create(id)
   await Room.updateMeta(id, { a: 'x' })
   await seqAt(admin, id, read)
-  const write = metaWrites(id)
+  const write = metaWrites(id, true)
   const merging = told(Room.updateMeta(id, { big: value }))
   await write.held
   await Room.updateMeta(id, { b: '1' })
@@ -130,7 +130,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
       const admin = await reached(store)
       const probe = `meta-first-probe-${i}`
       await Room.create(probe)
-      const probed = metaWrites(probe).commits
+      const probed = metaWrites(probe, false).commits
       await Room.updateMeta(probe, { big: 'y' })
       const besides = (probed[0]?.bytes ?? Number.NaN) - 1
       vi.restoreAllMocks()
@@ -142,7 +142,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
       const refusal = fields(await commitRefusal(over, MAX + 1))
       const fits = `meta-first-fits-${i}`
       await Room.create(fits)
-      const { commits } = metaWrites(fits)
+      const { commits } = metaWrites(fits, false)
       const fitting = await told(Room.updateMeta(fits, { big: 'y'.repeat(MAX - besides) }))
       console.log(JSON.stringify({ store: store.name, besides, answer, unchanged, fitting, commits }))
       admin.disconnect()
@@ -195,7 +195,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
         await Room.create(id)
         await Room.updateMeta(id, { a: 'x' })
         await seqAt(admin, id, 8)
-        const write = metaWrites(id)
+        const write = metaWrites(id, true)
         const replacing = told(Room.setMeta(id, { big: value }))
         await write.held
         await Room.updateMeta(id, { b: '1' })
@@ -241,7 +241,7 @@ describe.runIf(runs)('the value that numbers a room meta update', () => {
       const id = 'meta-reopened'
       await Room.create(id)
       await Room.updateMeta(id, { a: 'x' })
-      const write = metaWrites(id)
+      const write = metaWrites(id, true)
       const replacing = told(Room.setMeta(id, { big: 'y' }))
       await write.held
       await Room.close(id)
@@ -268,7 +268,7 @@ describe.runIf(runs)('the value that numbers a room meta update', () => {
       const admin = await reached(store)
       const id = 'meta-first-overtaken'
       await Room.create(id)
-      const write = metaWrites(id)
+      const write = metaWrites(id, true)
       const replacing = told(Room.setMeta(id, { big: 'y' }))
       await write.held
       await Room.setMeta(id, { seed: 's' })

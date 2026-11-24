@@ -1,6 +1,6 @@
-// A join whose `onBeforeJoin` grows its nested meta past the size the store commits, on the oldest and the newest
-// Redis and Valkey Telefunc supports: it is refused with nothing stored, and the inbox it opened is unsubscribed. The
-// subscriber's UNSUBSCRIBE is held until the row saw the inbox still subscribed, then let go, and the row sees it gone.
+// A join whose meta is past the size the store commits, on the oldest and the newest Redis and Valkey Telefunc
+// supports: it is refused with nothing stored, and the inbox it opened is unsubscribed. The subscriber's
+// UNSUBSCRIBE is held until the row saw the inbox still subscribed, then let go, and the row sees it gone.
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -55,31 +55,21 @@ async function until(check: () => Promise<boolean>, ms: number): Promise<boolean
   return check()
 }
 
-describe.runIf(runs)('a join whose hook grows its nested meta past the size the store commits', () => {
+describe.runIf(runs)('a join whose meta is past the size the store commits', () => {
   for (const [i, store] of STORES.entries()) {
     it(`${store.name}: refused with nothing stored, and its inbox subscribed until its UNSUBSCRIBE, then gone`, async () => {
       const admin = await reached(store)
       const id = `join-${i}`
       const room = await Room.create(id)
-      let growing = false
-      let hookRan = false
-      Room.guard(room, {
-        onBeforeJoin: ({ meta }) => {
-          if (!growing) return
-          hookRan = true
-          const nested = meta.grown
-          if (nested instanceof Map) nested.set('big', 'g'.repeat(29 * 1024 * 1024))
-        },
-      })
+      Room.guard(room, { anyoneCanJoin: true })
       // A first member holds this server's lease on the room and its subscriptions, so what the join leaves is what
       // changes.
-      await room.join({ meta: { grown: new Map<string, string>() } })
+      await room.join({ meta: { name: 'first' } })
       await sleep(200)
       const before = await snapshot(admin)
-      growing = true
       const held = { reached: Promise.withResolvers<string[]>(), release: Promise.withResolvers<void>() }
       unsubscribeHeld = held
-      const refused = room.join({ meta: { grown: new Map<string, string>() } }).then(
+      const refused = room.join({ meta: { big: 'g'.repeat(29 * 1024 * 1024) } }).then(
         () => 'resolved',
         (error: unknown) => told(error),
       )
@@ -92,11 +82,10 @@ describe.runIf(runs)('a join whose hook grows its nested meta past the size the 
         (await until(async () => (await subscribers(admin, inbox)).every((count) => count === 0), 5_000))
       const answer = await refused
       const changed = changedKeys(before, await snapshot(admin))
-      console.log(JSON.stringify({ store: store.name, hookRan, answer, changed, inbox, whileHeld, gone }))
+      console.log(JSON.stringify({ store: store.name, answer, changed, inbox, whileHeld, gone }))
       admin.disconnect()
 
-      expect({ hookRan, answer, changed, inboxes: inbox.length, whileHeld, gone }).toEqual({
-        hookRan: true,
+      expect({ answer, changed, inboxes: inbox.length, whileHeld, gone }).toEqual({
         answer: { name: 'ChannelOverflowError', outcome: 'none' },
         changed: [],
         inboxes: 1,

@@ -146,7 +146,7 @@ describe.runIf(runs)('a meta replace whose drop of the old generation the store 
 
 describe.runIf(runs)('a warm meta write with no drop pending', () => {
   for (const [i, store] of STORES.entries()) {
-    it(`${store.name}: a replace makes seven requests, and a merge five`, async () => {
+    it(`${store.name}: a replace makes six requests, and a merge four`, async () => {
       const admin = await reached(store)
       const id = `meta-drop-count-${i}`
       await roomWithMeta(admin, id)
@@ -162,7 +162,10 @@ describe.runIf(runs)('a warm meta write with no drop pending', () => {
       const merge = await requests(() => Room.updateMeta(id, { merged: true }))
       admin.disconnect()
 
-      expect({ replace, merge }).toEqual({ replace: 7, merge: 5 })
+      // Each reads the head and the room's config, then plans its operation on the cells it reads: a replace's
+      // `meta:seq`, generation and pending flag, and a merge's too, then its keys' cells in the generation. A replace's
+      // drop then reads the marks, the replaced generation's page, and deletes it with its mark in one exchange.
+      expect({ replace, merge }).toEqual({ replace: 6, merge: 4 })
     }, 60_000)
   }
 })

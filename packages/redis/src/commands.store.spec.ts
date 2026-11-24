@@ -137,6 +137,8 @@ async function record(store: Store): Promise<void> {
   Room.guard(room, { anyoneCanJoin: true })
   await Room.setMeta(roomId, { a: '1' })
   await Room.updateMeta(roomId, { b: '2' })
+  // A replace after the first write, whose drop of the generation it replaced deletes its cells.
+  await Room.setMeta(roomId, { c: '3' })
   await Room.publish(roomId, 'TFNOTRUN ERR hello')
   const alice = await Room.join(roomId, { meta: { name: 'alice' }, identity: 'u1' })
   await Room.join(roomId, { meta: { name: 'bob' }, identity: 'u2' })
@@ -155,9 +157,11 @@ async function record(store: Store): Promise<void> {
 /** `key`: the key the fault holds, which a call that runs leaves as it was, where the fault is that key's type. */
 type Fault = { name: string; key?: string; plant: (admin: Redis) => Promise<void> }
 
-/** Each key of the call in turn holding a list, a type Telefunc keeps nowhere. */
+/** Each key of the call in turn holding a list, a type Telefunc keeps nowhere; but a page of an incarnation's drop,
+ *  which UNLINK deletes whatever it holds (`tfRoomDropPage`'s KEYS past the head). */
 function anotherType(call: Recorded): Fault[] {
-  return [...new Set(call.keys)].map((key) => ({
+  const typed = call.name === REDIS_COMMANDS.dropPage.name ? call.keys.slice(0, 1) : call.keys
+  return [...new Set(typed)].map((key) => ({
     name: `${key} holds a list`,
     key,
     plant: async (admin) => {
@@ -290,11 +294,13 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
       const commit = '7 commands, 1 TYPE'
       expect(made).toEqual({
         tfBroadcastStart: ['3 commands, 0 TYPE'],
-        tfPublish: ['4 commands, 0 TYPE', '5 commands, 0 TYPE', '4 commands, 0 TYPE'],
-        tfRoomCellsExchange: ['22 commands, 3 TYPE', '18 commands, 3 TYPE'],
-        tfRoomCommit: [commit, commit, commit, commit, '10 commands, 1 TYPE', '10 commands, 1 TYPE', commit, commit],
+        tfPublish: Array(3).fill('4 commands, 0 TYPE'),
+        // The replace's drop: its last exchange deletes the generation it replaced, with its mark and the pending flag.
+        tfRoomCellsExchange: ['26 commands, 4 TYPE'],
+        tfRoomCommit: [commit, commit, '10 commands, 1 TYPE', '10 commands, 1 TYPE', commit, commit],
         tfRoomDirectoryDelete: ['6 commands, 2 TYPE', '6 commands, 2 TYPE'],
-        tfRoomDirectoryPut: Array(4).fill('6 commands, 2 TYPE'),
+        // Each create lists its room before its head exchange and after it, and each close lists it under its lease.
+        tfRoomDirectoryPut: Array(6).fill('6 commands, 2 TYPE'),
         tfRoomDropIncarnation: ['5 commands, 1 TYPE', '5 commands, 1 TYPE'],
         tfRoomDropPage: ['3 commands, 0 TYPE', '3 commands, 0 TYPE'],
         tfRoomHeadExchange: [
@@ -306,9 +312,13 @@ describe.runIf(runs)('every write script, on a key or value it does not expect',
           '3 commands, 0 TYPE',
           '4 commands, 0 TYPE',
         ],
-        // A join and a leave each write a member's lease reference beside its record. The first join, under a lease
-        // its server doesn't know as created yet, checks that no claim took that lease too.
+        // The room's meta: a first write, a merge and a replace, each with its event. A join and a leave each write a
+        // member's lease reference beside its record. The first join, under a lease its server doesn't know as created
+        // yet, checks that no claim took that lease too.
         tfRoomOperation: [
+          '31 commands, 3 TYPE',
+          '28 commands, 3 TYPE',
+          '39 commands, 3 TYPE',
           '51 commands, 3 TYPE',
           '46 commands, 3 TYPE',
           '33 commands, 3 TYPE',
