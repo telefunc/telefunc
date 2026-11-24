@@ -1,7 +1,5 @@
 export { SortedIds, compareCodePoints }
 
-import { assert } from './assert.js'
-
 /** The pieces one `concat()` joins, well under the arguments a call takes in any engine. */
 const CONCAT_BATCH = 8192
 
@@ -56,15 +54,20 @@ class SortedIds {
   }
 }
 
+/** Code point order: UTF-16 code unit order, but for a surrogate, which sorts after every unit from 0xE000 on. */
 function compareCodePoints(left: string, right: string): number {
-  for (let i = 0; i < left.length && i < right.length; ) {
-    const a = left.codePointAt(i)
-    const b = right.codePointAt(i)
-    assert(a !== undefined && b !== undefined)
-    if (a !== b) return a - b
-    i += a > 0xffff ? 2 : 1
+  const length = Math.min(left.length, right.length)
+  for (let i = 0; i < length; i++) {
+    const a = left.charCodeAt(i)
+    const b = right.charCodeAt(i)
+    if (a !== b) return codePointRank(a) - codePointRank(b)
   }
   return left.length - right.length
+}
+
+/** A code unit's place in code point order: the surrogates, 0xD800 to 0xDFFF, move past 0xE000 to 0xFFFF. */
+function codePointRank(unit: number): number {
+  return unit < 0xd800 ? unit : unit < 0xe000 ? unit + 0x2000 : unit - 0x800
 }
 
 /** Where `id` is in `ids`, which are in code point order, or where it would go, searching from `low` on. */
@@ -72,10 +75,10 @@ function positionOf(ids: readonly string[], id: string, low = 0): number {
   let high = ids.length
   while (low < high) {
     const mid = (low + high) >> 1
+    // Below `high`, `mid` reads an id.
     const at = ids[mid]
-    assert(at !== undefined)
-    if (compareCodePoints(at, id) < 0) low = mid + 1
-    else high = mid
+    if (at === undefined || compareCodePoints(at, id) >= 0) high = mid
+    else low = mid + 1
   }
   return low
 }

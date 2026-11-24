@@ -7,9 +7,9 @@ function from(ids: SortedIds, start: string): string[] {
 }
 
 it('reads ids in code point order, a supplementary character after every BMP one', () => {
-  const ids = new SortedIds(['b', '\u{1F600}', 'a', '￿', 'ab'])
-  expect(from(ids, '')).toEqual(['a', 'ab', 'b', '￿', '\u{1F600}'])
-  expect(from(ids, 'aa')).toEqual(['ab', 'b', '￿', '\u{1F600}'])
+  const ids = new SortedIds(['b', '\u{1F600}', 'a', '\u{FFFF}', 'ab', '\u{E000}', '\u{10000}', '\u{D7FF}'])
+  expect(from(ids, '')).toEqual(['a', 'ab', 'b', '\u{D7FF}', '\u{E000}', '\u{FFFF}', '\u{10000}', '\u{1F600}'])
+  expect(from(ids, 'aa')).toEqual(['ab', 'b', '\u{D7FF}', '\u{E000}', '\u{FFFF}', '\u{10000}', '\u{1F600}'])
 })
 
 it('merges the adds and deletes recorded since the last read, at the start, the end and between held ids', () => {

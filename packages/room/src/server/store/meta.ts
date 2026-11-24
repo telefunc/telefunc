@@ -121,12 +121,16 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
   const slice = new Slice()
   while (runs.length > 1) {
     const merged: RoomMetaEntry[][] = []
-    for (let r = 0; r < runs.length; r += 2) {
-      const a = runs[r]
-      const b = runs[r + 1]
-      assert(a !== undefined)
-      merged.push(b === undefined ? a : await mergePair(a, b, slice))
+    // Each run waits for the one after it; the last of an odd count goes on alone.
+    let waiting: RoomMetaEntry[] | null = null
+    for (const run of runs) {
+      if (waiting === null) waiting = run
+      else {
+        merged.push(await mergePair(waiting, run, slice))
+        waiting = null
+      }
     }
+    if (waiting !== null) merged.push(waiting)
     runs = merged
   }
   return runs[0] ?? []
