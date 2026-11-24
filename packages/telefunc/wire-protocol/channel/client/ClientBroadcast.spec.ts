@@ -225,6 +225,42 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
     }
 })
 
+// Room's lone member closes its channel once its leave was answered, and lets the close settle on its own
+// (`room/src/client/LoneMember.ts`): what the server or a close callback does decides the outcome, never a rejection.
+describe("a page's broadcast `close()` resolves with its outcome", () => {
+  it('when the server never acknowledges it: 1, once its timeout passes', async () => {
+    const page = new ClientBroadcast(channelOptions())
+    const closing = page.close({ timeout: 10 })
+    await vi.advanceTimersByTimeAsync(10)
+    await expect(closing).resolves.toBe(1)
+  })
+
+  it('when an `onClose()` callback throws, and when the promise one returns rejects, each reported', async () => {
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const page = new ClientBroadcast(channelOptions())
+    page.onClose(() => {
+      throw new Error('thrown')
+    })
+    page.onClose(() => Promise.reject(new Error('rejected')))
+    const closing = page.close({ timeout: 10 })
+    await vi.advanceTimersByTimeAsync(10)
+    await expect(closing).resolves.toBe(1)
+    expect(reported.mock.calls.map(([, err]) => String(err))).toEqual(['Error: thrown', 'Error: rejected'])
+  })
+
+  it('when the server asked to close it first, or it ended before', async () => {
+    const asked = new ClientBroadcast(channelOptions())
+    asked._dispatchFrame(received(encode.close(0, 10, 1)))
+    const closing = asked.close({ timeout: 10 })
+    await vi.advanceTimersByTimeAsync(10)
+    await expect(closing).resolves.toBe(1)
+
+    const ended = new ClientBroadcast(channelOptions())
+    ended.abort('gone')
+    await expect(ended.close()).resolves.toBe(1)
+  })
+})
+
 // A call carries each want the server hasn't confirmed yet, and none of a channel once it confirmed them or ended.
 it("a call carries the page's wants the server hasn't confirmed", () => {
   const page = new ClientBroadcast(channelOptions())
