@@ -21,8 +21,8 @@ function setup(
     open?: Array<Error | undefined>
     /** The answers to operations that carry an inbox's route. */
     carry?: Array<OperationWire | Error | Promise<OperationWire>>
-    /** The grant's answer, where it isn't at once. */
-    grant?: Promise<number>
+    /** The grant's answer, where it isn't at once, or the answers to each grant asked for, in order. */
+    grant?: Promise<number> | Array<number | Error | Promise<number>>
     /** The answers to the session's commits. */
     commit?: Array<Error>
   },
@@ -30,6 +30,8 @@ function setup(
   registeredBy?: 'operation',
 ) {
   const calls = { register: 0, renew: 0 }
+  /** How many grants the session asked the authority for. */
+  const grants = { asked: 0 }
   /** The routes the session removed at the authority. */
   const removed: unknown[] = []
   /** The operations that carried an inbox's route, as the authority got them, and the order each was sent under. */
@@ -46,7 +48,11 @@ function setup(
   }
   /** The authority's answer to each call the session makes, by method. */
   const authority: Record<string, (args: unknown[]) => Promise<unknown>> = {
-    grantHolder: () => answers.grant ?? Promise.resolve(1),
+    grantHolder: () => {
+      grants.asked++
+      const { grant } = answers
+      return Array.isArray(grant) ? answer(grant) : (grant ?? Promise.resolve(1))
+    },
     runOperationWithInbox: (args) => {
       carried.push(args[1])
       if (typeof args[2] === 'object' && args[2] !== null && 'order' in args[2]) carriedOrders.push(args[2].order)
@@ -108,6 +114,7 @@ function setup(
   return {
     attempt,
     calls,
+    grants,
     carried,
     carriedOrders,
     removed,
@@ -584,6 +591,67 @@ describe('a call of a Cloudflare Room lane to its room', () => {
       register: 0,
       carried: 2,
     })
+  })
+
+  // The room's authority issues a grant, which takes a round trip, before the first write it orders.
+  it("that is a member's join, sent beside its room's other lanes before this session has a grant there, waits for the one grant they asked for", async () => {
+    const grant = Promise.withResolvers<number>()
+    const { grants, carried, calls, subscribe, subscriptions, attemptOn } = setup(
+      { register: ['registered'], renew: [], carry: [joined], grant: grant.promise },
+      inbox,
+      'operation',
+    )
+    subscribe({ kind: 'control' })
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await vi.advanceTimersByTimeAsync(100)
+    grant.resolve(1)
+    expect(await carrying).toBe(joined)
+    expect({ grants: grants.asked, register: calls.register, carried: carried.length }).toEqual({
+      grants: 1,
+      register: 1,
+      carried: 1,
+    })
+  })
+
+  it('made beside another, more than 60 s after the last write the room counted, waits with it for one new grant', async () => {
+    const { attempt, grants, calls, subscribe } = setup({
+      register: ['registered', 'registered', 'registered'],
+      renew: [],
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    await attempt.unsubscribe()
+    await vi.advanceTimersByTimeAsync(61_000)
+    subscribe({ kind: 'control' })
+    subscribe({ kind: 'inbox', member: 'm' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect({ grants: grants.asked, register: calls.register }).toEqual({ grants: 2, register: 3 })
+  })
+
+  it("that is a member's join, waiting for a grant another lane asked for whose answer was lost, asks for one of its own and is sent", async () => {
+    const { carried, grants, subscribe, subscriptions, attemptOn } = setup(
+      { register: ['registered'], renew: [], carry: [joined], grant: [transient(false, 'grant lost'), 1] },
+      inbox,
+      'operation',
+    )
+    subscribe({ kind: 'control' })
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await carrying).toBe(joined)
+    expect({ carried: carried.length, grants: grants.asked }).toEqual({ carried: 1, grants: 2 })
+  })
+
+  it("that is a member's join, waiting for a grant another lane asked for which that lane's earlier deadline gave up, asks for one of its own within its own deadline", async () => {
+    const { carried, grants, subscribe, subscriptions, attemptOn } = setup(
+      { register: [], renew: [], carry: [joined], grant: [new Promise<never>(() => {}), 1] },
+      inbox,
+      'operation',
+    )
+    subscribe({ kind: 'control' })
+    await vi.advanceTimersByTimeAsync(5_000)
+    const carrying = subscriptions.runCarrying(attemptOn(), join, { deadline: Date.now() + 10_000 })
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(await carrying).toBe(joined)
+    expect({ carried: carried.length, grants: grants.asked }).toEqual({ carried: 1, grants: 2 })
   })
 
   it('that waited in its line behind a failed call is not sent once its lane was unsubscribed meanwhile', async () => {

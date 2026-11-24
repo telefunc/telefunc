@@ -411,9 +411,14 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     } = { refuse: false }
     /** The writes of presence that reached the authority, not counting the grants each member asked for first. */
     const presences: Exclude<PresenceCall, { op: 'grant' }>[] = []
+    /** How many grants the members asked the authority for. */
+    const grants = { asked: 0 }
     const binding = createBasicBinding({
       onPresence(_id, call) {
-        if (call.op === 'grant') return Promise.resolve(applyPresence(authority, call))
+        if (call.op === 'grant') {
+          grants.asked++
+          return Promise.resolve(applyPresence(authority, call))
+        }
         if (state.throwAtOnce) throw state.throwAtOnce
         const { refuse, held } = state
         const fail = state.failOnly === undefined || state.failOnly === call.op ? state.fail : undefined
@@ -460,6 +465,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     return {
       state,
       presences,
+      grants,
       /** The members the authority holds a live presence of for the key's text route. */
       present: (key: string) => authority.livePresence(broadcastRouteKey({ key, kind: 'text' }), Date.now()),
       inObject: <T>(run: () => T, session = sessions.first) => withCloudflareSession(session, run),
@@ -611,6 +617,22 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       await subscriber.ready
       await vi.waitFor(() => expect(heard).toEqual(['joined']))
       subscriber()
+    })
+
+    // A key's text and binary routes share its authority, which issues a grant in a round trip of its own.
+    it("a Durable Object's text and binary subscriptions to one key, made at once, wait for one grant", async () => {
+      const { grants, presences, inObject } = worker()
+      const [text, binary] = inObject(() => [
+        Broadcast.subscribe('room:test', () => {}),
+        Broadcast.subscribeBinary('room:test', () => {}),
+      ])
+      await Promise.all([text.ready, binary.ready])
+      expect({ grants: grants.asked, holds: presences.filter(({ op }) => op === 'hold').length }).toEqual({
+        grants: 1,
+        holds: 2,
+      })
+      text()
+      binary()
     })
 
     // A presence the authority refuses to store is a subscription that failed, as a refused one is on any other backend.

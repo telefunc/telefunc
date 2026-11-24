@@ -280,17 +280,20 @@ const COUNTED_ANSWERS: ReadonlySet<unknown> = new Set<LeaseRegistered | LeaseRem
   'removed',
 ])
 
+/** A grant asked for at a target: `pending` until the target answers, then `held`, or `failed` where the call failed. */
+type Grant = { readonly granted: Promise<number>; state: 'pending' | 'held' | 'failed' }
+
 /** A Durable Object's grants at the authorities it holds leases at, and the order of its writes there. */
 class HolderGrants {
-  private readonly grants = new Map<string, Promise<number>>()
+  private readonly grants = new Map<string, Grant>()
   /** By target: when the latest call the target counted as this DO's activity was sent. */
   private readonly countedAt = new Map<string, number>()
   private seq = 0
 
   /** Sends `write` with this DO's next order at `target`, getting a grant from `grant` first where it has none, or
    *  where the target may have dropped it since, and again where the target answers that the grant is no longer this
-   *  DO's. `write` is called at once, with the order still to come, so it takes its place among this DO's calls to
-   *  `target` before the grant is answered. */
+   *  DO's, or where a grant another write asked for failed. `write` is called at once, with the order still to come, so
+   *  it takes its place among this DO's calls to `target` before the grant is answered. */
   async send<T>(
     target: string,
     grant: () => Promise<number>,
@@ -298,15 +301,23 @@ class HolderGrants {
   ): Promise<T> {
     for (let regrants = 0; ; regrants++) {
       const sentAt = Date.now()
-      if (sentAt - (this.countedAt.get(target) ?? -Infinity) >= GRANT_HOLDS_MS) this.grants.delete(target)
-      const granted = this.grantAt(target, grant, sentAt)
+      const known = this.grants.get(target)
+      const shared = known !== undefined && (known.state === 'pending' || !this.mayBeDropped(target, sentAt))
+      const current = shared ? known : this.ask(target, grant, sentAt)
       const seq = ++this.seq
-      const answer = await write(granted.then((grant) => ({ grant, seq })))
+      let answer: T | 'regrant'
+      try {
+        answer = await write(current.granted.then((grant) => ({ grant, seq })))
+      } catch (error) {
+        // The grant another write asked for, in that write's time and while it wanted it, failed: this one asks again.
+        if (!shared || current.state !== 'failed' || regrants === REGRANTS) throw error
+        continue
+      }
       if (answer !== 'regrant') {
         if (COUNTED_ANSWERS.has(answer)) this.counted(target, sentAt)
         return answer
       }
-      if (this.grants.get(target) === granted) this.grants.delete(target)
+      if (this.grants.get(target) === current) this.grants.delete(target)
       if (regrants === REGRANTS) throw new Error(`The Durable Object at '${target}' refused each grant it issued`)
     }
   }
@@ -336,20 +347,27 @@ class HolderGrants {
     return first.promise
   }
 
-  private grantAt(target: string, grant: () => Promise<number>, sentAt: number): Promise<number> {
-    let granted = this.grants.get(target)
-    if (granted === undefined) {
-      granted = grant()
-      this.grants.set(target, granted)
-      // A grant counts as activity where it is issued; one that failed is asked for again by the next write.
-      granted.then(
-        () => this.counted(target, sentAt),
-        () => {
-          if (this.grants.get(target) === granted) this.grants.delete(target)
-        },
-      )
-    }
-    return granted
+  /** A grant asked for now, which every write sent before it is answered waits for too. */
+  private ask(target: string, grant: () => Promise<number>, sentAt: number): Grant {
+    const asked: Grant = { granted: grant(), state: 'pending' }
+    this.grants.set(target, asked)
+    // A grant counts as activity where it is issued; one that failed is asked for again by the next write.
+    asked.granted.then(
+      () => {
+        asked.state = 'held'
+        if (this.grants.get(target) === asked) this.counted(target, sentAt)
+      },
+      () => {
+        asked.state = 'failed'
+        if (this.grants.get(target) === asked) this.grants.delete(target)
+      },
+    )
+    return asked
+  }
+
+  /** Whether `target` may have dropped this DO's grant by `sentAt`: it counted none of its calls for that long. */
+  private mayBeDropped(target: string, sentAt: number): boolean {
+    return sentAt - (this.countedAt.get(target) ?? -Infinity) >= GRANT_HOLDS_MS
   }
 
   private counted(target: string, sentAt: number): void {
