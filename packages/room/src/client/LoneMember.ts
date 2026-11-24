@@ -70,7 +70,7 @@ class LoneMember implements PageLink {
     const value = await request(this.end, req)
     if (req.__r === 'req-leave') {
       this.participant._onLeft({ type: 'left' })
-      void this.end.close().catch(() => {})
+      void this.end.close()
     }
     return value
   }
