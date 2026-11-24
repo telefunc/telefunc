@@ -68,6 +68,17 @@ const twoBlobsStart = concat(
   ),
   encoder.encode('x'.repeat(10)),
 )
+/** A binary call to `holdsFirstReadsSecond` up to the first bytes of its first `Blob`. */
+const holdsFirstStart = concat(
+  frame(
+    JSON.stringify({
+      file,
+      name: 'holdsFirstReadsSecond',
+      args: [0, 1].map((index) => `!TelefuncBlob:${JSON.stringify({ index, size: FILE_SIZE, type: '' })}`),
+    }),
+  ),
+  encoder.encode('x'.repeat(10)),
+)
 /** A binary call to `startsReadingBlob` up to the first bytes of its `Blob`. */
 const readStartedStart = concat(
   frame(
@@ -358,6 +369,23 @@ test.each(vias)(
     // Nothing signals that the wire's reader is done with the failed read: give it as long as an app error takes above.
     await new Promise((resolve) => setTimeout(resolve, 500))
     expect(printed).toEqual([])
+  },
+)
+
+test.each(vias)(
+  "a Blob's read waiting behind a Blob whose reader the telefunction holds unread ends with the client's truncation once its client leaves (Telefunc given a %s)",
+  async (via) => {
+    recordErrors()
+    const readEnded: { now: string } = { now: 'pending' }
+    const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+    process.on('requestBody.telefunc:readEnded', onReadEnded)
+    onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+    const reading = blobRead()
+    const { socket } = await startUpload('binary', holdsFirstStart, via)
+    await reading
+    socket.destroy()
+    await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
+    expect(readEnded.now).toBe(`failed: ${new StreamTruncatedError('client').message}`)
   },
 )
 

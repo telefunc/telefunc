@@ -220,9 +220,13 @@ async function readBody(
     // the adapter's evidence says it. Watched again, it adds nothing.
     const leftByClient = () => reader.leftByClient(clientGone.reason)
     const watchClient = () => {
+      clientGone.removeEventListener('abort', leftDuringCall)
       if (clientGone.aborted) leftByClient()
       else clientGone.addEventListener('abort', leftByClient, { once: true })
     }
+    // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
+    const leftDuringCall = () => void reader.readSettled().then(() => reader.clientGaveUp())
+    clientGone.addEventListener('abort', leftDuringCall, { once: true })
     runContext.requestContext.onAnswered(() => {
       reader.keepRest(queueMemory)
       watchClient()

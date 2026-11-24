@@ -23,6 +23,18 @@ export async function readsBoth(first, second) {
   return (await second.text()).length
 }
 
+/** Holds its first `Blob`'s reader without reading, and reads the second: tells the spec how that read ended. */
+export async function holdsFirstReadsSecond(first, second) {
+  first.stream().getReader()
+  process.emit('requestBody.telefunc:read')
+  try {
+    const text = await second.text()
+    process.emit('requestBody.telefunc:readEnded', `read ${text.length} bytes`)
+  } catch (err) {
+    process.emit('requestBody.telefunc:readEnded', `failed: ${err.message}`)
+  }
+}
+
 /** Answers without reading its `Blob`. */
 export async function ignoresBlob() {
   return 'ignored'

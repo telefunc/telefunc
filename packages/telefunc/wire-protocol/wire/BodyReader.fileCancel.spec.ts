@@ -10,7 +10,8 @@ import { BodyReader, StreamTruncatedError } from './BodyReader.js'
 type Kind = 'node' | 'web'
 type Outcome = { state: 'pending' } | { state: 'done'; value: string } | { state: 'failed'; error: string }
 
-/** A body the row feeds: `push` hands bytes (latin1), `end` its end, `fail` its failure. */
+/** A body the row feeds: `push` hands bytes (latin1), `end` its end, `fail` its failure; `unread` says whether it holds
+ *  bytes nobody read yet. */
 function sourceOf(kind: Kind) {
   if (kind === 'node') {
     const readable = new Readable({ read() {} })
@@ -19,6 +20,7 @@ function sourceOf(kind: Kind) {
       push: (text: string) => void readable.push(Buffer.from(text, 'latin1')),
       end: () => void readable.push(null),
       fail: (error: Error) => void readable.destroy(error),
+      unread: () => readable.readableLength > 0,
     }
   }
   const sink: { controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null } = { controller: null }
@@ -39,6 +41,7 @@ function sourceOf(kind: Kind) {
     push: (text: string) => controller().enqueue(Uint8Array.from(text, (c) => c.charCodeAt(0))),
     end: () => controller().close(),
     fail: (error: Error) => controller().error(error),
+    unread: () => (controller().desiredSize ?? 0) < 0,
   }
 }
 
@@ -112,7 +115,140 @@ async function midFile(kind: Kind, clientLeft = false) {
   return { source, file, first, got }
 }
 
+/** File 0 (20 bytes) locked and unread, file 1's read waiting behind it, and file 0's first 10 bytes come: they are read
+ *  for file 0, whose reader is then released, more of it left. */
+async function releasedAfterPiece(kind: Kind) {
+  const { source, reader, file } = await setup(kind, [20, 10, 10])
+  const stream = file(0)
+  const first = stream.getReader()
+  const next = track(text(file(1)))
+  await settle()
+  source.push('a'.repeat(10))
+  await settle()
+  first.releaseLock()
+  await settle()
+  return { source, reader, stream, next }
+}
+
 const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
+  [
+    "W1. file 0's reader taken, file 1's read waiting behind it, then file 0's reader released unread: file 1 reads its own bytes",
+    async (kind) => {
+      const { source, file } = await setup(kind)
+      const first = file(0).getReader()
+      const next = track(text(file(1)))
+      await settle()
+      first.releaseLock()
+      source.push(A + B + C)
+      source.end()
+      await settle()
+      return { next: next.now }
+    },
+    { next: { state: 'done', value: B } },
+  ],
+  [
+    "W2. file 0 read, file 2's read waiting behind it and cancelled, then file 1 read once file 0 is done: file 1 reads its own bytes",
+    async (kind) => {
+      const { source, file } = await setup(kind)
+      const first = file(0).getReader()
+      const whole = track(textOf(first))
+      const third = file(2).getReader()
+      const waiting = track(third.read().then(({ done }) => (done ? 'done' : 'value')))
+      await settle()
+      const cancel = settled(third.cancel())
+      await settle()
+      source.push(A + B + C)
+      source.end()
+      await settle()
+      const next = track(text(file(1)))
+      await settle()
+      return { whole: whole.now, waiting: waiting.now, cancel: cancel.now, next: next.now }
+    },
+    {
+      whole: { state: 'done', value: A },
+      waiting: { state: 'done', value: 'done' },
+      cancel: { state: 'done', value: 'settled' },
+      next: { state: 'done', value: B },
+    },
+  ],
+  [
+    "W3. file 0's first 10 of 20 bytes read, file 1's read waiting behind it, then file 0's reader released: file 1 reads its own bytes",
+    async (kind) => {
+      const { source, file } = await setup(kind, [20, 10, 10])
+      const first = file(0).getReader()
+      source.push('a'.repeat(10))
+      const got = track(first.read().then(({ value }) => String.fromCharCode(...(value ?? []))))
+      const next = track(text(file(1)))
+      await settle()
+      first.releaseLock()
+      source.push('a'.repeat(10) + B + C)
+      source.end()
+      await settle()
+      return { got: got.now, next: next.now }
+    },
+    { got: { state: 'done', value: 'a'.repeat(10) }, next: { state: 'done', value: B } },
+  ],
+  [
+    "W4. file 1's read waits behind file 0, locked and unread, while two pieces of file 0 come: one is read for file 0, the other stays in the body; file 0 then reads both, and file 1 its own bytes",
+    async (kind) => {
+      const { source, file } = await setup(kind, [20, 10, 10])
+      const first = file(0).getReader()
+      const next = track(text(file(1)))
+      await settle()
+      source.push('a'.repeat(10))
+      await settle()
+      source.push('a'.repeat(10))
+      await settle()
+      const unread = source.unread()
+      source.push(B + C)
+      source.end()
+      const whole = track(textOf(first))
+      await settle()
+      return { unread, whole: whole.now, next: next.now }
+    },
+    { unread: true, whole: { state: 'done', value: 'a'.repeat(20) }, next: { state: 'done', value: B } },
+  ],
+  [
+    "W5. file 0's reader released after a piece was read for it, more of it left: file 1's read waits, and reads its own bytes once file 0 is read",
+    async (kind) => {
+      const { source, stream, next } = await releasedAfterPiece(kind)
+      const before = next.now
+      source.push('a'.repeat(10) + B + C)
+      source.end()
+      const whole = track(text(stream))
+      await settle()
+      return { before, whole: whole.now, next: next.now }
+    },
+    {
+      before: { state: 'pending' },
+      whole: { state: 'done', value: 'a'.repeat(20) },
+      next: { state: 'done', value: B },
+    },
+  ],
+  [
+    "W6. file 0's reader released after a piece was read for it, more of it left: file 1's read waits, and reads its own bytes once file 0 is cancelled",
+    async (kind) => {
+      const { source, stream, next } = await releasedAfterPiece(kind)
+      const before = next.now
+      source.push('a'.repeat(10) + B + C)
+      source.end()
+      const cancel = settled(stream.cancel())
+      await settle()
+      return { before, cancel: cancel.now, next: next.now }
+    },
+    { before: { state: 'pending' }, cancel: { state: 'done', value: 'settled' }, next: { state: 'done', value: B } },
+  ],
+  [
+    "W7. file 0's reader released after a piece was read for it, more of it left: file 1's read waits, and reads the client's truncation once the client leaves",
+    async (kind) => {
+      const { reader, next } = await releasedAfterPiece(kind)
+      const before = next.now
+      reader.clientGaveUp()
+      await settle()
+      return { before, next: next.now }
+    },
+    { before: { state: 'pending' }, next: { state: 'failed', error: CLIENT_LEFT } },
+  ],
   [
     '1. file 0 cancelled before its first byte: file 1 reads its own bytes',
     async (kind) => {

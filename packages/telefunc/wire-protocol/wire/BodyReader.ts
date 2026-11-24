@@ -87,9 +87,11 @@ class BodyReader {
    *  read or passed). */
   private next = 0
   private left: number | undefined
-  /** The file read whose pull is in flight: it alone reads the source, also while it passes earlier files. */
+  /** The file read whose pull is in flight: it alone reads the source, also while it passes earlier files or reads one
+   *  ahead for them. */
   private holder: FileRead | null = null
-  /** What the reads that wait for the position await: a file's end, a pull letting go of the position, a cancel. */
+  /** What the reads that wait for the position await: a file's end, a pull letting go of the position, a cancel, a file
+   *  taking the piece read ahead for it. */
   private fileEnd: Deferred<void> | null = null
   private stop: Stop | null = null
   /** Who ended the file reads: the client, whose request ended through its abort, or the server, which answered or let
@@ -202,11 +204,12 @@ class BodyReader {
     this.readOff.catch(() => {})
   }
 
-  /** The client that sends the body isn't coming for the call's answer (the connect window of a channel the call returned
-   *  ran out, with no byte of the body for a whole window): where the body stopped short of its end, the file reads end
-   *  as at its client's leaving, and what is kept for them goes. A body read to its end keeps its files' bytes. */
+  /** The client that sends the body isn't coming for the call's answer (it left while the call ran, or the connect window
+   *  of a channel the call returned ran out, with no byte of the body for a whole window): where the body stopped short
+   *  of its end, the file reads end as at its client's leaving, and what is kept for them goes. A body read to its end
+   *  keeps its files' bytes. */
   clientGaveUp(): void {
-    if (this.stop === null) this.endFiles('client')
+    if (this.stop?.why !== 'ended') this.endFiles('client')
   }
 
   /** The read-off: the source's chunks to its end or its client's leaving, each kept or dropped. A read of the body
@@ -315,9 +318,13 @@ class BodyReader {
    * The file at `index`: a stream of its bytes, read off the body only as the app reads it (`highWaterMark: 0`).
    *
    * The body is one forward-only sequence, so the reader owns its position and lends it to one pull at a time. A read of
-   * a later file passes every earlier file nobody holds (no pull in flight, its stream not locked), dropping its bytes,
-   * and waits only behind one that somebody holds. A cancel reads nothing: the file's bytes are dropped once a later read
-   * passes them.
+   * a later file reaches each earlier file in turn. One whose stream isn't locked, or that was cancelled, is passed: its
+   * bytes are dropped. One whose stream is locked gets its next piece read for it, kept until its own read takes it, and
+   * the later read waits until it does, the file is cancelled, or the files end; it looks again each time it wakes. A
+   * cancelled read reads nothing: its file's bytes are dropped once a later read passes them. The files end at the body's
+   * let-go, at a read that fails, and where the client leaves. A release of a file's reader can't be seen (nothing tells
+   * the stream), so a later read that waits behind a file whose piece was read for it, released with more left, waits
+   * until that file is read, cancelled or let go of, or the client leaves.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver)
@@ -326,11 +333,15 @@ class BodyReader {
     return file.stream
   }
 
-  /** One chunk of `file`, once it holds the position: the buffer's, or the source's. */
+  /** One chunk of `file`: the piece read ahead for it, or once it holds the position, the buffer's or the source's. */
   private readonly pullFile = async (file: FileRead): Promise<void> => {
     if (file.over) return
-    if (this.holder === null && this.next === file.index) this.holder = file
-    else await this.takePosition(file)
+    const turn =
+      file.ahead === null && this.holder === null && this.next === file.index
+        ? this.hold(file)
+        : await this.takePosition(file)
+    if (turn === 'ahead') return this.takeAhead(file)
+    if (turn === 'none') return
     try {
       const left = this.leftOfNext()
       if (left === 0) return this.fileDone(file)
@@ -368,41 +379,87 @@ class BodyReader {
     return bytes.subarray(0, left)
   }
 
+  /** The piece read ahead for `file`, handed to its stream, which closes at its last piece; the reads waiting behind it
+   *  look again. */
+  private takeAhead(file: FileRead): void {
+    const ahead = file.ahead
+    file.ahead = null
+    if (ahead === null) return
+    if (ahead.piece.length > 0) file.enqueue(ahead.piece)
+    if (ahead.last) file.close()
+    this.wake()
+  }
+
+  private hold(file: FileRead): 'position' {
+    this.holder = file
+    return 'position'
+  }
+
   private readonly cancelFile = (file: FileRead): void => {
     file.markOver()
     // A pull of it under way sees the cancel once its read is done, and wakes the waiting reads then.
     if (this.holder !== file) this.wake()
   }
 
-  /** Waits until `file`'s read holds the position at its own index, passing every earlier file that nobody holds. */
-  private async takePosition(file: FileRead): Promise<void> {
+  /** Waits until `file`'s read holds the position at its own index (`'position'`), a piece was read ahead for it
+   *  (`'ahead'`), or it was cancelled meanwhile (`'none'`), passing or reading ahead for each earlier file on its way. */
+  private async takePosition(file: FileRead): Promise<'position' | 'ahead' | 'none'> {
     for (;;) {
       if (this.filesEndedBy !== null) throw this.stopped()
+      if (file.over) return 'none'
+      if (file.ahead !== null) return 'ahead'
       assertUsage(
         file.index >= this.next,
         `File argument ${file.index} has already been consumed (currently at ${this.next}). File arguments must be read in order.`,
       )
-      if (this.holder === null && !this.isHeld(this.next, file)) {
-        if (this.next === file.index) {
-          this.holder = file
-          return
+      if (this.holder === null) {
+        if (this.next === file.index) return this.hold(file)
+        const earlier = this.files.get(this.next)
+        if (earlier === undefined || earlier.over || !earlier.stream.locked) {
+          await this.pass(file)
+          continue
         }
-        await this.pass(file)
-        continue
+        if (earlier.ahead === null) {
+          await this.readAheadFor(earlier, file)
+          continue
+        }
       }
       this.fileEnd ??= createDeferred()
       await this.fileEnd.promise
     }
   }
 
-  /** Whether a read other than `by` holds the file at `index`: its stream is locked, and it reads on. */
-  private isHeld(index: number, by: FileRead): boolean {
-    const file = this.files.get(index)
-    return file !== undefined && file !== by && !file.over && file.stream.locked
+  /** Reads the next piece of `earlier`, the file at the position whose stream is locked, for it, as its own pull would,
+   *  for `by`, which holds the position meanwhile. A file cancelled meanwhile drops it. */
+  private async readAheadFor(earlier: FileRead, by: FileRead): Promise<void> {
+    this.holder = by
+    try {
+      const left = this.leftOfNext()
+      let piece = EMPTY
+      if (left > 0) {
+        let bytes = this.buffer
+        if (bytes.length === 0) {
+          const pulled = await this.pullChunk(earlier)
+          if (this.stop?.why === 'letGo') return
+          if (pulled === null) throw this.truncation()
+          bytes = pulled
+        }
+        piece = this.handOut(bytes, left)
+        this.left = left - piece.length
+      }
+      const last = this.left === 0
+      if (last) {
+        this.next++
+        this.left = undefined
+      }
+      if (!earlier.over) earlier.ahead = { piece, last }
+    } finally {
+      this.release()
+    }
   }
 
-  /** Drops the bytes of the file at the position, for `by`, which holds the position meanwhile. A failure is the stop's
-   *  own: the truncation, or the app's error. */
+  /** Drops the bytes of the file at the position, and the piece read ahead for it, for `by`, which holds the position
+   *  meanwhile. A failure is the stop's own: the truncation, or the app's error. */
   private async pass(by: FileRead): Promise<void> {
     this.holder = by
     try {
@@ -413,6 +470,8 @@ class BodyReader {
       )
       await this.skipBytes(this.leftOfNext(), by)
       // Its bytes are dropped: no File reads it anymore.
+      const passed = this.files.get(this.next)
+      if (passed) passed.ahead = null
       this.fileGone(this.next)
       this.next++
       this.left = undefined
@@ -580,6 +639,8 @@ class FileRead {
   readonly index: number
   readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>
   over = false
+  /** The piece of it a later file's read read ahead for it (`readAheadFor`), and whether that is its last. */
+  ahead: { piece: Uint8Array<ArrayBuffer>; last: boolean } | null = null
   private controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null = null
   private readonly onOver: (file: FileRead) => void
 
@@ -608,6 +669,7 @@ class FileRead {
   markOver(): void {
     if (this.over) return
     this.over = true
+    this.ahead = null
     this.onOver(this)
   }
 
