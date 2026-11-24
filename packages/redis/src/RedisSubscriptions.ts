@@ -81,18 +81,12 @@ class LossKey {
     this.key = key
   }
 
-  /** Whether leaving the history `from` for `to` is news to the key: it is told once of each history it leaves, until
-   *  one of its attempts is on that history again. */
-  leaves(from: string, to: string): boolean {
-    const news = !this.left.has(from)
+  /** Whether leaving the history `from` is news to the key: it is told once of each history it leaves. A promotion
+   *  starts a new history, so a later failover leaves another one. */
+  leaves(from: string): boolean {
+    if (this.left.has(from)) return false
     this.left.add(from)
-    this.left.delete(to)
-    return news
-  }
-
-  /** An attempt started on, or moved without a loss to, `history`: leaving it is news again. */
-  entered(history: string): void {
-    this.left.delete(history)
+    return true
   }
 }
 
@@ -641,9 +635,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
 
   /** Its key's history goes on under `authority`, the master its key moved to, where it lost nothing in the move. */
   followHistory(authority: string): void {
-    if (this.state() !== 'ready') return
-    this.authority = authority
-    this.loss.entered(historyOf(authority))
+    if (this.state() === 'ready') this.authority = authority
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
@@ -671,8 +663,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       }
     }
     this.transition('ready')
-    if (left === null) this.loss.entered(historyOf(authority))
-    else if (this.loss.leaves(left, historyOf(authority))) this.tell(null)
+    if (left !== null && this.loss.leaves(left)) this.tell(null)
     for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
