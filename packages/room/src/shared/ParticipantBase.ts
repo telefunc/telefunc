@@ -44,6 +44,7 @@ import type {
   ParticipantMeta,
   PublishOptions,
   RemoteParticipant,
+  RoomSendReceipt,
   Sender,
   TrackDemand,
 } from '../types.js'
@@ -212,8 +213,11 @@ abstract class ParticipantBase<Link extends MemberLink = MemberLink> implements 
     return `${this.id}:${track === undefined ? DEFAULT_TRACK : trackKey(track)}`
   }
 
-  // The overloads live on `LocalParticipant`; this is their implementation signature.
-  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
+  /** As `LocalParticipant.send()`: an acked DM resolves to its recipient's reply, any other to its receipt. */
+  send(to: string | Sender, data: unknown): Promise<RoomSendReceipt>
+  send(to: string | Sender, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
+  send(to: string | Sender, data: unknown, options: { ack: true }): Promise<unknown>
+  send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<unknown> {
     assertKnownOptions(options, ['ack'], 'send()')
     assertUsage(
       options?.ack === undefined || typeof options.ack === 'boolean',
