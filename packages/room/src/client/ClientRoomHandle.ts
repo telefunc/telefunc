@@ -37,8 +37,14 @@ import { addRoom } from './page.js'
 import { toggle } from '../utils/sets.js'
 import type { JoinOptions, LeaveCause, Sender } from '../types.js'
 
-/** What a room's stub relays to its client on the text lane. */
-type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
+/** What a room's stub relays to its client on the text lane: none of the room's own demand asks, which pass only
+ *  between its server instances. */
+type ClientRoomEvent =
+  | Exclude<RoomEnvelope, { __r: 'demand-ask' }>
+  | RoomDmEnvelope
+  | RoomRosterEvent
+  | RoomJoinedEvent
+  | RoomDemandEvent
 
 type ClientRoomHandleOptions = {
   end: RoomChannel<ClientRoomEvent, RoomDataPublish>
