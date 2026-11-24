@@ -1,7 +1,7 @@
 import { inspect } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
-import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
+import { slotOf, type FormerMaster, type RedisClient, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import type { RedisConnection } from './RedisConnection.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
@@ -13,7 +13,7 @@ const BINARY = 'binary-channel'
  *  has it. */
 const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
 
-type ReadStarts = () => Promise<Starts>
+type ReadStarts = (on?: RedisClient) => Promise<Starts>
 
 /** No lane has a commit yet, on the history `authority`. */
 const none = (authority = 'a'): Starts => ({ authority, starts: new Map() })
@@ -84,6 +84,7 @@ function setup(
     channel: string,
     readStarts: ReadStarts = async () => none(),
     frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
+    lossKey = channel,
   ): DriverAttempt =>
     subscriptions.subscribe({
       channel,
@@ -99,6 +100,7 @@ function setup(
       reportMissed(count) {
         missed.push(count)
       },
+      lossKey,
     })
   const missed: Array<number | null> = []
   return {
@@ -212,9 +214,26 @@ describe('a Cluster slot whose master changed', () => {
     starts: new Map([['', { place, id: BigInt(place) }]]),
   })
   const moved = new Map([[slotOf(TEXT), '127.0.0.1:7001']])
+  /** The connection to the old master, which a start read is sent on to read from its own data. */
+  const OLD = {} as RedisClient
+  const node = (view: Pick<FormerMaster, 'master' | 'history'> & Partial<FormerMaster>): FormerMaster => ({
+    client: OLD as FormerMaster['client'],
+    previous: null,
+    serves: async () => false,
+    close() {},
+    ...view,
+  })
+  /** The old master of history 'a', which gave the slot away. */
+  const resharded = node({ master: true, history: 'a' })
 
-  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, or is of another history', async () => {
-    const views: Array<MasterView | null> = [null, { history: 'a', serves: true }, { history: 'x', serves: false }]
+  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, is of another history, or resynced in full', async () => {
+    const views: Array<FormerMaster | null> = [
+      null,
+      node({ master: true, history: 'a', serves: async () => true }),
+      node({ master: true, history: 'x' }),
+      // A replica now that took the new master's history whole: what it had past the new master's copy is gone.
+      node({ master: false, history: 'b' }),
+    ]
     for (const view of views) {
       const { subscriptions, listen, missed } = setup()
       let start = lane(3)
@@ -271,13 +290,76 @@ describe('a Cluster slot whose master changed', () => {
         publish(TEXT, frameOf(++place, 'y4', { id: BigInt(104) }))
         expect(missed).toEqual([null])
         start = { authority: 'b', starts: new Map([['', { place, id: BigInt(104) }]]) }
-        await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+        await subscriptions.followMoves(moved, async () => resharded)
       }
       publish(TEXT, frameOf(++place, 'z', { id: BigInt(100 + place), prev: BigInt(99 + place) }))
       start = { authority: 'c', starts: new Map([['', { place, id: BigInt(100 + place) }]]) }
       await subscriptions.followMoves(moved, async () => null)
       await expect.poll(() => missed).toEqual([null, null])
     }
+  })
+
+  it('goes on where the old master rejoined by a partial resync, or holds no commit its lanes lack', async () => {
+    const cases: Array<[string, FormerMaster, Starts]> = [
+      [
+        'a partial resync, which Redis grants only to a node with nothing the new master lacks',
+        node({ master: false, history: 'b', previous: 'a' }),
+        lane(3),
+      ],
+      [
+        'a replica not yet resynced, whose record is at the commit the lane started at',
+        node({ master: false, history: 'a' }),
+        lane(3),
+      ],
+      [
+        'a replica not yet resynced, whose last commit the new master holds too',
+        node({ master: false, history: 'a' }),
+        lane(4),
+      ],
+    ]
+    for (const [, old, there] of cases) {
+      const { subscriptions, listen, close, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async (on) => (on === OLD ? there : start))
+      await expect.poll(() => attempt.state()).toBe('ready')
+      const states: string[] = []
+      attempt.onStateChange((state) => states.push(state))
+      start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+      await subscriptions.followMoves(moved, async () => old)
+      expect(states).toEqual([])
+      // It follows the new master's history: a cut after resumes from it with no unknown loss.
+      close()
+      await expect.poll(() => states).toEqual(['lost', 'ready'])
+      expect(missed).toEqual([1])
+    }
+  })
+
+  it('resumes, told of a loss, where the old master, not yet resynced, holds a commit its lanes never got', async () => {
+    const { subscriptions, listen, missed } = setup()
+    let start = lane(3)
+    const there = { authority: 'a', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+    const attempt = listen(TEXT, async (on) => (on === OLD ? there : start))
+    await expect.poll(() => attempt.state()).toBe('ready')
+    // The new master has its own commit at place 4.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    await subscriptions.followMoves(moved, async () => node({ master: false, history: 'a' }))
+    await expect.poll(() => missed).toEqual([null])
+  })
+
+  it('tells one unknown loss of one change to the attempts that share a loss key, and the next change again', async () => {
+    const { subscriptions, listen, missed } = setup()
+    let start = lane(3)
+    // A Room's channels in one slot: one room, one loss key.
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    const both = new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']])
+    start = lane(3, 'b')
+    await subscriptions.followMoves(both, async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+    start = lane(3, 'c')
+    await subscriptions.followMoves(both, async () => null)
+    await expect.poll(() => missed).toEqual([null, null])
   })
 
   it('goes on where the old master, of the history it started from, sends its key elsewhere: a resharding', async () => {
@@ -289,7 +371,7 @@ describe('a Cluster slot whose master changed', () => {
     attempt.onStateChange((state) => states.push(state))
     // The new master, which the key moved to with its record.
     start = lane(3, 'b')
-    await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+    await subscriptions.followMoves(moved, async () => resharded)
     expect(states).toEqual([])
     // A cut after it resumes from the new master's history, which it follows now: nothing was missed.
     close()

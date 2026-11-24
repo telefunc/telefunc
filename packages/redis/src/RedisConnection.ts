@@ -6,8 +6,8 @@ import {
   connectsAlike,
   createCommandClient,
   createSubscriberSocket,
+  formerMaster,
   isCluster,
-  masterView,
   redisFailure,
   type RedisClient,
   type SubscriberSocket,
@@ -114,17 +114,20 @@ class RedisConnection {
         masters[slot] = master
       })
       if (moved.size === 0 || commands !== this.commands) return
-      void this.subscriptions.followMoves(moved, (node, key) => masterView(commands, node, key))
+      void this.subscriptions.followMoves(moved, (node) => formerMaster(commands, node, defineFormerReads))
     })
     return commands
   }
 
-  async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
+  /** Runs `command` on the command client, or a start read on `on`, a former master (`formerMaster`). */
+  async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input, on?: RedisClient): Promise<Output> {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
+    assert(on === undefined || command.formerLua !== undefined)
     const parts = command.numberOfKeys === null ? [[String(keys.length)], keys, argv] : [keys, argv]
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
-    return command.parse(await this.send((client) => callDefinedCommand(client, name, ...parts)), input)
+    const call = (client: RedisClient) => callDefinedCommand(client, name, ...parts)
+    return command.parse(await (on === undefined ? this.send(call) : call(on)), input)
   }
 }
 
@@ -135,4 +138,13 @@ function commandClientOf(redis: RedisClient): RedisClient {
     commands.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
   }
   return commands
+}
+
+/** A former master's start reads: they write nothing, and its connection is READONLY. */
+function defineFormerReads(redis: RedisClient): void {
+  for (const { name, formerLua, numberOfKeys } of Object.values(REDIS_COMMANDS)) {
+    if (formerLua === undefined) continue
+    const lua = { lua: formerLua, readOnly: true }
+    redis.defineCommand(name, numberOfKeys === null ? lua : { numberOfKeys, ...lua })
+  }
 }

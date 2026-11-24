@@ -131,6 +131,11 @@ class LaneHistory {
     this.anchors.set(route, this.branches)
   }
 
+  /** Whether the lane delivered `start`'s commit, or started or stands at it. */
+  knows({ place, id }: LaneStart): boolean {
+    return (place === this.last && id === this.tip) || this.knowsAt(place, id)
+  }
+
   /** Whether the lane holds `start` on a history it met since `route`'s anchor: it decided on that history then. */
   metSince(route: LaneRoute, start: LaneStart = NO_START): boolean {
     const anchor = this.anchors.get(route)
