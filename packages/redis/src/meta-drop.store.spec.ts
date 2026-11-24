@@ -1,6 +1,7 @@
 // A replaced meta generation whose drop the store refused, on the oldest and the newest Redis and Valkey Telefunc
-// supports: it stays marked, with the flag that a drop is pending, and the meta writes after it take the drop forward.
-// A healthy write pays no request for it.
+// supports: it stays marked, with the flag that a drop is pending. A replace drops in a call of its own once its write
+// committed, so its caller is told the write; the meta writes after it take the drop forward: a merge that reads the
+// flag, and the next replace. A healthy write pays no request for it.
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { BackendError } from 'telefunc'
@@ -16,7 +17,6 @@ afterEach(() => vi.restoreAllMocks())
  *  packages/room/src/server/store/cells.ts. */
 const META_DROP_CELL_PREFIX = 'meta:drop:'
 const META_DROP_PENDING_CELL_KEY = 'meta:drop:pending'
-const META_GEN_CELL_KEY = 'meta:gen'
 const META_KEY_CELL_PREFIX = 'meta:k:'
 
 const refused = () => new BackendError({ code: 'denied', outcome: 'not-run', message: 'the store refused the read' })
@@ -93,45 +93,10 @@ describe.runIf(runs)('a meta replace whose drop of the old generation the store 
       admin.disconnect()
 
       expect({ replaced, afterRefusal, afterMerge, meta }).toEqual({
-        replaced: 'denied',
+        replaced: 'resolved',
         afterRefusal: left,
         afterMerge: clean,
         meta: { replacement: true, merged: true },
-      })
-    }, 60_000)
-
-    it(`${store.name}: a replace another replace overtook, both having read no drop pending, drops what the other left`, async () => {
-      const admin = await reached(store)
-      const id = `meta-drop-overtaken-${i}`
-      const held = await roomWithMeta(admin, id)
-      const read = gate()
-      const release = gate()
-      let firstMetaRead = true
-      onReads(id, async (selector, marksRead) => {
-        if ('keys' in selector && selector.keys.includes(META_GEN_CELL_KEY) && firstMetaRead) {
-          firstMetaRead = false
-          read.open()
-          await release.opened
-        }
-        if (isMarksRead(selector) && marksRead === 1) throw refused()
-      })
-      // The overtaken replace read the meta, and waits while the other replace commits and its drop is refused.
-      const overtaken = outcomeOf(Room.setMeta(id, { overtaken: true }))
-      await read.opened
-      const overtaking = await outcomeOf(Room.setMeta(id, { overtaking: true }))
-      const beforeOvertaken = await held()
-      release.open()
-      const outcome = await overtaken
-      const after = await held()
-      const meta = (await Room.get(id)).meta
-      admin.disconnect()
-
-      expect({ overtaking, beforeOvertaken, overtaken: outcome, after, meta }).toEqual({
-        overtaking: 'denied',
-        beforeOvertaken: left,
-        overtaken: 'resolved',
-        after: clean,
-        meta: { overtaking: true },
       })
     }, 60_000)
 
@@ -170,7 +135,7 @@ describe.runIf(runs)('a meta replace whose drop of the old generation the store 
       admin.disconnect()
 
       expect({ newer, merged, afterDrop, afterNextMerge }).toEqual({
-        newer: 'denied',
+        newer: 'resolved',
         merged: 'resolved',
         afterDrop: left,
         afterNextMerge: clean,

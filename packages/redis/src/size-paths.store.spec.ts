@@ -15,6 +15,7 @@
 //   caller changes afterwards isn't the one committed, a reason that can't be serialized is refused when no tab
 //   matches too, and the ref is read once. The size is checked as of the removal's read of the tabs: a tab that left,
 //   or a room that closed, after that read doesn't change the refusal.
+import { randomBytes } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
@@ -236,11 +237,16 @@ async function acknowledgedThroughGap(admin: Redis, id: string, answer: (data: u
   const values = await valuesKey(admin, id)
   const replyField = async () => (await admin.hkeys(values)).find((field) => field.startsWith(`ack:${bob.id}:`))
   await until(async () => (await replyField()) !== undefined, 30_000)
+  // Bob's inbox's order record, `<dc8>`: its last commit's place and id. One place more, under an id no frame carried,
+  // is a commit the inbox never got.
   const [order] = await admin.keys(`tf:0:room:{${id}}:g:*:om:${bob.id}`)
-  const marks = order === undefined ? {} : await admin.hgetall(order)
-  const [[lane, mark] = ['', '']] = Object.entries(marks)
-  const [seq, ts] = mark.split(':')
-  if (order !== undefined) await admin.hset(order, lane, `${Number(seq) + 1}:${ts}`)
+  const records = order === undefined ? {} : await admin.hgetallBuffer(order)
+  const [[lane, record] = ['', Buffer.alloc(16)]] = Object.entries(records)
+  if (order !== undefined) {
+    const skipped = randomBytes(16)
+    skipped.writeDoubleLE(record.readDoubleLE(0) + 1, 0)
+    await admin.hset(order, lane, skipped)
+  }
   const after = alice.send(bob.id, 'after').catch((error: unknown) => told(error))
   let waited = 0
   for (await sleep(200); sender === 'pending' && waited < 120_000; await sleep(50)) {
@@ -251,7 +257,7 @@ async function acknowledgedThroughGap(admin: Redis, id: string, answer: (data: u
   await settled
   await after
   const stillStored = (await replyField()) !== undefined
-  return { skipped: Object.keys(marks).length === 1, sender, waited, repliesRead, stillStored }
+  return { skipped: Object.keys(records).length === 1, sender, waited, repliesRead, stillStored }
 }
 
 describe.runIf(runs)("a DM's acknowledged reply from a server recipient, over the size the store commits", () => {

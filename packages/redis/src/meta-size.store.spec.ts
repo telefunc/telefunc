@@ -1,22 +1,24 @@
 // A room meta update whose event the store's commit would refuse, on the oldest and the newest Redis and Valkey
-// Telefunc supports: the cells exchange refuses it before its first write, with the error that commit throws, and the
-// store keeps every key and value as before, its revision and index included. The event's `seq` is the one the
-// exchange writes, so the refusal and its twin one byte shorter, which commits, sit at a digit boundary:
+// Telefunc supports: its operation, the meta and its event in one write, is refused before its first write, with the
+// error that commit throws, and the store keeps every key and value as before, its revision and index included. The
+// event's `seq` is the one the operation writes, planned again from a new read where another write committed first,
+// so the refusal and its twin one byte shorter, which commits, sit at a digit boundary:
 // - a first write, at seq 1;
 // - a merge whose read predicts seq 9, 99999999999999 or 999999999999999 while another merge commits first, so it
 //   writes 10, 100000000000000 or 1000000000000000;
 // - a replacement that a merge overtook, at the seq it writes.
 // The value that numbers the event is always there: the first write creates `meta:seq`, and a later one counts it
-// while `meta:gen`, written with it, is as read. A room closed and opened again before a replacement's exchange tells
+// while `meta:gen`, written with it, is as read. A room closed and opened again before a replacement's operation tells
 // the replacement it closed, and a first write another first write overtook writes as a replacement. An exchange whose
 // control record is numbered by a counter it leaves absent is refused as a bug, before its first write.
 import { isDeepStrictEqual } from 'node:util'
 import type { Redis } from 'ioredis'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Room } from '@telefunc/room'
-import { getRoomPlane, type CellsExchange, type ControlRecord } from '@telefunc/room/backend'
+import { getRoomPlane } from '@telefunc/room/backend'
 import { endReached, reached, runs, snapshot, STORES, type Store } from '../test/stores.js'
-import { RedisRoomDriver } from './RedisRoomDriver.js'
+import { REDIS_COMMANDS } from './commands.js'
+import { RedisConnection } from './RedisConnection.js'
 
 /** The most a commit takes on a room's control lane: `PUBLISH_MAX_BYTES` in commands.ts. */
 const MAX = 28 * 1024 * 1024
@@ -31,50 +33,47 @@ async function seqAt(admin: Redis, id: string, value: number): Promise<void> {
   await admin.hset(values, 'meta:seq', `{"value":${value},"changedAt":${Date.now()}}`)
 }
 
-/** Each control-lane commit of room `id`: its length and its `seq`. */
-function controlCommits(id: string): { bytes: number; seq: string }[] {
-  const commits: { bytes: number; seq: string }[] = []
-  const { commitLane } = RedisRoomDriver.prototype
-  vi.spyOn(RedisRoomDriver.prototype, 'commitLane').mockImplementation(async function (
-    this: RedisRoomDriver,
-    target,
-    payload,
-    opts,
-  ) {
-    const committed = await commitLane.call(this, target, payload, opts)
-    if (target.roomId === id && target.lane.kind === 'control' && committed.kind === 'accepted') {
-      const head = new TextDecoder().decode(payload.subarray(0, 64))
-      commits.push({ bytes: payload.byteLength, seq: /"seq":(\d+)/.exec(head)?.[1] ?? 'none' })
-    }
-    return committed
-  })
-  return commits
+/** The control commit that the operation `input` would commit in room `id`, if it is one. */
+function controlPayload(input: unknown, id: string): Uint8Array | undefined {
+  if (typeof input !== 'object' || input === null || !('roomId' in input) || input.roomId !== id) return undefined
+  if (!('commit' in input) || typeof input.commit !== 'object' || input.commit === null) return undefined
+  const { commit } = input
+  if (!('lane' in commit) || typeof commit.lane !== 'object' || commit.lane === null) return undefined
+  if (!('kind' in commit.lane) || commit.lane.kind !== 'control') return undefined
+  return 'payload' in commit && commit.payload instanceof Uint8Array ? commit.payload : undefined
 }
 
-/** Until released, the first cells exchange of room `id` that writes the meta key `big` waits; the length its control
- *  record carries, once it reached the store. */
-function holdBigWrite(id: string) {
-  const { compareExchangeCells } = RedisRoomDriver.prototype
+/** Whether an operation's `outcome` committed its commit. */
+function committed(outcome: unknown): boolean {
+  if (typeof outcome !== 'object' || outcome === null || !('kind' in outcome) || outcome.kind !== 'done') return false
+  if (!('commit' in outcome) || typeof outcome.commit !== 'object' || outcome.commit === null) return false
+  return 'kind' in outcome.commit && outcome.commit.kind === 'accepted'
+}
+
+/** Room `id`'s meta writes as the store gets them, each an operation: the control commits they committed, each its
+ *  length and `seq`; and, until released, the first one whose commit writes the meta key `big`, held once it read
+ *  and planned, before it reaches the store. */
+function metaWrites(id: string) {
+  const commits: { bytes: number; seq: string }[] = []
   const held = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
-  const carried = { bytes: Number.NaN }
   let holding = true
-  vi.spyOn(RedisRoomDriver.prototype, 'compareExchangeCells').mockImplementation(async function (
-    this: RedisRoomDriver,
-    roomId: string,
-    inc: string,
-    exchange: CellsExchange,
-    record?: ControlRecord,
-  ) {
-    if (holding && roomId === id && exchange.mutations.some(({ key }) => key.endsWith('"big"'))) {
+  const { run } = RedisConnection.prototype
+  vi.spyOn(RedisConnection.prototype, 'run').mockImplementation(async function (this: RedisConnection, command, input) {
+    const payload = command.name === REDIS_COMMANDS.operation.name ? controlPayload(input, id) : undefined
+    const json = payload === undefined ? '' : new TextDecoder().decode(payload.subarray(0, 64))
+    if (holding && payload !== undefined && new TextDecoder().decode(payload).includes('"big"')) {
       holding = false
-      if (record !== undefined) carried.bytes = record.bytes
       held.resolve()
       await release.promise
     }
-    return await compareExchangeCells.call(this, roomId, inc, exchange, record)
+    const outcome = await run.call(this, command, input)
+    if (payload !== undefined && committed(outcome)) {
+      commits.push({ bytes: payload.byteLength, seq: /"seq":(\d+)/.exec(json)?.[1] ?? 'none' })
+    }
+    return outcome
   })
-  return { held: held.promise, release: () => release.resolve(), carried }
+  return { commits, held: held.promise, release: () => release.resolve() }
 }
 
 /** The error a commit of a record of `bytes` bytes on room `id`'s control lane throws, which writes nothing. */
@@ -115,8 +114,7 @@ async function overtakenMerge(admin: Redis, id: string, read: number, value: str
   await Room.create(id)
   await Room.updateMeta(id, { a: 'x' })
   await seqAt(admin, id, read)
-  const commits = controlCommits(id)
-  const write = holdBigWrite(id)
+  const write = metaWrites(id)
   const merging = told(Room.updateMeta(id, { big: value }))
   await write.held
   await Room.updateMeta(id, { b: '1' })
@@ -124,7 +122,7 @@ async function overtakenMerge(admin: Redis, id: string, read: number, value: str
   write.release()
   const answer = await merging
   const unchanged = isDeepStrictEqual(await snapshot(admin), before)
-  return { answer, unchanged, commits, carried: write.carried.bytes }
+  return { answer, unchanged, commits: write.commits }
 }
 
 describe.runIf(runs)('a room meta update whose event the commit would refuse', () => {
@@ -133,7 +131,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
       const admin = await reached(store)
       const probe = `meta-first-probe-${i}`
       await Room.create(probe)
-      const probed = controlCommits(probe)
+      const probed = metaWrites(probe).commits
       await Room.updateMeta(probe, { big: 'y' })
       const besides = (probed[0]?.bytes ?? Number.NaN) - 1
       vi.restoreAllMocks()
@@ -145,7 +143,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
       const refusal = fields(await commitRefusal(over, MAX + 1))
       const fits = `meta-first-fits-${i}`
       await Room.create(fits)
-      const commits = controlCommits(fits)
+      const { commits } = metaWrites(fits)
       const fitting = await told(Room.updateMeta(fits, { big: 'y'.repeat(MAX - besides) }))
       console.log(JSON.stringify({ store: store.name, besides, answer, unchanged, fitting, commits }))
       admin.disconnect()
@@ -181,7 +179,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
           over: { answer: over.answer, unchanged: over.unchanged },
           fits: { answer: fits.answer, written: fits.commits.at(-1) },
         }
-        console.log(JSON.stringify({ store: store.name, written, besides, carried: over.carried, ...seen }))
+        console.log(JSON.stringify({ store: store.name, written, besides, ...seen }))
         admin.disconnect()
 
         expect(seen).toEqual({
@@ -198,8 +196,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
         await Room.create(id)
         await Room.updateMeta(id, { a: 'x' })
         await seqAt(admin, id, 8)
-        const commits = controlCommits(id)
-        const write = holdBigWrite(id)
+        const write = metaWrites(id)
         const replacing = told(Room.setMeta(id, { big: value }))
         await write.held
         await Room.updateMeta(id, { b: '1' })
@@ -207,7 +204,7 @@ describe.runIf(runs)('a room meta update whose event the commit would refuse', (
         write.release()
         const answer = await replacing
         const unchanged = isDeepStrictEqual(await snapshot(admin), before)
-        return { answer, unchanged, commits, meta: Object.keys((await Room.get(id)).meta) }
+        return { answer, unchanged, commits: write.commits, meta: Object.keys((await Room.get(id)).meta) }
       }
       const probe = await replaced(`meta-replace-probe-${i}`, 'y')
       const besides = (probe.commits.find(({ seq }) => seq === '10')?.bytes ?? Number.NaN) - 1
@@ -280,17 +277,18 @@ describe.runIf(runs)('the value that numbers a room meta update', () => {
       const id = 'meta-reopened'
       await Room.create(id)
       await Room.updateMeta(id, { a: 'x' })
-      const write = holdBigWrite(id)
+      const write = metaWrites(id)
       const replacing = told(Room.setMeta(id, { big: 'y' }))
       await write.held
       await Room.close(id)
       await Room.create(id)
       await Room.updateMeta(id, { seed: 's' })
-      const commits = controlCommits(id)
+      const seeded = write.commits.length
       const before = await snapshot(admin)
       write.release()
       const answer = await replacing
       const unchanged = isDeepStrictEqual(await snapshot(admin), before)
+      const commits = write.commits.slice(seeded)
       const meta = Object.keys((await Room.get(id)).meta)
       admin.disconnect()
 
@@ -306,8 +304,7 @@ describe.runIf(runs)('the value that numbers a room meta update', () => {
       const admin = await reached(store)
       const id = 'meta-first-overtaken'
       await Room.create(id)
-      const commits = controlCommits(id)
-      const write = holdBigWrite(id)
+      const write = metaWrites(id)
       const replacing = told(Room.setMeta(id, { big: 'y' }))
       await write.held
       await Room.setMeta(id, { seed: 's' })
@@ -316,7 +313,7 @@ describe.runIf(runs)('the value that numbers a room meta update', () => {
       const meta = Object.keys((await Room.get(id)).meta)
       admin.disconnect()
 
-      expect({ answer, seqs: commits.map(({ seq }) => seq), meta }).toEqual({
+      expect({ answer, seqs: write.commits.map(({ seq }) => seq), meta }).toEqual({
         answer: 'resolved',
         seqs: ['1', '2'],
         meta: ['big'],
