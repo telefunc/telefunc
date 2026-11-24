@@ -18,6 +18,7 @@ import {
   readLocationBucket,
 } from './routing.js'
 import { CallNotSent, type CallOptions, type Invoke, type OrderedStubs } from './OrderedStubs.js'
+import { integerColumn, type DurableStorage, type SqlStore } from './sqlStorage.js'
 import { TransientRetry } from './transientRetry.js'
 import { assert } from '../../../utils/assert.js'
 import {
@@ -222,20 +223,20 @@ const AUTHORITY_SCHEMA = 'CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRI
 /** The Broadcast state of a key authority DO, in its SQLite storage: each key's `seq` and each route's member presence.
  *  The tables are created on first use, so a DO in another role never has them. */
 class CloudflareBroadcastAuthorityState {
-  private readonly storage: DurableObjectStorage
+  private readonly storage: DurableStorage
   private schema = false
   /** The alarm this run of the object set, null for none; undefined until it first sets or clears it. */
   private alarmAt: number | null | undefined = undefined
 
-  constructor(state: DurableObjectState) {
+  constructor(state: { storage: DurableStorage }) {
     this.storage = state.storage
   }
 
   nextSequence(key: string): number {
     const sql = this.sql()
     return this.storage.transactionSync(() => {
-      const row = sql.exec<{ seq: number }>('SELECT seq FROM broadcast_key WHERE key = ?', key).toArray()[0]
-      const seq = (row?.seq ?? 0) + 1
+      const row = sql.exec('SELECT seq FROM broadcast_key WHERE key = ?', key).toArray()[0]
+      const seq = (row === undefined ? 0 : integerColumn(row, 'seq')) + 1
       sql.exec('INSERT OR REPLACE INTO broadcast_key (key, seq) VALUES (?, ?)', key, seq)
       return seq
     })
@@ -286,7 +287,7 @@ class CloudflareBroadcastAuthorityState {
     return liveLeases(this.sql(), [routeKey], now, (member, bucket) => ({ member, bucket: readLocationBucket(bucket) }))
   }
 
-  private transaction<T>(fn: (sql: SqlStorage) => T): T {
+  private transaction<T>(fn: (sql: SqlStore) => T): T {
     const sql = this.sql()
     return this.storage.transactionSync(() => fn(sql))
   }
@@ -306,7 +307,7 @@ class CloudflareBroadcastAuthorityState {
     return this.storage.setAlarm(next)
   }
 
-  private sql(): SqlStorage {
+  private sql(): SqlStore {
     if (!this.schema) {
       this.storage.sql.exec(AUTHORITY_SCHEMA)
       initLeaseSchema(this.storage.sql)
