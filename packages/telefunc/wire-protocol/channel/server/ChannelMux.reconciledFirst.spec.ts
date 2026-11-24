@@ -182,3 +182,35 @@ test('a reconcile that throws a bug ends its wire, transiently: nothing stays he
   vi.restoreAllMocks()
   page.close()
 })
+
+test("over a WebSocket, a reconnect's probe answers go ahead of the RECONCILED and the replay it holds back", async () => {
+  const mux = getChannelMux()
+  const channels = Array.from({ length: 3 }, () => new ServerChannel())
+  for (const channel of channels) mux.registerChannel(channel, ATTACHABLE_NOW)
+  const sessionId = crypto.randomUUID()
+  const first = openWebSocket({ reads: true })
+  await mux.onWireMessage(
+    first.wire,
+    encode.reconcile({
+      sessionId,
+      attempt: 1,
+      open: channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true })),
+    }),
+  )
+  await Promise.all(channels.map((channel) => channel.opened))
+  // Each channel has a message to replay, which the page never confirmed.
+  for (const channel of channels) void channel.send('m'.repeat(1000)).catch(() => {})
+  first.close('transient')
+  const second = openWebSocket({ reads: true })
+  await mux.onWireMessage(
+    second.wire,
+    encode.reconcile({
+      sessionId,
+      attempt: 2,
+      open: channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, probe: ix + 1 })),
+    }),
+  )
+  const tags = second.frames.map((frame) => frame[0])
+  expect(tags.filter((tag) => tag === TAG.BDP_PING_ACK)).toHaveLength(3)
+  expect(tags.lastIndexOf(TAG.BDP_PING_ACK)).toBeLessThan(tags.indexOf(TAG.RECONCILED))
+})

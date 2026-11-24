@@ -19,14 +19,14 @@ config.channel = { reconnectTimeout: 1_000, connectTtl: 15_000 }
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
 
-/** An SSE wire opened for `channel`, its event stream not read yet. */
-async function sseWire(channel: ServerChannel) {
+/** An SSE wire opened for `channels`, at their indexes, its event stream not read yet. */
+async function sseWire(channels: ServerChannel[]) {
   const connId = crypto.randomUUID()
   const body = encodeSseRequest({ connId, streamResponse: true }, [
     encode.reconcile({
       sessionId: crypto.randomUUID(),
       attempt: 1,
-      open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
+      open: channels.map((channel, ix) => ({ id: channel.id, ix, lastSeq: 0, initial: true })),
     }),
   ])
   const init = { method: 'POST', body, duplex: 'half' }
@@ -67,7 +67,7 @@ test("a channel's end queued on the event stream when the session ends goes ahea
   const channel = new ServerChannel()
   mux.registerChannel(channel, ATTACHABLE_NOW)
   // The stream isn't read: what the server sends waits for it.
-  const { connId, events } = await sseWire(channel)
+  const { connId, events } = await sseWire([channel])
   await channel.opened
   const wire = mux.getWireByConnId(connId)
   if (!wire) throw new Error('No SSE wire')
@@ -96,4 +96,32 @@ test("a channel's end held behind a RECONCILED owed on a WebSocket when the sess
   mux.endFault(wire, { scope: 'session', cause: 'unreadable' })
   expect((await channel.closed)?.message).toBe(END_CAUSE.frameRefused.error().message)
   expect(handed.slice(-2)).toEqual([TAG.ERROR, 'close'])
+})
+
+test("a channel's end decided while another channel's message is under way on the event stream goes ahead of the stream's END", async () => {
+  const mux = getChannelMux()
+  const ended = new ServerChannel()
+  const busy = new ServerChannel()
+  mux.registerChannel(ended, ATTACHABLE_NOW)
+  mux.registerChannel(busy, ATTACHABLE_NOW)
+  const { connId, events } = await sseWire([ended, busy])
+  await Promise.all([ended.opened, busy.opened])
+  const wire = mux.getWireByConnId(connId)
+  if (!wire) throw new Error('No SSE wire')
+  // The page reads a few chunks of what the busy channel sends, its first message under way, and stops.
+  for (let i = 0; i < 8; i++) void busy.send('x'.repeat(256 * 1024)).catch(() => {})
+  const reader = events.getReader()
+  const tags: number[] = []
+  const parser = new SseEvents()
+  for (let i = 0; i < 4; i++) {
+    const read = await reader.read()
+    if (read.done) break
+    parser.push(read.value, (raw) => void tags.push(raw[0] ?? -1))
+  }
+  ended._onServerEnd('frameRefused')
+  mux.endFault(wire, { scope: 'session', cause: 'receiveBudget' })
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    parser.push(read.value, (raw) => void tags.push(raw[0] ?? -1))
+  }
+  expect(tags.slice(-2)).toEqual([TAG.ERROR, TAG.END])
 })
