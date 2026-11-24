@@ -1799,13 +1799,17 @@ test("a subscriber its server shed to nothing for another object's publish, its 
   await Broadcast.publish(key, 'p1' + 'x'.repeat(600_000))
   channel._onPeerDisconnect(defined(page.peers[0]), 10_000)
   await vi.advanceTimersByTimeAsync(5_000)
-  // The page comes back behind another channel's large frame: the replay of p1 waits for the wire.
+  // The page comes back behind another channel's large frame, on a link its page's acknowledgements measured slow: the
+  // replay of p1 waits for the wire.
   const blocker = new ServerChannel()
   const back = overWebSocket([])
   blocker._registerChannel(ATTACHABLE_NOW)
   back.attach(blocker, 1)
   void blocker.send('b1' + 'x'.repeat(600_000))
-  await vi.advanceTimersByTimeAsync(0)
+  await vi.advanceTimersByTimeAsync(10)
+  back.headroom.acknowledged({ bytes: back.headroom.sender.transmittedBytes, heldMs: 0, spanUs: 1_000 })
+  await vi.advanceTimersByTimeAsync(100)
+  back.headroom.acknowledged({ bytes: 100_000, heldMs: 0, spanUs: 10_000_000 })
   const again = back.attach(channel, 0, 0, request)
   // Room for less than one more publish under the most the server holds, so making room for one sheds to nothing.
   const filler: MemoryHolder = { heldBytes: 0 }

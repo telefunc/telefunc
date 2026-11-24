@@ -202,23 +202,36 @@ class PieceSender {
     return this.waitingBytes + this.messages.bytes
   }
 
-  /** The frames waiting behind the rest of a data frame, in order. */
+  /** The frames waiting for headroom, in order: in each lane, a rest none of which went, then those behind it. */
   get waitingFrames(): Iterable<Uint8Array<ArrayBuffer>> {
     return this.queued()
   }
 
   private *queued(): Generator<Uint8Array<ArrayBuffer>> {
-    for (const lane of this.lanes.values()) yield* lane
+    for (const [key, lane] of this.lanes) {
+      const rest = this.ungivenRestOf(key)
+      if (rest !== null) yield rest
+      yield* lane
+    }
   }
 
-  /** Removes the frames waiting behind the rest of a data frame that `drops` says go, called on each in order. */
+  /** The rest waiting in lane `key`, where the socket has been given no byte of it. */
+  private ungivenRestOf(key: number): Uint8Array<ArrayBuffer> | null {
+    return this.rest !== null && this.restLane === key && this.rest.offset === 0 ? this.rest.frame : null
+  }
+
+  /** Removes the frames waiting for headroom that `drops` says go, called on each in order as `waitingFrames` names them. */
   dropWaiting(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
     const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= frame.byteLength
+      // A head that goes names no body any more.
+      if (frame === this.headStarted) this.headStarted = null
       return true
     }
     for (const [key, lane] of this.lanes) {
+      const rest = this.ungivenRestOf(key)
+      if (rest !== null && goes(rest)) this.rest = null
       lane.remove(goes)
       if (lane.length === 0 && !(this.rest !== null && this.restLane === key)) this.lanes.delete(key)
     }
@@ -234,12 +247,6 @@ class PieceSender {
       return true
     }
     this.messages.remove(goes)
-    const rest = this.rest
-    const restGoes = rest !== null && rest.offset === 0 && goes(rest.frame)
-    if (restGoes) {
-      this.rest = null
-      this.waitingBytes -= rest.frame.byteLength
-    }
     this.dropWaiting(goes)
   }
 
