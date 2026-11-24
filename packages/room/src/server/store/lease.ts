@@ -119,7 +119,7 @@ async function runHosted<Args, Value>(
     const { value, counters } = await runOperation(store, room, operation, hosted, options)
     if (value !== 'lease-lost') {
       lease.hosted(id)
-      return { value: value as Value, counters }
+      return { value, counters }
     }
     lease.lost(id)
   }

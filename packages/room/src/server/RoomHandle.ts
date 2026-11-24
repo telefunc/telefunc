@@ -9,7 +9,6 @@ import { RoomError, roomClosedError } from '../shared/errors.js'
 import { normalizeJoinOptions, ownMetadata } from '../shared/arguments.js'
 import {
   inboxMessageFromWire,
-  type SenderStamp,
   type RoomDmEnvelope,
   type MemberMetaUpdate,
   type MemberRequest,
@@ -257,7 +256,7 @@ class RoomHandle implements RoomWritesOwner, TailHoldOwner, MemberLink, RoomStat
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
     if (holder instanceof RoomStub) {
       if (envelope.fromMetaSeq !== undefined) {
-        this.replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
+        this.replica.applyStamp(envelope.from, envelope)
       }
       const bodies = new MemberMessageBodies({ serialized, info, envelope })
       return holder.relayDm(bodies, envelope)

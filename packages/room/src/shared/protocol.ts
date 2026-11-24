@@ -140,15 +140,14 @@ type RoomDmEnvelope = {
   __r: 'dm'
   to: string
   from: string
-  fromMeta?: ParticipantMeta | null
-  fromMetaSeq?: number
-  fromIdentity?: string
-  fromDisconnected?: true
   data: unknown
   ackId?: string
   /** A package's message: for the field of that name (`defineParticipantField()`), never the app's `listen()`. */
   field?: string
-}
+} & (SenderStamp | UnstampedDm)
+/** A DM with no stamp: the server's (`Room.send()`), whose `fromMeta` is null, or one relayed to a client that can
+ *  already name its sender. */
+type UnstampedDm = { fromMeta?: null } & { [K in Exclude<keyof SenderStamp, 'fromMeta'>]?: never }
 
 /** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
  *  removed as `undefined`, or the connection of the page holding the member. */

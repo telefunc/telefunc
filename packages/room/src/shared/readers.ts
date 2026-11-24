@@ -24,6 +24,7 @@ import type {
   RoomCtrlEnvelope,
   RoomDmEnvelope,
   RoomMetaEntry,
+  SenderStamp,
   RoomFailure,
   WireLeaveCause,
 } from './protocol.js'
@@ -169,18 +170,27 @@ function ctrlEnvelopeOf(value: unknown): RoomCtrlEnvelope {
 
 /** A DM, as an inbox lane carries it or a recipient's stub relays it. */
 function dmEnvelopeOf(fields: Record<string | symbol, unknown>): RoomDmEnvelope {
-  const dm: RoomDmEnvelope = {
-    __r: 'dm',
-    to: textOf(fields.to, "A DM's recipient"),
-    from: textOf(fields.from, "A DM's sender"),
-    data: fields.data,
+  const to = textOf(fields.to, "A DM's recipient")
+  const from = textOf(fields.from, "A DM's sender")
+  const { data, fromMeta, fromMetaSeq } = fields
+  let dm: RoomDmEnvelope
+  if (fromMetaSeq === undefined) {
+    assert(fromMeta === undefined || fromMeta === null, 'An unstamped DM carries a sender meta')
+    dm = fromMeta === null ? { __r: 'dm', to, from, data, fromMeta } : { __r: 'dm', to, from, data }
+  } else {
+    const stamped: RoomDmEnvelope & SenderStamp = {
+      __r: 'dm',
+      to,
+      from,
+      data,
+      fromMeta: metaOf(fromMeta, "A DM's sender meta"),
+      fromMetaSeq: numberOf(fromMetaSeq, "A DM's sender meta seq"),
+    }
+    const fromIdentity = optionalText(fields.fromIdentity, "A DM's sender identity")
+    if (fromIdentity !== undefined) stamped.fromIdentity = fromIdentity
+    if (fields.fromDisconnected === true) stamped.fromDisconnected = true
+    dm = stamped
   }
-  const { fromMeta, fromMetaSeq } = fields
-  if (fromMeta !== undefined) dm.fromMeta = fromMeta === null ? null : metaOf(fromMeta, "A DM's sender meta")
-  if (fromMetaSeq !== undefined) dm.fromMetaSeq = numberOf(fromMetaSeq, "A DM's sender meta seq")
-  const fromIdentity = optionalText(fields.fromIdentity, "A DM's sender identity")
-  if (fromIdentity !== undefined) dm.fromIdentity = fromIdentity
-  if (fields.fromDisconnected === true) dm.fromDisconnected = true
   const ackId = optionalText(fields.ackId, "A DM's ack id")
   if (ackId !== undefined) dm.ackId = ackId
   const field = optionalText(fields.field, "A DM's field")
