@@ -1,5 +1,6 @@
-// How each end's `closed` reads when the page leaves, or the page's connection is lost for good during a close, and
-// what an ended broadcast keeps of its page's wire. Over a real server and page, on a WebSocket the spec can cut.
+// How each end's `closed` reads when the page leaves, or the page's connection is lost for good during a close; a
+// close the page makes while its connection is down; and what an ended broadcast keeps of its page's wire. Over a
+// real server and page, on a WebSocket the spec can cut.
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
@@ -17,6 +18,7 @@ import { ClientChannel } from './client/ClientChannel.js'
 import { ClientBroadcast } from './client/ClientBroadcast.js'
 import { Abort } from '../../shared/Abort.js'
 import { getChannelMux } from './server/ChannelMux.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 // The page's transport listens for `pagehide` on the global object, as in a browser.
 const pageEvents = new EventTarget()
@@ -34,6 +36,8 @@ serverConfig.disableNamingConvention = true
 /** What the server does with the page's next WebSocket upgrades. */
 const upgrades = { refuse: false, otherWireVersion: false }
 const sockets = new Set<Duplex>()
+/** When each of the page's upgrades reached the server, the refused ones too. */
+const upgradeAttempts: number[] = []
 let server: Server
 let telefuncUrl: string
 
@@ -44,6 +48,7 @@ beforeAll(async () => {
   const telefuncUpgrades = createServer()
   telefunc.installWebSocket(telefuncUpgrades)
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    upgradeAttempts.push(performance.now())
     if (upgrades.refuse) return void socket.destroy()
     if (upgrades.otherWireVersion) req.url = req.url?.replace(/([?&]wire=)\d+/, '$10')
     sockets.add(socket)
@@ -129,6 +134,65 @@ test('a page in a close whose reconnect reaches an updated server ends with Chan
   expect(end?.cause).toEqual(new NetworkError('The server was updated since this page loaded: reload the page.', true))
   await expect(closing).resolves.toBe(end)
 }, 10_000)
+
+/** The page's connections, by the key `ClientConnection.getOrCreate()` files them under: a disposed one is gone. */
+const { connections } = getGlobalObject('channel/client/ClientConnection.ts', {
+  connections: new Map<string, object>(),
+  wanting: new Map<string, Set<object>>(),
+})
+const connectionGone = (page: ClientChannel<unknown, unknown>) => ![...connections.values()].includes(page._connection)
+
+/** The page's wire drops and its reconnects are refused; returns once the page tried one, so it knows its wire is down. */
+async function connectionDown(): Promise<number> {
+  upgrades.refuse = true
+  const attemptsBefore = upgradeAttempts.length
+  dropWire()
+  const lostAt = performance.now()
+  await vi.waitFor(() => expect(upgradeAttempts.length).toBeGreaterThan(attemptsBefore), {
+    timeout: 2_000,
+    interval: 5,
+  })
+  return lostAt
+}
+
+test("a page that closes its channel while its connection is down, back within the server's grace, has its close read on the server as its own, and its connection goes", async () => {
+  // Each reconnect waits a tenth of its backoff: the page is back well within the server's 1 s grace.
+  const random = vi.spyOn(Math, 'random').mockReturnValue(0.1)
+  try {
+    const [channel, page] = await pair()
+    await connectionDown()
+    const closing = page.close({ timeout: 8_000 })
+    upgrades.refuse = false
+    expect(await closing).toBeNull()
+    expect(await channel.closed).toBeNull()
+    await vi.waitFor(() => expect(connectionGone(page)).toBe(true), { timeout: 2_000, interval: 20 })
+  } finally {
+    random.mockRestore()
+  }
+}, 10_000)
+
+test('a page that closes its channel while its connection is down, never back, tries until its recovery deadline, its connection goes there, and it opens nothing after', async () => {
+  const [, page] = await pair()
+  const lostAt = await connectionDown()
+  const closing = page.close({ timeout: 8_000 })
+  await vi.waitFor(() => expect(connectionGone(page)).toBe(true), { timeout: 6_000, interval: 20 })
+  const goneAfter = performance.now() - lostAt
+  const attemptsBeforeGone = upgradeAttempts.filter((at) => at > lostAt).length
+  const attempts = upgradeAttempts.length
+  await new Promise((resolve) => setTimeout(resolve, 2_000))
+  expect({
+    // Its window: two ping intervals and `reconnectTimeout`, 3 s from the loss.
+    goneAtItsDeadline: goneAfter >= 2_900 && goneAfter < 4_000,
+    triedMoreThanOnce: attemptsBeforeGone > 1,
+    attemptsAfterGone: upgradeAttempts.length - attempts,
+    closing: await closing,
+  }).toEqual({
+    goneAtItsDeadline: true,
+    triedMoreThanOnce: true,
+    attemptsAfterGone: 0,
+    closing: expect.any(ChannelCloseUnknownError),
+  })
+}, 15_000)
 
 /** The page decides a close and has the server's CLOSE_DONE when its connection is lost for good, its own cleanup
  *  running `cleanupMs`: how each end's `closed` reads. */
