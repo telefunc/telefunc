@@ -10,6 +10,7 @@ export type {
   BroadcastReleaseRequest,
   ForwardLoss,
   MemberPlacement,
+  PublishAnswer,
   TelefuncBroadcastStub,
 }
 
@@ -36,7 +37,7 @@ import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
-import type { BroadcastDelivery } from './extensions.js'
+import type { BroadcastDelivery, CloudflareRegions } from './extensions.js'
 import {
   HolderGrants,
   LEASE_CALL_DEADLINE_MS,
@@ -67,7 +68,16 @@ type BroadcastPublishRequest = {
 type BroadcastForwardRequest = BroadcastDelivery & { members: string[] }
 /** What a bucket coordinator lost of a forward: how many member DOs failed to take it, with the routes an owed one had
  *  no receiver for, and why: the first failure's error, else what had no receiver. */
-type ForwardLoss = { lost: number; reason: unknown }
+type ForwardLoss = { lost: number; reason: CarriedError }
+/** What a delivery lost, of its `total` member DOs, by the time it is answered to its sender. */
+type DeliveryLoss = ForwardLoss & { total: number }
+/** A key's authority's answer to a publish: its `seq`, or what its delivery lost, which `publish()` rejects with. */
+type PublishAnswer = { kind: 'published'; info: PublishResult } | ({ kind: 'lost' } & DeliveryLoss)
+/** The properties Workers RPC marks an error it threw across with, which a copy of the error returned across it loses. */
+type ErrorMarks = { remote?: boolean; retryable?: boolean; overloaded?: boolean; durableObjectId?: string }
+/** An error, as it was caught, to be returned across Workers RPC: its marks travel beside it, and `restoredError()`
+ *  puts them back on it where the loss is thrown. */
+type CarriedError = { error: unknown; marks: ErrorMarks }
 
 /** A member DO, by id, and the bucket its session was placed in, as it was stored or sent: `forward()` checks each
  *  bucket once. */
@@ -80,7 +90,7 @@ type BroadcastHoldRequest = BroadcastLeaseRequest & { bucket: LocationBucket; or
 type BroadcastReleaseRequest = BroadcastLeaseRequest & { order: LeaseOrder }
 
 type TelefuncBroadcastStub = {
-  telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishResult>
+  telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<PublishAnswer>
   /** Resolves to what of the delivery the member DOs it names didn't take, or null where they took it all. */
   telefuncBroadcastForward(request: BroadcastForwardRequest): Promise<ForwardLoss | null>
   /** How many of an owed delivery's routes it had no receiver for. */
@@ -563,8 +573,12 @@ class CloudflareBroadcast {
       payload: typeof payload === 'string' ? payload : new Uint8Array(payload),
     }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
-    if (member === undefined) return send(this.stubByName(name, null))
-    return this.callByName(member.calls, name, member.bucket, send)
+    const answer =
+      member === undefined
+        ? await send(this.stubByName(name, null))
+        : await this.callByName(member.calls, name, member.bucket, send)
+    if (answer.kind === 'lost') throw lostDeliveryError(route.key, answer)
+    return answer.info
   }
 
   /** Through `calls`, to the authority of `key`. */
@@ -589,24 +603,24 @@ class CloudflareBroadcast {
     authorityState: CloudflareBroadcastAuthorityState,
     calls: BroadcastCalls,
     request: BroadcastPublishRequest,
-  ): Promise<PublishResult> {
+  ): Promise<PublishAnswer> {
     const { key, kind, payload } = request
     const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
     const presence = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
-    await this.forward(calls, key, { routes: [{ key, kind }], payload, info }, presence)
-    return info
+    const loss = await this.forward(calls, key, { routes: [{ key, kind }], payload, info }, presence)
+    return loss === null ? { kind: 'published', info } : { kind: 'lost', ...loss }
   }
 
   /** Sends `delivery` across to each bucket once, to the coordinator `key` picks there, which hands it to the bucket's
-   *  `members`; resolves once every member DO took it, and rejects once one failed to take it. The forwards leave
-   *  through `calls` before this returns, so a DO's forwards for one key reach each coordinator in the order it made
-   *  them. */
+   *  `members`; resolves, once every coordinator answered, to what the delivery lost, or null where every member DO
+   *  took it. The forwards leave through `calls` before this returns, so a DO's forwards for one key reach each
+   *  coordinator in the order it made them. */
   async forward(
     calls: BroadcastCalls,
     key: string,
     delivery: BroadcastDelivery,
     members: Iterable<MemberPlacement>,
-  ): Promise<void> {
+  ): Promise<DeliveryLoss | null> {
     const membersByBucket = new Map<string, string[]>()
     let total = 0
     for (const { member, bucket } of members) {
@@ -614,7 +628,7 @@ class CloudflareBroadcast {
       total++
     }
     let lost = 0
-    let reason: unknown
+    let reason: CarriedError | undefined
     const forwardThrough = async ([name, members]: [string, string[]]) => {
       const bucket = readLocationBucket(name)
       try {
@@ -626,14 +640,22 @@ class CloudflareBroadcast {
         reason ??= loss.reason
       } catch (error) {
         lost += members.length
-        reason ??= error
+        reason ??= carriedError(error)
       }
     }
     await Promise.all(Array.from(membersByBucket, forwardThrough))
-    if (lost === 0) return
-    throw new Error(`Cloudflare Broadcast delivery of '${key}' lost to ${lost}/${total} Durable Objects`, {
-      cause: reason,
-    })
+    return reason === undefined ? null : { lost, total, reason }
+  }
+
+  /** Broadcast's regions as an extension's Durable Object sends through them, from the DO owning `calls`: a forward
+   *  rejects once a member DO failed to take its delivery. */
+  regions(calls: BroadcastCalls): CloudflareRegions {
+    return {
+      forward: async (key, delivery, members) => {
+        const loss = await this.forward(calls, key, delivery, members)
+        if (loss !== null) throw lostDeliveryError(key, loss)
+      },
+    }
   }
 
   /** At a bucket coordinator: delivers a forwarded delivery to the named member DOs, in arrival order. Returns what they
@@ -706,6 +728,33 @@ function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<n
   if (lost === 0) return null
   return {
     lost,
-    reason: failed > 0 ? reason : new Error(`${delivery} had no receiver for ${missing} of its owed routes`),
+    reason: carriedError(
+      failed > 0 ? reason : new Error(`${delivery} had no receiver for ${missing} of its owed routes`),
+    ),
   }
+}
+
+/** The rejection of a delivery of `key` that lost `loss`, with why as its cause, as the error was caught. */
+function lostDeliveryError(key: string, { lost, total, reason }: DeliveryLoss): Error {
+  return new Error(`Cloudflare Broadcast delivery of '${key}' lost to ${lost}/${total} Durable Objects`, {
+    cause: restoredError(reason),
+  })
+}
+
+function carriedError(error: unknown): CarriedError {
+  const marks: ErrorMarks = {}
+  if (typeof error === 'object' && error !== null) {
+    if ('remote' in error && typeof error.remote === 'boolean') marks.remote = error.remote
+    if ('retryable' in error && typeof error.retryable === 'boolean') marks.retryable = error.retryable
+    if ('overloaded' in error && typeof error.overloaded === 'boolean') marks.overloaded = error.overloaded
+    if ('durableObjectId' in error && typeof error.durableObjectId === 'string') {
+      marks.durableObjectId = error.durableObjectId
+    }
+  }
+  return { error, marks }
+}
+
+/** The error `carried` holds, with the marks a return across Workers RPC took off it put back. */
+function restoredError({ error, marks }: CarriedError): unknown {
+  return error instanceof Error ? Object.assign(error, marks) : error
 }

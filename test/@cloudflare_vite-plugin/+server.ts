@@ -145,16 +145,19 @@ app.all('/__broadcast-publish-from-worker', async (c) => {
   await Broadcast.publish('worker-publish', { from: 'worker' })
   return c.body(null, 204)
 })
-// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what and why.
+// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what and why,
+// and whether the cause has the mark Workers RPC gave the error where the session threw it.
 app.all('/__refused-delivery-publish', async (c) => {
   const key = c.req.query('key')
   const message = c.req.query('message')
   if (key === undefined || message === undefined) return c.text('Pass a key and a message', 400)
   try {
     await Broadcast.publish(key, message)
-    return c.json({ rejected: null, cause: null })
+    return c.json({ rejected: null, cause: null, causeRemote: null })
   } catch (error) {
-    return c.json({ rejected: String(error), cause: error instanceof Error ? String(error.cause) : null })
+    const cause = error instanceof Error ? error.cause : undefined
+    const causeRemote = typeof cause === 'object' && cause !== null && 'remote' in cause ? cause.remote : null
+    return c.json({ rejected: String(error), cause: String(cause), causeRemote })
   }
 })
 app.all('/__broadcast-subscribe-from-worker', (c) => {

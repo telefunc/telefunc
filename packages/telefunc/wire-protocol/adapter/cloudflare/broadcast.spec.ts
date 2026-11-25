@@ -102,7 +102,8 @@ function createBasicBinding(
         overrides?.onPresence?.(id, call, apply) ?? Promise.resolve(otherwise)
       return {
         telefuncBroadcastPublish: (request) =>
-          overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() }),
+          overrides?.onPublish?.(id, request) ??
+          Promise.resolve({ kind: 'published', info: { seq: 1, timestamp: Date.now() } }),
         telefuncBroadcastForward: (request) => overrides?.onForward?.(id, request) ?? Promise.resolve(null),
         telefuncBroadcastDeliver: (delivery) => overrides?.onDeliver?.(id, delivery) ?? Promise.resolve(0),
         telefuncBroadcastGrant: (member) =>
@@ -343,24 +344,25 @@ describe('cloudflare broadcast routing', () => {
   it("a publish its bucket's coordinator couldn't hand to a member rejects with that member's error as its cause", async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const authorityState = createAuthorityState()
-    const refused = new Error('The member Durable Object refused the delivery')
+    // As the coordinator catches it: Workers RPC marks an error thrown across it.
+    const refused = Object.assign(new Error('The member Durable Object refused the delivery'), { remote: true })
+    // An answer returned across Workers RPC is a copy: an error in it keeps its cause and loses its own properties.
+    const returned = <Answer>(answer: Answer) => structuredClone(answer)
     const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
-        // The bucket's coordinator hands the delivery to each of its members, as `telefuncBroadcastForward` does.
-        onForward: (_id, request) => broadcast.forwardToBucket(new OrderedStubs(), request),
+        // The key's authority and the bucket's coordinator, as `telefuncBroadcastPublish` and `telefuncBroadcastForward`
+        // answer.
+        onPublish: async (_id, request) =>
+          returned(await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), request)),
+        onForward: async (_id, request) => returned(await broadcast.forwardToBucket(new OrderedStubs(), request)),
         onDeliver: (id) => (id.name === 'telefunc-shard-weur-1' ? Promise.reject(refused) : Promise.resolve(0)),
       }),
     )
     await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-0', 'weur')
     await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-1', 'weur')
-    const publish = broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
-      key: 'room:test',
-      kind: 'text',
-      payload: '"hello"',
-    })
-    await expect(publish).rejects.toMatchObject({
+    await expect(broadcast.publish({ key: 'room:test', kind: 'text' }, '"hello"')).rejects.toMatchObject({
       message: "Cloudflare Broadcast delivery of 'room:test' lost to 1/2 Durable Objects",
-      cause: refused,
+      cause: { message: 'The member Durable Object refused the delivery', remote: true },
     })
     logged.mockRestore()
   })
@@ -498,11 +500,10 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       delivering,
       /** A sender's delivery of `routes` to the named member DOs, through the coordinators, as Room's fanout sends it. */
       forward: (routes: BroadcastRoute[], members: string[], owed: boolean) =>
-        broadcast.forward(
-          new OrderedStubs(),
+        broadcast.regions(new OrderedStubs()).forward(
           'room:test',
           { routes, payload: 'frame', info: { seq: 1, timestamp: 1 }, ...(owed ? { owed: true } : {}) },
-          members.map((member) => ({ member, bucket: 'weur' as const })),
+          members.map((member) => ({ member, bucket: 'weur' })),
         ),
     }
   }

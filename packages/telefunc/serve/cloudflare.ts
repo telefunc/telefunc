@@ -257,7 +257,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use ` +
           `Telefunc's Vite plugin?`,
       )
-      const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
+      const regions = broadcast.regions(this.broadcastCalls)
       const getNamespace = () => telefuncNamespace(this.env)
       const durableObject = extension.durableObject(this.ctx, { regions, getNamespace })
       this.durableObjects.set(name, durableObject)
