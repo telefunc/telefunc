@@ -41,7 +41,9 @@ function assertPublishOptions(options: PublishOptions | undefined): void {
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
-  return prototype === null || (Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object')
+  // This realm's plain objects first; one from another realm has its own `Object.prototype`.
+  if (prototype === Object.prototype || prototype === null) return true
+  return Object.getPrototypeOf(prototype) === null && prototype.constructor?.name === 'Object'
 }
 /** A value as it is now, detached from the caller's object: what its receivers decode. */
 function ownMessage(value: unknown): unknown {

@@ -136,9 +136,11 @@ function ctrlEnvelopeOf(value: unknown): RoomCtrlEnvelope {
     }
     case 'p-meta': {
       const id = textOf(fields.id, "A meta event's member")
+      // A new object each read (`memberMetaUpdateOf()`), which the event is, with its tag and member.
+      const update = memberMetaUpdateOf(fields)
       return fields.hidden === true
-        ? { __r: tag, id, hidden: true, ...memberMetaUpdateOf(fields) }
-        : { __r: tag, id, ...memberMetaUpdateOf(fields) }
+        ? Object.assign(update, { __r: tag, id, hidden: true })
+        : Object.assign(update, { __r: tag, id })
     }
     case 'update': {
       const seq = numberOf(fields.seq, "A room meta update's seq")
