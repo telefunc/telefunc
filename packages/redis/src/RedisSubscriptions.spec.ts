@@ -348,6 +348,35 @@ describe('a Cluster slot whose master changed', () => {
     expect(missed).toEqual([null])
   })
 
+  it("delivers the commit a holder's old attempt holds as it reads again, once its new attempt from the new history is ready first", async () => {
+    // A Room hands its member's track from her every-track channel to the track's every-member channel.
+    const EVERY = TEXT
+    const TRACK = `${TEXT}:t`
+    const { listen, publish, delivered, missed } = setup()
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+    let everyRead = Promise.resolve<Starts>({ authority: 'a', starts: new Map([['t', { place: 10, id: BigInt(10) }]]) })
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    const trackRead = createDeferred<Starts>()
+    const track = listen(TRACK, () => trackRead.promise, single, 'room')
+    // The new master forked at x10: its y11 replaces x11, and the old attempt reads where its key stands again.
+    const reread = createDeferred<Starts>()
+    everyRead = reread.promise
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    expect(every.state()).toBe('lost')
+    trackRead.resolve({ authority: 'b', starts: new Map([['', { place: 11, id: BigInt(111) }]]) })
+    await expect.poll(() => track.state()).toBe('ready')
+    // The room lets go of the old attempt once the new one is ready.
+    await every.unsubscribe()
+    reread.resolve({ authority: 'b', starts: new Map([['t', { place: 11, id: BigInt(111) }]]) })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
+  })
+
   it('tells a failover once where the old master’s late frame follows the new history’s first', async () => {
     const { listen, publish, delivered, missed } = setup()
     let start = lane(3)
@@ -708,5 +737,118 @@ describe('a subscriber connection Redis refuses at its login', () => {
     )
     expect(reports[0]).not.toContain('pw-SECRET')
     expect(reports[0]).not.toContain('args')
+  })
+})
+
+// c6 probes (finality-436-redis-order round 6): a holder's lane across a handoff, not part of the product.
+describe('c6: a lane its holder hands from one route to another', () => {
+  const EVERY = TEXT
+  const TRACK = `${TEXT}:t`
+  const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+  const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+  const at = (place: number, authority: string, laneKey: string, id = BigInt(place)): Starts => ({
+    authority,
+    starts: new Map([[laneKey, { place, id }]]),
+  })
+
+  it('P6a: delivers the new history’s commit only the old route brought, where the new route’s read answers first', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    const reread = createDeferred<Starts>()
+    everyRead = reread.promise
+    // y11 replaces x11, published before the track's route subscribes: only the old route has a copy.
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    expect(every.state()).toBe('lost')
+    const track = listen(TRACK, async () => at(11, 'b', '', BigInt(111)), single, 'room')
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    reread.resolve(at(11, 'b', 't', BigInt(111)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
+  })
+
+  it('P6b: delivers a commit the new route’s start covers that the lane never delivered, on one history', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    const trackRead = createDeferred<Starts>()
+    const track = listen(TRACK, () => trackRead.promise, single, 'room')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // One script publishes x11 on the track's lane channel first, then on the member's every-track channel.
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    trackRead.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11'])
+    expect(missed).toEqual([])
+  })
+
+  it('P6c: keeps what the old route parked once it leaves, and tells the hole', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(12, 'x12', { lane: 't', placed: false }))
+    const track = listen(TRACK, async () => at(12, 'a', ''), single, 'room')
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    expect(delivered).toEqual(['x12'])
+    expect(missed).toEqual([1])
+  })
+
+  it('P6d: tells a failover once where a stale read of the left history follows the new one', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    let trackRead = Promise.resolve(at(10, 'a', ''))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    const track = listen(TRACK, () => trackRead, single, 'room')
+    await expect.poll(() => every.state() === 'ready' && track.state() === 'ready').toBe(true)
+    const stale = createDeferred<Starts>()
+    trackRead = stale.promise
+    everyRead = Promise.resolve(at(11, 'b', 't', BigInt(111)))
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    // y11 replaces x11: both routes fork on it and read again.
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    await expect.poll(() => every.state()).toBe('ready')
+    // The old master still answers the track route's read.
+    stale.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    expect(missed).toEqual([null])
+    expect(delivered).toEqual(['x11', 'y11'])
+  })
+
+  it('P6e: tells a later failover after a stale read of the left history', async () => {
+    const { listen, publish, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    let trackRead = Promise.resolve(at(10, 'a', ''))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    const track = listen(TRACK, () => trackRead, single, 'room')
+    await expect.poll(() => every.state() === 'ready' && track.state() === 'ready').toBe(true)
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    const stale = createDeferred<Starts>()
+    trackRead = stale.promise
+    everyRead = Promise.resolve(at(11, 'b', 't', BigInt(111)))
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    await expect.poll(() => every.state()).toBe('ready')
+    stale.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    // A second failover: c forked at y11, so its z12 replaces nothing delivered yet but y12.
+    everyRead = Promise.resolve(at(12, 'c', 't', BigInt(212)))
+    trackRead = Promise.resolve(at(12, 'c', '', BigInt(212)))
+    publish(EVERY, frameOf(12, 'y12', { lane: 't', placed: false, id: BigInt(112), prev: BigInt(111) }))
+    publish(EVERY, frameOf(12, 'z12', { lane: 't', placed: false, id: BigInt(212), prev: BigInt(111) }))
+    await expect.poll(() => missed.length, { timeout: 2_000 }).toBe(2)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(missed).toEqual([null, null])
   })
 })
