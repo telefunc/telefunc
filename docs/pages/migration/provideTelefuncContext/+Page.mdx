@@ -7,8 +7,8 @@ When using `provideTelefuncContext()`, you must now call your telefunction insid
 
 provideTelefuncContext(context) // [!code --]
 const { todoItems } = await onLoadTodoItems() // [!code --]
-// @docpress-replace todoItems2 todoItems
-const { todoItems2 } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
+// @docpress-replace todoItemsDedupe todoItems
+const { todoItemsDedupe } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
 ```
 
 See: <Link href="/provideTelefuncContext" />
