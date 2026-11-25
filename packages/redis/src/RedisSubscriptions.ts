@@ -47,8 +47,10 @@ type RedisAttemptOptions = {
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
-  /** Whom its unknown losses are told to: the attempts with one key are told once of each history they leave. */
-  lossKey: string
+  /** The consumer its frames reach on this connection, by name: a Room's replica (its demand lane's exchange apart), a
+   *  Broadcast channel's subscription. The attempts of one holder share each lane's order, so a commit two of them
+   *  carry reaches it once, and they tell it once of each history they leave. */
+  holder: string
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -71,17 +73,31 @@ type ConnectedSocket = Extract<SocketState, { phase: 'connected' }>
 /** A lane an attempt carries, and the highest place the attempt brought it. */
 type CarriedLane = { history: LaneHistory; passed: number }
 
-/** The attempts with one loss key, and the histories they were told they left. */
-class LossKey {
-  readonly key: string
+/** The attempts with one holder: each lane's order they share, and the histories they told it they left. */
+class Holder {
+  readonly name: string
   attempts = 0
+  private readonly lanes = new Map<string, LaneHistory>()
   private readonly left = new Set<string>()
 
-  constructor(key: string) {
-    this.key = key
+  constructor(name: string) {
+    this.name = name
   }
 
-  /** Whether leaving the history `from` is news to the key: it is told once of each history it leaves. A promotion
+  /** The lane named `channel`, which `route` now carries. */
+  joinLane(channel: string, route: LaneRoute): LaneHistory {
+    const lane = getOrCreate(this.lanes, channel, () => new LaneHistory())
+    lane.routes.add(route)
+    return lane
+  }
+
+  /** `route` carries the lane no more; it is forgotten once no attempt does. */
+  leaveLane(channel: string, lane: LaneHistory, route: LaneRoute): void {
+    lane.leave(route)
+    if (lane.done && this.lanes.get(channel) === lane) this.lanes.delete(channel)
+  }
+
+  /** Whether leaving the history `from` is news to the holder: it is told once of each history it leaves. A promotion
    *  starts a new history, so a later failover leaves another one. */
   leaves(from: string): boolean {
     if (this.left.has(from)) return false
@@ -113,11 +129,8 @@ class RedisSubscriptions {
   private readonly connection: RedisConnection
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly byChannel = new Map<string, Set<RedisAttempt>>()
-  /** Each lane some attempt carries, by its consumer's receiver, then its channel. A consumer's attempts share its lanes
-   *  (a renewal and the attempt it replaces); another consumer orders its own, so it gets every frame too. */
-  private readonly lanes = new Map<BackendReceiver, Map<string, LaneHistory>>()
-  /** Each loss key some attempt has, by its name. */
-  private readonly lossKeys = new Map<string, LossKey>()
+  /** Each holder some attempt delivers to, by its name. */
+  private readonly holders = new Map<string, Holder>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
   private changedChannels = new Set<string>()
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
@@ -141,9 +154,9 @@ class RedisSubscriptions {
   }
 
   subscribe(options: RedisAttemptOptions): DriverAttempt {
-    const loss = getOrCreate(this.lossKeys, options.lossKey, () => new LossKey(options.lossKey))
-    loss.attempts++
-    const attempt = new RedisAttempt({ ...options, owner: this, loss })
+    const holder = getOrCreate(this.holders, options.holder, () => new Holder(options.holder))
+    holder.attempts++
+    const attempt = new RedisAttempt({ ...options, owner: this, holder })
     this.establishingCount++
     const settled = () => this.establishingCount--
     void attempt.firstReady.then(settled, settled)
@@ -206,27 +219,10 @@ class RedisSubscriptions {
     }
   }
 
-  /** `receiver`'s lane named `channel`, which `route` now carries. */
-  joinLane(receiver: BackendReceiver, channel: string, route: LaneRoute): LaneHistory {
-    const lanes = getOrCreate(this.lanes, receiver, () => new Map<string, LaneHistory>())
-    const lane = getOrCreate(lanes, channel, () => new LaneHistory())
-    lane.routes.add(route)
-    return lane
-  }
-
-  /** `route` carries the lane no more; it is forgotten once no attempt does. */
-  leaveLane(receiver: BackendReceiver, channel: string, lane: LaneHistory, route: LaneRoute): void {
-    lane.leave(route)
-    const lanes = this.lanes.get(receiver)
-    if (!lane.done || lanes?.get(channel) !== lane) return
-    lanes.delete(channel)
-    if (lanes.size === 0) this.lanes.delete(receiver)
-  }
-
   /** Forgets an attempt that unsubscribed or ended. */
   detach(attempt: RedisAttempt): void {
     this.unconfirmed.delete(attempt)
-    if (--attempt.loss.attempts === 0) this.lossKeys.delete(attempt.loss.key)
+    if (--attempt.holder.attempts === 0) this.holders.delete(attempt.holder.name)
     for (const channel of attempt.channels) {
       const attempts = this.byChannel.get(channel)
       attempts?.delete(attempt)
@@ -521,7 +517,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   readonly invalidationChannel: string | null
   readonly readStarts: RedisAttemptOptions['readStarts']
   readonly channels: readonly string[]
-  readonly loss: LossKey
+  readonly holder: Holder
   private readonly tell: RedisAttemptOptions['reportMissed']
   private readonly owner: RedisSubscriptions
   private readonly receiver: BackendReceiver
@@ -550,8 +546,8 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     readStarts,
     receiver,
     reportMissed: tell,
-    loss,
-  }: RedisAttemptOptions & { owner: RedisSubscriptions; loss: LossKey }) {
+    holder,
+  }: Omit<RedisAttemptOptions, 'holder'> & { owner: RedisSubscriptions; holder: Holder }) {
     super()
     this.owner = owner
     this.channel = channel
@@ -561,7 +557,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
     this.readStarts = readStarts
     this.receiver = receiver
     this.tell = tell
-    this.loss = loss
+    this.holder = holder
     this.channels = invalidationChannel === null ? [channel] : [channel, invalidationChannel]
     // Its first state change ends its establishment: ready, or closed.
     this.onStateChange(() => this.firstReadiness.resolve())
@@ -658,12 +654,12 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       if (!this.frames.lanesEndWithMembers) {
         lanes.add(laneKey)
       } else {
-        this.owner.leaveLane(this.receiver, this.laneName(laneKey), history, this)
+        this.holder.leaveLane(this.laneName(laneKey), history, this)
         this.lanes.delete(laneKey)
       }
     }
     this.transition('ready')
-    if (left !== null && this.loss.leaves(left)) this.tell(null)
+    if (left !== null && this.holder.leaves(left)) this.tell(null)
     for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
@@ -752,7 +748,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   /** The lane a frame's lane key names, which it carries from now on. */
   private laneOf(laneKey: string): CarriedLane {
     return getOrCreate(this.lanes, laneKey, () => ({
-      history: this.owner.joinLane(this.receiver, this.laneName(laneKey), this),
+      history: this.holder.joinLane(this.laneName(laneKey), this),
       passed: 0,
     }))
   }
@@ -788,7 +784,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
 
   private forgetFrames(): void {
     for (const [laneKey, { history }] of this.lanes) {
-      this.owner.leaveLane(this.receiver, this.laneName(laneKey), history, this)
+      this.holder.leaveLane(this.laneName(laneKey), history, this)
     }
     this.lanes.clear()
     this.early = []

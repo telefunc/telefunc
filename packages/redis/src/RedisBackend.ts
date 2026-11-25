@@ -55,7 +55,7 @@ class RedisBackend implements BroadcastDriver {
       receiver,
       reportMissed: (count) =>
         reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
-      lossKey: channel,
+      holder: channel,
     })
   }
 

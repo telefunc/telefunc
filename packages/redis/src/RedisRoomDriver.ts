@@ -286,8 +286,9 @@ class RedisRoomDriver implements RoomDriver {
       receiver,
       reportMissed: (count) =>
         this.kit.reportLaneLost(source.roomId, source.lane, neverReachedSubscription(count, 'commit')),
-      // The room's lanes tell the app of a loss as the room's; demand's, which the servers ask for again, tell it nothing.
-      lossKey: kind === 'demand' ? `${roomId} demand` : roomId,
+      // Every lane but demand reaches the room's replica, which tells the app of a loss as the room's; demand's reach its
+      // exchange, which asks the servers again.
+      holder: kind === 'demand' ? `${roomId} demand` : roomId,
     })
   }
 

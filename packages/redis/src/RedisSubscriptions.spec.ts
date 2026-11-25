@@ -84,7 +84,7 @@ function setup(
     channel: string,
     readStarts: ReadStarts = async () => none(),
     frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
-    lossKey = channel,
+    holder = channel,
   ): DriverAttempt =>
     subscriptions.subscribe({
       channel,
@@ -100,7 +100,7 @@ function setup(
       reportMissed(count) {
         missed.push(count)
       },
-      lossKey,
+      holder,
     })
   const missed: Array<number | null> = []
   return {
@@ -317,6 +317,35 @@ describe('a Cluster slot whose master changed', () => {
       expect(delivered).toEqual([...order, 'y12'])
       expect(missed).toEqual([null])
     }
+  })
+
+  it('delivers each commit once to a holder whose two attempts carry the lane, across a fork', async () => {
+    // A Room's every-track channel and its member track's channel both carry lane 't' to the room's replica.
+    const EVERY = TEXT
+    const TRACK = `${TEXT}:t`
+    const { listen, publish, delivered, missed } = setup()
+    let authority = 'a'
+    let at = { place: 10, id: BigInt(10) }
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+    const every = listen(EVERY, async () => ({ authority, starts: new Map([['t', at]]) }), fanIn, 'room')
+    const track = listen(TRACK, async () => ({ authority, starts: new Map([['', at]]) }), single, 'room')
+    await expect.poll(() => [every.state(), track.state()]).toEqual(['ready', 'ready'])
+    const onEvery = (place: number, text: string, ids: { id?: bigint; prev?: bigint } = {}) =>
+      publish(EVERY, frameOf(place, text, { lane: 't', placed: false, ...ids }))
+    const onTrack = (place: number, text: string, ids: { id?: bigint; prev?: bigint } = {}) =>
+      publish(TRACK, frameOf(place, text, { placed: false, ...ids }))
+    onEvery(11, 'x11')
+    authority = 'b'
+    at = { place: 11, id: BigInt(111) }
+    onTrack(11, 'y11', { id: BigInt(111) })
+    onEvery(11, 'y11', { id: BigInt(111) })
+    // The old master's copy of x11 on the track's channel, late.
+    onTrack(11, 'x11')
+    await expect.poll(() => [every.state(), track.state()]).toEqual(['ready', 'ready'])
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
   })
 
   it('tells a failover once where the old master’s late frame follows the new history’s first', async () => {
