@@ -132,6 +132,7 @@ import { sleep } from '../../sleep'
 import { whileRedisSubscribersDown } from '../../redis'
 import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
+import { byteAt, entryOf, messageOf, numberOf, present, textOf } from '../../checked'
 import { onServerAction } from '../../server-actions'
 import { cutWireSockets } from '../../wire-sockets'
 import { demandNames, type NamedDemand } from './demandNames'
@@ -202,9 +203,15 @@ async function onGetUnguardedRoom(roomId: string) {
   return await Room.get(roomId)
 }
 
-const auditLog = new Map<string, Array<Record<string, unknown>>>()
+/** What a guard's after-hook saw: a join, a publish or a send. */
+type AuditEntry =
+  | { kind: 'join'; name: unknown; joinedAt: number }
+  | { kind: 'publish'; name: unknown; data: unknown; seq: number }
+  | { kind: 'send'; name: unknown; to: unknown; seq: number }
 
-function audit(roomId: string, entry: Record<string, unknown>) {
+const auditLog = new Map<string, AuditEntry[]>()
+
+function audit(roomId: string, entry: AuditEntry) {
   const list = auditLog.get(roomId) ?? []
   list.push(entry)
   auditLog.set(roomId, list)
@@ -334,8 +341,8 @@ async function onWatchRoomTrack(roomId: string, track: string) {
   watchedTracks.set(roomId, { frames, lossy })
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
-  room.subscribeBinary((data) => frames.push(data[0]!), { track })
-  room.subscribeBinary((data) => lossy.push(data[0]!), { track: 'cursor' })
+  room.subscribeBinary((data) => frames.push(byteAt(data)), { track })
+  room.subscribeBinary((data) => lossy.push(byteAt(data)), { track: 'cursor' })
 }
 
 async function onGetWatchedTrack(roomId: string) {
@@ -350,11 +357,11 @@ async function onHoldRetainedReads(roomId: string) {
 }
 
 async function onHeldRetainedReads(roomId: string) {
-  return retainedReads.get(roomId)!.held()
+  return entryOf(retainedReads, roomId).held()
 }
 
 async function onReleaseRetainedReads(roomId: string) {
-  retainedReads.get(roomId)!.release()
+  entryOf(retainedReads, roomId).release()
   retainedReads.delete(roomId)
 }
 
@@ -366,7 +373,7 @@ async function onWatchEveryFrame(roomId: string) {
   const frames: Array<[number, unknown]> = []
   everyFrame.set(roomId, frames)
   watchedRooms.set(roomId, room)
-  room.subscribeBinary((data, { from }) => frames.push([data[0]!, from.meta.name ?? null]))
+  room.subscribeBinary((data, { from }) => frames.push([byteAt(data), from.meta.name ?? null]))
 }
 
 async function onGetEveryFrame(roomId: string) {
@@ -401,7 +408,7 @@ async function onKeepRoom(roomId: string) {
 }
 
 async function onCountKeptRoom(roomId: string) {
-  return keptRooms.get(roomId)!.count
+  return entryOf(keptRooms, roomId).count
 }
 
 async function onCountRoom(roomId: string) {
@@ -436,11 +443,11 @@ async function onReturnDeparted(roomId: string) {
 }
 
 async function onHiddenSetMeta(roomId: string, name: string) {
-  await hiddenBots.get(roomId)!.setMeta({ name })
+  await entryOf(hiddenBots, roomId).setMeta({ name })
 }
 
 async function onHiddenLeave(roomId: string) {
-  await hiddenBots.get(roomId)!.leave()
+  await entryOf(hiddenBots, roomId).leave()
 }
 
 const hiddenAfterPlayers = new Map<string, { cause: LeaveCause | null; closed: boolean; refs: unknown[] }>()
@@ -449,7 +456,11 @@ const hiddenAfterPlayers = new Map<string, { cause: LeaveCause | null; closed: b
 async function onHiddenAfterPlayers(roomId: string) {
   const room = await Room.create(roomId, { departureTimeout: 500 })
   const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
-  const state = { cause: null as LeaveCause | null, closed: false, refs: [room, bot] as unknown[] }
+  const state: { cause: LeaveCause | null; closed: boolean; refs: unknown[] } = {
+    cause: null,
+    closed: false,
+    refs: [room, bot],
+  }
   hiddenAfterPlayers.set(roomId, state)
   bot.onLeave((cause) => (state.cause = cause))
   room.onClose(() => (state.closed = true))
@@ -458,7 +469,7 @@ async function onHiddenAfterPlayers(roomId: string) {
 }
 
 async function onGetHiddenAfterPlayers(roomId: string) {
-  const state = hiddenAfterPlayers.get(roomId)!
+  const state = entryOf(hiddenAfterPlayers, roomId)
   return { cause: state.cause, closed: state.closed }
 }
 
@@ -474,7 +485,7 @@ async function onCloseRoomWithMember(roomId: string) {
 }
 
 let bugs: string[] | null = null
-onBug((err) => bugs?.push((err as Error).message))
+onBug((err) => bugs?.push(err instanceof Error ? err.message : String(err)))
 
 /** Listeners that fail in the background, and un-awaited writes of members a closed room let go. */
 async function onBackgroundErrors(roomId: string) {
@@ -618,7 +629,7 @@ async function onParticipantOverflow(roomId: string, memberId: string) {
 }
 
 async function onGetRoomOverflow(roomId: string) {
-  return overflows.get(roomId)!.leaves
+  return entryOf(overflows, roomId).leaves
 }
 
 /** A speaker publishes `count` numbered messages of `size` bytes in one go, faster than a wire takes them. */
@@ -704,7 +715,7 @@ async function publishPlain(speaker: LocalParticipant, message: unknown): Promis
     await speaker.publish(message, { track: 'cursor' })
     return 'published'
   } catch (err) {
-    return (err as Error).message
+    return messageOf(err)
   }
 }
 
@@ -757,7 +768,7 @@ async function releaseRefs(roomId: string) {
   left.onLeave(() => {})
   left.onChange(() => {})
   const view = await Room.get(roomId)
-  const departed = view.getParticipant(left.id)!
+  const departed = present(view.getParticipant(left.id), 'the member that leaves')
   departed.onChange(() => {})
   await left.leave()
   // Listeners added to a member that left, then the view's own, all gone.
@@ -818,9 +829,9 @@ async function onSeedRoom(roomId: string, count: number) {
 
 /** One member joins and the first seeded one leaves. */
 async function onSeedChurn(roomId: string) {
-  const members = seeded.get(roomId)!
+  const members = entryOf(seeded, roomId)
   members.push(await (await Room.get(roomId)).join({ meta: { name: 'late' } }))
-  await members[0]!.leave()
+  await present(members[0], 'the first seeded member').leave()
 }
 
 /** Each room's speaker, joined on the server: the member whose publishes a page subscribes to. */
@@ -963,7 +974,7 @@ async function onOpenSlowGuardRoom(roomId: string) {
   Room.guard(room, {
     anyoneCanJoin: true,
     onBeforePublish: async (_from, data) => {
-      const n = data instanceof Uint8Array ? data[0]! : (data as number)
+      const n = data instanceof Uint8Array ? byteAt(data) : numberOf(data)
       await new Promise((resolve) => setTimeout(resolve, 50 - n))
     },
   })
@@ -989,7 +1000,7 @@ async function onConcurrentMetaWrites(roomId: string) {
     afterAttributes,
     roomMeta: Object.entries(view.meta),
     memberId: me.id,
-    memberMeta: Object.entries(member!.meta),
+    memberMeta: Object.entries(present(member, 'the member').meta),
   }
 }
 
@@ -1021,7 +1032,7 @@ async function onReplaceMetaInLoop(roomId: string) {
 
 /** Resolves once the replaces in flight are done, so the next test's writes don't queue behind them. */
 async function onStopReplacingMeta(roomId: string) {
-  const { timer, writes } = replacing.get(roomId)!
+  const { timer, writes } = entryOf(replacing, roomId)
   clearInterval(timer)
   replacing.delete(roomId)
   await Promise.allSettled(writes)
@@ -1046,7 +1057,7 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
   }
   held.release()
   const [read] = await reading
-  return metaName(read!.meta, { before: bigMeta('a'), after })
+  return metaName(present(read, 'the read member').meta, { before: bigMeta('a'), after })
 }
 
 /** Member A's meta, whose last key it wrote after member B joined with the `b` meta, read by the room's roster while a
@@ -1060,14 +1071,17 @@ async function onReadSplitMetaAcrossMerge(roomId: string) {
   await held.reached
   await member.updateMeta({ k0: undefined, k2: undefined, zz: 'new' })
   held.release()
-  const read = (await reading).find((participant) => participant.id === member.id)!
+  const read = present(
+    (await reading).find((participant) => participant.id === member.id),
+    'the read member',
+  )
   return metaName(read.meta, { before: { k0: 'a', k1: 'a', k2: 'a' }, after: { k1: 'a', zz: 'new' } })
 }
 
 /** The name of the meta in `named` that `meta` is, keys in order, or the keys it holds. */
 function metaName(meta: Record<string, unknown>, named: Record<string, Record<string, unknown>>): string {
   const entries = JSON.stringify(Object.entries(meta))
-  for (const name in named) if (JSON.stringify(Object.entries(named[name]!)) === entries) return name
+  for (const [name, meta] of Object.entries(named)) if (JSON.stringify(Object.entries(meta)) === entries) return name
   const keys = Object.keys(meta)
   return `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
 }
@@ -1115,19 +1129,21 @@ async function onGetGuardCalls(roomId: string) {
 }
 
 const slowJoins = new Map<string, { entered: string[]; done: string[] }>()
+/** The view `onOpenSlowJoinRoom()` guarded, by room. */
+const slowJoinRooms = new Map<string, Awaited<ReturnType<typeof Room.get>>>()
 
 /** A join whose meta has `slow` waits 1 s in its guard; the names that entered the wait and that ended it are kept. */
 async function onOpenSlowJoinRoom(roomId: string) {
   const room = await Room.get(roomId)
-  const joins = { entered: [] as string[], done: [] as string[] }
+  const joins: { entered: string[]; done: string[] } = { entered: [], done: [] }
   slowJoins.set(roomId, joins)
-  watchedRooms.set(roomId, room)
+  slowJoinRooms.set(roomId, room)
   Room.guard(room, {
     onBeforeJoin: async (member) => {
       if (!member.meta.slow) return
-      joins.entered.push(member.meta.name as string)
+      joins.entered.push(textOf(member.meta.name))
       await new Promise((resolve) => setTimeout(resolve, 1000))
-      joins.done.push(member.meta.name as string)
+      joins.done.push(textOf(member.meta.name))
     },
   })
   return room
@@ -1135,11 +1151,11 @@ async function onOpenSlowJoinRoom(roomId: string) {
 
 /** The view `onOpenSlowJoinRoom()` guarded: a guard applies to the joins made through it. */
 async function onGetSlowJoinRoom(roomId: string) {
-  return watchedRooms.get(roomId) as Awaited<ReturnType<typeof onOpenSlowJoinRoom>>
+  return entryOf(slowJoinRooms, roomId)
 }
 
 async function onGetSlowJoins(roomId: string) {
-  return slowJoins.get(roomId)!
+  return entryOf(slowJoins, roomId)
 }
 
 /** A server view closes the room once it is empty, the cleanup the Room docs show. */
@@ -1290,8 +1306,8 @@ async function onBusyLanes(roomId: string) {
   const arrives = () => arrived++
   room.subscribe(arrives)
   room.subscribeBinary(arrives, { track: 'shared' })
-  view.getParticipant(alice.id)!.subscribeBinary(arrives)
-  view.getParticipant(bob.id)!.subscribeBinary(arrives, { track: 'named' })
+  present(view.getParticipant(alice.id), 'Alice').subscribeBinary(arrives)
+  present(view.getParticipant(bob.id), 'Bob').subscribeBinary(arrives, { track: 'named' })
   alice.listen(() => 'read')
   const key = `room:at-rest:${roomId}`
   Broadcast.subscribe(key, arrives)
@@ -1316,7 +1332,7 @@ async function onBusyLanes(roomId: string) {
 
 /** Nothing was published while the connections were down, so nothing is reported, and the lanes deliver again. */
 async function onLanesAfterDrop(roomId: string) {
-  const { reported, arrived, send, stopReporting } = atRest.get(roomId)!
+  const { reported, arrived, send, stopReporting } = entryOf(atRest, roomId)
   // Long enough to reconnect and read each lane's start.
   await sleep(1_000)
   const before = arrived()
@@ -1356,7 +1372,7 @@ async function onLanesBeforeRewind(roomId: string) {
 
 /** This server delivers past what the page's snapshot holds. */
 async function onLanesPastRewind(roomId: string) {
-  const entry = atRest.get(roomId)!
+  const entry = entryOf(atRest, roomId)
   const onlyHere = `room:flushed:${roomId}`
   Broadcast.subscribe(onlyHere, () => {})
   await Broadcast.publish(onlyHere, 'not on the replica')
@@ -1448,7 +1464,7 @@ async function onSeedAndChurn(roomId: string) {
   const churn: (Promise<unknown> | undefined)[] = []
   const timer = setInterval(() => {
     tick++
-    void members[tick % members.length]!.updateMeta({ n: tick })
+    void present(members[tick % members.length], 'a churning member').updateMeta({ n: tick })
     if (tick % 2 === 0) {
       churn.push(Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member)))
     } else {
@@ -1465,7 +1481,7 @@ async function onSeedAndChurn(roomId: string) {
 }
 
 async function onStopChurn(roomId: string) {
-  return await churning.get(roomId)!()
+  return await entryOf(churning, roomId)()
 }
 
 /** A view subscribes and a member publishes `count` messages of `bytes` bytes in the same turn: Redis's SUBSCRIBE round
@@ -1477,7 +1493,7 @@ async function onPublishWhileEstablishing(roomId: string, count: number, bytes: 
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
   room.subscribe((data, { from }) => {
-    if (from?.id === me.id) seen.push((data as string)[0]!)
+    if (from?.id === me.id) seen.push(present(textOf(data)[0], 'its first character'))
   })
   const publishes = Array.from({ length: count }, (_, i) =>
     me.publish(`${i + 1}`.padEnd(bytes, '.')).then(
@@ -1506,7 +1522,7 @@ async function onPublishOnServer(roomId: string) {
 }
 
 async function onServerPublisherReads(roomId: string) {
-  return serverPublishers.get(roomId)!.reads
+  return entryOf(serverPublishers, roomId).reads
 }
 
 /** A hidden participant the page holds. */
@@ -1527,10 +1543,10 @@ async function onWatchAsServer(roomId: string, names: string[], tracks: string[]
 
 /** The participant `onWatchAsServer()` joined as `name` takes the name `newName`. */
 async function onRenameWatcher(roomId: string, name: string, newName: string) {
-  await serverWatchers.get(`${roomId} ${name}`)!.setMeta({ name: newName })
+  await entryOf(serverWatchers, `${roomId} ${name}`).setMeta({ name: newName })
 }
 
 async function onWatcherLeaves(roomId: string, name: string) {
-  await serverWatchers.get(`${roomId} ${name}`)!.leave()
+  await entryOf(serverWatchers, `${roomId} ${name}`).leave()
   serverWatchers.delete(`${roomId} ${name}`)
 }

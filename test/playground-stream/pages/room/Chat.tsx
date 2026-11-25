@@ -2,6 +2,7 @@ export { Chat }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { onGetChat, onGetMembersChat, onSignIn, onWatchChat, onWhoIsOnline, onGetChatMember } from './Chat.telefunc'
+import { present } from '../../checked'
 
 type ChatRoom = Awaited<ReturnType<typeof onGetChat>>
 type Me = Awaited<ReturnType<ChatRoom['join']>>
@@ -14,7 +15,7 @@ function Chat() {
   useEffect(() => setParams(new URLSearchParams(location.search)), [])
   const chatId = params?.get('chat')
   if (!chatId) return null
-  const name = params!.get('as')!
+  const name = present(params?.get('as'), "the URL's as")
   if (joined) return <ChatView chat={joined.chat} me={joined.me} />
   const joinAsGuest = async () => {
     const chat = await onGetChat(chatId)

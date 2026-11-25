@@ -3,6 +3,7 @@ export { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose }
 import { Room, type LocalParticipant } from '@telefunc/room'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { addBackendFault } from '../../failing-backend'
+import { entryOf, present } from '../../checked'
 
 // The server's members, kept until their room's test ends.
 const members = new Map<string, LocalParticipant[]>()
@@ -19,11 +20,11 @@ function loseNext(roomId: string) {
 }
 
 async function onLoseLeave(roomId: string) {
-  const [stays] = members.get(roomId)!
+  const [stays] = entryOf(members, roomId)
   loseNext(roomId)
   // A removal, unlike the member's own leave(), reaches this server's view only through the control lane.
-  await Room.removeParticipant(roomId, { id: stays!.id })
-  members.get(roomId)!.push(await Room.join(roomId, { meta: { name: 'Next' } }))
+  await Room.removeParticipant(roomId, { id: present(stays, 'the member that stays').id })
+  entryOf(members, roomId).push(await Room.join(roomId, { meta: { name: 'Next' } }))
 }
 
 async function onLoseMeta(roomId: string) {

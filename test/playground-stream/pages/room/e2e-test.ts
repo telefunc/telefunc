@@ -27,6 +27,7 @@ import {
   canCutWire,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
+import { fieldOf, listOf, numberOf, present } from '../../checked'
 import type { NamedDemand } from './demandNames'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
@@ -211,7 +212,7 @@ function testRoomLimits() {
 
 /** Someone with the chat open in a browser of their own: `join` as a guest, `sign-in`, or `watch` unseen. */
 async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 'watch') {
-  const context = await page.context().browser()!.newContext()
+  const context = await present(page.context().browser(), 'the browser').newContext()
   const tab = await context.newPage()
   await navigate(`${getServerUrl()}/room?chat=${encodeURIComponent(chatId)}&as=${name}`, undefined, tab)
   await tab.click(`#chat-${how}`)
@@ -381,7 +382,7 @@ function testRoom() {
       expect(afterAttributes.length).toBe(201) // the created `topic`, then all 200 keys
       expect(afterAttributes[0]).toBe('topic')
       // One Room.setMeta() won whole: its own two keys, in its order.
-      const winner = roomMeta[0]![1] as number
+      const winner = numberOf(present(roomMeta[0], 'the first key')[1])
       expect(roomMeta).deep.equal([
         ['winner', winner],
         [`w${winner}`, true],
@@ -1010,9 +1011,10 @@ function testRoom() {
       roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
       expect(roomId).match(/^e2e-removed-identity:/)
     })
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const tabs = [await context.newPage(), await context.newPage()]
-    const tabResult = async (tab: (typeof tabs)[number]) => JSON.parse((await tab.textContent('#room-result'))!)
+    const tabResult = async (tab: (typeof tabs)[number]) =>
+      JSON.parse(present(await tab.textContent('#room-result'), 'the result'))
     try {
       for (const tab of tabs) {
         await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, tab)
@@ -1049,7 +1051,7 @@ function testRoom() {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-leave-causes')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const other = await context.newPage()
     await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
     await other.click('#test-room-join-only')
@@ -1108,7 +1110,7 @@ function testRoom() {
       await navigate(`${getServerUrl()}/room`)
       await page.click('#test-room-malformed')
       const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
-      const context = await page.context().browser()!.newContext()
+      const context = await present(page.context().browser(), 'the browser').newContext()
       try {
         const other = await context.newPage()
         await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
@@ -1132,7 +1134,7 @@ function testRoom() {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-connection')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const other = await context.newPage()
     await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
     await other.click('#test-room-join-only')
@@ -1220,7 +1222,7 @@ function testRoom() {
     if (!canCutWire()) return
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const tab = await context.newPage()
     try {
       await navigate(`${getServerUrl()}/room?chat=${encodeURIComponent(chatId)}&as=Bob`, undefined, tab)
@@ -1320,7 +1322,7 @@ function testRoom() {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-join-races')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'), { timeout: 10_000 })
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const other = await context.newPage()
     await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
     await other.click('#test-room-join-slowly')
@@ -1342,7 +1344,7 @@ function testRoom() {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-self-close')
     const { base } = await autoRetry(() => getResult<{ base: string }>('#room-result'), { timeout: 10_000 })
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     const other = await context.newPage()
     await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(`${base}:held`)}`, undefined, other)
     await other.click('#test-room-hold-room')
@@ -1601,7 +1603,9 @@ function testRoom() {
         { timeout: 40_000 },
       )
       // `['sse', 'ws']` starts on SSE and upgrades to a WebSocket.
-      const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+      const transports: string[] = JSON.parse(
+        present(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS, 'PUBLIC_ENV__CHANNEL_TRANSPORTS'),
+      )
       expect({ sseStreams, webSockets }).deep.equal({
         sseStreams: transports.includes('sse') ? 1 : 0,
         webSockets: transports.includes('ws') ? 1 : 0,
@@ -1741,9 +1745,11 @@ function testRoomDemand() {
     },
   )
   test("room: a view that watches beside the page's `me` while the page's connection upgrades to a WebSocket shows its publisher `me` throughout, never a watcher it can't name", async () => {
-    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    const transports: string[] = JSON.parse(
+      present(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS, 'PUBLIC_ENV__CHANNEL_TRANSPORTS'),
+    )
     if (!transports.includes('sse') || !transports.includes('ws')) return
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     try {
       // The page's WebSocket opens once the page watches: the upgrade then moves a watching page.
       const { promise: watching, resolve: watched } = Promise.withResolvers<void>()
@@ -1757,7 +1763,7 @@ function testRoomDemand() {
       await navigate(`${getServerUrl()}/room`, undefined, tab)
       await tab.click('#test-room-watchers-upgrade')
       await autoRetry(async () =>
-        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ watching: true }),
+        expect(JSON.parse(present(await tab.textContent('#room-result'), 'the result'))).deep.equal({ watching: true }),
       )
       watched()
       await autoRetry(() => expect(upgradedFrames).greaterThan(0))
@@ -1765,7 +1771,7 @@ function testRoomDemand() {
       await sleep(1000)
       await tab.click('#test-room-watchers-upgrade-check')
       await autoRetry(async () => {
-        const { reads } = JSON.parse((await tab.textContent('#room-result'))!) as { reads: NamedDemand[][] }
+        const reads = listOf(fieldOf(JSON.parse(present(await tab.textContent('#room-result'), 'the result')), 'reads'))
         expect(reads.length).greaterThan(0)
         for (const read of reads) expect(read).deep.equal([cam(['Me'], 1)])
       })
@@ -1774,9 +1780,11 @@ function testRoomDemand() {
     }
   })
   test("room: selfDelivery: false holds on the page's view of the room from another call after the page's connection upgrades to a WebSocket", async () => {
-    const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+    const transports: string[] = JSON.parse(
+      present(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS, 'PUBLIC_ENV__CHANNEL_TRANSPORTS'),
+    )
     if (!transports.includes('sse') || !transports.includes('ws')) return
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     try {
       // The page's WebSocket opens once `me` and the room are on the page: the upgrade then moves both.
       const { promise: ready, resolve: release } = Promise.withResolvers<void>()
@@ -1790,14 +1798,16 @@ function testRoomDemand() {
       await navigate(`${getServerUrl()}/room`, undefined, tab)
       await tab.click('#test-room-self-upgrade')
       await autoRetry(async () =>
-        expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal({ ready: true }),
+        expect(JSON.parse(present(await tab.textContent('#room-result'), 'the result'))).deep.equal({ ready: true }),
       )
       release()
       await autoRetry(() => expect(upgradedFrames).greaterThan(0))
       // The upgrade's reconcile had its chance to move every end of the page.
       await sleep(1000)
       await tab.click('#test-room-self-upgrade-publish')
-      await autoRetry(async () => expect(JSON.parse((await tab.textContent('#room-result'))!)).deep.equal(othersOnly))
+      await autoRetry(async () =>
+        expect(JSON.parse(present(await tab.textContent('#room-result'), 'the result'))).deep.equal(othersOnly),
+      )
     } finally {
       await context.close()
     }
@@ -1840,7 +1850,7 @@ function testRoomFailingBackend() {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-hiccups-departed')
     const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
-    const context = await page.context().browser()!.newContext()
+    const context = await present(page.context().browser(), 'the browser').newContext()
     try {
       const other = await context.newPage()
       await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
@@ -1987,7 +1997,7 @@ function testRoomSmallMemory() {
       expect(r.text.map(({ data }) => data)).deep.equal(['before', ...all.map(String)])
       expect(r.drawing.map(({ n }) => n)).deep.equal(all)
       for (const stream of [r.text, r.drawing]) {
-        expect(stream.map(({ seq }) => seq - stream[0]!.seq)).deep.equal(stream.map((_, i) => i))
+        expect(stream.map(({ seq }) => seq - present(stream[0], 'its first').seq)).deep.equal(stream.map((_, i) => i))
       }
       // Each gets its newest, the pointer's too though it went quiet first, and its seq jumps by as many as it missed.
       for (const [stream, count] of [
@@ -1996,7 +2006,8 @@ function testRoomSmallMemory() {
       ] as const) {
         expect(stream.length).lessThan(count)
         expect(stream.at(-1)?.n).toBe(count - 1)
-        expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => stream[0]!.seq - stream[0]!.n))
+        const first = present(stream[0], 'its first')
+        expect(stream.map(({ n, seq }) => seq - n)).deep.equal(stream.map(() => first.seq - first.n))
       }
     },
   )
@@ -2018,7 +2029,7 @@ function testRoomSmallMemory() {
       )
       expect(r).deep.include({ closed: false, myCause: null })
       expect(plain).toBe('published')
-      const cursor = r.cursor!
+      const cursor = present(r.cursor, 'the cursor frames')
       expect(cursor.length).lessThan(18)
       expect(cursor.at(-1)?.n).toBe(15)
       // The order they were published in: each arrives in it, its seq jumping by as many as were skipped before it.
@@ -2030,7 +2041,7 @@ function testRoomSmallMemory() {
       ]
       expect(cursor.map(({ n }) => n)).toContain('plain')
       expect(cursor.map(({ n, seq }) => seq - sent.indexOf(n))).deep.equal(
-        cursor.map(() => cursor[0]!.seq - sent.indexOf(cursor[0]!.n)),
+        cursor.map(() => present(cursor[0], 'its first').seq - sent.indexOf(present(cursor[0], 'its first').n)),
       )
       expect(cursor.map(({ n }) => sent.indexOf(n))).deep.equal(
         cursor.map(({ n }) => sent.indexOf(n)).sort((a, b) => a - b),

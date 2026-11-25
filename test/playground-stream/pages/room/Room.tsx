@@ -4,6 +4,19 @@ import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { abort, close, withContext } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
+  byteAt,
+  messageOf,
+  nameOf,
+  numberAt,
+  numberOf,
+  optionalTextOf,
+  present,
+  searchParam,
+  textAt,
+  textListOf,
+  textOf,
+} from '../../checked'
+import {
   onCreateRoom,
   onJoinSpeaker,
   onSpeakerPublishes,
@@ -226,7 +239,7 @@ async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
 
 /** Joins the room named in the URL as `Mallory`, then sends what no client library sends, as a hostile page can. */
 async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Promise<void> {
-  const roomId = new URLSearchParams(location.search).get('roomId')!
+  const roomId = searchParam('roomId')
   const room = await onGetRoom(roomId)
   keepReachable(room)
   // The room's own channel, past the API that checks what goes on it: its handle holds it, as its state's owner.
@@ -250,7 +263,7 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
     const sendReply = end._sendReply.bind(end)
     end._sendReply = (reply, failure) =>
       sendReply(
-        reply.then((dmReply) => ({ ...(dmReply as object), reply: 'bogus' })),
+        reply.then((dmReply) => Object.assign({}, dmReply, { reply: 'bogus' })),
         failure,
       )
   }
@@ -297,11 +310,13 @@ function Room() {
     const roomId = await createRoomId(`tracks-${heavy}`)
     const view = await onGetRoom(roomId)
     const text: { data: string; seq: number }[] = []
-    view.subscribe((data, info) => text.push({ data: data as string, seq: info.seq }))
+    view.subscribe((data, info) => text.push({ data: textOf(data), seq: info.seq }))
     type Frame = { n: number; seq: number }
-    const tracks = { pointer: [] as Frame[], cursor: [] as Frame[], drawing: [] as Frame[] }
+    const tracks: Record<'pointer' | 'cursor' | 'drawing', Frame[]> = { pointer: [], cursor: [], drawing: [] }
     for (const track of ['pointer', 'cursor', 'drawing'] as const) {
-      view.subscribeBinary((_data, info) => tracks[track].push({ n: info.meta!.n as number, seq: info.seq }), { track })
+      view.subscribeBinary((_data, info) => tracks[track].push({ n: numberAt(info.meta, 'n'), seq: info.seq }), {
+        track,
+      })
     }
     let closed = false
     view.onClose(() => (closed = true))
@@ -333,8 +348,8 @@ function Room() {
     const frames: number[] = []
     const lossy: number[] = []
     room.subscribe((data) => text.push(data))
-    room.subscribeBinary((data) => frames.push(data[0]!), { track: 'cam' })
-    room.subscribeBinary((data) => lossy.push(data[0]!), { track: 'cursor' })
+    room.subscribeBinary((data) => frames.push(byteAt(data)), { track: 'cam' })
+    room.subscribeBinary((data) => lossy.push(byteAt(data)), { track: 'cursor' })
     const other = await room.join({ meta: { name: 'Other' } })
     const otherSends = async (data: string, frame: number) => {
       await other.publish(data)
@@ -381,7 +396,7 @@ function Room() {
         lobby.subscribe(() => calls++, { signal: lifetime.signal })
         lobby.onJoin(() => calls++, { signal: lifetime.signal })
         const me = await lobby.join({ meta: { name: 'Alice' } })
-        const remote = lobby.getParticipant(me.id)!
+        const remote = present(lobby.getParticipant(me.id), 'Alice in the lobby')
         remote.subscribe(() => calls++, { signal: lifetime.signal })
         me.listen(() => calls++, { signal: lifetime.signal })
         lifetime.abort()
@@ -400,14 +415,16 @@ function Room() {
         await bob.publishBinary(new Uint8Array([3]), { track: 'camera' })
         const received: string[] = []
         for (let next = pending; received.length < 5; next = stream.next()) {
-          const message = (await next).value!
+          const step = await next
+          if (step.done) throw new Error('The messages ended')
+          const message = step.value
           received.push(
             message.type === 'text'
-              ? `text ${message.info.from.meta.name}: ${message.data}`
+              ? `text ${present(message.info.from, 'its sender').meta.name}: ${message.data}`
               : `binary ${message.info.from.meta.name} ${message.info.track}: ${message.data} ${JSON.stringify(message.info.meta)}`,
           )
         }
-        await stream.return!()
+        await present(stream.return, "the messages' return").call(stream)
         const stopped = (await stream.next()).done
         let onServer: string[] = []
         await pollUntil(async () => {
@@ -443,7 +460,7 @@ function Room() {
         lobby.onLeave((m) => events.push(`leave:${m.meta.name}`))
         const received: Array<{ text: unknown; from: unknown }> = []
         lobby.subscribe((data, { from }) => {
-          received.push({ text: (data as { text: string }).text, from: from?.meta.name })
+          received.push({ text: textAt(data, 'text'), from: from?.meta.name })
         })
 
         const snapBefore = lobby.snapshot()
@@ -453,7 +470,7 @@ function Room() {
         const me = await lobby.join({ meta: { name: 'Alice' } })
         const countAfterJoin = lobby.count
         const updates: unknown[] = []
-        const alice = lobby.getParticipant(me.id)!
+        const alice = present(lobby.getParticipant(me.id), 'Alice in the lobby')
         alice.onChange(() => updates.push(alice.meta.score))
 
         const ack = await me.publish({ text: 'hello' })
@@ -490,7 +507,7 @@ function Room() {
 
         const late = await onGetRoom(roomId)
         const received: string[] = []
-        late.subscribe((data) => received.push((data as { text: string }).text))
+        late.subscribe((data) => received.push(textAt(data, 'text')))
 
         await pollUntil(() => ({ result: { received }, done: received.length >= 1 }))
         releasePubView()
@@ -500,7 +517,7 @@ function Room() {
         const [roomId, observer] = await createRoom('participant')
         const received: Array<{ text: unknown; from: unknown }> = []
         observer.subscribe((data, { from }) => {
-          received.push({ text: (data as { text: string }).text, from: from?.meta.name })
+          received.push({ text: textAt(data, 'text'), from: from?.meta.name })
         })
 
         const me = await onJoinAsServer(roomId, 'Bob')
@@ -549,16 +566,16 @@ function Room() {
         videoRoom.subscribeBinary((data, info) => {
           frames.push({
             size: data.byteLength,
-            firstByte: data[0]!,
+            firstByte: byteAt(data),
             fromSelf: info.from.id === me.id,
             track: info.track,
             meta: info.meta,
           })
         })
         const cameraOnly: number[] = []
-        videoRoom.subscribeBinary((data) => cameraOnly.push(data[0]!), { track: 'camera' })
+        videoRoom.subscribeBinary((data) => cameraOnly.push(byteAt(data)), { track: 'camera' })
         const defaultOnly: number[] = []
-        videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: 'main' })
+        videoRoom.subscribeBinary((data) => defaultOnly.push(byteAt(data)), { track: 'main' })
 
         for (let i = 0; i < 3; i++) {
           await me.publishBinary(new Uint8Array(64).fill(i + 1))
@@ -625,14 +642,16 @@ function Room() {
           () => true,
           () => false,
         )
-        // Cast past the type to prove the generated shield rejects hostile ingress.
-        const badError = await me.publish({ kind: 'chat' } as unknown as { kind: 'chat'; text: string }).then(
+        // A hostile page publishes past the type, as a JavaScript caller can: the generated shield rejects it.
+        // @ts-expect-error The message has no `text`.
+        const badError = await me.publish({ kind: 'chat' }).then(
           () => null,
           (err: Error) => err.name,
         )
 
         const trackBadError = await me
-          .publish({ kind: 'chat' } as unknown as { kind: 'chat'; text: string }, { track: 'cursor' })
+          // @ts-expect-error The message has no `text`.
+          .publish({ kind: 'chat' }, { track: 'cursor' })
           .then(
             () => null,
             (err: Error) => err.name,
@@ -672,7 +691,7 @@ function Room() {
         const systemMessages: unknown[] = []
         room.subscribe((data, { from }) => {
           if (from === null) systemMessages.push(data)
-          else messages.push({ data, from: from.meta.name as string })
+          else messages.push({ data, from: textOf(from.meta.name) })
         })
         const frames: number[][] = []
         room.subscribeBinary((data) => frames.push([...data]))
@@ -693,8 +712,8 @@ function Room() {
             frames,
             systemMessages,
             dms,
-            reuserTags: (reuser.meta.tags as string[] | undefined) ?? null,
-            roomTags: (room.meta.tags as string[] | undefined) ?? null,
+            reuserTags: reuser.meta.tags === undefined ? null : textListOf(reuser.meta.tags),
+            roomTags: room.meta.tags === undefined ? null : textListOf(room.meta.tags),
           }
           return {
             result: state,
@@ -756,9 +775,9 @@ function Room() {
         const roomId = await createRoomId('call-order')
         const room = await onOpenSlowGuardRoom(roomId)
         const texts: number[] = []
-        room.subscribe((data) => texts.push(data as number))
+        room.subscribe((data) => texts.push(numberOf(data)))
         const frames: number[] = []
-        room.subscribeBinary((data) => frames.push(data[0]!))
+        room.subscribeBinary((data) => frames.push(byteAt(data)))
         const me = await room.join({ meta: { name: 'Fast' } })
 
         const numbers = Array.from({ length: 20 }, (_, i) => i)
@@ -840,11 +859,12 @@ function Room() {
           Array.from({ length: ROOM_VIEW_LIMIT + 1 }, (_, i) => view.join({ meta: { name: `m${i}` } })),
         )
         const joined = joins.flatMap((join) => (join.status === 'fulfilled' ? [join.value] : []))
-        const errors = joins.flatMap((join) => (join.status === 'rejected' ? [(join.reason as Error).message] : []))
+        const errors = joins.flatMap((join) => (join.status === 'rejected' ? [messageOf(join.reason)] : []))
         // The members it joined keep working.
-        await joined[0]!.updateMeta({ still: true })
+        const first = present(joined[0], 'a joined member')
+        await first.updateMeta({ still: true })
         const count = (await onListParticipantNames(roomId)).length
-        setResult(JSON.stringify({ joined: joined.length, errors, count, still: joined[0]!.meta.still }))
+        setResult(JSON.stringify({ joined: joined.length, errors, count, still: first.meta.still }))
         releaseView()
       })}
 
@@ -859,7 +879,7 @@ function Room() {
           ),
         )
         const errors = publishes.flatMap((publish) =>
-          publish.status === 'rejected' ? [(publish.reason as Error).message] : [],
+          publish.status === 'rejected' ? [messageOf(publish.reason)] : [],
         )
         // Its tracks and the default track keep working, and a late view gets each named track's retained frame.
         const kept = publishes.findIndex((publish) => publish.status === 'fulfilled')
@@ -991,7 +1011,7 @@ function Room() {
       })}
 
       {scenario('join-only', null, 'Join the room named in the URL', async () => {
-        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const roomId = searchParam('roomId')
         const room = await onGetRoom(roomId)
         keepReachable(room)
         const me = await room.join({ meta: { name: 'Closer' } })
@@ -1197,7 +1217,7 @@ function Room() {
       })}
 
       {scenario('join-slowly', null, 'Join the room named in the URL, slowly', async () => {
-        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const roomId = searchParam('roomId')
         const room = await onGetSlowJoinRoom(roomId)
         keepReachable(room)
         await room.join({ meta: { name: 'Closer', slow: true } })
@@ -1240,7 +1260,7 @@ function Room() {
               unsubscribe()
               unsubscribeInOnClose = 'returned'
             } catch (err) {
-              unsubscribeInOnClose = (err as Error).name
+              unsubscribeInOnClose = nameOf(err)
             }
           })
           const close = await outcome(onCloseRoom(closedId))
@@ -1301,7 +1321,7 @@ function Room() {
       })}
 
       {scenario('hold-room', null, 'Create the room named in the URL and keep its view', async () => {
-        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const roomId = searchParam('roomId')
         keepReachable(await onCreateRoomHeld(roomId))
         setResult(JSON.stringify('holding'))
       })}
@@ -1493,10 +1513,13 @@ function Room() {
           ),
         )
         // The third's arrival drops the oldest, whose acknowledged send rejects.
-        const first = await Promise.race([sends[0]!, new Promise((resolve) => setTimeout(() => resolve('held'), 5000))])
+        const first = await Promise.race([
+          present(sends[0], 'the first send'),
+          new Promise((resolve) => setTimeout(() => resolve('held'), 5000)),
+        ])
         const got: string[] = []
         late.listen((data) => {
-          got.push((data as string)[0]!)
+          got.push(present(textOf(data)[0], 'its first character'))
         })
         setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
       })}
@@ -1549,7 +1572,10 @@ function Room() {
           room.join({ meta: { name: 'C' } }),
         ])
         const tile = <P extends { id: string }>(participants: readonly P[], id: string) =>
-          participants.find((p) => p.id === id)!
+          present(
+            participants.find((p) => p.id === id),
+            `participant ${id}`,
+          )
         const before = room.snapshot().participants
         await b.updateMeta({ status: 'away' })
         const after = room.snapshot().participants
@@ -1676,8 +1702,8 @@ function Room() {
         await me.updateMeta({ score: undefined }) // a key set to undefined is removed
 
         await pollUntil(() => {
-          const meta = (remote?.meta ?? {}) as { name?: string; score?: number; title?: string }
-          const localMeta = me.meta as { name?: string; score?: number; title?: string }
+          const meta = remote?.meta ?? {}
+          const localMeta = me.meta
           return {
             result: {
               name: meta.name ?? null,
@@ -1891,9 +1917,10 @@ function Room() {
         let changes = 0
         room.onChange(() => changes++)
         const before = room.snapshot()
-        tag.set!(ann.id, 'a')
-        tag.set!(bob.id, 'b')
-        tag.set!(ann.id, 'c')
+        const setTag = present(tag.set, "the field's set")
+        setTag(ann.id, 'a')
+        setTag(bob.id, 'b')
+        setTag(ann.id, 'c')
         // After the microtask the first change queued, and before anything else can arrive.
         await Promise.resolve()
         setResult(JSON.stringify({ changes, changed: room.snapshot() !== before }))
@@ -2001,7 +2028,7 @@ function Room() {
 
         const subscribe = (view: RoomView) => {
           const texts: string[] = []
-          view.subscribe((data) => texts.push((data as { t: string }).t))
+          view.subscribe((data) => texts.push(textAt(data, 't')))
           return texts
         }
         const result = {
@@ -2032,26 +2059,17 @@ function Room() {
         await a.send(b.id, 'dm')
 
         await pollUntil(async () => {
-          const auditLog = (await onGetAudit(roomId)) as Array<{
-            kind: string
-            name?: string
-            to?: string
-            seq?: number
-            joinedAt?: number
-            data?: unknown
-          }>
-          const joinA = auditLog.find((e) => e.kind === 'join' && e.name === 'A')
+          const auditLog = await onGetAudit(roomId)
+          const joins = auditLog.filter((e) => e.kind === 'join')
+          const joinA = joins.find((e) => e.name === 'A')
           const publish = auditLog.find((e) => e.kind === 'publish')
           const send = auditLog.find((e) => e.kind === 'send')
           return {
             result: {
-              joins: auditLog
-                .filter((e) => e.kind === 'join')
-                .map((e) => e.name)
-                .sort(),
+              joins: joins.map((e) => e.name).sort(),
               joinHasTs: typeof joinA?.joinedAt === 'number',
-              publish: publish ? { name: publish.name, data: publish.data, seqOk: (publish.seq ?? 0) > 0 } : null,
-              send: send ? { name: send.name, to: send.to, seqOk: (send.seq ?? 0) > 0 } : null,
+              publish: publish ? { name: publish.name, data: publish.data, seqOk: publish.seq > 0 } : null,
+              send: send ? { name: send.name, to: send.to, seqOk: send.seq > 0 } : null,
             },
             done: !!joinA && !!publish && !!send,
           }
@@ -2073,7 +2091,7 @@ function Room() {
         remoteX.subscribeBinary((data, { from }) => xBin.push(`${from.meta.name}:${data[0]}`), { track: 'main' })
         // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
         const all: string[] = []
-        observer.subscribe((data) => all.push(data as string))
+        observer.subscribe((data) => all.push(textOf(data)))
 
         await x.publish('x1')
         await y.publish('y1')
@@ -2098,11 +2116,11 @@ function Room() {
         const remoteX = await getParticipantWhenJoined(observer, x.id)
         const first: string[] = []
         const second: string[] = []
-        const off = remoteX.subscribe((data) => first.push(data as string))
+        const off = remoteX.subscribe((data) => first.push(textOf(data)))
         await pollUntil(() => ({ done: first.length >= 1 }))
         // What a React effect over `[remoteX]` does when it runs again.
         off()
-        remoteX.subscribe((data) => second.push(data as string))
+        remoteX.subscribe((data) => second.push(textOf(data)))
         const { promise: published, resolve } = Promise.withResolvers<void>()
         publishToResubscribed = resolve
         setResult(JSON.stringify({ ready: true }))
@@ -2123,7 +2141,7 @@ function Room() {
         const observer = await onGetRoom(roomId)
         const remoteX = await getParticipantWhenJoined(observer, x.id)
         const received: string[] = []
-        remoteX.subscribe((data) => received.push(data as string))
+        remoteX.subscribe((data) => received.push(textOf(data)))
         await x.publish('live')
         await x.publish('end')
         await pollUntil(() => ({ result: { received }, done: received.includes('end') }))
@@ -2273,7 +2291,7 @@ function Room() {
 
         await ally.send(bob.id, 'early')
         const held: string[] = []
-        bob.listen((data) => held.push(data as string))
+        bob.listen((data) => held.push(textOf(data)))
 
         await pollUntil(() => ({ result: { held }, done: held.includes('early') }))
       })}
@@ -2303,12 +2321,12 @@ function Room() {
         const room = await onGetRoom(roomId)
         const me = await room.join({ meta: { name: 'Solo' }, selfDelivery: false })
         const mine: string[] = []
-        room.subscribe((data) => mine.push(data as string))
+        room.subscribe((data) => mine.push(textOf(data)))
 
         await me.publish('hi')
 
         await pollUntil(async () => {
-          const theirs = (await onGetWatched(roomId)) as string[]
+          const theirs = textListOf(await onGetWatched(roomId))
           // `theirs` arriving proves the publish propagated, so `mine` staying empty is meaningful.
           return { result: { mine, theirs, selfDelivery: me.selfDelivery }, done: theirs.includes('hi') }
         })
@@ -2349,14 +2367,14 @@ function Room() {
 
           const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
           const mine: string[] = []
-          room.subscribe((data) => mine.push(data as string))
+          room.subscribe((data) => mine.push(textOf(data)))
           await me.publish('from-me')
 
           const notMe = await room.join({ meta: { name: 'NotMe' } })
           await notMe.publish('from-notme')
 
           await pollUntil(async () => {
-            const theirs = (await onGetWatched(roomId)) as string[]
+            const theirs = textListOf(await onGetWatched(roomId))
             // Gate on the client seeing notMe's frame (published last) and the watcher seeing me's.
             return {
               result: { mine, theirs, selfDelivery: me.selfDelivery },
@@ -2430,7 +2448,7 @@ function Room() {
         const other = await view.join({ meta: { name: 'Other' } })
         await other.publish('other')
         await pollUntil(async () => {
-          const heard = (await onGetWatched(roomId)) as string[]
+          const heard = textListOf(await onGetWatched(roomId))
           return { result: { heard }, done: heard.includes('other') }
         })
       })}
@@ -2480,7 +2498,7 @@ function Room() {
         const room = await onGetRoom(roomId)
         await room.join({ meta: { name: 'R' } })
         const updates: string[] = []
-        room.onChange(() => updates.push((room.meta as { topic?: string }).topic ?? ''))
+        room.onChange(() => updates.push(optionalTextOf(room.meta.topic) ?? ''))
 
         await onUpdateRoom(roomId, { topic: 'updated' })
         const secondRoomId = `${base}:b`
@@ -2492,7 +2510,7 @@ function Room() {
           return {
             result: {
               updates,
-              topic: (room.meta as { topic?: string }).topic ?? null,
+              topic: optionalTextOf(room.meta.topic) ?? null,
               expectedIds: [roomId, secondRoomId],
               listed,
               sameId: same.id === roomId,
@@ -2506,7 +2524,11 @@ function Room() {
       {scenario('removed', "Remove the page's participant", 'Alone three ways, then one of two', async () => {
         /** The view's messages and closes, and the room as it is. */
         const watch = (room: RoomView) => {
-          const seen = { text: [] as unknown[], closes: 0, closeCause: null as unknown }
+          const seen: { text: unknown[]; closes: number; closeCause: unknown } = {
+            text: [],
+            closes: 0,
+            closeCause: null,
+          }
           room.subscribe((data) => seen.text.push(data))
           room.onClose((cause) => {
             seen.closes++
@@ -2604,12 +2626,12 @@ function Room() {
         Remove Multi
       </button>
       {scenario('removed-identity-held', null, 'Hold Multi in the room named in the URL', async () => {
-        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const roomId = searchParam('roomId')
         const room = await onGetRoom(roomId)
         const me = await onJoinAsServer(roomId, 'Multi')
         keepReachable(room)
         keepReachable(me)
-        const seen = { text: [] as unknown[], closes: 0, cause: null as unknown }
+        const seen: { text: unknown[]; closes: number; cause: unknown } = { text: [], closes: 0, cause: null }
         const show = () => setResult(JSON.stringify({ ...seen, isClosed: room.isClosed }))
         room.subscribe((data) => {
           seen.text.push(data)
@@ -2686,8 +2708,8 @@ function Room() {
           const late = await onGetRoom(roomId)
           const text: string[] = []
           const frames: Array<[string, number, unknown]> = []
-          late.subscribe((data) => text.push(data as string))
-          late.subscribeBinary((data, info) => frames.push([info.track, data[0]!, info.from.meta.name]))
+          late.subscribe((data) => text.push(textOf(data)))
+          late.subscribeBinary((data, info) => frames.push([info.track, byteAt(data), info.from.meta.name]))
           await a.publish('live')
           await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
           await pollUntil(async () => {
@@ -2696,7 +2718,7 @@ function Room() {
           })
 
           const later: string[] = []
-          late.subscribe((data) => later.push(data as string))
+          late.subscribe((data) => later.push(textOf(data)))
           await a.publish('live-2')
           await pollUntil(async () => {
             const server = await onGetWatchedTrack(roomId)
@@ -2722,7 +2744,7 @@ function Room() {
         const late = await onGetRoom(roomId)
         const frames: Array<[string, number, unknown]> = []
         const left: unknown[] = []
-        late.subscribeBinary((data, info) => frames.push([info.track, data[0]!, info.from.meta.name ?? null]))
+        late.subscribeBinary((data, info) => frames.push([info.track, byteAt(data), info.from.meta.name ?? null]))
         late.onLeave((member) => left.push(member.meta.name))
         await onWatchEveryFrame(roomId)
         // The page's replay and the server view's each wait on the retained read.
@@ -2762,7 +2784,7 @@ function Room() {
         handed.room.onJoin((m) => handedEvents.push(`join:${m.meta.name}`))
         handed.room.onLeave((m) => handedEvents.push(`leave:${m.meta.name}`))
         const memberEvents: string[] = []
-        const bot = handed.member!
+        const bot = present(handed.member, 'the handed member')
         bot.onChange(() => memberEvents.push(`change:${bot.meta.name}`))
         bot.onLeave((cause) => memberEvents.push(`leave:${cause.type}`))
         const counts = [view.count, handed.room.count]
@@ -2792,7 +2814,7 @@ function Room() {
         const { room, members } = await onReturnDeparted(await createRoomId('departed-returned'))
         const causes = members.map((member) => {
           let cause: string | null = null
-          member!.onLeave(({ type }) => (cause = type))
+          present(member, 'a returned member').onLeave(({ type }) => (cause = type))
           return cause
         })
         const { participants, count } = room.snapshot()
@@ -2801,7 +2823,9 @@ function Room() {
             names: participants.map(({ meta }) => meta.name),
             count,
             causes,
-            listed: members.map((member) => participants.some(({ id }) => id === member!.id)),
+            listed: members.map((member) =>
+              participants.some(({ id }) => id === present(member, 'a returned member').id),
+            ),
           }),
         )
       })}
@@ -2818,7 +2842,7 @@ function Room() {
 
         const closed = await onCloseRoomWithMember(`e2e-proxy-closed:${crypto.randomUUID()}`)
         const causes: unknown[] = []
-        closed.member!.onLeave((cause) => causes.push(cause))
+        present(closed.member, "the closed room's member").onLeave((cause) => causes.push(cause))
         setResult(
           JSON.stringify({
             sameMethods,
@@ -2869,10 +2893,12 @@ function Room() {
         const remote = await getParticipantWhenJoined(viewer, pub.id)
         const frames: Record<string, number[]> = {}
         const offs = tracks.map((track) =>
-          remote.subscribeBinary((data, info) => (frames[info.track!] ??= []).push(data[0]!), { track }),
+          remote.subscribeBinary((data, info) => (frames[present(info.track, 'its track')] ??= []).push(byteAt(data)), {
+            track,
+          }),
         )
         const defaultTrack: number[] = []
-        viewer.subscribeBinary((data) => defaultTrack.push(data[0]!), { track: 'main' })
+        viewer.subscribeBinary((data) => defaultTrack.push(byteAt(data)), { track: 'main' })
         await pollUntil(() => ({
           done:
             demand.some(([track]) => track === 't999') &&
@@ -2887,7 +2913,7 @@ function Room() {
         await pollUntil(() => ({
           done: tracks.every((track) => frames[track]?.length === 2) && defaultTrack.length > 0,
         }))
-        offs[0]!()
+        present(offs[0], "the first track's unsubscribe")()
         await pollUntil(() => ({ done: demand.some(([track, wanted]) => track === 't0' && !wanted) }))
 
         const many = await onGetRoom(roomId)
@@ -2899,7 +2925,7 @@ function Room() {
             many.subscribeBinary(() => {}, { track: 'past' })
             return null
           } catch (err) {
-            return (err as Error).message
+            return messageOf(err)
           }
         })()
         const manyWanted = () => pub.demand.filter(({ track }) => track.startsWith('x')).length
@@ -2907,7 +2933,7 @@ function Room() {
         await pollUntil(() => ({ done: manyWanted() === 4_096 }))
         setResult(
           JSON.stringify({
-            inOrder: tracks.filter((track) => frames[track]!.join() === '1,2').length,
+            inOrder: tracks.filter((track) => frames[track]?.join() === '1,2').length,
             defaultTrack,
             demand: demand.filter(([track]) => track === 'main' || track === 't0' || track === 't999'),
             wanted: new Set(
@@ -2928,7 +2954,7 @@ function Room() {
         const messages: string[] = []
         const leaves: string[] = []
         let closed = false
-        view.subscribe((data) => messages.push(data as string))
+        view.subscribe((data) => messages.push(textOf(data)))
         view.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
         view.onClose(() => (closed = true))
         const me = await view.join({ meta: { name: 'Me' } })
@@ -2943,7 +2969,7 @@ function Room() {
             roomId,
             messages,
             leaves: leaves.sort(),
-            topic: (view.meta as { topic?: string }).topic ?? null,
+            topic: optionalTextOf(view.meta.topic) ?? null,
             myCause,
             closed,
           }),
@@ -2961,8 +2987,8 @@ function Room() {
           setResult(
             JSON.stringify({
               roomId,
-              topic: (meta as { topic?: string }).topic ?? null,
-              filler: (srv?.meta.filler as string | undefined)?.trim() ?? null,
+              topic: optionalTextOf(meta.topic) ?? null,
+              filler: optionalTextOf(srv?.meta.filler)?.trim() ?? null,
             }),
           )
         }
@@ -2973,7 +2999,7 @@ function Room() {
       {scenario('overflow', 'Offline past maxMemory', 'Let go with ChannelOverflowError', async () => {
         const [roomId, view] = await createRoom('overflow')
         const seen: string[] = []
-        view.subscribe((data) => seen.push((data as string).trim()))
+        view.subscribe((data) => seen.push(textOf(data).trim()))
         let closed = false
         view.onClose(() => (closed = true))
         const me = await view.join({ meta: { name: 'Me' } })
@@ -2991,7 +3017,7 @@ function Room() {
         const [roomId] = await createRoom('participant-overflow')
         const me = await onJoinAsServer(roomId, 'Bob')
         const got: string[] = []
-        me.listen((data) => got.push((data as string).trim()))
+        me.listen((data) => got.push(textOf(data).trim()))
         let myCause: unknown = null
         me.onLeave((cause) => (myCause = cause))
         await onParticipantOverflow(roomId, me.id)
@@ -3004,7 +3030,7 @@ function Room() {
       {scenario('behind', null, 'Connected, behind what the server holds', async () => {
         const [roomId, view] = await createRoom('behind')
         const seen: number[] = []
-        view.subscribe((data) => seen.push(Number.parseInt(data as string)))
+        view.subscribe((data) => seen.push(Number.parseInt(textOf(data))))
         let closed = false
         view.onClose(() => (closed = true))
         await view.join({ meta: { name: 'Me' } })
@@ -3022,7 +3048,7 @@ function Room() {
             publish()
             return null
           } catch (err) {
-            return (err as Error).message
+            return messageOf(err)
           }
         }
         setResult(
@@ -3076,7 +3102,7 @@ function Room() {
         const roomId = await createRoomId('reliable-gap')
         const view = await onOpenReliableGapRoom(roomId)
         const received: string[] = []
-        view.subscribe((data) => received.push((data as string).split(' ')[0]!))
+        view.subscribe((data) => received.push(present(textOf(data).split(' ')[0], 'its first word')))
         let closed = false
         view.onClose(() => (closed = true))
         const me = await view.join({ meta: { name: 'Me' } })
@@ -3098,7 +3124,7 @@ function Room() {
         const roomId = await createRoomId('text-cursor')
         const view = await onGetRoom(roomId)
         const cursor: { n: number; seq: number }[] = []
-        view.subscribe((data, info) => cursor.push({ n: (data as { n: number }).n, seq: info.seq }), {
+        view.subscribe((data, info) => cursor.push({ n: numberAt(data, 'n'), seq: info.seq }), {
           track: 'cursor',
         })
         let closed = false
@@ -3133,7 +3159,7 @@ function Room() {
       {scenario('lossy-uplink', null, "Lossy frames waiting for the page's uplink", async () => {
         const [, view] = await createRoom('lossy-uplink')
         const seen: number[] = []
-        view.subscribeBinary((_data, info) => seen.push(info.meta!.n as number), { track: 'cursor' })
+        view.subscribeBinary((_data, info) => seen.push(numberAt(info.meta, 'n')), { track: 'cursor' })
         const me = await view.join({ meta: { name: 'Me' } })
         // A link that keeps up takes every frame: they wait while the page reconnects.
         await onCutWire()
@@ -3160,7 +3186,7 @@ function Room() {
         const [roomId, view] = await createRoom('slow-link')
         await onWatchRoom(roomId)
         const received: number[] = []
-        view.subscribe((data) => received.push(Number.parseInt(data as string)))
+        view.subscribe((data) => received.push(Number.parseInt(textOf(data))))
         const me = await view.join({ meta: { name: 'Me' }, selfDelivery: false })
         await onRoomBurst(roomId, 40, 16_000)
         await pollUntil(() => ({ done: received.length >= 40 }))
@@ -3188,7 +3214,7 @@ function Room() {
         await onSystemPublish(roomId, 'system')
         await me.publish('b')
         const received: string[] = []
-        tailed.subscribe((data) => received.push(data as string))
+        tailed.subscribe((data) => received.push(textOf(data)))
         await pollUntil(() => ({ done: received.includes('b') }))
         const flushed = [...received]
 
@@ -3198,7 +3224,7 @@ function Room() {
         // `tailed` gets it.
         await pollUntil(() => ({ done: received.includes('n299') }))
         const kept: string[] = []
-        capped.subscribe((data) => kept.push(data as string))
+        capped.subscribe((data) => kept.push(textOf(data)))
         await pollUntil(() => ({ done: kept.includes('n299') }))
         setResult(JSON.stringify({ received: flushed, kept }))
       })}
@@ -3211,7 +3237,7 @@ function Room() {
         setResult(JSON.stringify({ waiting: true }))
         await new Promise((resolve) => setTimeout(resolve, 61_000))
         const received: string[] = []
-        tailed.subscribe((data) => received.push(data as string))
+        tailed.subscribe((data) => received.push(textOf(data)))
         await me.updateMeta({ ready: true }) // same-channel ack orders the subscription before the live publish
         await me.publish('live')
         await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
@@ -3277,7 +3303,7 @@ function Room() {
 
         const [laneRoomId, laneView] = await createRoom('hiccup-lane')
         const got: string[] = []
-        laneView.subscribe((data) => got.push(data as string))
+        laneView.subscribe((data) => got.push(textOf(data)))
         const speaker = await laneView.join({ meta: { name: 'Speaker' } })
         await speaker.publish('before')
         await pollUntil(() => ({ done: got.includes('before') }))
@@ -3345,7 +3371,7 @@ function Room() {
         await onSeedChurn(roomId)
         let names: string[] = []
         await pollUntil(async () => {
-          names = view.getParticipants().map((member) => member.meta.name as string)
+          names = view.getParticipants().map((member) => textOf(member.meta.name))
           return { done: names.includes('late') }
         }, 300)
         const roster = {

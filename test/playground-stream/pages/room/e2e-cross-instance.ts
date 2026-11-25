@@ -9,6 +9,7 @@ export {
 }
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
+import { fieldOf, listOf, numberOf, present, recordOf, textListOf, textOf } from '../../checked'
 import {
   dropRedisConnections,
   getRedisChannels,
@@ -119,7 +120,7 @@ function testRedisOutages() {
         for (const instance of ['a', 'b', 'd'] as const) {
           const { members } = await view(instance, roomId)
           expect(Object.keys(members)).to.include.members(['Alice', 'Bob', 'Dave'])
-          expect(members.Bob!.score).toBe(2)
+          expect(present(members.Bob, 'Bob').score).toBe(2)
         }
       })
       // Each server reports the outage of its subscriber connection, and b that it can't count what 'lost' took with it.
@@ -340,12 +341,13 @@ function testRedisClusterReshard() {
 
 function testRedisInstallAgain() {
   test('broadcast: installRedis() called again for the same Redis keeps the servers delivering, and for another database throws', async () => {
-    const installAgain = async (db: number) =>
-      (await (
+    const installAgain = async (db: number) => {
+      const answer: unknown = await (
         await fetch(`${getServerUrl()}/api/redis/install-again?bench_instance=a&db=${db}`, { method: 'POST' })
-      ).json()) as {
-        error: string | null
-      }
+      ).json()
+      const error = fieldOf(answer, 'error')
+      return { error: error === null ? null : textOf(error) }
+    }
     expect(await installAgain(0)).deep.equal({ error: null })
     expect((await installAgain(1)).error).contains('Install one backend per process')
 
@@ -457,15 +459,25 @@ async function setMeta(
 }
 
 async function received(instance: Instance, roomId: string): Promise<unknown[]> {
-  return (await request(instance, '/api/room-cross-instance/received', roomId)).received as unknown[]
+  return listOf((await request(instance, '/api/room-cross-instance/received', roomId)).received)
 }
 
 async function broadcastReceived(instance: Instance, key: string): Promise<unknown[]> {
-  return (await broadcastRequest(instance, '/api/broadcast-cross-instance/received', key)).received as unknown[]
+  return listOf((await broadcastRequest(instance, '/api/broadcast-cross-instance/received', key)).received)
 }
 
 async function view(instance: Instance, roomId: string): Promise<RoomView> {
-  return (await request(instance, '/api/room-cross-instance/view', roomId)) as unknown as RoomView
+  const answer = await request(instance, '/api/room-cross-instance/view', roomId)
+  const records = (value: unknown) =>
+    Object.fromEntries(Object.entries(recordOf(value)).map(([key, each]) => [key, recordOf(each)]))
+  return {
+    count: numberOf(answer.count),
+    members: records(answer.members),
+    stored: records(answer.stored),
+    meta: recordOf(answer.meta),
+    frames: textListOf(answer.frames),
+    events: textListOf(answer.events),
+  }
 }
 
 async function leaveRoom(instances: Instance[], roomId: string) {
@@ -494,7 +506,7 @@ async function request(
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const payload = (await response.json()) as Record<string, unknown>
+  const payload = recordOf(await response.json())
   if (!response.ok) throw new Error(`${method} ${pathname} failed (${response.status}): ${JSON.stringify(payload)}`)
   return payload
 }
