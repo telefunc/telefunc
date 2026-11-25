@@ -6,6 +6,7 @@ import {
   getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   resolveCloudflareLocationHint,
+  readForwardedTarget,
   resolveSessionRoutingTarget,
 } from './routing.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
@@ -133,6 +134,18 @@ function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
 describe('cloudflare broadcast routing', () => {
   it('uses the six default canonical buckets for mapped Cloudflare locations', () => {
     expect(DEFAULT_BROADCAST_BUCKETS).toEqual(['wnam', 'enam', 'weur', 'eeur', 'apac', 'oc'])
+  })
+
+  it('reads a request the Worker forwarded to a session Durable Object as its shard and bucket, and one whose bucket header names no bucket as a bug', () => {
+    const forwarded = (bucket: string) =>
+      new Request('https://telefunc.test/_telefunc', {
+        headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': bucket },
+      })
+    expect(readForwardedTarget(forwarded('weur'))).toEqual({
+      sessionInstanceName: 'telefunc-shard-weur-1',
+      locationBucket: 'weur',
+    })
+    expect(() => readForwardedTarget(forwarded('mars'))).toThrow('Invalid Broadcast location bucket "mars"')
   })
 
   it('stores direct session-placement buckets for colos', () => {
