@@ -1,10 +1,10 @@
 ```
-[telefunc@0.3.2][Warning] telefunc@0.3.1 and telefunc@0.3.2 are both loaded, which is highly discouraged: use a single version of Telefunc, see https://telefunc.com/warning/version-mismatch
+[telefunc@1.2.4][Warning] telefunc@1.2.3 and telefunc@1.2.4 are both loaded, which is highly discouraged: use a single version of Telefunc, see https://telefunc.com/warning/version-mismatch
 ```
 
-This warning means that your app loads two different versions of Telefunc (`telefunc@0.3.1` and `telefunc@0.3.2`).
+This warning means that your app loads two different versions of Telefunc (`telefunc@1.2.3` and `telefunc@1.2.4`).
 
-> If the warning shows `telefunc@<=0.3.1`, then that version is `0.3.1` or older.
+> If the warning shows `an older version of Telefunc`, then that version is too old to tell which one it is.
 
 
 ## Why
@@ -24,7 +24,7 @@ npm ls telefunc
 
 Update that dependency to a version that uses the same Telefunc version as your app.
 
-If there isn't one, set `overrides` in your `package.json`, so that only your app's version of Telefunc is installed:
+If there isn't one, set `overrides` in the `package.json` at the root of your project, so that only one version of Telefunc is installed:
 
 ```json
 {
@@ -34,6 +34,6 @@ If there isn't one, set `overrides` in your `package.json`, so that only your ap
 }
 ```
 
-> The value `$telefunc` stands for the version of `telefunc` in your `dependencies`.
+> The value `$telefunc` stands for the version of `telefunc` in the `dependencies` of that `package.json`. If `telefunc` isn't one of them, write the version instead.
 
 > With pnpm, set [pnpm's `overrides`](https://pnpm.io/settings/dependency-resolution#overrides) instead.
