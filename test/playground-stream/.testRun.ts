@@ -5,7 +5,7 @@ import { navigate, setServerRuntime } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
-import { testStreaming } from './pages/streaming/e2e-test'
+import { testStreaming, testStreamingRequestContext } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
 import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
@@ -94,6 +94,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testFileDownload()
 
   testStreaming()
+  testStreamingRequestContext()
 
   testAbort()
 

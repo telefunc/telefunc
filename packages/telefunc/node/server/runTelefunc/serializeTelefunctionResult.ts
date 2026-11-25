@@ -24,6 +24,7 @@ import type { StreamingProducer, StreamingValueServer } from '../../../wire-prot
 import { type RequestContext } from '../context/requestContext.js'
 import { carryChannel } from './carryChannel.js'
 import type { AbortError } from '../Abort.js'
+import { restoreContext } from '../context/context.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
 import { getServerExtensionTypes } from '../serverConfig.js'
@@ -99,7 +100,7 @@ function serializeTelefunctionResult(runContext: {
   }
   function sendStream(createProducer: () => StreamingProducer) {
     // Taken as it's serialized: a stream that can't be read fails the serialization, which ends what the response carries.
-    const producer = createProducer()
+    const producer = producerInContext(createProducer(), runContext.context)
     const stream = {
       close() {},
       abort(abortError: AbortError) {
@@ -201,5 +202,14 @@ function serializeTelefunctionResult(runContext: {
       useNodeStream: runContext.useNodeStream,
     }),
     streamTransport: runContext.streamTransport,
+  }
+}
+
+/** The pumps pull and cancel a generator or stream the telefunction returned with its request's context. */
+function producerInContext(producer: StreamingProducer, context: Context): StreamingProducer {
+  let chunks: StreamingProducer['chunks'] | undefined
+  return {
+    chunks: { next: () => restoreContext(context, () => (chunks ??= producer.chunks).next()) },
+    cancel: (reason) => restoreContext(context, () => producer.cancel(reason)),
   }
 }

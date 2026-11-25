@@ -1,4 +1,4 @@
-export { testStreaming }
+export { testStreaming, testStreamingRequestContext }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
@@ -7,6 +7,19 @@ import { parseChannelTransports } from '../../channelTransports'
 const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
+
+function testStreamingRequestContext() {
+  test('streaming: concurrent generators read their own request context after yielding', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-request-context')
+    await autoRetry(async () => {
+      expect(await getResult('#streaming-result')).deep.equal([
+        ['alice', 'alice', 'alice'],
+        ['bob', 'bob', 'bob'],
+      ])
+    })
+  })
+}
 
 function testStreaming() {
   test('streaming: ReadableStream return', async () => {

@@ -132,12 +132,6 @@ function buildInlineResponseBody(runContext: {
   }
 
   async function mergeProducers() {
-    // The producers' first `.next()` must run inside the synchronous
-    // stretch of the restored context: in sync mode the context global is
-    // cleared on the next macrotask, and the header `emit` below can
-    // suspend until the consumer's first read (the Web sink applies
-    // backpressure from the first push). So start the pulls before
-    // emitting the header.
     for (const entry of producers) void pullNext(entry)
 
     // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
@@ -181,9 +175,7 @@ function buildInlineResponseBody(runContext: {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     responseAbort.errorPromise.catch(onResponseAborted)
     try {
-      // The telefunc context is restored around the whole merge loop, like the
-      // channel pump (ChannelResponseBody.ts) does, so `getContext()` works
-      // inside producer bodies (generator code runs lazily, on `.next()`).
+      // With AsyncLocalStorage, this one restore covers the producers for the whole loop.
       await restoreContext(context, mergeProducers)
     } catch (err) {
       // Cancel producers immediately so peer producers stop emitting work
