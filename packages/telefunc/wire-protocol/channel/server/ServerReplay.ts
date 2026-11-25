@@ -34,10 +34,11 @@ class ServerReplay {
   /** When its page last began moving to a wire: what it hadn't confirmed then is confirmed over that wire. */
   private movedAt = 0
   private stallDate: Stall | null = null
-  /** The publish bytes its page confirmed, and those it holds unconfirmed. */
+  /** The bytes its page confirmed, frames and publishes, and the publish bytes it holds unconfirmed. */
   private confirmedBytes = 0
   private heldPublishBytes = 0
-  /** The rate its page confirms publishes at: each confirmation measures what it confirmed while its newest crossed. */
+  /** The rate its page confirms at: a publish that went behind others measures what crossed ahead of it, over what its
+   *  confirmation took past the least. */
   private readonly confirms = new DrainRate()
 
   constructor(holder: MemoryHolder) {
@@ -104,7 +105,10 @@ class ServerReplay {
   acknowledge(lastSeq: number): void {
     if (lastSeq >= this.unkeptEnd) this.unkeptEnd = 0
     const frames = this.frames.indexAfter(lastSeq)
-    for (let i = 0; i < frames; i++) this.letFrameGo(this.frames.at(i))
+    for (let i = 0; i < frames; i++) {
+      this.confirmedBytes += this.frames.at(i).byteLength
+      this.letFrameGo(this.frames.at(i))
+    }
     this.frames.dropOldest(frames)
     const publishes = this.publishes.indexAfter(lastSeq)
     if (frames > 0 || publishes > 0) this.stallDate = null
@@ -120,7 +124,11 @@ class ServerReplay {
     // Sent before the wire its confirmation came on: its page may have had it long before.
     if (newest.at < this.movedAt) return
     const confirmMs = performance.now() - newest.at
-    this.confirms.measured((this.confirmedBytes - newest.confirmedBefore) / Math.max(1, confirmMs))
+    // One that went alone, or before any least, took a round trip that no rate is in.
+    if (!(publishes === 1 && alone) && this.leastConfirmMs !== Number.POSITIVE_INFINITY)
+      this.confirms.measured(
+        (this.confirmedBytes - newest.confirmedBefore) / Math.max(1, confirmMs - this.leastConfirmMs),
+      )
     this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
   }
 
