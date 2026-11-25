@@ -1,0 +1,39 @@
+```
+[telefunc@0.3.2][Warning] telefunc@0.3.1 and telefunc@0.3.2 are both loaded, which is highly discouraged: use a single version of Telefunc, see https://telefunc.com/warning/version-mismatch
+```
+
+This warning means that your app loads two different versions of Telefunc (`telefunc@0.3.1` and `telefunc@0.3.2`).
+
+> If the warning shows `telefunc@<=0.3.1`, then that version is `0.3.1` or older.
+
+
+## Why
+
+With two different versions of Telefunc, the version loaded second can respond to telefunction calls with `500 Internal Server Error`.
+
+
+## Solution
+
+Find the dependency that installs the other version:
+
+```bash
+npm ls telefunc
+```
+
+> With pnpm, run `pnpm why telefunc`.
+
+Update that dependency to a version that uses the same Telefunc version as your app.
+
+If there isn't one, set `overrides` in your `package.json`, so that only your app's version of Telefunc is installed:
+
+```json
+{
+  "overrides": {
+    "telefunc": "$telefunc"
+  }
+}
+```
+
+> The value `$telefunc` stands for the version of `telefunc` in your `dependencies`.
+
+> With pnpm, set [pnpm's `overrides`](https://pnpm.io/settings/dependency-resolution#overrides) instead.
