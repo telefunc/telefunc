@@ -6,6 +6,7 @@ import type { Page, WebSocket } from 'playwright-chromium'
 import { LEASE_CALL_DEADLINE_MS, LEASE_RENEW_EVERY_MS } from 'telefunc/__internal'
 import { sendRefusedWarning, testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 import { LAPSED_PRESENCE_REFUSED_FOR_MS } from './pages/lapsed-presence/presenceRecords'
+import { fieldOf, listOf, numberAt, present, recordOf, textAt, textListOf, textOf } from '../checked'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
@@ -249,7 +250,7 @@ function testChat() {
     )
     // `onOpen` also publishes two binary greetings from one reused buffer: each arrives as published.
     await autoRetry(async () => {
-      const text = (await page.textContent('#root'))!
+      const text = present(await page.textContent('#root'), 'the text of #root')
       expect(text).toContain(`welcome ${username}`)
       expect(text).toContain(`${username} is online`)
       expect(text.indexOf(`welcome ${username}`)).lessThan(text.indexOf(`${username} is online`))
@@ -274,10 +275,10 @@ function testBacklog() {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
     await page.click('#backlog-open')
-    let channelId: string | null = null
-    await autoRetry(async () => {
-      channelId = JSON.parse((await page.textContent('#backlog-state'))!).channelId
-      expect(channelId).not.toBe(null)
+    const channelId = await autoRetry(async () => {
+      const id = fieldOf(await shownJson(page, '#backlog-state'), 'channelId')
+      expect(id).not.toBe(null)
+      return textOf(id)
     })
     const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
     await page.click(`#backlog-run-${count}`)
@@ -287,20 +288,19 @@ function testBacklog() {
     // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
     const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
       await fetch(runUrl, { method: 'POST' })
-      let run: { sent: number; refused: number } | undefined
-      await autoRetry(async () => {
-        run = await (await fetch(runUrl)).json()
-        expect(run!.sent).not.toBe(undefined)
+      // The run reports nothing until its sends are done.
+      return await autoRetry(async () => {
+        const run = await jsonOf(await fetch(runUrl))
+        return { sent: numberAt(run, 'sent'), refused: numberAt(run, 'refused') }
       })
-      return run!
     })
     expect(sent).toBe(count)
     await autoRetry(
       async () => {
-        const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.received).toBe(count - refused)
-        expect(state.outOfOrder).toBe(0)
-        expect(state.closeErr).toBe(null)
+        const state = await shownJson(page, '#backlog-state')
+        expect(fieldOf(state, 'received')).toBe(count - refused)
+        expect(fieldOf(state, 'outOfOrder')).toBe(0)
+        expect(fieldOf(state, 'closeErr')).toBe(null)
       },
       { timeout: 30_000 },
     )
@@ -310,7 +310,7 @@ function testBacklog() {
 
 function testChatMembers() {
   test('Chat: members in separate browsers each get every message published after they joined, once', async () => {
-    const browser = page.context().browser()!
+    const browser = present(page.context().browser(), 'the browser')
     const names = ['member-1', 'member-2', 'member-3'].map((name) => `${name}-${Math.floor(Math.random() * 1e6)}`)
     const members: (typeof page)[] = []
     for (const name of names) {
@@ -350,10 +350,10 @@ function testUnsubscribeTwice() {
     })
     await page.click('#subscribe')
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).subscribed).toBe(true)
+      expect(fieldOf(await shownJson(page, '#unsubscribe-twice-state'), 'subscribed')).toBe(true)
     })
     // Another browser context is another session, routed by its own token.
-    const publisher = await (await page.context().browser()!.newContext()).newPage()
+    const publisher = await (await present(page.context().browser(), 'the browser').newContext()).newPage()
     await publisher.goto(url)
     await autoRetry(async () => {
       expect(await publisher.locator('#hydrated').count()).toBe(1)
@@ -363,7 +363,7 @@ function testUnsubscribeTwice() {
       async () => {
         await publisher.click('#publish')
         await page.click('#read')
-        expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).received).include('hello')
+        expect(fieldOf(await shownJson(page, '#unsubscribe-twice-state'), 'received')).include('hello')
       },
       { timeout: 10_000 },
     )
@@ -379,7 +379,7 @@ function testResubscribe() {
     })
     await page.click('#resubscribe')
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
+      expect(fieldOf(await shownJson(page, '#resubscribe-state'), 'subscribed')).toBe(true)
     })
     // A presence lasts 90 s unless refreshed. The page reads meanwhile, as a page's traffic does: a session Durable
     // Object nothing calls is evicted 70-140 s after its last request, and the subscription it holds with it.
@@ -390,7 +390,7 @@ function testResubscribe() {
     await page.click('#publish')
     await autoRetry(
       async () => {
-        expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
+        expect(fieldOf(await shownJson(page, '#resubscribe-state'), 'received')).deep.equal(['hello'])
       },
       { timeout: 5000 },
     )
@@ -405,13 +405,16 @@ function testRefusedPresence() {
     })
     await page.click('#subscribe')
     await autoRetry(async () => {
-      const state = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      const state = await shownJson(page, '#refused-presence-state')
       // The subscriber's `ready` keeps the refusal of its first presence.
-      expect({ published: state.published, ready: state.ready }).deep.equal({ published: true, ready: 'rejected' })
+      expect({ published: fieldOf(state, 'published'), ready: fieldOf(state, 'ready') }).deep.equal({
+        published: true,
+        ready: 'rejected',
+      })
     })
     await page.click('#publish')
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).deep.equal(['again'])
+      expect(fieldOf(await shownJson(page, '#refused-presence-state'), 'received')).deep.equal(['again'])
     })
   })
 }
@@ -431,7 +434,7 @@ function testLapsedPresence() {
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
-    const state = async () => JSON.parse((await page.textContent('#lapsed-presence-state'))!)
+    const state = async () => recordOf(await shownJson(page, '#lapsed-presence-state'))
     await page.click('#subscribe')
     await autoRetry(async () => {
       expect((await state()).received).deep.equal(['before'])
@@ -472,7 +475,7 @@ function testLapsedPresence() {
       expect(evicted).toBe(false)
       expect(received).toContain('after')
       expect(received).not.toContain('during')
-      if (outcome === 'recorded again') expect(reported.length).toBe(1)
+      if (outcome === 'recorded again') expect(listOf(reported).length).toBe(1)
     })
   })
 }
@@ -480,7 +483,7 @@ function testLapsedPresence() {
 function testRefusedDelivery() {
   test('Broadcast: a publish a session Durable Object refuses to take rejects, the other session still gets it, and the next publish reaches both', async () => {
     const key = `refused-delivery:${Math.random()}`
-    const browser = page.context().browser()!
+    const browser = present(page.context().browser(), 'the browser')
     const pages: Page[] = []
     // Two regions, so each session takes its deliveries in a Durable Object of its own (LAX is wnam, FRA is weur).
     // One after the other: in `vite dev`, a second first request to a page can get its half-evaluated entry and fail.
@@ -494,20 +497,20 @@ function testRefusedDelivery() {
       })
       await session.click('#subscribe')
       await autoRetry(async () => {
-        expect(JSON.parse((await session.textContent('#refused-delivery-state'))!).subscribed).toBe(true)
+        expect(fieldOf(await shownJson(session, '#refused-delivery-state'), 'subscribed')).toBe(true)
       })
       pages.push(session)
     }
     const publish = async (message: string) => {
       const query = new URLSearchParams({ key, message })
       const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
-      return ((await response.json()) as { rejected: string | null }).rejected
+      return fieldOf(await jsonOf(response), 'rejected')
     }
     const received = async () =>
       await Promise.all(
         pages.map(async (session) => {
           await session.click('#read')
-          return JSON.parse((await session.textContent('#refused-delivery-state'))!).received as string[]
+          return textListOf(fieldOf(await shownJson(session, '#refused-delivery-state'), 'received'))
         }),
       )
     // Each try publishes again until both presences are recorded.
@@ -553,10 +556,10 @@ function testRoomOrderAcrossSessions() {
       const [first, second] = await Promise.all(pages.map((page) => clickRoomCard(page, 'order-received')))
       for (const lane of ['broadcast', 'room'] as const) {
         for (const from of ['p1', 'p2']) {
-          const own = first[lane].filter((message: string) => message.startsWith(`${from}:`))
+          const own = textListOf(fieldOf(first, lane)).filter((message) => message.startsWith(`${from}:`))
           expect({ lane, own }).deep.equal({ lane, own: calls.map((n) => `${from}:${n}`) })
         }
-        expect({ lane, second: second[lane] }).deep.equal({ lane, second: first[lane] })
+        expect({ lane, second: fieldOf(second, lane) }).deep.equal({ lane, second: fieldOf(first, lane) })
       }
     })
     for (const page of pages) await page.context().close()
@@ -568,13 +571,12 @@ function testRoomJoinRoundTrip() {
     const id = crypto.randomUUID()
     const [session] = await openSessions(id, ['p1'])
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
-    expect(await clickRoomCard(session!, 'join')).toBe('joined')
+    expect(await clickRoomCard(session, 'join')).toBe('joined')
     await autoRetry(async () => {
-      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`)).json()) as {
-        object: string
-        method: string
-      }[]
-      const methods = calls.filter((call) => call.object === `__telefunc_room__:join:${id}`).map((call) => call.method)
+      const calls = listOf(await jsonOf(await fetch(`${getServerUrl()}/__room-calls`)))
+      const methods = calls
+        .filter((call) => textAt(call, 'object') === `__telefunc_room__:join:${id}`)
+        .map((call) => textAt(call, 'method'))
       // The join's own write, and any other write that could carry a join: an operation, or the inbox's route alone.
       const writes = methods.filter(
         (method) => method === 'runJoinWithInbox' || method === 'runOperation' || method === 'registerRoute(inbox)',
@@ -582,7 +584,7 @@ function testRoomJoinRoundTrip() {
       expect(writes).deep.equal(['runJoinWithInbox'])
     })
     await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })
-    await session!.context().close()
+    await session.context().close()
   })
 }
 
@@ -590,20 +592,24 @@ function testRoomJoinInbox() {
   test('Room: a join into a room that closes while its inbox registers rejects at once with the closed room', async () => {
     await openRoomPage()
     const result = await clickRoomCard(page, 'join-closing', 90_000)
-    expect(result.joined).toBe(false)
-    expect(result.failure.message.startsWith('Room is closed: join-closing:')).toBe(true)
-    expect(result.seconds).lessThan(5)
+    expect(fieldOf(result, 'joined')).toBe(false)
+    expect(textAt(fieldOf(result, 'failure'), 'message').startsWith('Room is closed: join-closing:')).toBe(true)
+    expect(numberAt(result, 'seconds')).lessThan(5)
   })
 
   test('Room: a join the authority refuses rejects with the refusal, leaves no member, and the other participant sees no join of it', async () => {
     await openRoomPage()
     const result = await clickRoomCard(page, 'join-refused')
-    expect({ joined: result.joined, members: result.members, seen: result.seen }).deep.equal({
+    expect({
+      joined: fieldOf(result, 'joined'),
+      members: fieldOf(result, 'members'),
+      seen: fieldOf(result, 'seen'),
+    }).deep.equal({
       joined: false,
       members: 1,
       seen: ['next'],
     })
-    expect(result.failure.message).toBe('Test: the authority refused the inbox')
+    expect(textAt(fieldOf(result, 'failure'), 'message')).toBe('Test: the authority refused the inbox')
   })
 }
 
@@ -612,10 +618,10 @@ function testRoomAcrossSessions() {
     const id = crypto.randomUUID()
     const pages = await openSessions(id, ['p1', 'p2'])
     for (const page of pages) await clickRoomCard(page, 'listen')
-    await clickRoomCard(pages[0]!, 'publish')
+    await clickRoomCard(pages[0], 'publish')
     await autoRetry(async () => {
       for (const page of pages) {
-        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+        expect(textListOf(await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
       }
     })
     for (const page of pages) await page.context().close()
@@ -635,17 +641,21 @@ function testRoomAcrossRegions() {
     const pages = await openSessions(id, Object.keys(colos), colos)
     for (const page of pages) await clickRoomCard(page, 'listen')
     await fetch(`${getServerUrl()}/__region-trace?message=hello`, { method: 'PUT' })
-    await clickRoomCard(pages[0]!, 'publish')
+    await clickRoomCard(pages[0], 'publish')
     await autoRetry(async () => {
       for (const page of pages) {
-        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+        expect(textListOf(await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
       }
     })
     const trace = await fetch(`${getServerUrl()}/__region-trace`)
-    const { forwards, deliveries } = (await trace.json()) as {
-      forwards: { members: string[] }[]
-      deliveries: { member: string; region: string }[]
-    }
+    const shown = await jsonOf(trace)
+    const forwards = listOf(fieldOf(shown, 'forwards')).map((forward) => ({
+      members: textListOf(fieldOf(forward, 'members')),
+    }))
+    const deliveries = listOf(fieldOf(shown, 'deliveries')).map((delivery) => ({
+      member: textAt(delivery, 'member'),
+      region: textAt(delivery, 'region'),
+    }))
     // One forward per region, each naming only that region's sessions, and one delivery to each session.
     const regionOf = new Map(deliveries.map(({ member, region }) => [member, region]))
     const forwardedRegions = forwards.map(({ members }) => [...new Set(members.map((member) => regionOf.get(member)))])
@@ -661,23 +671,22 @@ function testRoomCreatedInRegion() {
     // Los Angeles is wnam, Frankfurt is weur.
     const pages = await openSessions(id, ['p1', 'p2'], { p1: 'LAX', p2: 'FRA' })
     for (const [page, name, region] of [
-      [pages[0]!, 'p1', 'wnam'],
-      [pages[1]!, 'p2', 'weur'],
+      [pages[0], 'p1', 'wnam'],
+      [pages[1], 'p2', 'weur'],
     ] as const) {
       await fetch(`${getServerUrl()}/__room-calls`, { method: 'PUT' })
       expect(await clickRoomCard(page, 'create')).toBe('created')
-      const calls = (await (await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })).json()) as {
-        object: string
-        room: unknown
-      }[]
+      const calls = listOf(await jsonOf(await fetch(`${getServerUrl()}/__room-calls`, { method: 'DELETE' })))
       // Other tests' rooms keep their sessions' routes and listings meanwhile: only this room's calls count.
       const room = `regions:${id}:${name}`
       const objects = new Set(
-        calls.filter((call) => call.room === room || call.object.endsWith(room)).map((call) => call.object),
+        calls
+          .filter((call) => fieldOf(call, 'room') === room || textAt(call, 'object').endsWith(room))
+          .map((call) => textAt(call, 'object')),
       )
       expect([...objects].sort()).deep.equal([`__telefunc_room__:${room}`, `__telefunc_room_directory__:${region}`])
     }
-    expect(await clickRoomCard(pages[0]!, 'list-created')).deep.equal([`regions:${id}:p1`, `regions:${id}:p2`])
+    expect(await clickRoomCard(pages[0], 'list-created')).deep.equal([`regions:${id}:p1`, `regions:${id}:p2`])
     for (const page of pages) await page.context().close()
   })
 }
@@ -701,10 +710,10 @@ function testRoomStorage() {
   test('Room: a view that subscribes after another session closed its room closes, and no bug is reported', async () => {
     const id = crypto.randomUUID()
     const [holder, closer] = await openSessions(id, ['holder', 'closer'])
-    await clickRoomCard(holder!, 'hold-view')
-    await clickRoomCard(closer!, 'close-held')
-    expect(await clickRoomCard(holder!, 'subscribe-held')).deep.equal([])
-    for (const page of [holder!, closer!]) await page.context().close()
+    await clickRoomCard(holder, 'hold-view')
+    await clickRoomCard(closer, 'close-held')
+    expect(await clickRoomCard(holder, 'subscribe-held')).deep.equal([])
+    for (const page of [holder, closer]) await page.context().close()
   })
 
   test('Room: a server listener that throws is reported, and the listener beside it and the messages after it still arrive', async () => {
@@ -791,10 +800,10 @@ async function outcomeAt(card: string, length: number) {
 async function overRowLimit(card: string) {
   let low = ROW_LIMIT_BYTES - 4096
   let high = ROW_LIMIT_BYTES
-  expect((await outcomeAt(card, low)).told).toBe('resolved')
+  expect(fieldOf(await outcomeAt(card, low), 'told')).toBe('resolved')
   while (high - low > 1) {
     const middle = Math.floor((low + high) / 2)
-    if ((await outcomeAt(card, middle)).told === 'resolved') low = middle
+    if (fieldOf(await outcomeAt(card, middle), 'told') === 'resolved') low = middle
     else high = middle
   }
   return await outcomeAt(card, low + 1)
@@ -822,7 +831,7 @@ async function openRoomPage() {
 /** Pages in browsers of their own, so each has its own Telefunc session; `colos` places a page's session in a colo's
  *  region. */
 async function openSessions(id: string, names: string[], colos: Record<string, string> = {}) {
-  const browser = page.context().browser()!
+  const browser = present(page.context().browser(), 'the browser')
   return await Promise.all(
     names.map(async (name) => {
       const context = await browser.newContext()
@@ -838,15 +847,32 @@ async function openSessions(id: string, names: string[], colos: Record<string, s
   )
 }
 
-async function clickRoomCard(target: typeof page, id: string, timeout = 30_000): Promise<any> {
+/** What the room page's card `id` shows once clicked. */
+async function clickRoomCard(target: Page, id: string, timeout = 30_000): Promise<unknown> {
   await target.locator('#room-card-result').evaluate((element) => {
     element.textContent = ''
   })
   await target.click(`#room-${id}`)
-  await target.waitForFunction(() => document.querySelector('#room-card-result')!.textContent !== '', undefined, {
-    timeout,
-  })
-  return JSON.parse((await target.textContent('#room-card-result'))!)
+  await target.waitForFunction(
+    () => {
+      const result = document.querySelector('#room-card-result')
+      if (!result) throw new Error('The page shows no #room-card-result')
+      return result.textContent !== ''
+    },
+    undefined,
+    { timeout },
+  )
+  return await shownJson(target, '#room-card-result')
+}
+
+/** The JSON `target` shows in the element `selector` finds. */
+async function shownJson(target: Page, selector: string): Promise<unknown> {
+  return JSON.parse(present(await target.textContent(selector), `the text of ${selector}`))
+}
+
+/** The JSON a response of the app's test routes carries. */
+async function jsonOf(response: Response): Promise<unknown> {
+  return await response.json()
 }
 
 async function getNumberOfItems() {

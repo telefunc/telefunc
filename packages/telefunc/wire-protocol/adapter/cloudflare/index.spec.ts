@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { OrderedStubs } from './OrderedStubs.js'
+import type { HttpResponse } from '../../../node/server/runTelefunc.js'
 
 const mocks = vi.hoisted(() => {
   const crosswsAdapter = {
@@ -33,19 +34,25 @@ const mocks = vi.hoisted(() => {
     }
   }
 
+  /** A JSON answer of Telefunc's `serve()`, as far as the adapter reads it. */
+  function jsonResponse(): Pick<HttpResponse, 'statusCode' | 'headers' | 'getReadableWebStream'> {
+    return {
+      statusCode: 200,
+      headers: [['content-type', 'application/json']],
+      getReadableWebStream() {
+        return new ReadableStream()
+      },
+    }
+  }
+
   return {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     setAdapterMaxFrameBytes: vi.fn(),
     setAdapterMaxMemory: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
-    telefuncMock: vi.fn(async () => ({
-      statusCode: 200,
-      headers: [['content-type', 'application/json']] as HeadersInit,
-      getReadableWebStream() {
-        return new ReadableStream()
-      },
-    })),
+    jsonResponse,
+    telefuncMock: vi.fn(async () => jsonResponse()),
     transportInstances: new Array<MockCloudflareBroadcast>(),
     authorityInstances: new Array<MockCloudflareBroadcastAuthorityState>(),
     MockCloudflareBroadcastAuthorityState,
@@ -98,6 +105,7 @@ import { disposeBackend } from '../../backend/install.js'
 import type { BroadcastPublishRequest } from './broadcast.js'
 import type { BroadcastDelivery } from './extensions.js'
 import { assert } from '../../../utils/assert.js'
+import { durableObjectState, webSocket } from '../../test/cloudflareRuntime.js'
 
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
@@ -130,13 +138,7 @@ beforeEach(() => {
   mocks.getServerConfig.mockReset()
   mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })
   mocks.telefuncMock.mockClear()
-  mocks.telefuncMock.mockResolvedValue({
-    statusCode: 200,
-    headers: [['content-type', 'application/json']] as HeadersInit,
-    getReadableWebStream() {
-      return new ReadableStream()
-    },
-  })
+  mocks.telefuncMock.mockResolvedValue(mocks.jsonResponse())
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
 })
@@ -160,7 +162,9 @@ describe('cloudflare adapter entrypoint', () => {
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-oc-0' }), { locationHint: 'oc' })
     expect(fetch).toHaveBeenCalledTimes(1)
 
-    const forwardedRequest = fetch.mock.calls[0]![0] as Request
+    const [forwarded] = fetch.mock.calls
+    assert(forwarded !== undefined)
+    const [forwardedRequest] = forwarded
     expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-oc-0')
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('oc')
   })
@@ -171,7 +175,7 @@ describe('cloudflare adapter entrypoint', () => {
     await expect(
       tf.serve({
         request: new Request('https://telefunc.test/other'),
-        env: {} as Cloudflare.Env,
+        env: {},
       }),
     ).resolves.toBeUndefined()
   })
@@ -182,7 +186,7 @@ describe('cloudflare adapter entrypoint', () => {
     await expect(
       tf.serve({
         request: new Request('https://telefunc.test/_telefunc'),
-        env: {} as Cloudflare.Env,
+        env: {},
       }),
     ).rejects.toThrow('Missing Cloudflare Durable Object binding')
   })
@@ -203,7 +207,7 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { env, jurisdiction } = createBinding()
-    const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
+    const tf = new Telefunc({ jurisdiction: 'eu' })
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
@@ -222,13 +226,12 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('wires the durable object runtime and delegates fetch, websocket, and broadcast methods', async () => {
-    const { binding } = createBinding()
+    const { binding, env } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
-    const ctx = { id: { name: 'telefunc-shard-weur-1' } } as DurableObjectState
-    const instance = new DurableClass(ctx, {
-      TelefuncDurableObject: binding,
-    } as unknown as Cloudflare.Env) as InstanceType<typeof DurableClass> & {
+    const ctx = durableObjectState('telefunc-shard-weur-1')
+    // The class's public type is a `DurableObject`, which names none of the methods Cloudflare calls on it.
+    const instance = new DurableClass(ctx, env) as InstanceType<typeof DurableClass> & {
       fetch(request: Request): Promise<Response>
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
@@ -259,10 +262,12 @@ describe('cloudflare adapter entrypoint', () => {
     assert(member !== undefined)
     expect(member.locate).toHaveBeenCalledWith('weur')
 
-    instance.webSocketMessage({} as WebSocket, 'payload')
+    instance.webSocketMessage(webSocket(vi.fn()), 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
 
-    instance.webSocketClose({ close: vi.fn() } as unknown as WebSocket, 1000, 'done', true)
+    const closing = vi.fn()
+    instance.webSocketClose(webSocket(closing), 1000, 'done', true)
+    expect(closing).toHaveBeenCalledWith(1000, 'done')
     expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenCalledWith(
       instance,
       expect.anything(),

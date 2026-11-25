@@ -32,6 +32,7 @@ import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { Room, type LeaveCause } from '@telefunc/room'
 import { getRoomPlane, type CellsBeside, type CellsRead } from '@telefunc/room/backend'
 import { authorityCalls, authorityClocks, type AuthorityCall } from './authorityCalls'
+import { entryOf } from '../../../checked'
 
 async function onRoomRoundTrip() {
   const id = `telefunction-${crypto.randomUUID()}`
@@ -92,7 +93,7 @@ async function onPublishFrom(id: string, message: string) {
 }
 
 async function onReceived(id: string, page: string) {
-  return listeners.get(`${id}:${page}`)!.got.filter((message) => !message.includes('ready:'))
+  return entryOf(listeners, `${id}:${page}`).got.filter((message) => !message.includes('ready:'))
 }
 
 /** Rooms whose ids differ in their last character, listed by prefix. */
@@ -143,7 +144,7 @@ async function onCloseWhenLeft() {
 }
 
 let bugs: string[] | null = null
-onBug((err) => bugs?.push((err as Error).message))
+onBug((err) => bugs?.push(err instanceof Error ? err.message : String(err)))
 
 // The views of a room each page holds, by the id the test gave it.
 const heldViews = new Map<string, Room>()
@@ -161,7 +162,7 @@ async function onCloseHeld(id: string) {
 /** Subscribes the held view, waits for it to close, and returns the bugs reported meanwhile. */
 async function onSubscribeHeld(id: string) {
   bugs = []
-  const room = heldViews.get(id)!
+  const room = entryOf(heldViews, id)
   const { promise, resolve } = Promise.withResolvers<LeaveCause>()
   room.onClose(resolve)
   room.subscribe(() => {})

@@ -4,6 +4,7 @@ import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
 import { LAPSED_PRESENCE_REFUSED_FOR_MS, rerecordedPresences } from './pages/lapsed-presence/presenceRecords'
+import { present, textAt } from '../checked'
 
 const tf = new Telefunc({ scale: 5 })
 
@@ -61,7 +62,7 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
   override async telefuncDurableObjectCall(name: string, method: string, args: unknown[]) {
     const room = name === 'room-directory' ? args[0] : null
     const object = this.ctx.id.name ?? null
-    const inbox = method === 'registerRoute' && (args[0] as { laneKey: string }).laneKey.startsWith('inbox:')
+    const inbox = method === 'registerRoute' && textAt(args[0], 'laneKey').startsWith('inbox:')
     roomCalls?.push({ object, method: inbox ? 'registerRoute(inbox)' : method, room })
     // Test-only: the next call a test set up for this room is refused, or held until it releases it.
     const next = object !== null ? authorityCalls.get(object) : undefined
@@ -124,9 +125,9 @@ let roomCalls: { object: string | null; method: string; room: unknown }[] | null
 
 // Test-only: the Room deliveries of the message `/__region-trace` names, as the regions test counts them.
 let tracedMessage: string | null = null
-const regionTrace = {
-  forwards: [] as { members: string[] }[],
-  deliveries: [] as { member: string; region: string | null }[],
+const regionTrace: { forwards: { members: string[] }[]; deliveries: { member: string; region: string | null }[] } = {
+  forwards: [],
+  deliveries: [],
 }
 function isTraced({ routes, payload }: DeliveryRequest): boolean {
   if (tracedMessage === null || !routes.some(({ key }) => key.startsWith('__telefunc_room__:'))) return false
@@ -151,7 +152,9 @@ app.all('/__broadcast-publish-from-worker', async (c) => {
 })
 // Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what.
 app.all('/__refused-delivery-publish', async (c) => {
-  const rejected = await Promise.resolve(Broadcast.publish(c.req.query('key')!, c.req.query('message')!)).then(
+  const rejected = await Promise.resolve(
+    Broadcast.publish(present(c.req.query('key'), 'a key'), present(c.req.query('message'), 'a message')),
+  ).then(
     () => null,
     (error: unknown) => String(error),
   )
@@ -182,7 +185,7 @@ app.all('/backlog-run', async (c) => {
 // Test-only: a PUT starts tracing the Room deliveries of `message`; a GET returns what was traced.
 app.all('/__region-trace', (c) => {
   if (c.req.method === 'PUT') {
-    tracedMessage = c.req.query('message')!
+    tracedMessage = present(c.req.query('message'), 'a message')
     regionTrace.forwards.length = 0
     regionTrace.deliveries.length = 0
   }
