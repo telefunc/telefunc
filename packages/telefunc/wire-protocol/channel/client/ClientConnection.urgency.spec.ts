@@ -40,22 +40,25 @@ function dropWire(): void {
   defined(world.streams.at(-1), 'an event stream').end()
 }
 
-test('a send that asks for the answer goes at once on an idle channel', async () => {
+test('a send that asks for the answer on an idle channel goes at the idle delay', async () => {
   const page = await openIdle()
   const sentAt = performance.now()
   void page.channel.send('asks', { ack: true }).catch(() => {})
   await advance(1_000)
-  expect(askedAt().at - sentAt).toBe(0)
+  expect(askedAt().at - sentAt).toBe(SSE_POST_IDLE_FLUSH_DELAY_MS)
 })
 
-test('a send that asks for the answer goes at once, though a POST started 100 ms before', async () => {
+test('a send that asks for the answer, 150 ms after a POST started, goes a throttle after that POST', async () => {
   const page = await openIdle()
   void page.channel.send('data').catch(() => {})
   await advance(200)
-  const sentAt = performance.now()
   void page.channel.send('asks', { ack: true }).catch(() => {})
   await advance(1_000)
-  expect(askedAt().at - sentAt).toBe(0)
+  const data = defined(
+    world.server.got.find(({ tag }) => tag !== TAG.TEXT_ACK_REQ),
+    'the data send',
+  )
+  expect(askedAt().at - data.at).toBe(SSE_FLUSH_THROTTLE_MS)
 })
 
 test('a send that asks for the answer, held while the page reconnects, goes as the RECONCILED lets it', async () => {
@@ -67,10 +70,10 @@ test('a send that asks for the answer, held while the page reconnects, goes as t
   await advance(5_000)
   const reopened = defined(world.streams[1], 'the second event stream')
   expect(askedAt().wire).toBe(2)
-  expect(askedAt().at - reopened.openedAt).toBe(0)
+  expect(askedAt().at - reopened.openedAt).toBe(SSE_RECONCILE_DEADLINE_MS)
 })
 
-test('a send that asks for the answer, waiting behind a full POST, goes as that POST is answered', async () => {
+test('a send that asks for the answer, waiting behind a full POST, goes soon after that POST is answered', async () => {
   const page = await openIdle()
   void page.channel.send('x'.repeat(100_000)).catch(() => {})
   void page.channel.send('asks', { ack: true }).catch(() => {})
@@ -79,7 +82,7 @@ test('a send that asks for the answer, waiting behind a full POST, goes as that 
     world.server.got.find(({ tag }) => tag !== TAG.TEXT_ACK_REQ),
     'the full POST',
   )
-  expect(askedAt().at - full.at).toBe(0)
+  expect(askedAt().at - full.at).toBe(SSE_RECONCILE_DEADLINE_MS)
 })
 
 test('a send that asks for the answer, replayed after a reconnect, goes as the RECONCILED asks for it', async () => {
@@ -93,7 +96,7 @@ test('a send that asks for the answer, replayed after a reconnect, goes as the R
   const reopened = defined(world.streams[1], 'the second event stream')
   const replayed = askedAt(2)
   expect(replayed.seq).toBe(askedAt(1).seq)
-  expect(replayed.at - reopened.openedAt).toBe(0)
+  expect(replayed.at - reopened.openedAt).toBe(SSE_RECONCILE_DEADLINE_MS)
 })
 
 test('a send just after a full POST started goes in the idle delay, not the throttle', async () => {
@@ -130,11 +133,45 @@ test('data held while the page reconnects goes together, not a POST for each', a
   expect(world.posts.slice(before).filter(({ data }) => data).length).toBeLessThanOrEqual(2)
 })
 
-test('sends that ask for the answer, made in a loop without awaiting, go in two POSTs: the first at once, the rest together after it', async () => {
+test('sends that ask for the answer, made in a loop without awaiting, go together in one POST at the idle delay', async () => {
   const page = await openIdle()
+  const sentAt = performance.now()
   const before = world.posts.length
   for (let i = 0; i < 50; i++) void page.channel.send(`asks ${i}`, { ack: true }).catch(() => {})
   await advance(5_000)
-  expect(world.server.got.filter(({ tag }) => tag === TAG.TEXT_ACK_REQ)).toHaveLength(50)
-  expect(world.posts.slice(before).filter(({ data }) => data).length).toBeLessThanOrEqual(2)
+  const asked = world.server.got.filter(({ tag }) => tag === TAG.TEXT_ACK_REQ)
+  expect(asked).toHaveLength(50)
+  expect(asked.map(({ at }) => at - sentAt)).toEqual(asked.map(() => SSE_POST_IDLE_FLUSH_DELAY_MS))
+  expect(world.posts.slice(before).filter(({ data }) => data)).toHaveLength(1)
+})
+
+test('a page that sends what asks for the answer once the server has the one before sends a POST per throttle, the first at the idle delay', async () => {
+  const page = await openIdle()
+  const startedAt = performance.now()
+  const before = world.posts.length
+  const asked = () => world.server.got.filter(({ tag }) => tag === TAG.TEXT_ACK_REQ)
+  // As an app that awaits each answer, which its server gives as it takes the POST.
+  for (let i = 0; i < 5; i++) {
+    void page.channel.send(`asks ${i}`, { ack: true }).catch(() => {})
+    while (asked().length === i) await advance(1)
+  }
+  const at = asked().map((frame) => frame.at)
+  expect(defined(at[0], 'the first asking frame') - startedAt).toBe(SSE_POST_IDLE_FLUSH_DELAY_MS)
+  const gaps = at.slice(1).map((each, i) => each - defined(at[i], 'the asking frame before'))
+  expect(gaps).toEqual([1, 2, 3, 4].map(() => SSE_FLUSH_THROTTLE_MS))
+  expect(world.posts.slice(before).filter(({ data }) => data)).toHaveLength(5)
+})
+
+test("a send that asks for the answer, made while another's POST is out, goes in the next POST, a throttle after that one", async () => {
+  const page = await openIdle()
+  // The first POST is answered 100 ms after it went, when the server records its frame.
+  world.postAnswers.push({ tag: 'slow', ms: 100 })
+  const sentAt = performance.now()
+  const before = world.posts.length
+  void page.channel.send('first', { ack: true }).catch(() => {})
+  await advance(60)
+  void page.channel.send('second', { ack: true }).catch(() => {})
+  await advance(1_000)
+  expect(askedAt(2).at - sentAt).toBe(SSE_POST_IDLE_FLUSH_DELAY_MS + SSE_FLUSH_THROTTLE_MS)
+  expect(world.posts.slice(before).filter(({ data }) => data)).toHaveLength(2)
 })
