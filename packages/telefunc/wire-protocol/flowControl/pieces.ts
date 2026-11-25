@@ -951,9 +951,10 @@ class SocketMessages {
     // Carried frames counted for a cut that then waited for headroom stay for the next message, and frames carried
     // after them join it: it counts from the first not counted, after the LENGTH the frame before it needs.
     let length = 0
-    let i = 0
-    for (const frame of this.frames) {
-      if (i++ >= this.given) this.give(frame, length)
+    for (let i = 0; ; i++) {
+      const frame = this.frames[i]
+      if (frame === undefined) break
+      if (i >= this.given) this.give(frame, length)
       const tag = frame[0]
       length = tag === undefined ? 0 : lengthBytes(tag)
     }
