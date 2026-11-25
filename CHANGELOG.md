@@ -1,3 +1,23 @@
+# [0.4.0](https://github.com/telefunc/telefunc/compare/v0.3.1...v0.4.0) (2026-11-25)
+
+
+### Bug Fixes
+
+* `getContext()` never returns another request's context ([#520](https://github.com/telefunc/telefunc/issues/520)) ([a899717](https://github.com/telefunc/telefunc/commit/a899717c51c3c6ba2f5750590c47963e9f9c169c))
+* channels and streams survive reconnects, slow links and large messages ([#479](https://github.com/telefunc/telefunc/issues/479)) ([54464f9](https://github.com/telefunc/telefunc/commit/54464f99b258e7a8bdd0abb87bc6bb2691eacd55))
+* keep the Vite plugin's Telefunc config in production builds ([#511](https://github.com/telefunc/telefunc/issues/511)) ([e47d0ee](https://github.com/telefunc/telefunc/commit/e47d0eeae9971084015085c784058777ccb7d502))
+* load telefunc in `vite dev` of Vike + `@cloudflare/vite-plugin` apps ([#509](https://github.com/telefunc/telefunc/issues/509)) ([f376d2b](https://github.com/telefunc/telefunc/commit/f376d2bbc8a3580788d12435e14b51898cf6f687))
+* run telefunctions in a Vite-bundled server without Vike (`@cloudflare/vite-plugin`, standaloner) ([#506](https://github.com/telefunc/telefunc/issues/506)) ([3e05989](https://github.com/telefunc/telefunc/commit/3e05989e574cbc299cb4cffd2b3fe6aabe505b12))
+
+
+### BREAKING CHANGES
+
+* When using `provideTelefuncContext()`, you must now call your telefunction inside the `provideTelefuncContext()` callback — see https://telefunc.com/migration/provideTelefuncContext
+
+Co-authored-by: Romuald Brillout <git@brillout.com>
+
+
+
 ## [0.3.1](https://github.com/telefunc/telefunc/compare/v0.3.0...v0.3.1) (2026-10-27)
 
 
