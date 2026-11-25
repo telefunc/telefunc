@@ -9,6 +9,7 @@ import {
   letGo,
   type MemoryHolder,
 } from './channelMemory.js'
+import { encode } from '../../wire/frame.js'
 import { isClosingTag } from '../../wire/tags.js'
 import type { PublishBody } from './PublishBody.js'
 import { SeqQueue } from '../SeqQueue.js'
@@ -18,10 +19,10 @@ import { DrainRate } from '../../flowControl/DrainRate.js'
 type Stall = { since: number }
 
 /** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
-type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean; confirmedBefore: number }
+type Publish = { index: number; body: PublishBody; at: number; alone: boolean; confirmedBefore: number }
 
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
- *  each a head and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
+ *  each a channel index and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
  *  its ends: acknowledged ones from the oldest, publishes skipped or past a gap from the newest. */
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
@@ -72,10 +73,10 @@ class ServerReplay {
     return this.unkeptEnd > lastSeq
   }
 
-  pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
+  pushPublish(seq: number, index: number, body: PublishBody): void {
     this.pushed(seq)
     const alone = this.publishes.length === 0 && this.frames.length === 0
-    this.publishes.push(seq, { head, body, at: performance.now(), alone, confirmedBefore: this.confirmedBytes })
+    this.publishes.push(seq, { index, body, at: performance.now(), alone, confirmedBefore: this.confirmedBytes })
     this.heldPublishBytes += body.frame.byteLength
     hold(this.holder, body)
   }
@@ -144,8 +145,8 @@ class ServerReplay {
         out.push(this.frames.at(f++))
         continue
       }
-      const { head, body } = this.publishes.at(p++)
-      out.push(head, body.frame)
+      const { index, body } = this.publishes.at(p)
+      out.push(encode.publishTo(index, this.publishes.seqAt(p++)), body.frame)
     }
     return out
   }

@@ -164,7 +164,7 @@ class IndexedPeer {
 
   private sendBehindHead(seq: number, body: PublishBody): void {
     const head = encode.publishTo(this.index, seq)
-    this.replay.pushPublish(seq, head, body)
+    this.replay.pushPublish(seq, this.index, body)
     this.sender.send(head)
     this.sender.send(body.frame)
   }
