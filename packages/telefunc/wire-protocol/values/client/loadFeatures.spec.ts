@@ -335,6 +335,37 @@ test("an extension's value loads what its code imports, and no other chunk", asy
   expect(imported).toEqual(['channels'])
 })
 
+test('a second client module instance gets native Files and Blobs from the shared feature cache', async () => {
+  const first = await page()
+  await warmStreams(first.call)
+  vi.resetModules()
+  const second = await page()
+  respond = streamed(
+    {
+      file: tag('!TelefuncFile:', { __index: 0, size: 3, name: 'cat.txt', type: 'text/plain', lastModified: 12 }),
+      blob: tag('!TelefuncBlob:', { __index: 1, size: 3, type: 'text/plain' }),
+    },
+    {
+      frames: [
+        encodeIndexedFrame(0, textEncoder.encode('cat')),
+        encodeIndexedFrame(0, new Uint8Array()),
+        encodeIndexedFrame(1, textEncoder.encode('dog')),
+        encodeIndexedFrame(1, new Uint8Array()),
+      ],
+    },
+  )
+
+  const ret = await second.call([])
+  assertHas(ret, 'file')
+  assertHas(ret, 'blob')
+  assert(ret.file instanceof File)
+  assert(ret.blob instanceof Blob)
+  expect(ret.file.name).toBe('cat.txt')
+  expect(ret.file.lastModified).toBe(12)
+  expect(await ret.file.text()).toBe('cat')
+  expect(await ret.blob.text()).toBe('dog')
+})
+
 test('plain RPC: sent at once, an app string that looks like a value loads nothing and comes back as it was', async () => {
   const { call } = await page()
   const value = ['!', '!Telefunc', CHANNEL, '!TelefuncRoom:x']

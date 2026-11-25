@@ -10,7 +10,7 @@ import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../.
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 import type { BaseStreamReader } from './BaseStreamReader.js'
 import type { FrameDemuxer } from './FrameDemuxer.js'
-import { PendingValue, resolvePendingValues } from './PendingValue.js'
+import { isPendingValue, resolvePendingValues, type PendingValue } from './PendingValue.js'
 import type { ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
@@ -169,7 +169,7 @@ async function reviveResponse(
       { once: true },
     )
 
-    if (value instanceof PendingValue) {
+    if (isPendingValue(value)) {
       // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
       value.promise.catch(() => {})
       pendingValues.push(value)

@@ -1,10 +1,18 @@
-export { PendingValue, resolvePendingValues }
+export { PendingValue, isPendingValue, resolvePendingValues }
 
+import { isObject } from '../../../../utils/isObject.js'
 import { isPlainObject } from '../../../../utils/isPlainObject.js'
+
+const PENDING_VALUE = Symbol.for('telefuncPendingValue')
 
 /** Revived value known only once `promise` resolves: the call waits for it and hands out the resolved value in its slot. */
 class PendingValue<T> {
+  readonly [PENDING_VALUE] = true
   constructor(readonly promise: Promise<T>) {}
+}
+
+function isPendingValue(value: unknown): value is PendingValue<unknown> {
+  return isObject(value) && value[PENDING_VALUE] === true
 }
 
 /** Awaits `pendingValues`, then swaps each one for its resolved value in place. Walks the containers json-serializer builds (arrays, plain objects, Map, Set); revived values are opaque. */
@@ -19,7 +27,7 @@ async function resolvePendingValues(
   return resolve(parsed)
 
   function resolve(value: unknown): unknown {
-    if (value instanceof PendingValue) return resolved.get(value)
+    if (isPendingValue(value)) return resolved.get(value)
     if (typeof value !== 'object' || value === null || isRevived(value)) return value
     if (Array.isArray(value)) {
       value.forEach((item, i) => {
