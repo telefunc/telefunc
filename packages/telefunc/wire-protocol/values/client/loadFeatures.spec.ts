@@ -193,6 +193,21 @@ test('a call with an upload aborted while channels load sends nothing and cancel
   expect(sourceCancelled).toBe(1)
 })
 
+test('an already-aborted upload cancels its source without starting a chunk load', async () => {
+  const { call, withContext } = await page()
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  const controller = new AbortController()
+  controller.abort()
+  failing.add('channels')
+  gates.channels.open()
+
+  expect(isAbort(await settledWithin(withContext(call, { signal: controller.signal })([upload]), 200))).toBe(true)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(posts).toEqual([])
+  expect(imported).toEqual([])
+})
+
 test('a callback call sends the values its invocation read', async () => {
   const { call } = await page()
   respond = text(1)

@@ -27,7 +27,7 @@ function loadedFeatures(): Features {
 
 /** Loads `features` for a call (see `callWaitsFor()`), each once per page, and again after a load that failed. */
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
-  await callWaitsFor(call, Promise.all(features.map(loadFeature)))
+  await callWaitsFor(call, () => Promise.all(features.map(loadFeature)))
   return globalObject.loaded
 }
 
@@ -52,7 +52,7 @@ type WaitingCall = { abortController: AbortController; telefunctionName: string;
 
 /** A call waiting for the code it needs: an abort rejects at once, as during the call's `fetch()`, and a load that fails
  *  rejects as a call that can't reach its server does. */
-async function callWaitsFor<T>(call: WaitingCall, load: Promise<T>): Promise<Awaited<T>> {
+async function callWaitsFor<T>(call: WaitingCall, load: () => Promise<T>): Promise<Awaited<T>> {
   const { signal } = call.abortController
   const aborted = () => throwAbortError(call.telefunctionName, call.telefuncFilePath, undefined)
   if (signal.aborted) aborted()
@@ -63,7 +63,7 @@ async function callWaitsFor<T>(call: WaitingCall, load: Promise<T>): Promise<Awa
   })
   let loaded: Awaited<T> | typeof ABORTED
   try {
-    loaded = await Promise.race([load, abort])
+    loaded = await Promise.race([load(), abort])
   } catch {
     if (signal.aborted) aborted()
     throw new ConnectionError()
