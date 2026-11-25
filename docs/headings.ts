@@ -27,7 +27,7 @@ const categories = [
   'Miscellaneous',
 ] as const satisfies Config['categories']
 
-const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...migrations(), ...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -345,6 +345,17 @@ const headings = [
   },
 ] as const satisfies HeadingDefinition[]
 
+function migrations() {
+  return (
+    [
+      {
+        title: '`provideTelefuncContext()` Migration',
+        url: '/migration/provideTelefuncContext',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
+}
+
 function misc() {
   return (
     [
@@ -371,10 +382,6 @@ function misc() {
       {
         title: '❌ Non-function exports',
         url: '/warning/non-function-export',
-      },
-      {
-        title: '`provideTelefuncContext()` Migration',
-        url: '/migration/provideTelefuncContext',
       },
     ] as const
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
