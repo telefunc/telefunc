@@ -25,10 +25,8 @@ import type { MemberWants, RoomDataEvent } from './protocol.js'
 import type { BinaryFrameInfo, LeaveCause } from '../types.js'
 
 type TrackListenerOptions = ListenerOptions & { track?: string }
-/** A `subscribe()` listener: its `info` has the frame's fields where it names a track. `info` is `any` because the
- *  public overloads type it by `options.track`, which no implementation signature ties to the listener: a narrower type
- *  refuses one overload's listener. */
-type MessageListener<From extends unknown[]> = (data: unknown, info: any, ...from: From) => unknown
+/** A `subscribe()` listener as the state calls it: a listener on a track gets the frame's fields in `info` too. */
+type MessageListener<From extends unknown[]> = (data: unknown, info: ChannelPublishInfo, ...from: From) => unknown
 /** A track listener's filter: one track, or `EVERY_TRACK`. */
 type TrackFilter = TrackKey | EveryTrack
 /** A track listener list's filters as counts: every-track listeners, and listeners per lane track. */

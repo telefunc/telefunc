@@ -5,7 +5,7 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { type ChannelPublishInfo, tetherTo, untether, type TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import type { ListenerOptions } from './disposer.js'
 import type { MemberEntry, ResolvedSender } from './RoomModel.js'
-import type { Adder, MessageListener, RoomState, TrackListenerOptions } from './RoomState.js'
+import type { Adder, RoomState, TrackListenerOptions } from './RoomState.js'
 import { fieldValue, participantFields } from './participantFields.js'
 import { roomMessages } from './messages.js'
 import type { MemberSnapshot } from './protocol.js'
@@ -22,6 +22,11 @@ import type {
 
 /** What the state hands a listener: a message's info, or a frame's (and a message's on a track) with its track. */
 type TakenInfo = ChannelPublishInfo | (ChannelPublishInfo & BinaryFrameInfo)
+/** A listener the app gives `subscribe()` or `subscribeBinary()`. `info` is `any` because the public `subscribe()`
+ *  overloads type it by `options.track`, which no implementation signature ties to the listener: with `unknown`, a
+ *  room's class doesn't implement `Room` (TS2420), and as overloads over `info: TakenInfo & { from: Sender | null }`,
+ *  the track overload isn't compatible with its implementation (TS2394). */
+type ViewListener<Data> = (data: Data, info: any) => unknown
 
 /** The participant `snapshot()` lists, with the meta, connection and package fields it shows. */
 type ShownParticipant = {
@@ -83,10 +88,8 @@ class RoomRemotes {
   }
 
   /** A listener as the state calls it, with the sender it resolved, which the listener gets as `info.from`: `null` for
-   *  the server. `info` is `any` as `MessageListener`'s is: it takes each `subscribe()` overload's listener. */
-  taking<Data>(
-    callback: (data: Data, info: any) => unknown,
-  ): (data: Data, info: TakenInfo, from: ResolvedSender | null) => unknown {
+   *  the server. */
+  taking<Data>(callback: ViewListener<Data>): (data: Data, info: TakenInfo, from: ResolvedSender | null) => unknown {
     return (data, info, from) => callback(data, withSender(info, from && this.sender(from)))
   }
 
@@ -154,7 +157,7 @@ class RoomRemotes {
       get isConnected() {
         return model.isConnected(entry)
       },
-      subscribe: (cb: MessageListener<[]>, opts?: TrackListenerOptions) =>
+      subscribe: (cb: ViewListener<unknown>, opts?: TrackListenerOptions) =>
         this.holding(state.subscribeMember(entry, this.taking(cb), opts, adder)),
       subscribeBinary: (cb, opts) => this.holding(state.subscribeMemberBinary(entry, this.taking(cb), opts, adder)),
       onChange: (cb, opts) => this.holding(state.onMember(entry, 'change', cb, opts, adder)),
@@ -250,7 +253,7 @@ class RoomView {
     return this._read.snapshot()
   }
 
-  subscribe(callback: MessageListener<[]>, options?: TrackListenerOptions): () => void {
+  subscribe(callback: ViewListener<unknown>, options?: TrackListenerOptions): () => void {
     const remotes = this._remotes
     return remotes.state.subscribe(remotes.taking(callback), options, remotes.adder)
   }

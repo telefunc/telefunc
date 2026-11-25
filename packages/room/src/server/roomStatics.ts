@@ -117,22 +117,22 @@ type RoomStatic = {
   ): Promise<ParticipantInfo<P>[]>
 }
 
-// The generic statics' casts give a room the M, P and Pub its caller declares, which nothing stored carries: as
+// The generic statics' overloads give a room the M, P and Pub its caller declares, which nothing stored carries: as
 // `Broadcast.subscribe<U>()` gives a parsed payload the `U` its caller declares (core's `ServerBroadcast.ts`).
 const roomStatics: RoomStatic = {
-  create: createRoom as RoomStatic['create'],
-  get: getRoom as RoomStatic['get'],
-  getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],
+  create: createRoom,
+  get: getRoom,
+  getOrCreate: getOrCreateRoom,
   guard: guardRoom,
-  join: joinRoom as RoomStatic['join'],
-  list: listRooms as RoomStatic['list'],
+  join: joinRoom,
+  list: listRooms,
   setMeta: setRoomMeta,
   updateMeta: updateRoomMeta,
   close: closeRoom,
   removeParticipant,
   publish: publishToRoom,
   send: sendToParticipant,
-  getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
+  getParticipants: getRoomParticipants,
 }
 
 function assertRoomId(id: unknown): asserts id is string {
@@ -157,6 +157,10 @@ function roomNotFoundError(id: string): RoomError {
   return new RoomError('ROOM_NOT_FOUND', `Room not found: ${id}`)
 }
 
+function createRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
+  id: string,
+  options?: RoomOptions<M>,
+): Promise<Room<M, P, Pub>>
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
   const result = await getRoomPlane().call((store) => tryCreateRoom(store, id, options))
@@ -165,6 +169,10 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return result.room
 }
 
+function getRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
+  id: string,
+  options?: RoomGetOptions,
+): Promise<Room<M, P, Pub>>
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   assertKnownOptions(options, ['tail'], 'Room.get()')
   // One account of the call's writes: the reap of a lapsed lease that opening the room may do.
@@ -200,6 +208,10 @@ async function requireRoomMeta(store: RoomStore, id: string, config: RoomConfigR
   return stored
 }
 
+function getOrCreateRoom<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
+  id: string,
+  options?: RoomOptions<M> & RoomGetOptions,
+): Promise<Room<M, P, Pub>>
 async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOptions): Promise<Room> {
   assertRoomId(id)
   const { tail, ...roomOptions } = options ?? {}
@@ -260,6 +272,10 @@ function guardRoom(room: Room, guards: RoomGuards): void {
   handleOf(room).setGuards({ ...hooks, anyoneCanJoin: anyoneCanJoin === true })
 }
 
+function joinRoom<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
+  id: string,
+  options?: JoinOptions<P>,
+): Promise<LocalParticipant<P, Pub>>
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
   // One call: the room's reads, then the join's, its guard among them.
   const { handle, joining } = await getRoomPlane().call(async (store) => {
@@ -274,6 +290,7 @@ async function joinRoom(id: string, options?: JoinOptions): Promise<LocalPartici
   return await handle.finishJoin(joining)
 }
 
+function listRooms<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   assertUsage(
     options === undefined ||
@@ -413,6 +430,10 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   })
 }
 
+function getRoomParticipants<P extends ParticipantMeta = ParticipantMeta>(
+  id: string,
+  target?: { identity: string },
+): Promise<ParticipantInfo<P>[]>
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantInfo[]> {
   // One account of the call's writes: the reap of a lapsed lease that reading the members may do.
   const members = await getRoomPlane().call(async (store) => {
