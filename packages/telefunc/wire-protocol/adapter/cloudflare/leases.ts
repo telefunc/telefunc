@@ -304,11 +304,6 @@ class HolderGrants {
     }
   }
 
-  /** A renewal of this DO's that `target` answered renewed, sent at `sentAt`. */
-  renewed(target: string, sentAt: number): void {
-    this.counted(target, sentAt)
-  }
-
   /** Sends a removal through `send` until the target answers it, waiting between tries a time that doubles, and at least
    *  `pausedFor()`: what a write that failed or wasn't waited for may have stored goes, however long its target fails.
    *  Settles once its first try did; the tries after it go on without a caller. Its first failure is reported. */
@@ -352,7 +347,8 @@ class HolderGrants {
     return sentAt - (this.countedAt.get(target) ?? -Infinity) >= GRANT_HOLDS_MS
   }
 
-  private counted(target: string, sentAt: number): void {
+  /** `target` counted a call of this DO's that was sent at `sentAt`, as it does a renewal it answered renewed. */
+  counted(target: string, sentAt: number): void {
     if (sentAt > (this.countedAt.get(target) ?? -Infinity)) this.countedAt.set(target, sentAt)
   }
 }

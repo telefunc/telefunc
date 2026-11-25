@@ -112,9 +112,9 @@ type BroadcastNamespace = {
 
 type MemberRouteOptions = { route: BroadcastRoute }
 
-/** One route's presence at its key's authority, for one member DO, and the attempt it serves. */
+/** One route's presence at its key's authority, for one member DO, and the attempt it serves, which holds whether the
+ *  presence is recorded. */
 class MemberRoute {
-  state: 'establishing' | 'ready' | 'lost' = 'establishing'
   /** Null once it unsubscribed: an establishing route is released once its presence is recorded. */
   attempt: MemberAttempt | null = null
   readonly route: BroadcastRoute
@@ -147,16 +147,7 @@ class MemberRoute {
   /** Its key's authority confirmed its presence by a write that went out at `sentAt`: ready. */
   private confirmed(sentAt: number): void {
     this.confirmedAt = sentAt
-    if (this.state === 'ready') return
-    this.state = 'ready'
-    this.attempt?.presence('ready')
-  }
-
-  presenceLost(error: unknown): void {
-    if (this.state !== 'ready') return
-    this.state = 'lost'
-    console.error(new Error(`Cloudflare Broadcast presence for '${this.route.key}' lost`, { cause: error }))
-    this.attempt?.presence('lost')
+    this.attempt?.recorded()
   }
 
   startRefresh(
@@ -191,7 +182,7 @@ class MemberRoute {
         this.refreshAfterPause = setTimeout(() => void this.refreshPresence(renew, hold, pausedFor), pausedFor())
         return
       }
-      return this.presenceLost(error)
+      return this.attempt?.lost(error)
     }
     this.lapsed = false
     this.presenceRecorded()
@@ -222,14 +213,27 @@ class MemberAttempt extends DriverAttempt {
     this.receiver = receiver
   }
 
-  /** Its route's presence was recorded, lost, or failed to record with `error`. */
-  presence(state: 'ready' | 'lost' | 'closed', error?: unknown): void {
-    this.transition(state, error)
+  /** Its route's presence was recorded. */
+  recorded(): void {
+    this.transition('ready')
+  }
+
+  /** Its route's presence may have lapsed: a refresh failed with `error`, which is reported where it was ready. */
+  lost(error: unknown): void {
+    if (this.state() !== 'ready') return
+    console.error(new Error(`Cloudflare Broadcast presence for '${this.memberRoute.route.key}' lost`, { cause: error }))
+    this.transition('lost')
+  }
+
+  /** Its route's presence failed to record, with `reason`. */
+  failed(reason: unknown): void {
+    this.transition('closed', reason)
   }
 
   unsubscribe(): Promise<void> {
+    const recorded = this.state() !== 'establishing'
     this.transition('closed')
-    return this.member.unsubscribe(this.memberRoute)
+    return this.member.unsubscribe(this.memberRoute, recorded)
   }
 }
 
@@ -369,8 +373,9 @@ class CloudflareBroadcastMember {
 
   openSubscription(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     const routeKey = broadcastRouteKey(route)
+    // One that is still here was unsubscribed while establishing: it is subscribed again before its presence was
+    // recorded, and that presence serves this attempt.
     const existing = this.routes.get(routeKey)
-    // Else it was unsubscribed while establishing, and is subscribed again before its presence was recorded.
     const memberRoute = existing ?? new MemberRoute({ route })
     const attempt = new MemberAttempt({ member: this, memberRoute, receiver })
     memberRoute.attempt = attempt
@@ -414,10 +419,10 @@ class CloudflareBroadcastMember {
     return missing
   }
 
-  async unsubscribe(memberRoute: MemberRoute): Promise<void> {
+  /** `recorded`: whether the route's presence was recorded; an establishing route is released once it is. */
+  async unsubscribe(memberRoute: MemberRoute, recorded: boolean): Promise<void> {
     memberRoute.attempt = null
-    // An establishing route is released once its presence is recorded.
-    if (memberRoute.state !== 'establishing') await this.release(broadcastRouteKey(memberRoute.route), memberRoute)
+    if (recorded) await this.release(broadcastRouteKey(memberRoute.route), memberRoute)
   }
 
   /** Written again after a failure Cloudflare calls transient, a few times (`TransientRetry`), unless nobody wants the
@@ -441,7 +446,7 @@ class CloudflareBroadcastMember {
         if (delay === null) {
           this.routes.delete(routeKey)
           if (sent) void this.removeUntilDone(memberRoute)
-          memberRoute.attempt?.presence('closed', reason)
+          memberRoute.attempt?.failed(reason)
           return
         }
         await new Promise((resolve) => setTimeout(resolve, delay))
@@ -510,7 +515,7 @@ class CloudflareBroadcastMember {
       (authority) => authority.telefuncBroadcastRenew(request),
       { deadline: sentAt + LEASE_RENEW_EVERY_MS, paused: true },
     )
-    if (renewed === 'renewed') this.grants.renewed(this.broadcast.authorityName(memberRoute.route.key), sentAt)
+    if (renewed === 'renewed') this.grants.counted(this.broadcast.authorityName(memberRoute.route.key), sentAt)
     return renewed
   }
 

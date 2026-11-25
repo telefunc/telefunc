@@ -250,7 +250,7 @@ class RoomSessionSubscriptions {
       return
     }
     // The room counts a renewal it renewed as this session's activity, which keeps its grant there.
-    if (results.includes('renewed')) this.grants.renewed(roomId, sentAt)
+    if (results.includes('renewed')) this.grants.counted(roomId, sentAt)
     attempts.forEach((attempt, index) => attempt.onRenewal(results[index]!, sentAt))
   }
 }
