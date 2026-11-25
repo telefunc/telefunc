@@ -3140,10 +3140,14 @@ function Room() {
       {scenario('text-cursor', null, 'Offline past maxMemory on a text track, lossy', async () => {
         const roomId = await createRoomId('text-cursor')
         const view = await onGetRoom(roomId)
-        const cursor: { n: number; seq: number }[] = []
-        view.subscribe((data, info) => cursor.push({ n: numberAt(data, 'n'), seq: info.seq }), {
-          track: 'cursor',
-        })
+        const cursor: { n: number | 'plain'; seq: number }[] = []
+        view.subscribe(
+          (data, info) => {
+            const n = fieldOf(data, 'n')
+            cursor.push({ n: n === 'plain' ? n : numberOf(n), seq: info.seq })
+          },
+          { track: 'cursor' },
+        )
         let closed = false
         view.onClose(() => (closed = true))
         const me = await view.join({ meta: { name: 'Me' } })
