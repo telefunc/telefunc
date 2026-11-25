@@ -410,14 +410,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
-   *  last entry; attached to a page that is behind or out of credit, the newest that waits and its sends still in the
+   *  last entry; attached to a page that is behind or out of credit, those that wait and its sends still in the
    *  wire's queue since its last frame. Nothing for a page that keeps up. */
   private replaceableHeld(): number {
     if (!this.peer) return this.offlineBuffer.replaceableHeld
     // Made before the first attached lossy send is measured: the attach may have handed lossy sends that still wait.
     const sends = this.lossyDelivery()
-    if (!sends.waits()) return 0
-    return (sends.held?.held ?? 0) + this.peer.replaceableHeld()
+    if (!sends.replaces()) return 0
+    return sends.waitingBytes + this.peer.replaceableHeld()
   }
 
   private lossyDelivery(): LossyDelivery<LossySend> {
@@ -438,6 +438,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       letGo: ({ held }) => this._letGoOffline(held),
       dropReplaceable: () => this.dropReplaceable(),
       outOfCredit: () => this.sendCredit.isOutOfCredit(),
+      bytes: ({ held }) => held,
     }
   }
 

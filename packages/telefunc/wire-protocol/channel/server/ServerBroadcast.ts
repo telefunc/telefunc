@@ -100,6 +100,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
           dropReplaceable: () => this.dropUnhanded(),
           // A broadcast's publishes count against no credit.
           outOfCredit: () => false,
+          bytes: (body) => body.frame.byteLength,
         })
       : null
   }
@@ -393,9 +394,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** `MemoryHolder`: its page gets every publish, so where it would miss one no wire has, the channel ends: from that gap
    *  on everything goes, receipts too, and its page reads on up to the gap and no further. A lossy one holds no publish
-   *  waiting but its newest, so it ends only at 0, where not even that fits. The bytes go at once and the channel ends
-   *  after the call that cut it (`overflow`). Ended by its abort, it is cut the same way, and the overflow takes the
-   *  abort's place; the abort alone needs no memory, so without a gap it ends as it was going to. */
+   *  waiting but its newest once its page confirmed a rate, so it ends only at 0, where not even that fits. The bytes
+   *  go at once and the channel ends after the call that cut it (`overflow`). Ended by its abort, it is cut the same
+   *  way, and the overflow takes the abort's place; the abort alone needs no memory, so without a gap it ends as it was
+   *  going to. */
   shed(toBytes: number, owner?: string): void {
     const replay = this._replayBuffer
     const ended = this._phase === 'ended'
@@ -420,6 +422,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** An answer past the gap would cross it: the channel ends first, and the publish it answers settles with that. */
   protected override sendAckRes(ackedSeq: number, result: string, status?: AckResultStatus): void {
     if (this.overflowed !== null) return this.endOverflowed()
+    // As a channel's reliable send, it goes behind its lossy publishes that wait.
+    this.lossyPublishes?.flush()
     super.sendAckRes(ackedSeq, result, status)
   }
 

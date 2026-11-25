@@ -150,5 +150,22 @@ for (const transport of ['sse', 'ws'] as const) {
       expect(await Promise.all([channel.close(), page.close()])).toEqual([null, null])
       expect(read).toEqual(['v1', 'v2', 'v3', 'close began'])
     })
+
+    test('with no close, the page reads each of them', async () => {
+      const key = `room:${crypto.randomUUID()}`
+      const channel = new ServerBroadcast({ key, lossy: true })
+      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+      const page = new ClientBroadcast<string>({
+        channelId: channel.id,
+        lossy: true,
+        connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
+      })
+      const read: string[] = []
+      page.subscribe((value) => void read.push(value.slice(0, 2)))
+      await Promise.all([channel.opened, page.opened])
+      await Promise.all(['v1', 'v2', 'v3'].map((name) => Broadcast.publish(key, name + 'x'.repeat(600_000))))
+      await vi.waitFor(() => expect(read).toEqual(['v1', 'v2', 'v3']))
+      expect(await Promise.all([channel.close(), page.close()])).toEqual([null, null])
+    })
   })
 }
