@@ -3,7 +3,6 @@ export { ServerHeadroom }
 import {
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECES_ACK_GAP_MS,
-  WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
   WIRE_SEND_AHEAD_ROUND_TRIPS,
 } from '../../constants.js'
@@ -17,7 +16,7 @@ import {
   type PieceSenderOwner,
   type PieceSocket,
 } from '../pieces.js'
-import { encode, MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type PiecesAck } from '../../wire/frame.js'
+import { encode, type PiecesAck } from '../../wire/frame.js'
 import {
   countWaitingPublishes,
   droppingFrom,
@@ -30,8 +29,6 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 
 /** How long a blocked window waits for its page's word before it asks. */
 const WIRE_ASK_AFTER_MS = WIRE_PIECES_ACK_GAP_MS / 5
-/** A message of the least send-ahead, with the most its frame adds. */
-const MESSAGE_BYTES = WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
@@ -58,7 +55,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private releasedData = false
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
-  /** Looks again for copy room, which another wire's page may free. */
+  /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it. */
+  private inPath = 0
+  private inPathAt = 0
+  /** Looks again for copy room, which another wire's page may free, or for the window the rate drains. */
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** Asks for the page's word once a blocked window has heard nothing for a while (`askSoon`). */
   private askTimer: ReturnType<typeof setTimeout> | null = null
@@ -119,27 +119,29 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return this.drain.rate
   }
 
-  /** What the path takes past what the page hasn't confirmed. */
+  /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands, as on main. */
   headroom(): number {
-    // Unmeasured, the kernel's TCP paces what the app hands, as on main; measured, only an acknowledgement frees room.
-    if (this.pathRate() === 0) return Number.POSITIVE_INFINITY
-    // A message may cross the window: on a slow link the next is on its way while the page acknowledges the last.
-    const room = this.window() - this.unconfirmed()
-    return room > 0 ? room + MESSAGE_BYTES : 0
+    return this.window() - this.pathHolds(performance.now())
   }
 
-  /** `PieceSenderOwner`: the most data the path may hold. On a slow link the least round trip still spans a whole frame's
-   *  arrival, and what goes ahead is copied pieces. The rate's rise waits for acknowledgements, which go a gap apart
-   *  however short the round trip. */
+  /** `PieceSenderOwner`: the most data the path may hold: what the page takes in `WIRE_SEND_AHEAD_ROUND_TRIPS` least
+   *  round trips. */
   window(): number {
     const rate = this.pathRate()
-    if (rate === 0) return Number.POSITIVE_INFINITY
-    const toAck = WIRE_SEND_AHEAD_ROUND_TRIPS * this.leastRtt + 2 * WIRE_PIECES_ACK_GAP_MS
-    return Math.max(2 * MESSAGE_BYTES, rate * Math.min(toAck, WIRE_QUEUE_DELAY_MS))
+    if (rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
+    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * rate * this.leastRtt)
+  }
+
+  /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
+  private pathHolds(now: number): number {
+    return Math.max(0, this.inPath - this.pathRate() * (now - this.inPathAt))
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
   handed(bytes: number, data: boolean, copied: boolean): void {
+    const now = performance.now()
+    this.inPath = this.pathHolds(now) + bytes
+    this.inPathAt = now
     if (copied) {
       this.copied.push({ end: this.sender.transmittedBytes, bytes })
       addWireCopies(bytes)
@@ -155,7 +157,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (this.releasing) this.releasedData = true
     if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) this.appLimitedTo = end
     this.handedSinceData = 0
-    if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
+    if (acknowledges(bytes)) this.sent.push({ end, at: now })
     // Asked at half the window, the page's answer frees its first half while the second still crosses.
     const asks = this.pieceRate.fastest > 0 && !this.sender.awaitsProbe && hasCopyRoom()
     if (asks && this.pathRate() > 0 && this.unconfirmed() >= this.window() / 2) this.askEarly = true
@@ -219,6 +221,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     // Arrivals of data handed while nothing waited came at the app's rate: they neither set the rate nor lower it.
     if (before < this.appLimitedTo) this.drain.dropSpan()
     else this.drain.spanned(acknowledged - before, spanMs)
+    // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
+    const now = performance.now()
+    this.inPath = Math.max(
+      0,
+      this.sender.transmittedBytes - acknowledged - this.pathRate() * Math.max(0, now - arrived),
+    )
+    this.inPathAt = now
     this.releaseCopies(acknowledged)
     this.sendWaiting()
     return true
@@ -285,7 +294,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.pace()
   }
 
-  /** While data waits, looks again for copy room, or asks for the page's report that frees a measured window. */
+  /** While data waits, looks again for copy room, or once the rate drained what the path holds past its window. */
   private pace(): void {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
     if (waitingBytes === 0 || awaitsProbe) return
@@ -300,6 +309,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.askForReport()
     // What goes after this look holds room no ask covers: ask again once the page says nothing for a while.
     this.askSoon()
+    // What waits goes once the rate drained the path to what it needs: looking sooner finds nothing to send.
+    const needed = Number.isFinite(this.sender.headroomNeeded) ? this.sender.headroomNeeded : 0
+    if (this.paceTimer === null)
+      this.paceTimer = unrefTimer(setTimeout(this.lookAgain, Math.max(1, (needed - this.headroom()) / this.pathRate())))
   }
 
   private readonly lookAgain = (): void => {

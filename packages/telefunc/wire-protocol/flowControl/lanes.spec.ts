@@ -337,9 +337,10 @@ describe('the lanes', () => {
     })
     try {
       let seq = 0
-      for (let n = 0; n < 50; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
+      // Frames the page acknowledges, so their acknowledgement gives a round trip.
+      for (let n = 0; n < 6; n++) headroom.send(encode.binary(1, new Uint8Array(17_000), ++seq))
       await sleep(30)
-      // 100 kB over a second: a window of the least send-ahead.
+      // 100 kB over a second, 30 ms after it went: a window of the least send-ahead.
       headroom.acknowledged({ bytes: headroom.sender.transmittedBytes, heldMs: 0, spanUs: 1_000_000 })
       const confirmed = headroom.sender.confirmedBytes
       // 2 KiB frames past the window, which wait whole: no probe, and the blocked window asks.
