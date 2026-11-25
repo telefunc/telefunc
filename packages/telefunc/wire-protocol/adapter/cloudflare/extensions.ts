@@ -5,6 +5,7 @@ export {
   getCloudflareExtensionPlanes,
   currentCloudflareMember,
   currentCloudflareHostKey,
+  extensionStub,
   CLOUDFLARE_BUCKETS,
 }
 export type {
@@ -12,6 +13,7 @@ export type {
   CloudflareExtension,
   CloudflareExtensionDurableObject,
   CloudflareExtensionKit,
+  CloudflareExtensionMethods,
   CloudflareMember,
   CloudflarePlaneKit,
   CloudflareRegions,
@@ -97,11 +99,30 @@ type CloudflareMember = {
   subscribeLocal(route: BroadcastRoute, receiver: BackendReceiver): () => void
 }
 
-/** An extension's part of a Durable Object: the methods its calls reach, by name, which are all a call can reach of
- *  it, and its alarm. */
+/** The methods an extension's Durable Object serves, by name, which are all a call can reach of it. */
+type CloudflareExtensionMethods = Readonly<Record<string, (...args: never[]) => Promise<unknown>>>
+
+/** An extension's part of a Durable Object: its methods and its alarm. */
 type CloudflareExtensionDurableObject = {
-  methods: Readonly<Record<string, (...args: never[]) => Promise<unknown>>>
+  methods: CloudflareExtensionMethods
   alarm?(): Promise<void>
+}
+
+/** The extension `name`'s `methods` of the Durable Object `stub` reaches, as the extension's `Methods` declares them,
+ *  each called through the object's `telefuncDurableObjectCall()`. */
+function extensionStub<Methods extends CloudflareExtensionMethods>(
+  stub: TelefuncExtensionStub,
+  name: string,
+  methods: readonly (keyof Methods & string)[],
+): Methods {
+  const call =
+    (method: string) =>
+    (...args: unknown[]) =>
+      stub.telefuncDurableObjectCall(name, method, args)
+  const called: CloudflareExtensionMethods = Object.fromEntries(methods.map((method) => [method, call(method)]))
+  // The one place an extension's declared methods meet the Durable Object's untyped call, as a Broadcast's declared `T`
+  // meets its parsed payload (`ServerBroadcast`'s delivery).
+  return called as Methods
 }
 
 type CloudflareExtension = {

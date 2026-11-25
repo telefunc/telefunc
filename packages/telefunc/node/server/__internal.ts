@@ -74,10 +74,12 @@ export {
   serveCloudflarePlane,
   currentCloudflareMember,
   currentCloudflareHostKey,
+  extensionStub,
   CLOUDFLARE_BUCKETS,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type {
   CloudflareExtensionKit,
+  CloudflareExtensionMethods,
   CloudflareMember,
   CloudflarePlaneKit,
   CloudflareRegions,
