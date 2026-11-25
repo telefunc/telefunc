@@ -14,12 +14,7 @@ export type {
   TelefuncBroadcastStub,
 }
 
-import {
-  KNOWN_BROADCAST_BUCKETS,
-  getBucketCoordinatorScale,
-  getDeterministicKeyBucketIndex,
-  readLocationBucket,
-} from './routing.js'
+import { getBucketCoordinatorScale, getDeterministicKeyBucketIndex, readLocationBucket } from './routing.js'
 import { CallNotSent, type CallOptions, type Invoke, type OrderedStubs } from './OrderedStubs.js'
 import { integerColumn, type DurableStorage, type SqlStore } from './sqlStorage.js'
 import { TransientRetry } from './transientRetry.js'
@@ -326,7 +321,6 @@ class CloudflareBroadcastMember {
 
   /** The bucket the session was placed in, from the request that reached it. */
   locate(bucket: LocationBucket): void {
-    assert(KNOWN_BROADCAST_BUCKETS.has(bucket), `Invalid Broadcast location bucket "${bucket}".`)
     this.locatedBucket = bucket
   }
 

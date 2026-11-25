@@ -1,7 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export {
   DEFAULT_BROADCAST_BUCKETS,
-  KNOWN_BROADCAST_BUCKETS,
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
@@ -34,7 +33,6 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** The session Durable Object's name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
-const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS)
 /** Each bucket Broadcast places members in, by its name. */
 const BROADCAST_BUCKETS_BY_NAME = new Map<string, LocationBucket>(
   DEFAULT_BROADCAST_BUCKETS.map((bucket) => [bucket, bucket]),
@@ -136,7 +134,7 @@ function resolveCloudflareLocationHint(
   locationFallback: DurableObjectLocationHint,
 ): DurableObjectLocationHint {
   assert(
-    KNOWN_BROADCAST_BUCKETS.has(locationFallback),
+    BROADCAST_BUCKETS_BY_NAME.has(locationFallback),
     `Cloudflare locationFallback must be one of ${DEFAULT_BROADCAST_BUCKETS.join(', ')}. Received ${String(locationFallback)}.`,
   )
 
