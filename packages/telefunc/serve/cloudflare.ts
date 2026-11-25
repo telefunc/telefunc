@@ -12,10 +12,8 @@ import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '.
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
-import {
-  CloudflareBroadcastAuthorityState,
-  CloudflareBroadcast,
-} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+import { CloudflareBroadcastAuthorityState } from '../wire-protocol/adapter/cloudflare/CloudflareBroadcastAuthorityState.js'
+import { CloudflareBroadcast } from '../wire-protocol/adapter/cloudflare/CloudflareBroadcast.js'
 import type {
   BroadcastCalls,
   BroadcastForwardRequest,
@@ -23,7 +21,7 @@ import type {
   BroadcastLeaseRequest,
   BroadcastReleaseRequest,
   BroadcastPublishRequest,
-} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcastRpc.js'
 import { OrderedStubs } from '../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,

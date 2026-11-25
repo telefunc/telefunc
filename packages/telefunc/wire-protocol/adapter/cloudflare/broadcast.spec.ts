@@ -9,7 +9,8 @@ import {
   readForwardedTarget,
   resolveSessionRoutingTarget,
 } from './routing.js'
-import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
+import { CloudflareBroadcastAuthorityState } from './CloudflareBroadcastAuthorityState.js'
+import { CloudflareBroadcast } from './CloudflareBroadcast.js'
 import type {
   BroadcastCalls,
   BroadcastHoldRequest,
@@ -18,7 +19,7 @@ import type {
   BroadcastReleaseRequest,
   ForwardLoss,
   TelefuncBroadcastStub,
-} from './broadcast.js'
+} from './broadcastRpc.js'
 import { OrderedStubs } from './OrderedStubs.js'
 import { integerColumn } from './sqlStorage.js'
 import type { TelefuncExtensionNamespace } from './extensions.js'

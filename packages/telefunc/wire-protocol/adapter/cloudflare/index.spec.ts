@@ -87,15 +87,18 @@ vi.mock('../../../node/server/runTelefunc/loadTelefuncFilesUsingVite.js', () => 
   preloadServerProductionEntry: vi.fn(async () => {}),
 }))
 
-vi.mock('./broadcast.js', () => ({
+vi.mock('./CloudflareBroadcastAuthorityState.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
+}))
+
+vi.mock('./CloudflareBroadcast.js', () => ({
   CloudflareBroadcast: mocks.MockCloudflareBroadcast,
 }))
 
 import { Telefunc } from '../../../serve/cloudflare.js'
 import { resolveSessionRoutingTarget } from './routing.js'
 import { disposeBackend } from '../../backend/install.js'
-import type { BroadcastPublishRequest } from './broadcast.js'
+import type { BroadcastPublishRequest } from './broadcastRpc.js'
 import type { BroadcastDelivery } from './extensions.js'
 
 function createBinding() {

@@ -7,7 +7,7 @@ import { getContext, PROVIDED_CONTEXT } from '../../../node/server/context/getCo
 import { ChannelMux } from '../../channel/server/ChannelMux.js'
 import { ServerChannel } from '../../channel/server/ServerChannel.js'
 import { TAG } from '../../wire/tags.js'
-import type { CloudflareBroadcastMember } from './broadcast.js'
+import type { CloudflareBroadcastMember } from './CloudflareBroadcastMember.js'
 import { withCloudflareSession } from './session.js'
 
 beforeAll(() => installAsyncContext(AsyncLocalStorage))
