@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   DEFAULT_BROADCAST_BUCKETS,
@@ -19,6 +19,7 @@ import type {
   TelefuncBroadcastStub,
 } from './broadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
+import { integerColumn } from './sqlStorage.js'
 import type { TelefuncExtensionNamespace } from './extensions.js'
 import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
@@ -407,6 +408,33 @@ describe('cloudflare broadcast routing', () => {
 
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
+  })
+
+  it("a key's authority keeps no lease or holder row of a member Durable Object that left, once its alarm fires 90 s after the member's release", async () => {
+    vi.useFakeTimers()
+    onTestFinished(() => void vi.useRealTimers())
+    const { storage } = sqliteStorage()
+    const authority = new CloudflareBroadcastAuthorityState({ storage })
+    const rows = (table: string) => integerColumn(storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one(), 'n')
+    const member = 'telefunc-shard-weur-0'
+    const grant = await authority.grant(member)
+    const route: BroadcastLeaseRequest = { key: 'room:test', kind: 'text', member, lease: crypto.randomUUID() }
+    await authority.hold({ ...route, bucket: 'weur', order: { grant, seq: 1 } })
+    await authority.release({ ...route, order: { grant, seq: 2 } })
+    const releasedAt = Date.now()
+    expect({ alarm: await storage.getAlarm(), holders: rows('telefunc_lease_holder') }).toEqual({
+      alarm: releasedAt + 90_000,
+      holders: 1,
+    })
+    vi.setSystemTime(releasedAt + 90_000)
+    // The runtime clears an alarm as it runs it.
+    await storage.deleteAlarm()
+    await authority.alarm()
+    expect({
+      leases: rows('telefunc_lease'),
+      holders: rows('telefunc_lease_holder'),
+      alarm: await storage.getAlarm(),
+    }).toEqual({ leases: 0, holders: 0, alarm: null })
   })
 })
 
