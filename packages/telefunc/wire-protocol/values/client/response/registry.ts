@@ -1,10 +1,11 @@
-export { createStreamingReviver, featuresIn }
+export { ResponseValues }
 
-import type { Reviver } from '@brillout/json-serializer/parse'
+import { parse } from '@brillout/json-serializer/parse'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import type { Feature, Features } from '../loadFeatures.js'
+import { replaceParsedValues } from './replaceParsedValues.js'
 import {
   SERIALIZER_PREFIX_STEM,
   SERIALIZER_PREFIX_GENERATOR,
@@ -19,7 +20,6 @@ import {
   SERIALIZER_PREFIX_BROADCAST,
 } from '../../../constants.js'
 
-/** The code each built-in value's reviver is in. */
 const FEATURE_OF_PREFIX = new Map<string, Feature>([
   [SERIALIZER_PREFIX_GENERATOR, 'streams'],
   [SERIALIZER_PREFIX_STREAM, 'streams'],
@@ -32,54 +32,77 @@ const FEATURE_OF_PREFIX = new Map<string, Feature>([
   [SERIALIZER_PREFIX_FUNCTION, 'channels'],
   [SERIALIZER_PREFIX_BROADCAST, 'broadcasts'],
 ])
-const TAG_START = `"${SERIALIZER_PREFIX_STEM}`
 
-/** The code the built-in values in a response's serialized `text` need. The serializer escapes an app's string that
- *  starts with `!` as `!!`, so `"!Telefunc` starts only a value's tag, at any depth. A stream that a text response
- *  carries rides a channel of its own (`streamsRideChannels`). */
-function featuresIn(text: string, streamsRideChannels: boolean): Set<Feature> {
-  const features = new Set<Feature>()
-  for (let at = text.indexOf(TAG_START); at !== -1; at = text.indexOf(TAG_START, at + TAG_START.length)) {
-    const feature = FEATURE_OF_PREFIX.get(text.slice(at + 1, text.indexOf(':', at) + 1))
-    if (feature) features.add(feature)
-    if (feature === 'streams' && streamsRideChannels) features.add('channels')
+type ClientResponseType = ReviverType<TypeContract, ClientReviverContext>
+type TagType = { prefix: string; feature: Feature } | { prefix: string; extension: ClientResponseType }
+type ResponseTag = { type: TagType; metadata: unknown }
+
+/** The serializer visits value strings, including those inside tag metadata, before any live value is created. */
+class ResponseValues {
+  private readonly value: unknown
+  private tags?: Map<string, ResponseTag>
+  private features?: Set<Feature>
+
+  constructor(body: string, extensions: ClientResponseType[], streamsRideChannels: boolean) {
+    this.value = parse(body, {
+      reviver: (_path, wire, parseMetadata) => {
+        const existing = this.tags?.get(wire)
+        if (existing) return { replacement: existing }
+
+        const type = responseType(wire, extensions)
+        if (!type) return undefined
+        const features = (this.features ??= new Set())
+        if ('feature' in type) {
+          features.add(type.feature)
+          if (type.feature === 'streams' && streamsRideChannels) features.add('channels')
+        } else {
+          features.add('channels')
+          features.add('broadcasts')
+        }
+
+        const metadata = parseMetadata(wire.slice(type.prefix.length))
+        const tag = { type, metadata }
+        const tags = (this.tags ??= new Map())
+        tags.set(wire, tag)
+        return { replacement: tag }
+      },
+    })
   }
-  return features
+
+  missingFeatures(loaded: Features): Feature[] | undefined {
+    return this.features && [...this.features].filter((feature) => !loaded[feature])
+  }
+
+  revive(
+    context: ClientReviverContext,
+    handOut: (revived: ReturnType<ClientResponseType['revive']>) => unknown,
+    loaded: Features,
+  ): unknown {
+    if (!this.tags) return this.value
+    const replacements = new Map<object, unknown>()
+    // A tag is stored after its metadata, so nested values revive first and repeated wire tags share one value.
+    for (const tag of this.tags.values()) {
+      const { type } = tag
+      const reviver =
+        'feature' in type
+          ? loaded[type.feature]?.responseTypes.find((entry) => entry.prefix === type.prefix)
+          : type.extension
+      assert(reviver)
+      const metadata = replaceParsedValues(tag.metadata, replacements)
+      assert(isObject(metadata))
+      replacements.set(tag, handOut(reviver.revive(metadata, context)))
+    }
+    return replaceParsedValues(this.value, replacements)
+  }
 }
 
-/** Creates a JSON-serializer reviver that delegates to type-specific plugins, with the built-in ones of `loaded`.
- *
- *  Duplicated references are deduplicated, mirroring createStreamingReplacer: the server emits
- *  one replacement string per value identity, so equal wire strings denote the same server-side
- *  value — the first occurrence revives (side effects run once), duplicates resolve to the
- *  already-revived object, and server-side `===` holds on the client too. */
-function createStreamingReviver(
-  context: ClientReviverContext,
-  handOut: (revived: ReturnType<ReviverType['revive']>) => unknown,
-  extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
-  loaded: Features,
-) {
-  const allTypes = [
-    ...(loaded.streams?.responseTypes ?? []),
-    ...(loaded.broadcasts?.responseTypes ?? []),
-    ...(loaded.channels?.responseTypes ?? []),
-    ...extensionTypes,
-  ]
-  const revivedByWireString = new Map<string, unknown>()
-  const reviver: Reviver = (_path, value, parser) => {
-    if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }
-    for (const type of allTypes) {
-      if (value.startsWith(type.prefix)) {
-        const metadata = parser(value.slice(type.prefix.length))
-        assert(isObject(metadata))
-        const revived = type.revive(metadata, context)
-        // Duplicates resolve to the exact object the first occurrence handed out.
-        const handedOut = handOut(revived)
-        revivedByWireString.set(value, handedOut)
-        return { replacement: handedOut }
-      }
-    }
-    return undefined
+function responseType(wire: string, extensions: ClientResponseType[]): TagType | undefined {
+  if (wire.startsWith(SERIALIZER_PREFIX_STEM)) {
+    const prefix = wire.slice(0, wire.indexOf(':') + 1)
+    const feature = FEATURE_OF_PREFIX.get(prefix)
+    if (feature) return { prefix, feature }
   }
-  return reviver
+  for (const extension of extensions) {
+    if (wire.startsWith(extension.prefix)) return { prefix: extension.prefix, extension }
+  }
 }

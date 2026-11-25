@@ -1,6 +1,5 @@
 export { parseResponse }
 
-import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
@@ -16,7 +15,7 @@ import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
-import { createStreamingReviver, featuresIn } from './registry.js'
+import { ResponseValues } from './registry.js'
 import { loadFeatures, loadedFeatures, loadedChannels } from '../loadFeatures.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
@@ -62,7 +61,6 @@ async function parseResponse(
 
     // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
     const body = await response.text()
-    await loadFeaturesIn(body, true, callContext)
     return await reviveResponse(body, callContext, connection, null)
   } catch (err) {
     for (const close of callContext.requestCloseHandlers) void closeOnFailure(close)
@@ -89,7 +87,6 @@ async function parseStreamedResponse(
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
     }
     const metaText = new TextDecoder().decode(metaBytes)
-    await loadFeaturesIn(metaText, false, callContext)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
     if (streamReader) streamReader.cancel()
@@ -97,14 +94,6 @@ async function parseStreamedResponse(
     else body.cancel().catch(() => {})
     throw err
   }
-}
-
-/** Loads the code the values in a response's serialized `text` need, before any of them revives. */
-async function loadFeaturesIn(text: string, streamsRideChannels: boolean, callContext: CallContext): Promise<void> {
-  const loaded = loadedFeatures()
-  if (loaded.streams && loaded.channels && loaded.broadcasts) return
-  const needed = [...featuresIn(text, streamsRideChannels)].filter((feature) => !loaded[feature])
-  if (needed.length > 0) await loadFeatures(needed, callContext)
 }
 
 // ===== Response revival =====
@@ -161,7 +150,6 @@ async function reviveResponse(
       return demuxer.create(metadata.__index)
     },
   }
-  const reviver = createStreamingReviver(context, handOut, callContext.extensionResponseTypes, loadedFeatures())
 
   function handOut(revived: ReturnType<ReviverType['revive']>) {
     const { value, abort, close, onEnd } = revived
@@ -193,7 +181,11 @@ async function reviveResponse(
 
   let parsed: unknown
   try {
-    parsed = parse(body, { reviver })
+    const values = new ResponseValues(body, callContext.extensionResponseTypes, !bodyStreamReader)
+    const loaded = loadedFeatures()
+    const needed = values.missingFeatures(loaded)
+    if (needed?.length) await loadFeatures(needed, callContext)
+    parsed = values.revive(context, handOut, loaded)
     if (pendingValues.length > 0) {
       parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))
     }

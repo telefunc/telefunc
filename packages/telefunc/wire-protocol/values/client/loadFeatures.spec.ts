@@ -372,11 +372,12 @@ test('a response carrying an inline stream and a channel loads both, then revive
   expect(imported.sort()).toEqual(['channels', 'streams'])
 })
 
-test("an extension's value loads what its code imports, and no other chunk", async () => {
+test('an extension response can create a broadcast and a channel', async () => {
   const { call, config } = await page()
   gates.channels.open()
   // The extension's client code: its values create channels.
   await import('../../../client/__internal.js')
+  gates.broadcasts.open()
   const created: string[] = []
   config.extensions.push({
     name: 'probe',
@@ -385,15 +386,22 @@ test("an extension's value loads what its code imports, and no other chunk", asy
         prefix: '!TelefuncProbe:',
         revive(metadata: { channelId: string }, context) {
           created.push(context.createChannel({ channelId: metadata.channelId }).id)
-          return { value: {}, close() {}, abort() {} }
+          const value = context.createBroadcast({ channelId: 'b1', key: 'probe' })
+          return {
+            value,
+            async close() {
+              await value.close()
+            },
+            abort: () => value.abort(),
+          }
         },
       },
     ],
   })
   respond = text(tag('!TelefuncProbe:', { channelId: 'p1' }))
-  await call([])
+  expect(await call([])).toHaveProperty('subscribe', expect.any(Function))
   expect(created).toEqual(['p1'])
-  expect(imported).toEqual(['channels'])
+  expect(imported).toEqual(['channels', 'broadcasts'])
 })
 
 test('a second client module instance gets native Files and Blobs from the shared feature cache', async () => {
@@ -425,6 +433,33 @@ test('a second client module instance gets native Files and Blobs from the share
   expect(ret.file.lastModified).toBe(12)
   expect(await ret.file.text()).toBe('cat')
   expect(await ret.blob.text()).toBe('dog')
+})
+
+test.each<[Feature, string | Record<string, number>]>([
+  ['channels', 'Documentation example: "!TelefuncChannel:sample'],
+  ['broadcasts', { '!TelefuncBroadcast:category': 42 }],
+  ['streams', 'Documentation example: "!TelefuncStream:sample'],
+])('plain response data does not load %s even if its asset fails', async (feature, value) => {
+  const { call } = await page()
+  failing.add(feature)
+  for (const group of FEATURES) gates[group].open()
+  const body = stringify({ ret: value })
+  respond = () => new Response(body)
+  const jsonParse = vi.spyOn(JSON, 'parse')
+  try {
+    const ret = await call([value])
+    if (typeof value === 'object') {
+      assert(typeof ret === 'object' && ret !== null)
+      expect(Object.fromEntries(Object.entries(ret))).toEqual(value)
+    } else {
+      expect(ret).toEqual(value)
+    }
+    expect(jsonParse.mock.calls.filter(([input]) => input === body)).toHaveLength(1)
+  } finally {
+    jsonParse.mockRestore()
+  }
+  expect(posts).toHaveLength(1)
+  expect(imported).toEqual([])
 })
 
 test('plain RPC: sent at once, an app string that looks like a value loads nothing and comes back as it was', async () => {
