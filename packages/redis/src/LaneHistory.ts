@@ -64,6 +64,7 @@ class LaneHistory {
   /** The routes it delivers through: it lives while one holds it. */
   readonly routes = new Set<LaneRoute>()
   private started = false
+  private followed: string | null = null
   private last = 0
   private tip = NO_ID
   private branch = 0
@@ -92,20 +93,24 @@ class LaneHistory {
     return this.routes.size === 0
   }
 
-  /** `route` is ready at `start` (none: the lane had no commit) with the frames that reached it before. On a first
-   *  establish, those its start covers are dropped and the rest go out; on a resume, the start is compared with what
-   *  the lane delivered. A route that joins a running lane only drops the frames its start covers. `switched`: the
-   *  resume read another authority than the route's last start, which its key was told of. */
+  /** `route` is ready at `start` (none: the lane had no commit), read from `history`, with the frames that reached it
+   *  before. On a first establish, those its start covers are dropped and the rest go out. A start of another history
+   *  than the lane follows is followed as a history it never saw; on its own history, a resume compares the start with
+   *  what the lane delivered, and a route that joins a running lane drops only what its start covers that the lane is
+   *  past. `resumedFrom`: the history of the route's last start, which a lane new to a resuming route had no commit on.
+   *  Returns the history it left, if any. */
   establish(
     route: LaneRoute,
     start: LaneStart | undefined,
     early: LaneFrame[],
     resuming: boolean,
     passed: (frame: LaneFrame) => number,
-    switched = false,
-  ): void {
+    history: string = this.followed ?? '',
+    resumedFrom: string = history,
+  ): string | null {
     if (!this.started) {
       this.started = true
+      this.followed = resuming ? resumedFrom : history
       // A lane new to a resuming route had no commit when the route was last ready.
       this.follow(resuming ? NO_START : (start ?? NO_START), null, 0)
       if (!resuming) {
@@ -115,16 +120,42 @@ class LaneHistory {
           // The read that started the lane saw these frames' history.
           else this.offer(frame, Number.POSITIVE_INFINITY, 'accounted')
         }
-        return
+        return null
       }
     }
-    if (resuming && switched) return this.switchTo(start ?? NO_START, early, passed)
-    if (resuming) return this.resume(route, start ?? NO_START, early, passed)
+    const left = this.followed !== history ? this.followed : null
+    this.followed = history
+    if (left !== null) {
+      this.switchTo(start ?? NO_START, early, passed)
+      return left
+    }
+    if (resuming) {
+      this.resume(route, start ?? NO_START, early, passed)
+      return null
+    }
     const covered = start === undefined ? null : coveredBy(start, early)
     for (const frame of early) {
-      if (covered?.has(frame)) route.dropped(frame)
+      if (covered?.has(frame) && frame.place <= this.last) route.dropped(frame)
       else this.offer(frame, passed(frame))
     }
+    return null
+  }
+
+  /** The history it follows, from its last start or a proof: null before its first. */
+  get follows(): string | null {
+    return this.followed
+  }
+
+  /** Its key moved to `history`, where it lost nothing in the move. */
+  followHistory(history: string): void {
+    this.followed = history
+  }
+
+  /** Frames a route that left brought and the lane didn't decide yet: they go on through a route that stays. */
+  adopt(frames: LaneFrame[]): void {
+    const [via] = this.routes
+    if (via === undefined) return
+    for (const frame of frames) this.offer({ ...frame, via })
   }
 
   /** A frame, decided by the first row that matches. `passedBefore` is the highest place its route brought the lane
@@ -144,12 +175,16 @@ class LaneHistory {
     return (place === this.last && id === this.tip) || this.knowsAt(place, id)
   }
 
-  /** The route is gone: its parked frames go with it, as every route of the lane brings each of its frames. */
+  /** The route is gone: its parked frames go on through a route that stays, as a later route never brings what was
+   *  published before it subscribed. */
   leave(route: LaneRoute): void {
     this.routes.delete(route)
     if (this.parked !== null) {
+      const [other] = this.routes
       for (const [place, frames] of this.parked) {
-        const kept = frames.filter((frame) => frame.via !== route)
+        const kept = frames.flatMap((frame) =>
+          frame.via !== route ? [frame] : other ? [{ ...frame, via: other }] : [],
+        )
         if (kept.length > 0) this.parked.set(place, kept)
         else this.parked.delete(place)
       }
@@ -299,8 +334,8 @@ class LaneHistory {
     for (const frame of rest) this.offer(frame, passed(frame))
   }
 
-  /** The route's lost connection ended at `start` of another authority, which its key was told of: no count holds
-   *  across two authorities, so the lane follows the start as a history it never saw, unless it stands at the start.
+  /** The route starts at `start` of another history than the lane followed, which its key was told of: no count holds
+   *  across two histories, so the lane follows the start as a history it never saw, unless it stands at the start.
    *  A frame at or below the start is of the change that read saw. */
   private switchTo(start: LaneStart, early: LaneFrame[], passed: (frame: LaneFrame) => number): void {
     if (!(start.place === this.last && start.id === this.tip)) {

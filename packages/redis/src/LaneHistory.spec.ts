@@ -56,7 +56,7 @@ function route(log: string[]) {
     read(lane, start, switched = false) {
       const early = reading ?? []
       reading = null
-      lane.establish(route, start, early, true, route.pass, switched)
+      lane.establish(route, start, early, true, route.pass, switched ? 'switched' : undefined)
     },
   }
   return route
@@ -246,7 +246,7 @@ describe('LaneHistory', () => {
         form === 'behind' ? { place: 2, last: idOf('x2') } : { place: 3, last: idOf('x3') },
       )
       if (form === 'ahead') for (const i of [4, 5]) B.commit(`y${i}`, E)
-      history.establish(E, B.start(), [], true, E.pass, true)
+      history.establish(E, B.start(), [], true, E.pass, 'b')
       E.offer(history, B.commit('y6', E))
       expect(log.slice(3)).toEqual(form === 'behind' ? ['y6 rewound'] : ['y6'])
     }
@@ -262,7 +262,7 @@ describe('LaneHistory', () => {
     // Another history whose start the lane never saw.
     const B = new Node()
     const y1 = B.commit('y1', E)
-    history.establish(E, B.start(), [y1], true, E.pass, true)
+    history.establish(E, B.start(), [y1], true, E.pass, 'b')
     E.offer(history, y1)
     E.offer(history, B.commit('y2', E))
     expect(log).toEqual(['x1', 'x2', 'y1 rewound', 'y2'])

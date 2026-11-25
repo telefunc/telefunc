@@ -97,10 +97,16 @@ class Holder {
     if (lane.done && this.lanes.get(channel) === lane) this.lanes.delete(channel)
   }
 
-  /** Whether leaving the history `from` is news to the holder: it is told once of each history it leaves. A promotion
+  /** Frames an attempt that left brought on the lane named `channel`, which the lane didn't decide yet. */
+  adopt(channel: string, frames: LaneFrame[]): void {
+    this.lanes.get(channel)?.adopt(frames)
+  }
+
+  /** Whether moving from the history `from` to `to` is news to the holder: it is told once of each history it leaves.
+   *  A read that finds a history it was told it left (its old master still answering) is of that failover. A promotion
    *  starts a new history, so a later failover leaves another one. */
-  leaves(from: string): boolean {
-    if (this.left.has(from)) return false
+  leaves(from: string, to: string): boolean {
+    if (this.left.has(from) || this.left.has(to)) return false
     this.left.add(from)
     return true
   }
@@ -631,19 +637,21 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
 
   /** Its key's history goes on under `authority`, the master its key moved to, where it lost nothing in the move. */
   followHistory(authority: string): void {
-    if (this.state() === 'ready') this.authority = authority
+    if (this.state() !== 'ready') return
+    this.authority = authority
+    for (const { history } of this.lanes.values()) history.followHistory(historyOf(authority))
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
-   *  before it is ready; on a resume, each lane it carried compares its start with what it delivered, unless the start
-   *  came from another history than its last: then its key is told, once for that history, that it doesn't know what
-   *  it missed. */
+   *  before it is ready; each lane compares its start with what it delivered and the history it follows. A read that
+   *  leaves a history the attempt or one of its lanes followed tells its key, once for that history, that it doesn't
+   *  know what it missed. */
   markReady({ authority, starts }: Starts): void {
     if (!this.awaitsConfirmation()) return
     const resuming = this.state() === 'lost'
-    const left = resuming && this.authority !== authority ? this.history : null
-    const switched = left !== null
+    const before = resuming ? this.history : null
     this.authority = authority
+    const now = historyOf(authority)
     const early = new Map<string, LaneFrame[]>()
     for (const frame of this.early) getOrCreate(early, frame.lane, () => []).push(frame)
     this.early = []
@@ -659,13 +667,21 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
       }
     }
     this.transition('ready')
-    if (left !== null && this.holder.leaves(left)) this.tell(null)
+    const left = new Set<string>()
+    if (before !== null && before !== now) left.add(before)
+    for (const laneKey of lanes) {
+      const follows = this.laneOf(laneKey).history.follows
+      if (follows !== null && follows !== now) left.add(follows)
+    }
+    let news = false
+    for (const history of left) news = this.holder.leaves(history, now) || news
+    if (news) this.tell(null)
     for (const laneKey of lanes) {
       // A consumer may close the lane.
       if (this.state() !== 'ready') return
       const lane = this.laneOf(laneKey)
       const pass = (frame: LaneFrame) => this.pass(lane, frame)
-      lane.history.establish(this, starts.get(laneKey), early.get(laneKey) ?? [], resuming, pass, switched)
+      lane.history.establish(this, starts.get(laneKey), early.get(laneKey) ?? [], resuming, pass, now, before ?? now)
     }
   }
 
@@ -783,11 +799,15 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   }
 
   private forgetFrames(): void {
+    const early = new Map<string, LaneFrame[]>()
+    for (const frame of this.early) getOrCreate(early, frame.lane, () => []).push(frame)
+    this.early = []
     for (const [laneKey, { history }] of this.lanes) {
       this.holder.leaveLane(this.laneName(laneKey), history, this)
     }
     this.lanes.clear()
-    this.early = []
+    // What it brought and its lanes didn't decide yet stays theirs, where another attempt carries them.
+    for (const [laneKey, frames] of early) this.holder.adopt(this.laneName(laneKey), frames)
   }
 
   private rejectFences(error: unknown): void {
