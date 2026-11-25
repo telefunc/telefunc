@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Calling <Link href="/provideTelefuncContext">`provideTelefuncContext(context)`</Link> without a callback now throws an error. Call your telefunction inside a callback instead:
+You must now call your telefunction inside the `provideTelefuncContext()` callback:
 
 ```ts
 // Environment: server
@@ -10,29 +10,7 @@ const { todoItems } = await onLoadTodoItems() // [!code --]
 const { todoItems } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
 ```
 
-> The value returned by the callback is returned by `provideTelefuncContext()`.
-
-> The changes on this page apply only if your app doesn't import `telefunc/async_hooks`.
-
-
-## `getContext()` after `await`
-
-Calling `getContext()` after an `await` operator now throws an error. Call it before the first `await`:
-
-```ts
-// TodoList.telefunc.ts
-// Environment: server
-
-export async function onLoad() {
-  await something() // [!code --]
-  const context = getContext() // [!code --]
-  const context = getContext() // [!code ++]
-  await something() // [!code ++]
-}
-```
-
-> See <Link href="/getContext#access" />.
-
+See: <Link href="/provideTelefuncContext" />
 
 ## See also
 
