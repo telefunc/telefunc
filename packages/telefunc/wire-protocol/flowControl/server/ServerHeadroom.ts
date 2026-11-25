@@ -27,7 +27,7 @@ import {
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
-/** How long a blocked window waits for its page's word before it asks. */
+/** How long a wire waiting for copy room waits for its page's word before it asks. */
 const WIRE_ASK_AFTER_MS = WIRE_PIECES_ACK_GAP_MS / 5
 
 type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
@@ -39,17 +39,12 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly socket: PieceSocket
   /** The rate the page takes data at, as acknowledgements measure it. */
   private readonly drain = new DrainRate()
-  /** The rates frames crossed at. The probe of the wire's first large frame gives one in a round trip: that frame's
-   *  acknowledgement comes only when all of it arrived, which on a slow link is seconds of publishes later. */
-  private readonly pieceRate = new PieceRate()
   /** The least time from data handed to the acknowledgement that covered it, `Infinity` before one. */
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
   private readonly sent = new Fifo<{ end: number; at: number }>()
   /** Where the newest data handed with nothing waiting ahead ends: arrivals up to it came at the app's rate. */
   private appLimitedTo = 0
-  /** Whether what the page hasn't confirmed reached half the window since the last ask: the next send asks. */
-  private askEarly = false
   /** Whether the sender is sending what waited for headroom, and whether it handed data of it yet. */
   private releasing = false
   private releasedData = false
@@ -60,7 +55,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private inPathAt = 0
   /** Looks again for copy room, which another wire's page may free, or for the window the rate drains. */
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  /** Asks for the page's word once a blocked window has heard nothing for a while (`askSoon`). */
+  /** Asks for the page's word once a wire waiting for copy room has heard nothing for a while (`askSoon`). */
   private askTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
@@ -76,7 +71,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.sender = new PieceSender({
       socket,
       pingInterval,
-      pieceRate: this.pieceRate,
+      pieceRate: new PieceRate(),
       cuts: 'whole',
       lanes: true,
       owner: this,
@@ -86,14 +81,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
     this.sender.send(frame, this.headroom())
-    this.askIfHalf()
     this.pace()
-  }
-
-  private askIfHalf(): void {
-    if (!this.askEarly) return
-    this.askEarly = false
-    this.askForReport()
   }
 
   waitingPublishes(ix: number): number {
@@ -158,9 +146,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) this.appLimitedTo = end
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
-    // Asked at half the window, the page's answer frees its first half while the second still crosses.
-    const asks = this.pieceRate.fastest > 0 && !this.sender.awaitsProbe && hasCopyRoom()
-    if (asks && this.pathRate() > 0 && this.unconfirmed() >= this.window() / 2) this.askEarly = true
   }
 
   /** `PieceSenderOwner`: the most copies this wire may hold once its page took all it handed. */
@@ -233,7 +218,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return true
   }
 
-  /** Asks the page soon, unless it says first: a blocked window would otherwise wait out its acknowledgement gap. */
+  /** Asks the page soon, unless it says first: copy room would otherwise wait out its acknowledgement gap. */
   private askSoon(): void {
     if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
   }
@@ -290,7 +275,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       this.releasing = false
       this.releasedData = false
     }
-    this.askIfHalf()
     this.pace()
   }
 
@@ -305,14 +289,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
         this.paceTimer = unrefTimer(setTimeout(this.lookAgain, WIRE_PIECES_ACK_GAP_MS))
       return
     }
-    if (this.pathRate() === 0) return
-    this.askForReport()
-    // What goes after this look holds room no ask covers: ask again once the page says nothing for a while.
-    this.askSoon()
+    if (this.pathRate() === 0 || this.paceTimer !== null) return
     // What waits goes once the rate drained the path to what it needs: looking sooner finds nothing to send.
     const needed = Number.isFinite(this.sender.headroomNeeded) ? this.sender.headroomNeeded : 0
-    if (this.paceTimer === null)
-      this.paceTimer = unrefTimer(setTimeout(this.lookAgain, Math.max(1, (needed - this.headroom()) / this.pathRate())))
+    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, Math.max(1, (needed - this.headroom()) / this.pathRate())))
   }
 
   private readonly lookAgain = (): void => {
