@@ -62,6 +62,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** The live wire's, set with it by `setupHandlers`: none before the first, nor once disposed. */
   private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
+  private firstPing: 'waiting' | { frame: Uint8Array<ArrayBuffer>; timer: ReturnType<typeof setTimeout> } | null = null
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -185,6 +186,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   attachHeartbeat(heartbeat: Heartbeat): void {
     this.heartbeat = heartbeat
+    this.firstPing = 'waiting'
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
     heartbeat.expectFrom(() =>
       Math.max(this.pieces?.receiver.expectedBy(heartbeat.pongTimeoutMs) ?? 0, this.pieces?.sender.acknowledgedBy ?? 0),
@@ -194,6 +196,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   detachHeartbeat(): void {
     this.heartbeat?.stop()
     this.heartbeat = null
+    if (this.firstPing && this.firstPing !== 'waiting') clearTimeout(this.firstPing.timer)
+    this.firstPing = null
   }
 
   drained(): Promise<void> {
@@ -307,6 +311,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const { receiver } = this.pieces
     if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
     else this.pieces.headroom.send(receiver.report(frame.frame))
+    if (this.firstPing && this.firstPing !== 'waiting') this.flushFirstPing()
   }
 
   /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
@@ -375,7 +380,22 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.pieces.sender.answered(performance.now())
   }
 
-  sendPing(frame: Uint8Array<ArrayBuffer>): void {
+  sendPing(frame: Uint8Array<ArrayBuffer>, now = false): void {
+    if (now) this.flushFirstPing()
+    if (now || this.firstPing !== 'waiting') return this.sendPingFrame(frame)
+    // The first heartbeat can share the controls queued with the first downlink frames.
+    this.firstPing = { frame, timer: setTimeout(this.flushFirstPing) }
+  }
+
+  private readonly flushFirstPing = (): void => {
+    const first = this.firstPing
+    if (first === null || first === 'waiting') return
+    clearTimeout(first.timer)
+    this.firstPing = null
+    this.sendPingFrame(first.frame)
+  }
+
+  private sendPingFrame(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.pieces)
     this.pieces.sender.send(this.pieces.receiver.report(frame), 0)
