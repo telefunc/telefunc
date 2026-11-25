@@ -117,6 +117,23 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.heldBytes += frame.byteLength
   }
 
+  sendPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>): void {
+    const headroom = this.pieces?.headroom
+    const bytes = head.byteLength + body.byteLength
+    if (headroom && !this.closed && !this.pastBacklog && !this.owed && bytes <= this.headroom) {
+      const room = headroom.gatherRoom(bytes)
+      if (room !== undefined) {
+        this.headroom -= bytes
+        this.largestSent = Math.max(this.largestSent, head.byteLength, body.byteLength)
+        this.wait.handed(bytes, false, performance.now())
+        headroom.sender.gatherPublish(head, body, room)
+        return
+      }
+    }
+    this.send(head)
+    this.send(body)
+  }
+
   /** A RECONCILE is answered: what is sent from now, its replay first, goes behind its RECONCILED (`sendReconciled`),
    *  so the page reads that first on every host and transport. A page has one RECONCILE out at a time. */
   owesReconciled(): void {

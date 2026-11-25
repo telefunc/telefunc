@@ -300,6 +300,33 @@ class PieceSender {
     if (!this.cutsData && tag !== TAG.PUBLISH_TO) this.release()
   }
 
+  /** Whether both frames of a publish fit the next message and the wire has room for them. */
+  canGatherPublish(bytes: number, headroom: number): boolean {
+    const messages = this.messages
+    return (
+      !this.dataWaits &&
+      this.open === null &&
+      this.probe === null &&
+      this.carried.length === 0 &&
+      !messages.atOnce &&
+      messages.bytes + messages.lengthAhead + bytes <= this.gatherUpTo &&
+      messages.ungivenBytes + messages.lengthAhead + bytes <= headroom &&
+      (!this.copiesOnSend || bytes + messages.lengthAhead <= this.copyRoom())
+    )
+  }
+
+  /** Gathers a publish that fits (`canGatherPublish`), in one message with its head. */
+  gatherPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>, headroom: number): void {
+    this.headroom = headroom
+    if (this.sentBytes === 0) {
+      this.firstBytes = head.byteLength
+      this.firstAt = performance.now()
+    }
+    this.headStarted = isPublishBody(body[0]) ? head : null
+    this.gather(head, true)
+    this.messages.gather(body)
+  }
+
   /** The lane `frame` waits in: its channel's on a sender with lanes, a publish body its head's, anything else last. */
   private laneOf(frame: Uint8Array<ArrayBuffer>, tag: number): number {
     if (!this.laned) return 0
