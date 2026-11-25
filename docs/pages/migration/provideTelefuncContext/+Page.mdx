@@ -2,12 +2,13 @@ import { Link } from '@brillout/docpress'
 
 You must now call your telefunction inside the `provideTelefuncContext()` callback:
 
-```js
+```ts
 // Environment: server
 
 provideTelefuncContext(context) // [!code --]
 const { todoItems } = await onLoadTodoItems() // [!code --]
-const { todoItems } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
+// @docpress-replace todoItems2 todoItems
+const { todoItems2 } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
 ```
 
 See: <Link href="/provideTelefuncContext" />
