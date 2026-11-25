@@ -2,7 +2,7 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-`provideTelefuncContext()` makes the `context` object available to telefunctions (via <Link href="/getContext">`getContext()`</Link>) — **it's useful when a telefunction runs outside <Link href="/Telefunc">Telefunc's server middleware</Link> and you therefore cannot pass the context to `telefunc.serve({ context })`**, such as Server-Side Rendering (SSR) or tests.
+`provideTelefuncContext()` makes the `context` object available to telefunctions (via <Link href="/getContext">`getContext()`</Link>) — **it's useful when a telefunction runs outside <Link href="/Telefunc">Telefunc's server middleware</Link> and you therefore cannot pass the context to `serve({ context })`**, such as Server-Side Rendering (SSR) or tests.
 
 ```ts
 // Environment: server
@@ -17,7 +17,7 @@ const { todoItems } = await provideTelefuncContext(context, () => {
 })
 ```
 
-> With <Link href="/Telefunc">`new Telefunc()`</Link> or <Link href="/serve">`serve()`</Link>, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
+> With <Link href="/Telefunc">`new Telefunc()`</Link> or <Link href="/serve">`serve()`</Link>, the context is automatically provided to telefunctions — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 
 
 ## See also
