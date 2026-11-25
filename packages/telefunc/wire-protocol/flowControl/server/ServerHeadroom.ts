@@ -102,11 +102,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return cut.count()
   }
 
-  /** The rate sends go by, which a probe gives before any data does. */
-  private pathRate(): number {
-    return this.drain.rate
-  }
-
   /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands, as on main. */
   headroom(): number {
     return this.window() - this.pathHolds(performance.now())
@@ -115,14 +110,14 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** `PieceSenderOwner`: the most data the path may hold: what the page takes in `WIRE_SEND_AHEAD_ROUND_TRIPS` least
    *  round trips. */
   window(): number {
-    const rate = this.pathRate()
+    const rate = this.drain.rate
     if (rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
     return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * rate * this.leastRtt)
   }
 
   /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
   private pathHolds(now: number): number {
-    return Math.max(0, this.inPath - this.pathRate() * (now - this.inPathAt))
+    return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
@@ -139,9 +134,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       return
     }
     const end = this.sender.transmittedBytes
-    // Unmeasured, what waits in the sender waits for the probe's answer, not for the path: a release's first data
-    // arrives after that wait, and only what follows it arrives as the path takes it.
-    const pathHeld = this.pathRate() > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
+    // Unmeasured, what waits in the sender waits for the probe's answer or for copy room, not for the path: a release's
+    // first data arrives after that wait, and only what follows it arrives as the path takes it.
+    const pathHeld = this.drain.rate > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
     if (this.releasing) this.releasedData = true
     if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) this.appLimitedTo = end
     this.handedSinceData = 0
@@ -179,7 +174,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.measureAnswer()
     this.releaseCopies(this.sender.heartbeatBytes)
     // A page taking small frames says what it took mostly here, in the frames it sends anyway.
-    if (this.awaitsCopyRoom || this.pathRate() === 0) this.sendWaiting()
+    if (this.awaitsCopyRoom || this.drain.rate === 0) this.sendWaiting()
     return true
   }
 
@@ -210,7 +205,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const now = performance.now()
     this.inPath = Math.max(
       0,
-      this.sender.transmittedBytes - acknowledged - this.pathRate() * Math.max(0, now - arrived),
+      this.sender.transmittedBytes - acknowledged - this.drain.rate * Math.max(0, now - arrived),
     )
     this.inPathAt = now
     this.releaseCopies(acknowledged)
@@ -289,10 +284,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
         this.paceTimer = unrefTimer(setTimeout(this.lookAgain, WIRE_PIECES_ACK_GAP_MS))
       return
     }
-    if (this.pathRate() === 0 || this.paceTimer !== null) return
+    if (this.drain.rate === 0 || this.paceTimer !== null) return
     // What waits goes once the rate drained the path to what it needs: looking sooner finds nothing to send.
     const needed = Number.isFinite(this.sender.headroomNeeded) ? this.sender.headroomNeeded : 0
-    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, Math.max(1, (needed - this.headroom()) / this.pathRate())))
+    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, Math.max(1, (needed - this.headroom()) / this.drain.rate)))
   }
 
   private readonly lookAgain = (): void => {

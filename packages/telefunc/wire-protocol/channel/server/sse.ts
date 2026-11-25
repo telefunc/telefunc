@@ -24,14 +24,13 @@ import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire
 import { getChannelMux } from './ChannelMux.js'
 import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
-import { HEADER } from '../../wire/header.js'
-import { TAG, passesData } from '../../wire/tags.js'
+import { HEADER, readU16 } from '../../wire/header.js'
+import { TAG, isPublishBody, isSequencedTag, passesData } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
   droppingFrom,
   droppingLossy,
   droppingPublishes,
-  overtakes,
   type WireQueue,
 } from '../../flowControl/server/waitingPublishes.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -245,6 +244,22 @@ function encodedBytes(bytes: number): number {
 /** What `frame`'s event takes: its base64url and the 8 bytes around it. */
 function eventBytes(frame: Uint8Array<ArrayBuffer>): number {
   return encodedBytes(frame.byteLength) + 8
+}
+
+/** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
+ *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. Any other
+ *  frame of the channel, one that ends or closes it too, waits behind all of it, so the page gets what was sent before. */
+function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
+  const tag = frame[0]!
+  if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
+  const ix = readU16(frame, 1)
+  for (const other of ahead) {
+    const otherTag = other[0]!
+    // A body's index names no channel; its head does.
+    if (!isSequencedTag(otherTag) || isPublishBody(otherTag) || readU16(other, 1) !== ix) continue
+    return false
+  }
+  return true
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {

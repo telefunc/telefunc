@@ -80,8 +80,9 @@ type PieceSenderOptions = {
   pingInterval: number
   /** The wire's rate record, where the rates this sender measures go. */
   pieceRate: PieceRate
-  /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval goes whole while headroom is
-   *  left, and waits whole if none, so that the socket holds the frame itself and not a copy per piece. */
+  /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval and fits the window goes
+   *  whole while headroom is left, and waits whole if none, so that the socket holds the frame itself and not a copy per
+   *  piece; any other goes in pieces. */
   cuts: 'cut' | 'whole'
   /** Whether what waits for headroom waits in a lane per channel, the lanes taking turns, so that one channel's backlog
    *  holds up no other's; without it, all of it waits in one line. */
@@ -147,9 +148,6 @@ class PieceSender {
   private bodyLane = 0
   /** The bytes waiting for headroom. */
   waitingBytes = 0
-  /** The head that left of a publish whose body, which names no channel, may be the rest or at the front of what waits.
-   *  A frame after that body starts only once the body has left. */
-  private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** The least headroom that lets a frame waiting for headroom go, as the sender last looked at what waits: `Infinity`
    *  where none waits for it. The owner looks again once that much is free, not as soon as any is. */
   headroomNeeded = Number.POSITIVE_INFINITY
@@ -228,8 +226,6 @@ class PieceSender {
     const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= frame.byteLength
-      // A head that goes names no body any more.
-      if (frame === this.headStarted) this.headStarted = null
       return true
     }
     for (const [key, lane] of this.lanes) {
@@ -243,14 +239,8 @@ class PieceSender {
   /** Removes the frames of which the socket has been given no byte that `drops` says go, called on each in order: those
    *  gathered for the next message, a rest none of which went, then those waiting behind it. */
   dropUngiven(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
-    // A head that goes names no body any more.
-    const goes = (frame: Uint8Array<ArrayBuffer>) => {
-      if (!drops(frame)) return false
-      if (frame === this.headStarted) this.headStarted = null
-      return true
-    }
-    this.messages.remove(goes)
-    this.dropWaiting(goes)
+    this.messages.remove(drops)
+    this.dropWaiting(drops)
   }
 
   /** Whether the rest of a data frame waits for headroom. */
@@ -453,8 +443,6 @@ class PieceSender {
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
     const tag = frame[0]!
-    if (tag === TAG.PUBLISH_TO) this.headStarted = frame
-    else if (!isPublishBody(tag)) this.headStarted = null
     if (isSequencedTag(tag) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
       // An open announcement names whole frames.
       return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
