@@ -1,4 +1,4 @@
-export { serializeTelefunctionArguments, serializeHeldArguments, cancelHeldArguments }
+export { serializeTelefunctionArguments, serializeHeldArguments, cancelUnsentArguments }
 export type { HeldArguments }
 
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -34,8 +34,6 @@ type CallContext = {
   telefuncUrl: string
 }
 
-type Replaced = Parameters<Parameters<typeof createRequestReplacer>[1]>[0]
-
 type SerializeResult = {
   httpRequestBody: string | Blob
   requestCloseHandlers: CloseHandler[]
@@ -47,7 +45,7 @@ type HeldArguments = {
   held: unknown[]
   serialized: string
   files: Blob[]
-  replaced: Replaced[]
+  requestCloseHandlers: CloseHandler[]
 }
 
 // A held token ends in `!`, which cannot end the JSON payload of a wire tag.
@@ -74,16 +72,19 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
   const wants = loadedFeatures().broadcasts?.unconfirmedWants(callContext.telefuncUrl)
   if (wants) dataMain.wants = wants
 
-  const args: HeldArguments = { held: [], serialized: '', files: [], replaced: [] }
-  const replacer = createRequestReplacer(
-    createReplacerContext(args.files, callContext),
-    (replaced) => args.replaced.push(replaced),
-    callContext.extensionRequestTypes,
+  const args: HeldArguments = { held: [], serialized: '', files: [], requestCloseHandlers: [] }
+  const replacer = createCallReplacer(
+    args,
+    callContext,
     loadedFeatures().channels ? null : (value) => `${SERIALIZER_PREFIX_HELD}${args.held.push(value) - 1}!`,
   )
-  args.serialized = serialize(dataMain, callContext, replacer)
-  if (args.held.length > 0) return args
-  return withLifecycles(args, callContext)
+  try {
+    args.serialized = serialize(dataMain, callContext, replacer)
+    return args.held.length > 0 ? args : requestBody(args)
+  } catch (err) {
+    cancelUnsentArguments(args, callContext, err)
+    throw err
+  }
 }
 
 /** Replaces the values `args` held, once channels are loaded. What else the call carries is read from what was
@@ -104,22 +105,18 @@ function serializeHeldArguments(args: HeldArguments, callContext: CallContext): 
       return undefined
     },
   })
-  const replacer = createRequestReplacer(
-    createReplacerContext(args.files, callContext),
-    (replaced) => args.replaced.push(replaced),
-    callContext.extensionRequestTypes,
-    null,
-  )
+  const replacer = createCallReplacer(args, callContext, null)
   args.serialized = serialize(dataMain, callContext, (key, value, serializer) => {
     if (value instanceof Verbatim) return { replacement: value.serialized, resolved: true }
     if (value instanceof Held) return replacer(key, value.value, serializer)
     return undefined
   })
-  return withLifecycles(args, callContext)
+  return requestBody(args)
 }
 
-/** A held call that ends before it is sent cancels the streams it would have uploaded, as a sent one's abort does. */
-function cancelHeldArguments(args: HeldArguments, reason: unknown): void {
+/** Cancels the replacements and held uploads of a call that failed before it was sent. */
+function cancelUnsentArguments(args: HeldArguments, callContext: CallContext, reason: unknown): void {
+  callContext.abortController.abort()
   for (const value of args.held) {
     // A stream the app holds locked rejects its cancel, which is the app's.
     if (value instanceof ReadableStream) value.cancel(reason).catch(() => {})
@@ -133,52 +130,42 @@ class Verbatim {
   constructor(readonly serialized: string) {}
 }
 
-function createReplacerContext(files: Blob[], callContext: CallContext): ClientReplacerContext {
+function createCallReplacer(args: HeldArguments, callContext: CallContext, hold: ((value: unknown) => string) | null) {
   const connection = getConnectionOptions(callContext)
-  return {
-    registerFile(body) {
-      const index = files.length
-      files.push(body)
-      return index
-    },
-    createChannel(opts) {
-      const { ClientChannel } = loadedChannels()
-      return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
-    },
-    sendStream(createProducer) {
-      return loadedChannels().pumpClientProducerToChannel(createProducer, connection)
-    },
-  }
-}
-
-/** The body the call sends, with its values' lifecycles tied to the call. */
-function withLifecycles(args: HeldArguments, callContext: CallContext): SerializeResult {
-  const abortSignal = callContext.abortController.signal
-  const requestCloseHandlers: CloseHandler[] = []
-  for (const replaced of args.replaced) {
+  const signal = callContext.abortController.signal
+  return createRequestReplacer(
     {
-      // Track the user's actual value — when they drop all references to it, close.
-      // (Unlike the response side, we don't create a value here; the user already
-      //  holds the original, so it serves as its own GC anchor.)
-      const { value, close } = replaced
+      registerFile(body) {
+        const index = args.files.length
+        args.files.push(body)
+        return index
+      },
+      createChannel(opts) {
+        const { ClientChannel } = loadedChannels()
+        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
+      },
+      sendStream(createProducer) {
+        return loadedChannels().pumpClientProducerToChannel(createProducer, connection)
+      },
+    },
+    ({ value, close, abort }) => {
+      const onAbort = () => abort(makeAbortError(undefined, callContext))
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+      args.requestCloseHandlers.push(close)
+
+      // The app's original value is the GC anchor.
       assert(isObjectOrFunction(value))
       getGcRegistry().register(value, close)
-    }
+    },
+    callContext.extensionRequestTypes,
+    hold,
+  )
+}
 
-    {
-      const { close, abort } = replaced
-      abortSignal.addEventListener(
-        'abort',
-        () => {
-          abort(makeAbortError(undefined, callContext))
-        },
-        { once: true },
-      )
-      requestCloseHandlers.push(close)
-    }
-  }
+function requestBody(args: HeldArguments): SerializeResult {
   const httpRequestBody = args.files.length > 0 ? encodeRequestEnvelope(args.serialized, args.files) : args.serialized
-  return { httpRequestBody, requestCloseHandlers }
+  return { httpRequestBody, requestCloseHandlers: args.requestCloseHandlers }
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

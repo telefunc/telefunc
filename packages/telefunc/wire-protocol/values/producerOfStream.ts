@@ -10,6 +10,14 @@ function producerOfStream(
   checkChunk?: (chunk: unknown) => void,
 ): StreamingProducer {
   const reader = stream.getReader()
+  let cancellation: Promise<void> | undefined
+  const cancelReader = (reason?: unknown) => {
+    if (!cancellation) {
+      cancellation = reader.cancel(reason)
+      reader.releaseLock()
+    }
+    return cancellation
+  }
   const chunks = (async function* () {
     try {
       while (true) {
@@ -19,8 +27,7 @@ function producerOfStream(
         yield chunk
       }
     } finally {
-      // The stream is the app's: at its end, it is let go of for the app's own `cancel()` or another read.
-      await reader.cancel().finally(() => reader.releaseLock())
+      await cancelReader()
     }
   })()
   return {
@@ -28,7 +35,8 @@ function producerOfStream(
     cancel: (reason) => {
       // Nothing awaits these: they reject with the source's error, or its cancel() failure.
       chunks.return(undefined).catch(() => {})
-      reader.cancel(reason).catch(() => {})
+      // Returning an iterator that never started skips its finally block.
+      cancelReader(reason).catch(() => {})
     },
   }
 }

@@ -275,6 +275,52 @@ test('a held callback preserves an extension tag that shares the replay prefix',
   expect(args[1]).toMatch(/^!TelefuncFunction:/)
 })
 
+test('serialization failure cancels the stream an earlier replayed argument started', async () => {
+  const { call, withContext } = await page()
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  const second = new ReadableStream()
+  const secondReader = second.getReader()
+  const controller = new AbortController()
+  const pending = withContext(call, { signal: controller.signal })([upload, second])
+  gates.channels.open()
+
+  try {
+    await expect(pending).rejects.toThrow(/ReadableStream is locked/)
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce())
+    expect(upload.locked).toBe(false)
+    controller.abort()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(posts).toEqual([])
+  } finally {
+    secondReader.releaseLock()
+  }
+})
+
+test('a later invalid argument cancels a resource created by an extension replacer', async () => {
+  const { call, config, withContext } = await page()
+  const resource = {}
+  const abort = vi.fn()
+  config.extensions.push({
+    name: 'resource',
+    requestTypes: [
+      {
+        prefix: '!Resource:',
+        detect: (value: unknown): value is object => value === resource,
+        replace: () => ({ metadata: {}, close() {}, abort }),
+      },
+    ],
+  })
+  const controller = new AbortController()
+  const cyclic: { self?: unknown } = {}
+  cyclic.self = cyclic
+
+  expect(() => withContext(call, { signal: controller.signal })([resource, cyclic])).toThrow()
+  controller.abort()
+  expect(abort).toHaveBeenCalledOnce()
+  expect(posts).toEqual([])
+})
+
 test('a returned promise stays a promise when another value of the response loads its chunk', async () => {
   const { call } = await page()
   await warmStreams(call)

@@ -4,7 +4,7 @@ import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
 import {
   serializeTelefunctionArguments,
   serializeHeldArguments,
-  cancelHeldArguments,
+  cancelUnsentArguments,
   type HeldArguments,
 } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
@@ -102,11 +102,11 @@ function sendCall(callContext: CallContext): Promise<unknown> {
 async function sendHeldCall(args: HeldArguments, callContext: CallContext): Promise<unknown> {
   try {
     await loadFeatures(['channels'], callContext)
+    objectAssign(callContext, serializeHeldArguments(args, callContext))
   } catch (err) {
-    cancelHeldArguments(args, err)
+    cancelUnsentArguments(args, callContext, err)
     throw err
   }
-  objectAssign(callContext, serializeHeldArguments(args, callContext))
   return makeHttpRequest(callContext)
 }
 
