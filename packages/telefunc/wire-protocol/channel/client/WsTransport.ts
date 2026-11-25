@@ -16,7 +16,15 @@ import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/clie
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
-import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
+import {
+  decode,
+  encode,
+  isOneFrame,
+  messageFrames,
+  stampWindowHold,
+  withTook,
+  type DecodedFrame,
+} from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
@@ -302,11 +310,14 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     return this.connecting !== null
   }
 
-  sendFrame(frame: OutboundFrame): void {
+  sendFrame({ kind, frame, receivedAt }: OutboundFrame): void {
     assert(this.ws && this.pieces)
     const { receiver } = this.pieces
-    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
-    else this.pieces.headroom.send(receiver.report(frame.frame))
+    if (kind === 'acknowledgement') {
+      this.pieces.sender.carry(() => receiver.report(stampWindowHold(frame, receivedAt)))
+    } else {
+      this.pieces.headroom.send(receiver.report(stampWindowHold(frame, receivedAt)))
+    }
   }
 
   /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */

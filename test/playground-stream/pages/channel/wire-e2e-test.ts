@@ -3,6 +3,7 @@ export { testWire, testWireSlowPing, testWireShortReconnect, testUploadSessionEn
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Response, WebSocket } from 'playwright-chromium'
+import { WIRE_VERSION } from '../../../../packages/telefunc/wire-protocol/constants'
 import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
 import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 import {
@@ -182,7 +183,7 @@ function testWire(isDev: boolean) {
     const maxChannels = 4_096
     const connect = async () => {
       // The wire's version, as the page's `getWireUrl` names it.
-      const url = new URL('/_telefunc?wire=3', getServerUrl())
+      const url = new URL(`/_telefunc?wire=${WIRE_VERSION}`, getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'

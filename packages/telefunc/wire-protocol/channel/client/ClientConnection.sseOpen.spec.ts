@@ -7,7 +7,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { connect } from 'node:net'
 import { once } from 'node:events'
 import { ClientChannel } from './ClientChannel.js'
-import { decode, encode } from '../../wire/frame.js'
+import { ClientBroadcast } from './ClientBroadcast.js'
+import { ClientConnection } from './ClientConnection.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { decode, encode, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { decodeU32, parseSseRequestMetadata } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
@@ -30,7 +33,9 @@ let endUploadsAfterWire: boolean
 let heldUploads: ServerResponse[]
 /** The wire's session and settings, which a RECONCILED on it names. */
 let session: string
-let settings: { pingInterval?: number; reconnectTimeout?: number }
+type WireSettings = { pingInterval?: number; reconnectTimeout?: number; creditWindow?: number }
+let settings: WireSettings
+let onBatch: ((frames: DecodedFrame[], res: ServerResponse) => void) | undefined
 /** The largest batch POST body taken: a larger one is answered 413, unread. */
 let postLimit: number
 /** Each batch POST's body size and status, and the number of opens before it: the wire it went on. */
@@ -65,7 +70,10 @@ async function framesOf(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>[]
 }
 
 /** The event of a RECONCILED for the channels `ixes`. */
-function reconciled(ixes: number[], { pingInterval = 100_000, reconnectTimeout = 60_000 } = {}): string {
+function reconciled(
+  ixes: number[],
+  { pingInterval = 100_000, reconnectTimeout = 60_000, creditWindow = 1_000_000 }: WireSettings = {},
+): string {
   const frame = encode.reconciled({
     sessionId: session,
     open: ixes.map((ix) => ({ ix, lastSeq: 0 })),
@@ -73,7 +81,7 @@ function reconciled(ixes: number[], { pingInterval = 100_000, reconnectTimeout =
     idleTimeout: 60_000,
     pingInterval,
     maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    creditWindow: 1_000_000,
+    creditWindow,
     sseFlushThrottle: 300,
     ssePostIdleFlushDelay: 50,
     transports: ['sse'],
@@ -86,7 +94,7 @@ function reconciled(ixes: number[], { pingInterval = 100_000, reconnectTimeout =
 function wire({
   contentType = ['text/event-stream'],
   ...ofWire
-}: { pingInterval?: number; reconnectTimeout?: number; contentType?: string[] } = {}): Answer {
+}: WireSettings & { contentType?: string[] } = {}): Answer {
   return (res, ixes) => {
     if (contentType.length > 0) res.setHeader('Content-Type', contentType)
     res.writeHead(200)
@@ -114,6 +122,7 @@ beforeEach(async () => {
   posts = []
   received = []
   released = []
+  onBatch = undefined
   server = createServer((req, res) => {
     // A page a redirect sent here.
     if (req.method === 'GET') return html(200)(res)
@@ -146,6 +155,7 @@ beforeEach(async () => {
             if (ixes.length > 0) wires.at(-1)?.write(reconciled(ixes, settings))
           }
         }
+        if (onBatch) return onBatch(frames.slice(1).map(decode), res)
         return void res.end()
       }
       opens++
@@ -192,6 +202,112 @@ function openingOf(channel: ClientChannel) {
     (err: unknown) => err,
   )
 }
+
+/** Opens a lossy broadcast on batch POSTs and holds a publish POST while the page receives values. */
+async function holdBroadcastPost(settings: WireSettings) {
+  answers.push(wire(settings))
+  const broadcast = new ClientBroadcast({
+    channelId: crypto.randomUUID(),
+    lossy: true,
+    connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey: crypto.randomUUID() },
+  })
+  channels.push(broadcast)
+  await broadcast.opened
+
+  const held = createDeferred<ServerResponse>()
+  const reports = createDeferred<DecodedFrame[]>()
+  onBatch = (frames, res) => {
+    if (frames.some(({ tag }) => tag === TAG.PUBLISH_BINARY_ACK_REQ)) {
+      held.resolve(res)
+      return
+    }
+    res.end()
+    if (frames.some((frame) => frame.tag === TAG.WINDOW && frame.lastSeq !== 0)) reports.resolve(frames)
+  }
+  void broadcast.publishBinary(Uint8Array.of(1))
+  const post = await held.promise
+  const stream = wires.at(-1)
+  if (!stream) throw new Error('The downstream stream did not open')
+
+  const arrivals = { 1: createDeferred(), 2: createDeferred() }
+  broadcast.subscribeBinary((_data, { seq }) => {
+    if (seq === 1 || seq === 2) arrivals[seq].resolve()
+  })
+  const deliver = async (seq: 1 | 2, data: Uint8Array<ArrayBuffer>) => {
+    for (const frame of [encode.publishTo(0, seq), encode.publishBinary(data, { seq, timestamp: 1 })]) {
+      stream.write(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+    }
+    await arrivals[seq].promise
+  }
+  return { deliver, post, reports }
+}
+
+test('a batch POST keeps the hold of each lossy value confirmed by a credit refresh', async () => {
+  const { deliver, post, reports } = await holdBroadcastPost({ creditWindow: 8 * 1024 * 1024 })
+  let now = Math.ceil(performance.now())
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+  const refreshes = vi.spyOn(ClientConnection.prototype, 'sendByteLimit')
+  onTestFinished(() => {
+    refreshes.mockRestore()
+    clock.mockRestore()
+  })
+
+  const data = new Uint8Array(3 * 1024 * 1024)
+  await deliver(1, data)
+  now += 100
+  await deliver(2, data)
+  now += 100
+  await delay(60)
+  expect(refreshes.mock.calls).toHaveLength(2)
+  post.end()
+
+  const windows = (await reports.promise).filter((frame) => frame.tag === TAG.WINDOW)
+  expect(windows.map(({ lastSeq, heldMs }) => [lastSeq, heldMs])).toEqual([
+    [1, 200],
+    [2, 100],
+  ])
+})
+
+test('a batch POST keeps separate lossy holds from the heartbeat and the 50 ms confirmation timer', async () => {
+  const pingInterval = 19_000
+  const intervals = vi.spyOn(globalThis, 'setInterval')
+  onTestFinished(() => {
+    intervals.mockRestore()
+  })
+  const { deliver, post, reports } = await holdBroadcastPost({ creditWindow: 8 * 1024 * 1024, pingInterval })
+  const beat = intervals.mock.calls.find(([, interval]) => interval === pingInterval)?.[0]
+  if (typeof beat !== 'function') throw new Error('The heartbeat did not start')
+
+  let now = Math.ceil(performance.now())
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+  const refreshes = vi.spyOn(ClientConnection.prototype, 'sendByteLimit')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  onTestFinished(() => {
+    vi.useRealTimers()
+    refreshes.mockRestore()
+    clock.mockRestore()
+  })
+
+  const data = new Uint8Array(4 * 1024)
+  await deliver(1, data)
+  now += 39
+  vi.advanceTimersByTime(39)
+  beat()
+  now += 5
+  vi.advanceTimersByTime(5)
+  await deliver(2, data)
+  now += 6
+  vi.advanceTimersByTime(6)
+  expect(refreshes.mock.calls.map(([, , urgency]) => urgency)).toEqual(['acknowledgement', 'flow-control'])
+  vi.useRealTimers()
+  post.end()
+
+  const windows = (await reports.promise).filter((frame) => frame.tag === TAG.WINDOW)
+  expect(windows.map(({ lastSeq, heldMs }) => [lastSeq, heldMs])).toEqual([
+    [1, 50],
+    [2, 6],
+  ])
+})
 
 // A page that goes away sends the rest of no request it started: the fixture then has no request to answer.
 test('a request whose page leaves in the middle of its body is left unanswered, with no error', async () => {

@@ -339,8 +339,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super.abort(abortValue, message)
   }
 
-  protected override onPageHas(lastSeq: number): void {
-    super.onPageHas(lastSeq)
+  protected override onPageHas(lastSeq: number, heldMs?: number): void {
+    super.onPageHas(lastSeq, heldMs)
     this.lossyPublishes?.mayGo()
   }
 
