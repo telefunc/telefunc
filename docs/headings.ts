@@ -27,7 +27,7 @@ const categories = [
   'Miscellaneous',
 ] as const satisfies Config['categories']
 
-const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...migrations(), ...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -344,6 +344,17 @@ const headings = [
     url: '/babel-plugin',
   },
 ] as const satisfies HeadingDefinition[]
+
+function migrations() {
+  return (
+    [
+      {
+        title: '`provideTelefuncContext()` Migration',
+        url: '/migration/provideTelefuncContext',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
+}
 
 function misc() {
   return (
