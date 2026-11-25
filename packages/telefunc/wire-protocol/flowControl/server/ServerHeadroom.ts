@@ -224,10 +224,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.askTimer = null
   }
 
-  private readonly askIfBlocked = (): void => {
-    if (this.sender.dataWaits && !this.awaitsCopyRoom) this.askForReport()
-  }
-
   private readonly askNow = (): void => {
     this.askTimer = null
     if (this.sender.dataWaits) this.askForReport()
@@ -236,8 +232,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private askForReport(): void {
     const { confirmedBytes, transmittedBytes } = this.sender
     if (confirmedBytes < this.askedUpTo || confirmedBytes >= transmittedBytes) return
-    // An open announcement counts every message till it closes, at the end of this task.
-    if (this.sender.announcing) return void queueMicrotask(this.askIfBlocked)
     this.askedAt = performance.now()
     this.sender.send(encode.piecesAckReq(), 0)
     this.sender.flush()

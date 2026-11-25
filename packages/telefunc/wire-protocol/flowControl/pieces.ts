@@ -248,11 +248,6 @@ class PieceSender {
     return this.rest !== null || this.lanes.size > 0
   }
 
-  /** Whether an announcement is open: it counts every message handed till it closes, as this task ends. */
-  get announcing(): boolean {
-    return this.open !== null
-  }
-
   /** Whether what waits waits for the probe's rate, which comes after its first acknowledgement. */
   get awaitsProbe(): boolean {
     return this.probe !== null && !this.cutsData
@@ -449,22 +444,7 @@ class PieceSender {
     }
     if (this.open === null && !this.announces(frame)) return this.pass(frame)
     if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
-    // Before any rate, a frame too small to probe the path goes behind an announcement only within the headroom.
-    if (this.withinNoRate(frame)) return this.wait(frame, 0)
     this.sendBehindAnnouncement(frame)
-  }
-
-  /** Whether data `frame`, too small to probe, waits for headroom while no rate is measured. */
-  private withinNoRate(frame: Uint8Array<ArrayBuffer>): boolean {
-    const bytes = frame.byteLength
-    return (
-      !this.cutsData &&
-      this.pieceRate.fastest === 0 &&
-      isSequencedTag(frame[0]!) &&
-      bytes <= this.wholeUpTo &&
-      bytes <= this.mostFor(frame) &&
-      bytes > this.headroom - this.messages.ungivenBytes
-    )
   }
 
   private copyRoom(): number {
