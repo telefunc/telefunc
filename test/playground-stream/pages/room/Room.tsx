@@ -5,10 +5,12 @@ import { abort, close, withContext } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   byteAt,
+  fieldOf,
   messageOf,
   nameOf,
   numberAt,
   numberOf,
+  optionalFieldOf,
   optionalTextOf,
   present,
   searchParam,
@@ -242,22 +244,9 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
   const roomId = searchParam('roomId')
   const room = await onGetRoom(roomId)
   keepReachable(room)
-  // The room's own channel, past the API that checks what goes on it: its handle holds it, as its state's owner.
-  const { end } = (
-    room as unknown as {
-      _remotes: {
-        state: {
-          owner: {
-            end: {
-              send(data: unknown, options: { ack: true }): Promise<unknown>
-              publish(data: unknown): Promise<unknown>
-              _sendReply(reply: Promise<unknown>, failure: unknown): void
-            }
-          }
-        }
-      }
-    }
-  )._remotes.state.owner
+  // The room's own channel, past the API that checks what goes on it.
+  const end = roomEnd(room)
+  if (!isSendingEnd(end)) throw new Error("The room's channel has no send(), publish() or _sendReply()")
   if (kind === 'reply') {
     // Before the join: a DM that arrives while the join settles is answered through the end as it is then.
     const sendReply = end._sendReply.bind(end)
@@ -275,6 +264,34 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
   await (kind === 'request' ? end.send({ __r: 'req-bogus' }, { ack: true }) : end.publish({ __r: 'bogus' })).catch(
     () => {},
   )
+}
+
+/** The room's own channel, as a hostile page reaches it past the API: its handle holds it, as its state's owner. */
+function roomEnd(room: object): object {
+  const end = fieldOf(fieldOf(fieldOf(fieldOf(room, '_remotes'), 'state'), 'owner'), 'end')
+  if (typeof end !== 'object' || end === null) throw new Error(`Expected the room's channel, read ${String(end)}`)
+  return end
+}
+
+/** A channel with the methods a hostile page calls on it to send past the API. */
+function isSendingEnd(end: object): end is {
+  send(data: unknown, options: { ack: true }): Promise<unknown>
+  publish(data: unknown): Promise<unknown>
+  _sendReply(reply: Promise<unknown>, failure: unknown): void
+} {
+  return (
+    'send' in end &&
+    typeof end.send === 'function' &&
+    'publish' in end &&
+    typeof end.publish === 'function' &&
+    '_sendReply' in end &&
+    typeof end._sendReply === 'function'
+  )
+}
+
+/** A connection's table of its channels, which finds a channel's record. */
+function isChannelTable(channels: unknown): channels is { of(end: object): unknown } {
+  return typeof channels === 'object' && channels !== null && 'of' in channels && typeof channels.of === 'function'
 }
 
 /** The documented React adapter: the room's methods passed as they are. */
@@ -3173,12 +3190,12 @@ function Room() {
         await new Promise((resolve) => setTimeout(resolve))
         // The room's own channel: its handle holds it, as its state's owner. Its connection lists a stream's newest lossy
         // frame until the server confirms it.
-        type End = {
-          connection: { channels: { of(end: End): { replaceable: Map<string, number> | null } | undefined } }
-        }
-        const { end } = (view as unknown as { _remotes: { state: { owner: { end: End } } } })._remotes.state.owner
+        const end = roomEnd(view)
+        const channels = fieldOf(fieldOf(end, 'connection'), 'channels')
+        if (!isChannelTable(channels)) throw new Error("The room's connection has no table of its channels")
+        const replaceable = optionalFieldOf(channels.of(end), 'replaceable')
         const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
-        const listed = end.connection.channels.of(end)?.replaceable?.size ?? 0
+        const listed = replaceable instanceof Map ? replaceable.size : 0
         setResult(JSON.stringify({ receipts: receiptSeqs.size, seen, listed }))
       })}
 
