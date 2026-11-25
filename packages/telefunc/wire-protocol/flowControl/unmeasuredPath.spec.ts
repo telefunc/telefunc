@@ -18,10 +18,19 @@ const LINK_BYTES_PER_MS = 125
 
 /** A server wire to a page behind a slow link, through a socket that reports what its link holds as buffered, as
  *  Node's does once its kernel buffers are full, or, `buffersNothing`, none of it, as Bun's does while its kernel takes
- *  all it is handed: the link carries what the socket took, in order, at its rate, `delayMs` each way. */
-function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0, buffersNothing = false } = {}) {
+ *  all it is handed: the link carries what the socket took, in order, at its rate, `delayMs` each way. A page busy as it
+ *  starts reads at `startBytesPerMs` for its first `startMs`. The page sends nothing but its lone acknowledgements. */
+function wireBehindSlowLink({
+  bytesPerMs = LINK_BYTES_PER_MS,
+  delayMs = 0,
+  buffersNothing = false,
+  startMs = 0,
+  startBytesPerMs = 0,
+} = {}) {
   const link: Uint8Array<ArrayBuffer>[] = []
   let linkBytes = 0
+  /** When each data frame arrived whole at the page. */
+  const arrivals: number[] = []
   const receiver: ClientPieceReceiver = new ClientPieceReceiver({
     owner: {
       sendAck: (frame) => {
@@ -35,15 +44,20 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0, buffe
     for (const frame of isOneFrame(message) ? [message] : Array.from(messageFrames(message))) {
       const decoded = decode(frame)
       if (decoded.tag === TAG.ANNOUNCE) receiver.announce(decoded.bytes, at, decoded.floor)
-      else if (decoded.tag === TAG.PIECE) receiver.add(decoded.total, decoded.piece, at)
-      else receiver.arrived(decoded.tag, frame.byteLength, at, 'alone')
+      else if (decoded.tag === TAG.PIECE) {
+        if (receiver.add(decoded.total, decoded.piece, at)?.[0] === TAG.BINARY) arrivals.push(at)
+      } else {
+        receiver.arrived(decoded.tag, frame.byteLength, at, 'alone')
+        if (decoded.tag === TAG.BINARY) arrivals.push(at)
+      }
     }
   }
   let budget = 0
-  let last = performance.now()
+  const opened = performance.now()
+  let last = opened
   const timer = setInterval(() => {
     const now = performance.now()
-    budget += (now - last) * bytesPerMs
+    budget += (now - last) * (now - opened < startMs ? startBytesPerMs : bytesPerMs)
     last = now
     while (link.length > 0 && link[0]!.byteLength <= budget) {
       const message = link.shift()!
@@ -73,6 +87,7 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0, buffe
     linkBytes: () => linkBytes,
     sentBytes: () => headroom.sender.transmittedBytes,
     window: () => headroom.window(),
+    arrivals,
     stop: () => clearInterval(timer),
   }
 }
@@ -141,6 +156,26 @@ describe('ServerHeadroom.headroom', () => {
       // look a few times for each, far fewer than once a millisecond.
       expect(timers.mock.calls.length).toBeLessThan(2_000 / 10)
       timers.mockRestore()
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it("a wire a page measured low as it started rises to the link's rate once the page reads at it", async () => {
+    // 32 MiB/s; the page reads 200 kB/s for its first 1.5 s, and the app publishes 8 MiB a second.
+    const wire = wireBehindSlowLink({ bytesPerMs: 32 * 1024, startMs: 1_500, startBytesPerMs: 200 })
+    try {
+      const publish = new Uint8Array(8 * 1024 * 1024)
+      const start = performance.now()
+      for (let n = 0; n < 10; n++) {
+        wire.send((seq) => encode.binary(1, publish, seq))
+        await sleep(1_000)
+      }
+      await sleep(500)
+      const tookMs = wire.arrivals.map((at, n) => at - start - n * 1_000)
+      expect(tookMs).toHaveLength(10)
+      // From the third, each publish takes the 256 ms the link takes for 8 MiB, not what the first rate allows.
+      expect(Math.max(...tookMs.slice(2))).toBeLessThan(2 * 256)
     } finally {
       wire.stop()
     }
