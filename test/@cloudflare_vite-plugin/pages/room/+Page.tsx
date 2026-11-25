@@ -52,7 +52,11 @@ function Page() {
   }, [])
 
   // Two pages share `id`; `page` names this one.
-  const query = () => new URLSearchParams(window.location.search)
+  const param = (name: string) => {
+    const value = new URLSearchParams(window.location.search).get(name)
+    if (value === null) throw new Error(`Test: the page's URL names no '${name}'`)
+    return value
+  }
   const card = (id: string, run: () => Promise<unknown>) => (
     <button
       type="button"
@@ -71,15 +75,16 @@ function Page() {
       <pre id="room-result">{result}</pre>
       <pre id="room-card-result">{cardResult}</pre>
       {card('order-subscribe', async () => {
-        const { channel, room } = await onOrderChannels(query().get('id')!)
+        const { channel, room } = await onOrderChannels(param('id'))
         channels.current = { channel, room }
         channel.subscribe(({ from, n }) => order.current.broadcast.push(`${from}:${n}`))
         room.subscribe(({ from, n }) => order.current.room.push(`${from}:${n}`))
         return 'subscribed'
       })}
       {card('order-publish', async () => {
-        const { channel, room } = channels.current!
-        const from = query().get('page')!
+        if (channels.current === null) throw new Error('Test: order-subscribe comes first')
+        const { channel, room } = channels.current
+        const from = param('page')
         const me = await room.join({ meta: { name: from } })
         for (let n = 1; n <= PUBLISHES; n++) {
           void channel.publish({ from, n })
@@ -88,19 +93,19 @@ function Page() {
         return 'published'
       })}
       {card('order-received', async () => order.current)}
-      {card('join', () => onJoinRoom(query().get('id')!))}
+      {card('join', () => onJoinRoom(param('id')))}
       {card('subscribe-then-publish', () => onSubscribeThenPublish())}
-      {card('listen', () => onListen(query().get('id')!, query().get('page')!))}
-      {card('publish', () => onPublishFrom(query().get('id')!, 'hello'))}
-      {card('received', () => onReceived(query().get('id')!, query().get('page')!))}
+      {card('listen', () => onListen(param('id'), param('page')))}
+      {card('publish', () => onPublishFrom(param('id'), 'hello'))}
+      {card('received', () => onReceived(param('id'), param('page')))}
       {card('list', () => onListInOrder())}
-      {card('create', () => onCreateRoom(query().get('id')!, query().get('page')!))}
-      {card('list-created', () => onListRooms(query().get('id')!))}
+      {card('create', () => onCreateRoom(param('id'), param('page')))}
+      {card('list-created', () => onListRooms(param('id')))}
       {card('retain-large', () => onRetainLarge())}
       {card('close-when-left', () => onCloseWhenLeft())}
-      {card('hold-view', () => onHoldView(query().get('id')!))}
-      {card('close-held', () => onCloseHeld(query().get('id')!))}
-      {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
+      {card('hold-view', () => onHoldView(param('id')))}
+      {card('close-held', () => onCloseHeld(param('id')))}
+      {card('subscribe-held', () => onSubscribeHeld(param('id')))}
       {card('meta-key-order', () => onMetaKeyOrder())}
       {card('throwing-listener', () => onThrowingListener())}
       {card('join-closing', () => onJoinClosing())}

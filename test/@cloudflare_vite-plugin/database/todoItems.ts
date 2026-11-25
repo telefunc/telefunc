@@ -38,9 +38,8 @@ async function getTodoItemsData(): Promise<DurableObjectStub<TodoListDurableObje
 
 class TodoListDurableObject extends DurableObject {
   async getTodoItems() {
-    let todoItems = (await this.ctx.storage.get('all-todo-items')) as TodoItem[]
-    todoItems ??= Array.from(todoItemsInit)
-    return todoItems
+    const stored: unknown = await this.ctx.storage.get('all-todo-items')
+    return stored === undefined || stored === null ? Array.from(todoItemsInit) : readTodoItems(stored)
   }
   async addTodoItem(todoItem: TodoItem) {
     const todoItems = await this.getTodoItems()
@@ -51,4 +50,15 @@ class TodoListDurableObject extends DurableObject {
   async resetTodoItems() {
     await this.ctx.storage.put('all-todo-items', null)
   }
+}
+
+/** The todo items as `TodoListDurableObject` stores them. */
+function readTodoItems(stored: unknown): TodoItem[] {
+  if (!Array.isArray(stored)) throw new Error('Test: the stored todo items are no list')
+  const items: unknown[] = stored
+  return items.map((item) => {
+    if (typeof item !== 'object' || item === null || !('text' in item) || typeof item.text !== 'string')
+      throw new Error('Test: a stored todo item has no text')
+    return { text: item.text }
+  })
 }

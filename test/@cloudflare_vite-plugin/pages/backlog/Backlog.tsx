@@ -16,6 +16,11 @@ function Backlog() {
     }
   }, [])
 
+  const opened = () => {
+    if (channelRef.current === null) throw new Error('Test: open the channel first')
+    return channelRef.current
+  }
+
   const open = async () => {
     const channel = await onBacklog()
     channelRef.current = channel
@@ -35,10 +40,10 @@ function Backlog() {
       <button type="button" id="backlog-open" onClick={open}>
         Open
       </button>
-      <button type="button" id="backlog-run-1500" onClick={() => channelRef.current!.send(1500)}>
+      <button type="button" id="backlog-run-1500" onClick={() => opened().send(1500)}>
         Send 24 MiB, unawaited
       </button>
-      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current!.send(6000)}>
+      <button type="button" id="backlog-run-6000" onClick={() => opened().send(6000)}>
         Send 96 MiB, unawaited
       </button>
     </div>

@@ -68,7 +68,7 @@ function ChannelDemo() {
       channelRef.current.sendBinary(new Uint8Array(32 * 1024 * 1024))
       addLog('out', 'binary: 32 MiB')
     } catch (err) {
-      addLog('system', `Refused: ${(err as Error).message}`)
+      addLog('system', `Refused: ${err instanceof Error ? err.message : String(err)}`)
     }
   }, [addLog])
 

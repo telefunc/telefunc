@@ -11,7 +11,11 @@ function UnsubscribeTwice() {
   })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
-  const key = () => new URLSearchParams(window.location.search).get('key')!
+  const key = () => {
+    const value = new URLSearchParams(window.location.search).get('key')
+    if (value === null) throw new Error("Test: the page's URL names no 'key'")
+    return value
+  }
 
   const subscribe = async () => {
     await onSubscribeAndUnsubscribeTwice(key())

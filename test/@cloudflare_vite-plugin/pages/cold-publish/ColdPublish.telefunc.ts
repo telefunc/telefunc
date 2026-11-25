@@ -11,7 +11,7 @@ async function onColdPublish() {
   const answered = new Promise<void>((resolve) => {
     setTimeout(resolve, 3_000)
     const off = Broadcast.subscribe<string>(key, (message) => {
-      received.push(message[0]!)
+      received.push(message.charAt(0))
       if (message[0] === 'a') void Broadcast.publish(key, `b${padding}`)
       else {
         off()

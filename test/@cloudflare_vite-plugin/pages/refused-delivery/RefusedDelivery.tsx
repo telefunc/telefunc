@@ -11,7 +11,11 @@ function RefusedDelivery() {
   })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
-  const param = (name: string) => new URLSearchParams(window.location.search).get(name)!
+  const param = (name: string) => {
+    const value = new URLSearchParams(window.location.search).get(name)
+    if (value === null) throw new Error(`Test: the page's URL names no '${name}'`)
+    return value
+  }
 
   const subscribe = async () => {
     await onSubscribe(param('key'), param('page'))

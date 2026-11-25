@@ -22,5 +22,7 @@ async function onSubscribe(key: string) {
 
 async function onPublish(key: string, message: string) {
   await Broadcast.publish(key, message)
-  return received.get(key)!
+  const messages = received.get(key)
+  if (messages === undefined) throw new Error(`Test: nothing subscribed on '${key}'`)
+  return messages
 }
