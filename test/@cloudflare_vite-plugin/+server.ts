@@ -2,7 +2,9 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
+import type { LeaseRegistered } from 'telefunc/__internal'
 import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
+import { LAPSED_PRESENCE_REFUSED_FOR_MS, lapsedPresences } from './pages/lapsed-presence/presenceRecords'
 
 const tf = new Telefunc({ scale: 5 })
 
@@ -23,11 +25,20 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
       refusedPresences.add(request.key)
       throw new Error('Test: the authority refused the presence')
     }
-    refuseLapsedPresenceRefresh(request)
-    return super.telefuncBroadcastHold(request)
+    const held = await super.telefuncBroadcastHold(request)
+    if (held !== 'registered' || !request.key.startsWith('lapsed-presence:')) return held
+    const { key, lease } = request
+    const first = lapsedPresences.get(key)
+    if (first === undefined) lapsedPresences.set(key, { lease, recordedAt: Date.now(), rerecorded: false })
+    else if (first.lease === lease) first.rerecorded = true
+    return held
   }
+
   override async telefuncBroadcastRenew(request: PresenceRequest) {
-    refuseLapsedPresenceRefresh(request)
+    const first = lapsedPresences.get(request.key)
+    if (first?.lease === request.lease && Date.now() - first.recordedAt < LAPSED_PRESENCE_REFUSED_FOR_MS) {
+      throw new Error('Test: the authority refused the refresh')
+    }
     return super.telefuncBroadcastRenew(request)
   }
 
@@ -78,14 +89,14 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
 export { TodoListDurableObject } from './database/todoItems'
 
 // The Durable Object's Broadcast RPCs and extension Durable Object RPCs, which its public type doesn't name.
-type PresenceRequest = { key: string }
+type PresenceRequest = { key: string; lease: string }
 type DeliveryRequest = { routes: { key: string }[]; payload: string | Uint8Array }
 type TelefuncDurableObjectWithPresence = new (
   ctx: DurableObjectState,
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
   fetch(request: Request): Promise<Response>
-  telefuncBroadcastHold(request: PresenceRequest): Promise<string>
+  telefuncBroadcastHold(request: PresenceRequest): Promise<LeaseRegistered>
   telefuncBroadcastRenew(request: PresenceRequest): Promise<string>
   telefuncBroadcastForward(
     request: DeliveryRequest & { members: string[] },
@@ -106,15 +117,6 @@ async function withClockAhead<T>(ms: number, work: () => Promise<T>): Promise<T>
   }
 }
 const refusedPresences = new Set<string>()
-const lapsedPresences = new Map<string, number>()
-
-/** Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for 100 s, past its record's 90 s. */
-function refuseLapsedPresenceRefresh({ key }: PresenceRequest): void {
-  if (!key.startsWith('lapsed-presence:')) return
-  const recordedAt = lapsedPresences.get(key)
-  if (recordedAt === undefined) lapsedPresences.set(key, Date.now())
-  else if (Date.now() - recordedAt < 100_000) throw new Error('Test: the authority refused the refresh')
-}
 const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 

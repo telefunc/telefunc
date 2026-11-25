@@ -3,7 +3,9 @@ export { testCloudflareBindings }
 
 import { autoRetry, expect, expectLog, getServerUrl, page, test } from '@brillout/test-e2e'
 import type { Page, WebSocket } from 'playwright-chromium'
+import { LEASE_CALL_DEADLINE_MS, LEASE_RENEW_EVERY_MS } from 'telefunc/__internal'
 import { sendRefusedWarning, testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
+import { LAPSED_PRESENCE_REFUSED_FOR_MS } from './pages/lapsed-presence/presenceRecords'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
@@ -14,8 +16,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testRoomRoleFromWorker()
   testCloudflareBindings()
   testRunClassic(cmd, {
-    // testResubscribe() waits out a presence's TTL, and testLapsedPresence() the refresh after it too.
-    additionalTimeout: 110_000,
+    // The preview row waits out the lease and its next refresh.
+    additionalTimeout: LAPSED_PRESENCE_RECORDED_AGAIN_WITHIN_MS,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
       // The Channel/Chat streaming (SSE) connection surfaces a benign
@@ -413,35 +415,67 @@ function testRefusedPresence() {
   })
 }
 
+// The first renewal after refusals end, plus the renewal and hold deadlines.
+const LAPSED_PRESENCE_RECORDED_AGAIN_WITHIN_MS =
+  Math.ceil(LAPSED_PRESENCE_REFUSED_FOR_MS / LEASE_RENEW_EVERY_MS) * LEASE_RENEW_EVERY_MS +
+  LEASE_RENEW_EVERY_MS +
+  LEASE_CALL_DEADLINE_MS
+
 function testLapsedPresence() {
-  test("Broadcast: a session whose presence lapsed misses what is published, is told, and gets what follows once it's recorded again", async () => {
+  test('Broadcast: a lapsed presence misses messages and delivery resumes after recovery or a fresh subscription', async () => {
     await page.goto(getServerUrl() + '/lapsed-presence')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
-    const state = async () => JSON.parse((await page.textContent('#lapsed-presence-state'))!)
+    const state = async (): Promise<Record<string, unknown>> => {
+      const value: unknown = JSON.parse(await page.locator('#lapsed-presence-state').innerText())
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        throw new Error(`The lapsed-presence page showed ${JSON.stringify(value)}`)
+      }
+      return Object.fromEntries(Object.entries(value))
+    }
     await page.click('#subscribe')
     await autoRetry(async () => {
       expect((await state()).received).deep.equal(['before'])
     })
-    // A presence lasts 90 s unless refreshed, and the authority takes no refresh until 100 s in.
+    const recordedAgainBy = Date.now() + LAPSED_PRESENCE_RECORDED_AGAIN_WITHIN_MS
+
+    // The original lease expires at 90 s, and the authority refuses its renewals for 100 s.
     await page.waitForTimeout(95_000)
     await page.click('#publish-during')
     await autoRetry(async () => {
-      expect((await state()).published).toBe('during')
+      const { published, received, reported } = await state()
+      expect(published).toBe('during')
+      expect(received).not.toContain('during')
+      expect(reported).deep.equal([])
     })
-    expect((await state()).reported).deep.equal([])
-    // The next refresh comes within 30 s. Each try publishes again, until the refreshed presence gets it.
-    await autoRetry(
+
+    const wasEvicted = await autoRetry(
       async () => {
-        await page.click('#publish-after')
-        const { received, reported } = await state()
-        expect(received).toContain('after')
-        expect(received).not.toContain('during')
-        expect(reported.length).toBe(1)
+        await page.click('#read')
+        const { rerecorded, evicted } = await state()
+        expect(rerecorded === true || evicted === true).toBe(true)
+        return evicted === true
       },
-      { timeout: 35_000 },
+      { timeout: recordedAgainBy - Date.now() },
     )
+    if (wasEvicted) {
+      await page.click('#subscribe')
+      await autoRetry(async () => {
+        const { received, evicted } = await state()
+        expect(evicted).toBe(false)
+        expect(received).deep.equal(['before'])
+      })
+    }
+
+    await page.click('#publish-after')
+    await autoRetry(async () => {
+      const { received, reported, evicted } = await state()
+      expect(evicted).toBe(false)
+      expect(received).toContain('after')
+      expect(received).not.toContain('during')
+      if (!wasEvicted) expect(reported).to.be.an('array').with.lengthOf(1)
+    })
   })
 }
 

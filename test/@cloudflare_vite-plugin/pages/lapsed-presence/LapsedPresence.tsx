@@ -1,11 +1,11 @@
 export { LapsedPresence }
 
 import React, { useEffect, useState } from 'react'
-import { onPublish, onSubscribe } from './LapsedPresence.telefunc'
+import { onPublish, onRead, onSubscribe } from './LapsedPresence.telefunc'
 
 function LapsedPresence() {
   const [key] = useState(() => `lapsed-presence:${Math.random()}`)
-  const [state, setState] = useState<Awaited<ReturnType<typeof onPublish>> | null>(null)
+  const [state, setState] = useState<(Awaited<ReturnType<typeof onRead>> & { published?: string }) | null>(null)
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
 
@@ -18,6 +18,9 @@ function LapsedPresence() {
       </button>
       <button type="button" id="publish-during" onClick={async () => setState(await onPublish(key, 'during'))}>
         Publish while it's lapsed
+      </button>
+      <button type="button" id="read" onClick={async () => setState(await onRead(key))}>
+        Read
       </button>
       <button type="button" id="publish-after" onClick={async () => setState(await onPublish(key, 'after'))}>
         Publish after

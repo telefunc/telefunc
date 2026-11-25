@@ -1,22 +1,36 @@
-export { onSubscribe, onPublish }
+export { onSubscribe, onPublish, onRead }
 
 import { Broadcast, config } from 'telefunc'
+import { currentCloudflareHostKey } from 'telefunc/__internal'
+import { lapsedPresences } from './presenceRecords'
 
-const received = new Map<string, string[]>()
-const reported = new Map<string, string[]>()
+/** A key's subscriber in this session: the incarnation of the session's Durable Object that subscribed, what it got,
+ *  and the losses it was told of. */
+type Subscriber = { incarnation: string; received: string[]; reported: string[] }
+const subscribers = new Map<string, Subscriber>()
 
-/** The key's authority refuses its refreshes for 100 s (see +server.ts). */
 async function onSubscribe(key: string) {
   config.broadcast.onDeliveryLost = ({ key, reason }) => {
-    reported.get(key)?.push(reason)
+    subscribers.get(key)?.reported.push(reason)
   }
-  received.set(key, [])
-  reported.set(key, [])
-  Broadcast.subscribe<string>(key, (message) => received.get(key)!.push(message))
+  const subscriber: Subscriber = { incarnation: currentCloudflareHostKey(), received: [], reported: [] }
+  const subscription = Broadcast.subscribe<string>(key, (message) => subscriber.received.push(message))
+  await subscription.ready
+  subscribers.set(key, subscriber)
   return onPublish(key, 'before')
 }
 
 async function onPublish(key: string, message: string) {
   await Broadcast.publish(key, message)
-  return { published: message, received: received.get(key)!, reported: reported.get(key)! }
+  return { ...(await onRead(key)), published: message }
+}
+
+async function onRead(key: string) {
+  const subscriber = subscribers.get(key)
+  return {
+    received: subscriber?.received ?? [],
+    reported: subscriber?.reported ?? [],
+    rerecorded: lapsedPresences.get(key)?.rerecorded ?? false,
+    evicted: subscriber?.incarnation !== currentCloudflareHostKey(),
+  }
 }
