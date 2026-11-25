@@ -494,9 +494,13 @@ class ChannelMux implements UpgradeStagesOwner {
       state.messageReconcile = this.chainRecv(entry, exec)
       return state.messageReconcile
     }
-    // From the receipt on, the page waits for the RECONCILED a deadline at most: nothing between waits.
-    if (entry.sender.pieces) entry.sender.send(encode.reconcileTaken())
     this.answerArrival(entry)
+    if (entry.sender.pieces) {
+      const receipt = encode.reconcileTaken()
+      // A RECONCILE waiting behind other frames starts its reply deadline on its own receipt.
+      if (state.recvChain !== null) entry.sender.send(receipt)
+      else entry.sender.carry(receipt)
+    }
     state.messageReconcile = this.chainRecv(entry, exec)
     return state.messageReconcile
   }
@@ -1018,8 +1022,6 @@ class ChannelMux implements UpgradeStagesOwner {
   /** Returns null to leave the channel out of the RECONCILED; an initial channel not registered yet is awaited until
    *  its ATTACH_RESULT. */
   private attach(open: ReconcileOpenEntry, entry: WireEntry, replay: boolean): ChannelHandle | null {
-    // The probe is answered at once, ahead of the RECONCILED and of the channel's frames, and of its registration where
-    // the channel is awaited, so its round trip measures the path alone.
     if (open.probe !== undefined) entry.sender.answerProbe(open.ix, open.probe)
     const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {

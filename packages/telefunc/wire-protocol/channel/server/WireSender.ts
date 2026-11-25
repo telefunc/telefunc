@@ -1,6 +1,12 @@
 export { WireSender }
 
-import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
+import {
+  LOSSY_CONFIRM_SLACK_MS,
+  WIRE_PROBE_FIRST_BYTES,
+  WIRE_PROBE_PAIR_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_BACKLOG_BASE_BYTES,
+} from '../../constants.js'
 import { encode } from '../../wire/frame.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
@@ -74,6 +80,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly held: Uint8Array<ArrayBuffer>[] = []
   /** Their bytes, which the backlog counts as it does what the socket holds. */
   private heldBytes = 0
+  /** WebSocket attach probe answers waiting to ride the RECONCILED. */
+  private readonly probeAnswers: Uint8Array<ArrayBuffer>[] = []
   /** The channels' ends a close the server decides keeps for the transport, in their order (see `close`). */
   private readonly lastEnds: Uint8Array<ArrayBuffer>[] = []
 
@@ -126,18 +134,35 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.headroom = 0
   }
 
-  /** An attach probe's answer, which says no credit ran out and names no round trip: written ahead of what is held, since
-   *  a RECONCILED of many channels would read the path as slower than it is. On a WebSocket, the acknowledgements the
-   *  sender carries ride ahead of it in its message, as they do of any frame written. */
+  /** An attach probe's answer precedes the RECONCILED, which may take time to arrive in full. */
   answerProbe(ix: number, probe: number): void {
     const answer = encode.bdpPingAck(ix, probe, Infinity, Infinity)
-    if (this.admit(answer)) this.hand(answer)
+    if (!this.admit(answer)) return
+    if (!this.pieces) return this.hand(answer)
+    this.probeAnswers.push(answer)
+    this.heldBytes += answer.byteLength
   }
 
   /** The RECONCILED goes ahead of what was held, and that follows, in order. */
   sendReconciled(reconciled: Uint8Array<ArrayBuffer>): void {
     this.owed = false
-    if (this.admit(reconciled)) this.hand(reconciled)
+    if (this.admit(reconciled)) {
+      const first = this.probeAnswers[0]
+      if (first !== undefined) {
+        const bytes = first.byteLength * this.probeAnswers.length
+        // Keep a large group of replies out of the first message of an unmeasured link.
+        const carry = bytes <= WIRE_PROBE_FIRST_BYTES && bytes + reconciled.byteLength <= 2 * WIRE_PROBE_PAIR_BYTES
+        for (const answer of this.probeAnswers) {
+          if (carry) this.carry(answer)
+          else this.hand(answer)
+        }
+      }
+      this.hand(reconciled)
+      // A receipt can leave while a large reply waits behind data in pieces.
+      const sender = this.pieces?.headroom.sender
+      if (sender?.dataWaits) sender.flush()
+    }
+    this.probeAnswers.length = 0
     // `hand` gives the frame to the transport only, which sends nothing back through here meanwhile.
     for (const frame of this.held) this.hand(frame)
     this.held.length = 0
@@ -246,6 +271,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     else this.lastEnds.length = 0
     this.closed = true
     this.owed = false
+    this.probeAnswers.length = 0
     this.held.length = 0
     this.heldBytes = 0
     this.pieces?.headroom.close()
