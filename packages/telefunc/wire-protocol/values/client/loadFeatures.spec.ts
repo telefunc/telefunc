@@ -4,7 +4,7 @@ import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/e
 
 // A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
 // finish, or fails, as the chunk's request would.
-const FEATURES = ['streams'] as const
+const FEATURES = ['streams', 'broadcasts'] as const
 type Feature = (typeof FEATURES)[number]
 
 let gates: Record<Feature, { promise: Promise<void>; open: () => void }>
@@ -21,7 +21,7 @@ beforeEach(() => {
   imported = []
   posts = []
   cancelled = 0
-  gates = { streams: newGate() }
+  gates = { streams: newGate(), broadcasts: newGate() }
   // The client runs in a browser only.
   vi.stubGlobal('window', {
     scrollY: 0,
@@ -134,6 +134,17 @@ test('a call aborted while its chunk loads rejects at once, cancels its body onc
   await new Promise((resolve) => setTimeout(resolve, 20))
   process.off('unhandledRejection', onUnhandled)
   expect(unhandled).toEqual([])
+})
+
+test('each call loads only the code the values it carries need', async () => {
+  const { call } = await page()
+  for (const feature of FEATURES) gates[feature].open()
+  respond = streamed({ gen: GENERATOR })
+  await call([])
+  expect(imported).toEqual(['streams'])
+  respond = () => new Response(JSON.stringify({ ret: tag('!TelefuncBroadcast:', { channelId: 'b1', key: 'k' }) }))
+  await call([])
+  expect(imported).toEqual(['streams', 'broadcasts'])
 })
 
 test('plain RPC: sent at once, an app string that looks like a value loads nothing and comes back as it was', async () => {

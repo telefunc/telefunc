@@ -18,7 +18,6 @@ import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { createStreamingReviver, featuresIn } from './registry.js'
 import { loadFeatures, loadedFeatures } from '../loadFeatures.js'
 import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
-import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
@@ -83,6 +82,7 @@ async function parseStreamedResponse(
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
+    await loadFeaturesIn(metaText, callContext)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
     if (streamReader) streamReader.cancel()
@@ -95,7 +95,7 @@ async function parseStreamedResponse(
 /** Loads the code the values in a response's serialized `text` need, before any of them revives. */
 async function loadFeaturesIn(text: string, callContext: CallContext): Promise<void> {
   const loaded = loadedFeatures()
-  if (loaded.streams) return
+  if (loaded.streams && loaded.broadcasts) return
   const needed = [...featuresIn(text)].filter((feature) => !loaded[feature])
   if (needed.length > 0) await loadFeatures(needed, callContext)
 }
@@ -130,7 +130,9 @@ async function reviveResponse(
       })
     },
     createBroadcast(opts) {
-      return new ClientBroadcast({
+      const { broadcasts } = loadedFeatures()
+      assert(broadcasts)
+      return new broadcasts.ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
         lossy: opts.lossy,

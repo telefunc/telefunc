@@ -8,7 +8,7 @@ import { createRequestReplacer } from '../../wire-protocol/values/client/request
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/channel/client/ClientChannel.js'
-import { ClientConnection } from '../../wire-protocol/channel/client/ClientConnection.js'
+import { loadedFeatures } from '../../wire-protocol/values/client/loadFeatures.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
@@ -54,7 +54,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const wants = ClientConnection.unconfirmedWants(callContext.telefuncUrl)
+  const wants = loadedFeatures().broadcasts?.unconfirmedWants(callContext.telefuncUrl)
   if (wants) dataMain.wants = wants
 
   const connection = getConnectionOptions(callContext)

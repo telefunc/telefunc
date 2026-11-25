@@ -9,6 +9,7 @@ import { ConnectionError } from '../../../client/ConnectionError.js'
 type Features = {
   /** Streams, files and promises a response's own body carries. */
   streams?: typeof import('./streams.js')
+  broadcasts?: typeof import('./broadcasts.js')
 }
 type Feature = keyof Features
 
@@ -63,6 +64,7 @@ async function importFeature(feature: Feature): Promise<void> {
   const { loaded } = globalObject
   try {
     if (feature === 'streams') loaded.streams = await import('./streams.js')
+    if (feature === 'broadcasts') loaded.broadcasts = await import('./broadcasts.js')
   } catch (err) {
     // The next call that needs it tries again: the chunk may be back (a deploy, a network that recovered).
     delete globalObject.loading[feature]

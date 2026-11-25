@@ -5,7 +5,6 @@ import type { ClientReviverContext, ReviverType, TypeContract } from '../../type
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import type { Feature, Features } from '../loadFeatures.js'
-import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import {
@@ -17,6 +16,7 @@ import {
   SERIALIZER_PREFIX_FILE_DOWNLOAD,
   SERIALIZER_PREFIX_BLOB_DOWNLOAD,
   SERIALIZER_PREFIX_PROMISE,
+  SERIALIZER_PREFIX_BROADCAST,
 } from '../../../constants.js'
 
 /** The code each built-in value's reviver is in. */
@@ -28,6 +28,7 @@ const FEATURE_OF_PREFIX = new Map<string, Feature>([
   [SERIALIZER_PREFIX_FILE_DOWNLOAD, 'streams'],
   [SERIALIZER_PREFIX_BLOB_DOWNLOAD, 'streams'],
   [SERIALIZER_PREFIX_PROMISE, 'streams'],
+  [SERIALIZER_PREFIX_BROADCAST, 'broadcasts'],
 ])
 const TAG_START = `"${SERIALIZER_PREFIX_STEM}`
 
@@ -56,7 +57,7 @@ function createStreamingReviver(
 ) {
   const allTypes: ReviverType<TypeContract, ClientReviverContext>[] = [
     ...(loaded.streams?.responseTypes ?? []),
-    broadcastReviver,
+    ...(loaded.broadcasts?.responseTypes ?? []),
     channelReviver,
     functionReviver,
     ...extensionTypes,

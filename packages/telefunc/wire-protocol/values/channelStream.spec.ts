@@ -7,6 +7,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import * as streams from './client/streams.js'
+import * as broadcasts from './client/broadcasts.js'
 import { readableStreamReplacer } from './client/request/readableStream.js'
 import { createStreamProducer } from './server/response/createStreamProducer.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
@@ -89,7 +90,7 @@ function returnOverChannel(value: unknown): unknown {
       return source
     },
   }
-  return parse(body, { reviver: createStreamingReviver(page, (revived) => revived.value, [], { streams }) })
+  return parse(body, { reviver: createStreamingReviver(page, (revived) => revived.value, [], { streams, broadcasts }) })
 }
 
 describe('a value streamed over transport channel, larger than the 1 MiB parts it goes in', () => {
