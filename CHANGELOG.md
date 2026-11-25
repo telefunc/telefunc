@@ -14,8 +14,6 @@
 
 * When using `provideTelefuncContext()`, you must now call your telefunction inside the `provideTelefuncContext()` callback — see https://telefunc.com/migration/provideTelefuncContext
 
-Co-authored-by: Romuald Brillout <git@brillout.com>
-
 
 
 ## [0.3.1](https://github.com/telefunc/telefunc/compare/v0.3.0...v0.3.1) (2026-10-27)
