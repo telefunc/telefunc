@@ -595,7 +595,7 @@ class PieceSender {
    *  needs there. */
   private readonly gave = (frame: Uint8Array<ArrayBuffer>, length: number): void => {
     if (length > 0) this.countHanded(length, false)
-    const [tag] = frame
+    const tag = frame[0]
     this.countHanded(frame.byteLength, tag !== undefined && isSequencedTag(tag), this.copiesOnSend)
   }
 
@@ -953,7 +953,7 @@ class SocketMessages {
     let i = 0
     for (const frame of this.frames) {
       if (i++ >= this.given) this.give(frame, length)
-      const [tag] = frame
+      const tag = frame[0]
       length = tag === undefined ? 0 : lengthBytes(tag)
     }
     this.given = this.frames.length
