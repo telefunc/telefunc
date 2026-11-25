@@ -473,8 +473,7 @@ class MemoryRoomDriver implements RoomDriver {
     return Array.from(keys ?? [], (key) => copyLane(incarnation.retained.get(key)!.lane))
   }
 
-  // One order per source, delivered once to each receiver: a holder asks nothing more of it.
-  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver, _holder: string): DriverAttempt {
+  subscribe({ roomId, inc, lane }: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const room = this.rooms.get(roomId)
     if (room === undefined || !isOpenIncarnation(this.liveHead(room), inc)) return new EndedAttempt()
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.

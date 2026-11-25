@@ -56,8 +56,7 @@ class CloudflareRoomDriver implements RoomDriver {
     return currentCloudflareHostKey()
   }
 
-  // One order per source, delivered once to each receiver: a holder asks nothing more of it.
-  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver, _holder: string): DriverAttempt {
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
     const subscriptions = currentRoomSessionSubscriptions(this)
     assert(subscriptions !== null) // `hostKey()` refused a subscribe outside a session
     return subscriptions.subscribe(source, receiver)
