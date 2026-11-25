@@ -27,7 +27,7 @@ import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
 import { CloudflareBackend } from './CloudflareBackend.js'
-import { servesRequest, withCloudflareSession, type CloudflareSession } from './session.js'
+import { cloudflareSession, servesRequest, withCloudflareSession, type CloudflareSession } from './session.js'
 import { disposeBackend, installBackend } from '../../backend/install.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
@@ -548,7 +548,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     const session = (name: string): CloudflareSession => {
       const member = broadcast.member(name, new OrderedStubs())
       member.locate('weur')
-      const session = { broadcast: member, mux: getChannelMux() }
+      const session = cloudflareSession(member, getChannelMux())
       byName.set(name, session)
       return session
     }

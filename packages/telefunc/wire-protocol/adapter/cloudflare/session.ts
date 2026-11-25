@@ -1,8 +1,9 @@
-export { currentCloudflareSession, withCloudflareSession, servesRequest }
+export { cloudflareSession, currentCloudflareSession, withCloudflareSession, servesRequest }
 export type { CloudflareSession }
 
 import { getRawContext, isAsyncMode, restoreContext } from '../../../node/server/context/context.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { isObject } from '../../../utils/isObject.js'
 import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/ChannelMux.js'
 import { setRequestScope } from '../../channel/server/requestScope.js'
 import type { CloudflareBroadcastMember } from './CloudflareBroadcastMember.js'
@@ -10,15 +11,30 @@ import type { CloudflareBroadcastMember } from './CloudflareBroadcastMember.js'
 /** What a session DO lends the code it runs: its Broadcast membership and its channels, both of which end with this
  *  incarnation of the DO. */
 type CloudflareSession = {
+  readonly [SESSION_BRAND]: true
   broadcast: CloudflareBroadcastMember
   mux: ChannelMux
 }
 
+/** Marks a session, which a scope's context carries to any copy of telefunc's code. */
+const SESSION_BRAND: unique symbol = Symbol.for('telefunc.cloudflare.session.brand')
+
+function cloudflareSession(broadcast: CloudflareBroadcastMember, mux: ChannelMux): CloudflareSession {
+  return { [SESSION_BRAND]: true, broadcast, mux }
+}
+
+function isCloudflareSession(value: unknown): value is CloudflareSession {
+  return isObject(value) && SESSION_BRAND in value
+}
+
 const SESSION = Symbol.for('telefunc.cloudflare.session')
 
-const globalObject = getGlobalObject('wire-protocol/adapter/cloudflare/session.ts', {
+const globalObject = getGlobalObject<{
+  running: CloudflareSession | undefined
+  requests: WeakMap<Request, CloudflareSession>
+}>('wire-protocol/adapter/cloudflare/session.ts', {
   /** Without AsyncLocalStorage, the session whose page's subscription a call brings, up to its first `await`. */
-  running: undefined as CloudflareSession | undefined,
+  running: undefined,
   /** The session each request reached, so that a page's subscription its call brings runs in it (`inRequestScope`). */
   requests: new WeakMap<Request, CloudflareSession>(),
 })
@@ -55,5 +71,6 @@ function servesRequest(session: CloudflareSession, request: Request): void {
 
 function currentCloudflareSession(): CloudflareSession | undefined {
   if (!isAsyncMode()) return globalObject.running
-  return getRawContext()?.[SESSION] as CloudflareSession | undefined
+  const session = getRawContext()?.[SESSION]
+  return isCloudflareSession(session) ? session : undefined
 }

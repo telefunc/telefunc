@@ -113,7 +113,8 @@ type CloudflareExtension = {
   planes?: readonly CloudflarePlane[]
 }
 
-declare const servedCloudflarePlane: unique symbol
+/** Marks a plane `serveCloudflarePlane()` made. */
+const servedCloudflarePlane: unique symbol = Symbol('servedCloudflarePlane')
 
 /** How the Cloudflare backend builds one of an extension's planes, from Cloudflare's kit. Only `serveCloudflarePlane()`
  *  makes one, so an entry in `planes` was checked against its key. */
@@ -138,9 +139,7 @@ function serveCloudflarePlane<Key extends PlaneKey>(
   key: Key,
   build: (kit: CloudflarePlaneKit) => PlaneOf<Key>['driver'],
 ): CloudflarePlane {
-  const entry: Omit<CloudflarePlane, typeof servedCloudflarePlane> = { key, build }
-  // The brand is the type's only: it marks what this function checked
-  return entry as CloudflarePlane
+  return { key, build, [servedCloudflarePlane]: true }
 }
 
 function getCloudflareExtension(name: string): CloudflareExtension | undefined {

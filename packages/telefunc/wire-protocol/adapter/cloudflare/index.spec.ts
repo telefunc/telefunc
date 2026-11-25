@@ -46,8 +46,8 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    transportInstances: [] as MockCloudflareBroadcast[],
-    authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
+    transportInstances: new Array<MockCloudflareBroadcast>(),
+    authorityInstances: new Array<MockCloudflareBroadcastAuthorityState>(),
     MockCloudflareBroadcastAuthorityState,
     MockCloudflareBroadcast,
   }
@@ -100,6 +100,7 @@ import { resolveSessionRoutingTarget } from './routing.js'
 import { disposeBackend } from '../../backend/install.js'
 import type { BroadcastPublishRequest } from './broadcastRpc.js'
 import type { BroadcastDelivery } from './extensions.js'
+import { assert } from '../../../utils/assert.js'
 
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
@@ -116,7 +117,10 @@ function createBinding() {
   }))
   const jurisdiction = vi.fn(() => binding)
   const binding = { get, idFromName, jurisdiction }
-  return { binding, get, fetch, idFromName, jurisdiction }
+  /** The Worker's env, whose `TelefuncDurableObject` is the binding. */
+  const bindings = { TelefuncDurableObject: binding }
+  const env: Cloudflare.Env = bindings
+  return { binding, env, get, fetch, idFromName, jurisdiction }
 }
 
 beforeEach(() => {
@@ -144,7 +148,7 @@ afterEach(() => disposeBackend())
 
 describe('cloudflare adapter entrypoint', () => {
   it('routes by the home its page names and forwards routing headers', async () => {
-    const { binding, get, fetch } = createBinding()
+    const { env, get, fetch } = createBinding()
     const tf = new Telefunc()
     const request = new Request('https://telefunc.test/_telefunc?session=my-token&home=oc', {
       headers: { 'x-telefunc-request': 'txt' },
@@ -152,7 +156,7 @@ describe('cloudflare adapter entrypoint', () => {
 
     await tf.serve({
       request,
-      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
+      env,
     })
 
     expect(mocks.transportInstances).toHaveLength(1)
@@ -187,26 +191,26 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('returns 400 for websocket upgrades when websocket transport is disabled', async () => {
-    const { binding } = createBinding()
+    const { env } = createBinding()
     mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: [] } })
     const tf = new Telefunc()
     const request = new Request('https://telefunc.test/_telefunc', { headers: { upgrade: 'websocket' } })
 
     const response = await tf.serve({
       request,
-      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
+      env,
     })
 
     expect(response?.status).toBe(400)
   })
 
   it('applies jurisdiction wrapping before binding lookups', async () => {
-    const { binding, jurisdiction } = createBinding()
+    const { env, jurisdiction } = createBinding()
     const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
-      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
+      env,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')
@@ -253,7 +257,9 @@ describe('cloudflare adapter entrypoint', () => {
     )
     expect(mocks.telefuncMock).toHaveBeenCalled()
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
-    const member = mocks.transportInstances[0]!.members[0]!
+    const [transport] = mocks.transportInstances
+    const [member] = transport?.members ?? []
+    assert(member !== undefined)
     expect(member.locate).toHaveBeenCalledWith('weur')
 
     instance.webSocketMessage({} as WebSocket, 'payload')
