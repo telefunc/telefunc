@@ -331,7 +331,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     )
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
     this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES))
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
@@ -798,7 +798,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.exchange.forgetWire()
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
 
     const now = performance.now()
@@ -921,7 +921,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
   private startTtlIfIdle(): void {
     // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
-    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) this.ttl = this.confirming = null
+    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) return this.dispose()
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
@@ -929,21 +929,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.ttl = ttl
   }
 
-  /** Disposes the connection once the server has what its closed channels sent. Till then the expired timer stays as
-   *  `ttl`, so nothing arms another, and one PING asks the server at once (`startTtlIfIdle` lets the timer go). */
+  /** Waits for queued frames to go. If the server still owes confirmation, keep the expired timer and ask with a PING. */
   private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
     await this.transport.drained()
     if (this.ttl !== ttl || !this.channels.idle) return
     if (this.channels.delivered) return this.dispose()
-    this.liveness.pingNow(this.transport)
     this.confirming = ttl
+    this.liveness.pingNow(this.transport)
   }
 
   private dispose(): void {
     if (this.closed) return
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
