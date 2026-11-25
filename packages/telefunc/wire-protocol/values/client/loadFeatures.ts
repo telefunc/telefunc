@@ -1,7 +1,8 @@
-export { loadFeatures, loadedFeatures }
+export { loadFeatures, loadedFeatures, loadedChannels, channelsLoadedBy }
 export type { Feature, Features }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { assertUsage } from '../../../utils/assert.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ConnectionError } from '../../../client/ConnectionError.js'
 
@@ -9,6 +10,8 @@ import { ConnectionError } from '../../../client/ConnectionError.js'
 type Features = {
   /** Streams, files and promises a response's own body carries. */
   streams?: typeof import('./streams.js')
+  /** Channels with their transports: what a returned channel or function, and a stream that rides a channel, need. */
+  channels?: typeof import('./channels.js')
   broadcasts?: typeof import('./broadcasts.js')
 }
 type Feature = keyof Features
@@ -26,6 +29,21 @@ function loadedFeatures(): Features {
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
   await callWaitsFor(call, Promise.all(features.map(loadFeature)))
   return globalObject.loaded
+}
+
+/** The channel code that an extension's value creates its channel with. */
+function loadedChannels(): NonNullable<Features['channels']> {
+  const { channels } = globalObject.loaded
+  assertUsage(
+    channels,
+    "A Telefunc extension's value creates a channel, yet the page hasn't loaded Telefunc's channel code: the extension's client code should `import 'telefunc/__internal'`.",
+  )
+  return channels
+}
+
+/** The extension code that imports `channels` statically has them loaded with it. */
+function channelsLoadedBy(channels: NonNullable<Features['channels']>): void {
+  globalObject.loaded.channels = channels
 }
 
 const ABORTED = Symbol('ABORTED')
@@ -64,6 +82,7 @@ async function importFeature(feature: Feature): Promise<void> {
   const { loaded } = globalObject
   try {
     if (feature === 'streams') loaded.streams = await import('./streams.js')
+    if (feature === 'channels') loaded.channels = await import('./channels.js')
     if (feature === 'broadcasts') loaded.broadcasts = await import('./broadcasts.js')
   } catch (err) {
     // The next call that needs it tries again: the chunk may be back (a deploy, a network that recovered).

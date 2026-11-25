@@ -11,14 +11,13 @@ import { makeAbortError, throwAbortError, throwBugError } from '../../../../clie
 import type { BaseStreamReader } from './BaseStreamReader.js'
 import type { FrameDemuxer } from './FrameDemuxer.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
+import type { ConnectionOptions } from '../../../channel/client/ClientChannel.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { createStreamingReviver, featuresIn } from './registry.js'
-import { loadFeatures, loadedFeatures } from '../loadFeatures.js'
-import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
-import { ChannelStreamSource } from '../../ChannelStreamSource.js'
+import { loadFeatures, loadedFeatures, loadedChannels } from '../loadFeatures.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
   gcRegistry: new GcRegistry(),
@@ -62,7 +61,7 @@ async function parseResponse(
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  await loadFeaturesIn(body, callContext)
+  await loadFeaturesIn(body, true, callContext)
   return reviveResponse(body, callContext, connection, null)
 }
 
@@ -82,7 +81,7 @@ async function parseStreamedResponse(
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    await loadFeaturesIn(metaText, callContext)
+    await loadFeaturesIn(metaText, false, callContext)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
     if (streamReader) streamReader.cancel()
@@ -93,10 +92,10 @@ async function parseStreamedResponse(
 }
 
 /** Loads the code the values in a response's serialized `text` need, before any of them revives. */
-async function loadFeaturesIn(text: string, callContext: CallContext): Promise<void> {
+async function loadFeaturesIn(text: string, streamsRideChannels: boolean, callContext: CallContext): Promise<void> {
   const loaded = loadedFeatures()
-  if (loaded.streams && loaded.broadcasts) return
-  const needed = [...featuresIn(text)].filter((feature) => !loaded[feature])
+  if (loaded.streams && loaded.channels && loaded.broadcasts) return
+  const needed = [...featuresIn(text, streamsRideChannels)].filter((feature) => !loaded[feature])
   if (needed.length > 0) await loadFeatures(needed, callContext)
 }
 
@@ -122,6 +121,7 @@ async function reviveResponse(
   let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
     createChannel(opts) {
+      const { ClientChannel } = loadedChannels()
       return new ClientChannel({
         channelId: opts.channelId,
         ack: opts.ack,
@@ -142,6 +142,7 @@ async function reviveResponse(
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
+        const { ClientChannel, ChannelStreamSource } = loadedChannels()
         const channel = new ClientChannel({ channelId: metadata.channelId, connection })
         return ChannelStreamSource.create(channel, { throwError: throwStreamError })
       }

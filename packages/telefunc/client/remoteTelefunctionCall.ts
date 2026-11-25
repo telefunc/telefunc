@@ -1,9 +1,15 @@
 export { remoteTelefunctionCall }
 
 import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
-import { serializeTelefunctionArguments } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
+import {
+  serializeTelefunctionArguments,
+  serializeHeldArguments,
+  cancelHeldArguments,
+  type HeldArguments,
+} from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
 import { assertUsage } from '../utils/assert.js'
+import { loadFeatures } from '../wire-protocol/values/client/loadFeatures.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
@@ -71,15 +77,37 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
-
-  const telefunctionReturnPromise = makeHttpRequest(callContext)
+  const telefunctionReturnPromise = sendCall(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
+}
+
+type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
+  Omit<Parameters<typeof makeHttpRequest>[0], 'httpRequestBody' | 'requestCloseHandlers'>
+
+/** Sends the call. Its arguments are serialized now, at its invocation: a serialization error throws here, except for
+ *  a call holding a value carried over a channel before the page loaded channels, whose returned promise rejects. */
+function sendCall(callContext: CallContext): Promise<unknown> {
+  const serialized = serializeTelefunctionArguments(callContext)
+  if ('held' in serialized) return sendHeldCall(serialized, callContext)
+  objectAssign(callContext, serialized)
+  return makeHttpRequest(callContext)
+}
+
+/** A call whose arguments hold a value carried over a channel, before the page loaded channels: it loads them, then
+ *  sends what its invocation serialized. */
+async function sendHeldCall(args: HeldArguments, callContext: CallContext): Promise<unknown> {
+  try {
+    await loadFeatures(['channels'], callContext)
+  } catch (err) {
+    cancelHeldArguments(args, err)
+    throw err
+  }
+  objectAssign(callContext, serializeHeldArguments(args, callContext))
+  return makeHttpRequest(callContext)
 }
 
 /** Create an AbortController optionally wired to an external signal. */

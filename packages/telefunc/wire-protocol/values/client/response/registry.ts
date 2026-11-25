@@ -5,8 +5,6 @@ import type { ClientReviverContext, ReviverType, TypeContract } from '../../type
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import type { Feature, Features } from '../loadFeatures.js'
-import { channelReviver } from './channel.js'
-import { functionReviver } from './function.js'
 import {
   SERIALIZER_PREFIX_STEM,
   SERIALIZER_PREFIX_GENERATOR,
@@ -16,6 +14,8 @@ import {
   SERIALIZER_PREFIX_FILE_DOWNLOAD,
   SERIALIZER_PREFIX_BLOB_DOWNLOAD,
   SERIALIZER_PREFIX_PROMISE,
+  SERIALIZER_PREFIX_CHANNEL,
+  SERIALIZER_PREFIX_FUNCTION,
   SERIALIZER_PREFIX_BROADCAST,
 } from '../../../constants.js'
 
@@ -28,17 +28,21 @@ const FEATURE_OF_PREFIX = new Map<string, Feature>([
   [SERIALIZER_PREFIX_FILE_DOWNLOAD, 'streams'],
   [SERIALIZER_PREFIX_BLOB_DOWNLOAD, 'streams'],
   [SERIALIZER_PREFIX_PROMISE, 'streams'],
+  [SERIALIZER_PREFIX_CHANNEL, 'channels'],
+  [SERIALIZER_PREFIX_FUNCTION, 'channels'],
   [SERIALIZER_PREFIX_BROADCAST, 'broadcasts'],
 ])
 const TAG_START = `"${SERIALIZER_PREFIX_STEM}`
 
 /** The code the built-in values in a response's serialized `text` need. The serializer escapes an app's string that
- *  starts with `!` as `!!`, so `"!Telefunc` starts only a value's tag, at any depth. */
-function featuresIn(text: string): Set<Feature> {
+ *  starts with `!` as `!!`, so `"!Telefunc` starts only a value's tag, at any depth. A stream that a text response
+ *  carries rides a channel of its own (`streamsRideChannels`). */
+function featuresIn(text: string, streamsRideChannels: boolean): Set<Feature> {
   const features = new Set<Feature>()
   for (let at = text.indexOf(TAG_START); at !== -1; at = text.indexOf(TAG_START, at + TAG_START.length)) {
     const feature = FEATURE_OF_PREFIX.get(text.slice(at + 1, text.indexOf(':', at) + 1))
     if (feature) features.add(feature)
+    if (feature === 'streams' && streamsRideChannels) features.add('channels')
   }
   return features
 }
@@ -55,11 +59,10 @@ function createStreamingReviver(
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
   loaded: Features,
 ) {
-  const allTypes: ReviverType<TypeContract, ClientReviverContext>[] = [
+  const allTypes = [
     ...(loaded.streams?.responseTypes ?? []),
     ...(loaded.broadcasts?.responseTypes ?? []),
-    channelReviver,
-    functionReviver,
+    ...(loaded.channels?.responseTypes ?? []),
     ...extensionTypes,
   ]
   const revivedByWireString = new Map<string, unknown>()
