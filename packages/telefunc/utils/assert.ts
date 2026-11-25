@@ -5,6 +5,7 @@ export { assertInfo }
 export { getProjectError }
 export { errorPrefix }
 
+import { assertSingleInstance } from './assertSingleInstance.js'
 import { createErrorWithCleanStackTrace } from './createErrorWithCleanStackTrace.js'
 import { getGlobalObject } from './getGlobalObject.js'
 import { projectInfo } from './projectInfo.js'
@@ -69,7 +70,7 @@ const globalObject = getGlobalObject<{ alreadyLogged: Set<string>; versions?: st
   alreadyLogged: new Set(),
   versions: [],
 })
-assertSingleInstance()
+assertSingleInstance(globalObject)
 function assertWarning(
   condition: unknown,
   errorMessage: string,
@@ -93,20 +94,6 @@ function assertWarning(
   } else {
     console.warn(msg)
   }
-}
-
-function assertSingleInstance() {
-  // `versions` is missing if a Telefunc version that doesn't record its version (0.3.1 or older) was loaded first
-  const versions = (globalObject.versions ??= ['<=0.3.1'])
-  const { projectVersion } = projectInfo
-  if (!versions.includes(projectVersion)) versions.push(projectVersion)
-  const versionOther = versions.find((version) => version !== projectVersion)
-  if (versionOther === undefined) return
-  assertWarning(
-    false,
-    `telefunc@${pc.bold(versionOther)} and telefunc@${pc.bold(projectVersion)} are both loaded, which is highly discouraged: use a single version of Telefunc, see ${pc.underline('https://telefunc.com/warning/version-mismatch')}`,
-    { onlyOnce: 'version-mismatch' },
-  )
 }
 
 function assertInfo(condition: unknown, errorMessage: string, { onlyOnce }: { onlyOnce: boolean }): void {
