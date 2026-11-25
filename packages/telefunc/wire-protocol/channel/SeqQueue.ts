@@ -2,8 +2,8 @@ export { SeqQueue }
 
 /** Entries in seq order that leave at the ends, or from among the newest: a slot left at the oldest end holds nothing,
  *  and the slots go once they are as many as the live ones, which keeps a drop amortised O(1) per entry. Indices count
- *  from the oldest live entry. */
-class SeqQueue<T> {
+ *  from the oldest live entry. An entry is never `undefined`, which marks a slot left. */
+class SeqQueue<T extends {}> {
   // Seqs in an array of their own, so a scan by seq reads only numbers.
   private seqs: number[] = []
   private items: (T | undefined)[] = []
@@ -14,18 +14,26 @@ class SeqQueue<T> {
   }
 
   seqAt(i: number): number {
-    return this.seqs[this.head + i]!
+    const seq = this.seqs[this.head + i]
+    if (seq === undefined) throw outOfRange(i, this.length)
+    return seq
   }
 
   at(i: number): T {
-    return this.items[this.head + i]!
+    const item = this.items[this.head + i]
+    if (item === undefined) throw outOfRange(i, this.length)
+    return item
   }
 
   /** The index of the oldest entry after `seq`, `length` where none is. */
   indexAfter(seq: number): number {
     const seqs = this.seqs
     let i = this.head
-    while (i < seqs.length && seqs[i]! <= seq) i++
+    for (; i < seqs.length; i++) {
+      const at = seqs[i]
+      if (at === undefined) throw outOfRange(i - this.head, this.length)
+      if (at > seq) break
+    }
     return i - this.head
   }
 
@@ -53,8 +61,9 @@ class SeqQueue<T> {
   }
 
   pop(): T {
+    const item = this.items.pop()
+    if (item === undefined) throw new RangeError('The queue holds no entry to take')
     this.seqs.pop()
-    const item = this.items.pop()!
     if (this.head >= this.items.length) this.clear()
     return item
   }
@@ -73,4 +82,9 @@ class SeqQueue<T> {
     this.items.length = 0
     this.head = 0
   }
+}
+
+/** A read past the queue's live entries: a bug of its caller. */
+function outOfRange(i: number, length: number): Error {
+  return new RangeError(`The queue has no entry ${i}: it holds ${length}`)
 }
