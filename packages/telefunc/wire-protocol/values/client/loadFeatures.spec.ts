@@ -227,6 +227,31 @@ test('a callback call sends the values its invocation read', async () => {
   expect(JSON.parse(posts[0] ?? '').args[0].read).toBe(10)
 })
 
+test('a held callback preserves an extension tag that shares the replay prefix', async () => {
+  const { call, config } = await page()
+  const prefix = '!TelefuncHeld:'
+  config.extensions.push({
+    name: 'app-tag',
+    requestTypes: [
+      {
+        prefix,
+        detect: (value: unknown): value is { kind: 'tag'; value: number } =>
+          typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'tag',
+        replace: (value: { value: number }) => ({ metadata: { value: value.value }, close() {}, abort() {} }),
+      },
+    ],
+  })
+  respond = text(1)
+  const pending = call([{ kind: 'tag', value: 7 }, (n: number) => n * 2])
+  gates.channels.open()
+
+  await pending
+  expect(posts).toHaveLength(1)
+  const { args } = JSON.parse(posts[0] ?? '')
+  expect(args[0]).toBe('!TelefuncHeld:{"value":7}')
+  expect(args[1]).toMatch(/^!TelefuncFunction:/)
+})
+
 test('a returned promise stays a promise when another value of the response loads its chunk', async () => {
   const { call } = await page()
   await warmStreams(call)

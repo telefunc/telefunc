@@ -50,7 +50,7 @@ type HeldArguments = {
   replaced: Replaced[]
 }
 
-/** Names a held value in what a call serialized; it never reaches the server. */
+// A held token ends in `!`, which cannot end the JSON payload of a wire tag.
 const SERIALIZER_PREFIX_HELD = '!TelefuncHeld:'
 
 /** Serializes the call's arguments, at its invocation; `HeldArguments` where they hold a value carried over a channel
@@ -79,7 +79,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     createReplacerContext(args.files, callContext),
     (replaced) => args.replaced.push(replaced),
     callContext.extensionRequestTypes,
-    loadedFeatures().channels ? null : (value) => SERIALIZER_PREFIX_HELD + (args.held.push(value) - 1),
+    loadedFeatures().channels ? null : (value) => `${SERIALIZER_PREFIX_HELD}${args.held.push(value) - 1}!`,
   )
   args.serialized = serialize(dataMain, callContext, replacer)
   if (args.held.length > 0) return args
@@ -96,8 +96,8 @@ function serializeHeldArguments(args: HeldArguments, callContext: CallContext): 
   ]
   const dataMain = parse(args.serialized, {
     reviver(_path, value) {
-      if (value.startsWith(SERIALIZER_PREFIX_HELD)) {
-        return { replacement: new Held(args.held[Number(value.slice(SERIALIZER_PREFIX_HELD.length))]) }
+      if (value.startsWith(SERIALIZER_PREFIX_HELD) && value.endsWith('!')) {
+        return { replacement: new Held(args.held[Number(value.slice(SERIALIZER_PREFIX_HELD.length, -1))]) }
       }
       // A value replaced at the invocation stays as it was serialized: a file's index is in `args.files` already.
       if (replacedPrefixes.some((prefix) => value.startsWith(prefix))) return { replacement: new Verbatim(value) }
