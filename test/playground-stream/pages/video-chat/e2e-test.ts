@@ -3,7 +3,7 @@ export { testVideoChat }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page } from 'playwright-chromium'
 import { canCutWire, cutWire } from '../../e2e-utils'
-import { present } from '../../checked'
+import { present } from '../../../checked'
 
 type Tally = { draws: Record<string, Record<string, number>>; decodeErrors: number }
 

@@ -29,7 +29,7 @@ import {
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
-import { fieldOf, listOf, optionalFieldOf, present, textAt, textListOf, textOf } from './checked'
+import { fieldOf, listOf, optionalFieldOf, present, textAt, textListOf, textOf } from '../checked'
 
 /** `op` is a driver method (its next matching call rejects; with `after`, once it ran, as a store whose reply is lost),
  *  'subscribe' (the next matching subscribe throws, a refusal), 'deliver' (the next message a matching subscription

@@ -15,7 +15,7 @@ import {
   textAt,
   textListOf,
   textOf,
-} from '../../checked'
+} from '../../../checked'
 import {
   onCreateRoom,
   onJoinSpeaker,

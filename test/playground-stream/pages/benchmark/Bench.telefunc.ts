@@ -16,7 +16,7 @@ export {
 import { BroadcastChannel, Channel } from 'telefunc'
 import { Room, type LocalParticipant } from '@telefunc/room'
 import { anyoneCanJoin } from '../../anyone-can-join'
-import { entryOf } from '../../checked'
+import { entryOf } from '../../../checked'
 
 const INSTANCE_ID = process.env.INSTANCE_ID ?? 'local'
 

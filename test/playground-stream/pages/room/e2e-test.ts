@@ -27,7 +27,7 @@ import {
   canCutWire,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
-import { fieldOf, listOf, numberOf, present } from '../../checked'
+import { fieldOf, listOf, numberOf, present } from '../../../checked'
 import type { NamedDemand } from './demandNames'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */

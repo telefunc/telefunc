@@ -3,7 +3,7 @@ export { ChannelsQueued, AcksWaiting, initialSendsPastMemoryState, type SendsPas
 import React from 'react'
 import { onChannelAcksWaiting, onChannelsQueuedBeforeReturn } from './Channel.telefunc'
 import { openChannel } from './openChannel'
-import { nameOf } from '../../checked'
+import { nameOf } from '../../../checked'
 
 type SendsPastMemoryState = {
   channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null

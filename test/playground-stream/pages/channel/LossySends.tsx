@@ -3,7 +3,7 @@ export { LossySends, LossyFromPage, initialLossySendsState, type LossySendsState
 import React, { useEffect, useRef } from 'react'
 import { onChannelLossySends, onChannelLossyFromPage } from './Channel.telefunc'
 import { openChannel } from './openChannel'
-import { present } from '../../checked'
+import { present } from '../../../checked'
 
 type LossySendsState = {
   lossySends: string[] | null

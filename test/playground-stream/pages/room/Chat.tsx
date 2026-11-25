@@ -2,7 +2,7 @@ export { Chat }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { onGetChat, onGetMembersChat, onSignIn, onWatchChat, onWhoIsOnline, onGetChatMember } from './Chat.telefunc'
-import { present } from '../../checked'
+import { present } from '../../../checked'
 
 type ChatRoom = Awaited<ReturnType<typeof onGetChat>>
 type Me = Awaited<ReturnType<ChatRoom['join']>>

@@ -2,7 +2,7 @@ export { redis, dropRedisSubscribers, whileRedisSubscribersDown }
 
 import IORedis from 'ioredis'
 import { sleep } from './sleep'
-import { present } from './checked'
+import { present } from '../checked'
 
 /** The connection Telefunc's Redis transport publishes on, when REDIS_URL is set. */
 const redis = process.env.REDIS_URL ? new IORedis(process.env.REDIS_URL) : undefined

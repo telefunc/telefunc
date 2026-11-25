@@ -3,7 +3,7 @@ export { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose }
 import { Room, type LocalParticipant } from '@telefunc/room'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { addBackendFault } from '../../failing-backend'
-import { entryOf, present } from '../../checked'
+import { entryOf, present } from '../../../checked'
 
 // The server's members, kept until their room's test ends.
 const members = new Map<string, LocalParticipant[]>()

@@ -2,7 +2,7 @@ export { VideoChat }
 
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { onGetCall, onJoinCall, onSwitchHere } from './VideoChat.telefunc'
-import { booleanAt, numberAt, present } from '../../checked'
+import { booleanAt, numberAt, present } from '../../../checked'
 
 type Call = Awaited<ReturnType<typeof onGetCall>>
 type Me = Awaited<ReturnType<typeof onJoinCall>>

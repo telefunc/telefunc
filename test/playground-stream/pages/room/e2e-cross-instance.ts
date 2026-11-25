@@ -9,7 +9,7 @@ export {
 }
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
-import { fieldOf, listOf, numberOf, present, recordOf, textListOf, textOf } from '../../checked'
+import { fieldOf, listOf, numberOf, present, recordOf, textListOf, textOf } from '../../../checked'
 import {
   dropRedisConnections,
   getRedisChannels,
