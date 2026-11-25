@@ -4,6 +4,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
+import * as streams from './client/streams.js'
 import { ServerChannel } from '../channel/server/ServerChannel.js'
 import { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
@@ -97,6 +98,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       return wrapProxy(revived.value as object)
     },
     extensionTypes,
+    { streams },
   )
   const parseBody = (body: string) => parse(body, { reviver })
   return { parseBody, mintedChannels, mintedBroadcasts, lifecycles }

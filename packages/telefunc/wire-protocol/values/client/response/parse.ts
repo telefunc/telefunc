@@ -1,27 +1,25 @@
 export { parseResponse }
-export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
-import { createStreamingReviver } from './registry.js'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
-import { BaseStreamReader } from './BaseStreamReader.js'
+import type { BaseStreamReader } from './BaseStreamReader.js'
+import type { FrameDemuxer } from './FrameDemuxer.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
-import { StreamReader } from './StreamReader.js'
-import { SseStreamReader } from './SseStreamReader.js'
-import { FrameDemuxer } from './FrameDemuxer.js'
-import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
-import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
-import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
+import { createStreamingReviver, featuresIn } from './registry.js'
+import { loadFeatures, loadedFeatures } from '../loadFeatures.js'
+import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
+import { ClientBroadcast } from '../../../channel/client/ClientBroadcast.js'
+import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
   gcRegistry: new GcRegistry(),
@@ -56,24 +54,50 @@ async function parseResponse(
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
 
-  // HTTP streaming (binary / SSE)
+  // HTTP streaming (binary / SSE): its body carries streams, which the stream readers read.
   if (isStreaming) {
-    assert(response.body)
-    const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
-    const isSSE = contentType.includes('text/event-stream')
-    const streamReader = isSSE
-      ? //
-        new SseStreamReader(reader, callContext)
-      : new StreamReader(reader, callContext)
-    const metaLen = await streamReader.readU32()
-    const metaBytes = await streamReader.readExact(metaLen)
-    const metaText = new TextDecoder().decode(metaBytes)
-    return reviveResponse(metaText, callContext, connection, streamReader)
+    const { body } = response
+    assert(body)
+    return parseStreamedResponse(body, contentType.includes('text/event-stream'), callContext, connection)
   }
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
+  await loadFeaturesIn(body, callContext)
   return reviveResponse(body, callContext, connection, null)
+}
+
+/** Until its values are handed out, the call owns the body: an abort or a failed load cancels it, so that the server
+ *  stops sending it. */
+async function parseStreamedResponse(
+  body: ReadableStream<Uint8Array<ArrayBuffer>>,
+  isSse: boolean,
+  callContext: CallContext,
+  connection: ConnectionOptions,
+): Promise<unknown> {
+  let streamReader: BaseStreamReader | undefined
+  try {
+    const { streams } = await loadFeatures(['streams'], callContext)
+    assert(streams)
+    streamReader = streams.createBodyReader(body.getReader(), isSse, callContext)
+    const metaLen = await streamReader.readU32()
+    const metaBytes = await streamReader.readExact(metaLen)
+    const metaText = new TextDecoder().decode(metaBytes)
+    return await reviveResponse(metaText, callContext, connection, streamReader)
+  } catch (err) {
+    if (streamReader) streamReader.cancel()
+    // An errored body rejects its cancel; that error already reached the call.
+    else body.cancel().catch(() => {})
+    throw err
+  }
+}
+
+/** Loads the code the values in a response's serialized `text` need, before any of them revives. */
+async function loadFeaturesIn(text: string, callContext: CallContext): Promise<void> {
+  const loaded = loadedFeatures()
+  if (loaded.streams) return
+  const needed = [...featuresIn(text)].filter((feature) => !loaded[feature])
+  if (needed.length > 0) await loadFeatures(needed, callContext)
 }
 
 // ===== Response revival =====
@@ -84,7 +108,6 @@ async function reviveResponse(
   connection: ConnectionOptions,
   bodyStreamReader: BaseStreamReader | null,
 ): Promise<unknown> {
-  const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
 
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
@@ -95,6 +118,7 @@ async function reviveResponse(
   }
 
   const pendingValues: PendingValue<unknown>[] = []
+  const allCloseHandlers = [...callContext.requestCloseHandlers]
   let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
     createChannel(opts) {
@@ -120,44 +144,41 @@ async function reviveResponse(
         return ChannelStreamSource.create(channel, { throwError: throwStreamError })
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader, callContext.telefunctionName)
+      const { streams } = loadedFeatures()
+      assert(streams)
+      demuxer ??= new streams.FrameDemuxer(bodyStreamReader, callContext.telefunctionName)
       return demuxer.create(metadata.__index)
     },
   }
+  const reviver = createStreamingReviver(context, handOut, callContext.extensionResponseTypes, loadedFeatures())
 
-  const allCloseHandlers = [...callContext.requestCloseHandlers]
+  function handOut(revived: ReturnType<ReviverType['revive']>) {
+    const { value, abort, close, onEnd } = revived
+    allCloseHandlers.push(close)
+    callContext.abortController.signal.addEventListener(
+      'abort',
+      () => {
+        abort(makeAbortError(undefined, callContext))
+      },
+      { once: true },
+    )
 
-  const reviver = createStreamingReviver(
-    context,
-    function handOut(revived) {
-      const { value, abort, close, onEnd } = revived
-      allCloseHandlers.push(close)
-      callContext.abortController.signal.addEventListener(
-        'abort',
-        () => {
-          abort(makeAbortError(undefined, callContext))
-        },
-        { once: true },
-      )
+    if (value instanceof PendingValue) {
+      // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
+      value.promise.catch(() => {})
+      pendingValues.push(value)
+      return value
+    }
 
-      if (value instanceof PendingValue) {
-        // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
-        value.promise.catch(() => {})
-        pendingValues.push(value)
-        return value
-      }
-
-      assert(isObjectOrFunction(value))
-      const wrapper = wrapProxy(value)
-      const forget = globalObject.gcRegistry.register(wrapper, close)
-      // Forgotten at its value's end, as the value may keep what its wrapper returned, which keeps the wrapper.
-      onEnd?.(forget)
-      closeHandlers.set(wrapper, close)
-      // This is what the user gets
-      return wrapper
-    },
-    extensionResponseTypes,
-  )
+    assert(isObjectOrFunction(value))
+    const wrapper = wrapProxy(value)
+    const forget = globalObject.gcRegistry.register(wrapper, close)
+    // Forgotten at its value's end, as the value may keep what its wrapper returned, which keeps the wrapper.
+    onEnd?.(forget)
+    closeHandlers.set(wrapper, close)
+    // This is what the user gets
+    return wrapper
+  }
 
   let parsed: unknown
   try {
