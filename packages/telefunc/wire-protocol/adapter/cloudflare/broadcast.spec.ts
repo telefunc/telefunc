@@ -599,6 +599,20 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       remove()
     })
 
+    it("a subscriber's presence is renewed every 30 s and stays at the key's authority for as long as it is subscribed", async () => {
+      vi.useFakeTimers()
+      const { inObject, present, presences } = worker()
+      const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await vi.advanceTimersByTimeAsync(0)
+      await subscriber.ready
+      await vi.advanceTimersByTimeAsync(300_000)
+      expect({
+        present: present('room:test').map(({ member }) => member),
+        renewals: presences.filter((call) => call.op === 'renew').length,
+      }).toEqual({ present: ['telefunc-shard-weur-0'], renewals: 10 })
+      subscriber()
+    })
+
     // A private message's sender learns that it was lost where a Durable Object it went to had no receiver for it.
     describe('a delivery whose sender is owed every receiver', () => {
       const route: BroadcastRoute = { key: 'room:lane', kind: 'text' }
