@@ -66,9 +66,9 @@ function getProjectError(errorMessage: string) {
   return pluginError
 }
 
-const globalObject = getGlobalObject<{ alreadyLogged: Set<string>; versions?: string[] }>('assert.ts', {
+const globalObject = getGlobalObject<{ alreadyLogged: Set<string>; version?: string }>('assert.ts', {
   alreadyLogged: new Set(),
-  versions: [],
+  version: projectInfo.projectVersion,
 })
 assertSingleInstance(globalObject)
 function assertWarning(
