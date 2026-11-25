@@ -16,11 +16,15 @@ import { broadcastMessages } from '../channelMessages.js'
 import { ServerChannel } from './ServerChannel.js'
 import { handleCallbackBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { getBroadcastAdapter } from '../../broadcast/broadcastAdapter.js'
-import type { BroadcastPublishResult, BroadcastAdapter, Listening } from '../../broadcast/broadcastAdapter.js'
+import type {
+  BroadcastPublishResult,
+  BroadcastAdapter,
+  BroadcastDelivery,
+  Listening,
+} from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../../utils/assert.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import {
   admitPublish,
   fitsPublish,
@@ -223,32 +227,40 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private deliverBroadcastMessage(
     serialized: string,
     rawInfo: WirePublishInfo,
+    delivery: BroadcastDelivery | undefined,
     listeners: Iterable<Registration<BroadcastListener<T>>>,
   ): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
+    let info: ChannelPublishInfo | undefined
     const data = parse(serialized) as ChannelData<T>
     for (const { listener } of listeners) {
       if (!listener) continue
+      info ??= makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
       if (this.callListener(listener, data, info)) return
     }
     if (!this.takesPublish(this.pageWant.text)) return this.endOverflowed()
-    const body = bodyOf(encode.publish, serialized, rawInfo, this.owner, (holder) => this.replaceIn(holder, false))
+    const body = bodyOf(encode.publish, serialized, rawInfo, delivery, this.owner, (holder) =>
+      this.replaceIn(holder, false),
+    )
     this.forwardPublish(body)
   }
 
   private deliverBroadcastBinaryMessage(
     data: Uint8Array,
     rawInfo: WirePublishInfo,
+    delivery: BroadcastDelivery | undefined,
     listeners: Iterable<Registration<BroadcastBinaryListener>>,
   ): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
+    let info: ChannelPublishInfo | undefined
     for (const { listener } of listeners) {
       if (!listener) continue
+      info ??= makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
       // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
       if (this.callListener(listener, new Uint8Array(data), info)) return
     }
     if (!this.takesPublish(this.pageWant.binary)) return this.endOverflowed()
-    const body = bodyOf(encode.publishBinary, data, rawInfo, this.owner, (holder) => this.replaceIn(holder, true))
+    const body = bodyOf(encode.publishBinary, data, rawInfo, delivery, this.owner, (holder) =>
+      this.replaceIn(holder, true),
+    )
     this.forwardPublish(body)
   }
 
@@ -604,14 +616,14 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       this.broadcastAdapter().subscribe(
         this.key,
         Object.assign(
-          (serialized: string, rawInfo: WirePublishInfo) =>
-            this.deliverBroadcastMessage(serialized, rawInfo, this.broadcastListeners.live()),
+          (serialized: string, rawInfo: WirePublishInfo, delivery?: BroadcastDelivery) =>
+            this.deliverBroadcastMessage(serialized, rawInfo, delivery, this.broadcastListeners.live()),
           // A publish that waits goes to the listeners there are when it's made.
           {
             taken: () => {
               const listeners = this.broadcastListeners.list()
-              return (serialized: string, rawInfo: WirePublishInfo) =>
-                this.deliverBroadcastMessage(serialized, rawInfo, listeners)
+              return (serialized: string, rawInfo: WirePublishInfo, delivery?: BroadcastDelivery) =>
+                this.deliverBroadcastMessage(serialized, rawInfo, delivery, listeners)
             },
           },
         ),
@@ -627,13 +639,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       this.broadcastAdapter().subscribeBinary(
         this.key,
         Object.assign(
-          (data: Uint8Array, rawInfo: WirePublishInfo) =>
-            this.deliverBroadcastBinaryMessage(data, rawInfo, this.broadcastBinaryListeners.live()),
+          (data: Uint8Array, rawInfo: WirePublishInfo, delivery?: BroadcastDelivery) =>
+            this.deliverBroadcastBinaryMessage(data, rawInfo, delivery, this.broadcastBinaryListeners.live()),
           {
             taken: () => {
               const listeners = this.broadcastBinaryListeners.list()
-              return (data: Uint8Array, rawInfo: WirePublishInfo) =>
-                this.deliverBroadcastBinaryMessage(data, rawInfo, listeners)
+              return (data: Uint8Array, rawInfo: WirePublishInfo, delivery?: BroadcastDelivery) =>
+                this.deliverBroadcastBinaryMessage(data, rawInfo, delivery, listeners)
             },
           },
         ),
@@ -779,23 +791,19 @@ const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: BroadcastChannelOptions): BroadcastChannel<T>
 }
 
-const globalObject = getGlobalObject('wire-protocol/channel/server/ServerBroadcast.ts', {
-  /** One delivery hands every subscriber on this server the same `info`, so they share the body the first one makes. */
-  publishBodies: new WeakMap<WirePublishInfo, PublishBody>(),
-})
-
 function bodyOf<T>(
   encodeBody: (data: T, info: WirePublishInfo) => Uint8Array<ArrayBuffer>,
   data: T,
   info: WirePublishInfo,
+  delivery: BroadcastDelivery | undefined,
   owner: string | undefined,
   replace: (holder: MemoryHolder) => void,
 ): PublishBody {
-  let body = globalObject.publishBodies.get(info)
+  let body = delivery?.body
   if (!body) {
     body = new PublishBody(encodeBody(data, info))
     admitPublish(body, owner, replace)
-    globalObject.publishBodies.set(info, body)
+    if (delivery) delivery.body = body
   }
   return body
 }

@@ -7,6 +7,7 @@ export type {
   BroadcastPublishResult,
   BroadcastOnMessage,
   BroadcastBinaryOnMessage,
+  BroadcastDelivery,
 }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -15,6 +16,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { CHANNEL_HOLD_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { Outcome } from '../channel/channel.js'
+import type { PublishBody } from '../channel/server/PublishBody.js'
 import { HELD_SEND_OVERHEAD_BYTES } from '../channel/server/channelMemory.js'
 import type { WirePublishInfo } from '../wire/publishInfo.js'
 
@@ -28,9 +30,14 @@ type BroadcastBinaryOnMessage = OnMessage<Uint8Array>
 
 /** `taken`, on a subscriber with listeners of its own: what delivers a publish to the listeners it has now, for a publish
  *  that waits to be delivered (`queueInMemory`). */
-type OnMessage<T> = ((data: T, info: WirePublishInfo) => void) & {
-  taken?: () => (data: T, info: WirePublishInfo) => void
+type OnMessage<T> = Deliver<T> & {
+  taken?: () => Deliver<T>
 }
+
+type Deliver<T> = (data: T, info: WirePublishInfo, delivery?: BroadcastDelivery) => void
+
+/** The encoded body shared by the subscribers reached in one dispatch. */
+type BroadcastDelivery = { body: PublishBody | undefined }
 
 /** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
  *  is returned; else that function as `unsubscribe`, with `opened`, which resolves once the backend delivers to the
@@ -239,15 +246,16 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   private deliverInMemory<T>(
-    targets: Iterable<(data: T, info: WirePublishInfo) => void> | undefined,
+    targets: Iterable<Deliver<T>> | undefined,
     data: T,
     info: WirePublishInfo,
   ): BroadcastPublishResult {
     let delivered = 0
     if (targets) {
+      const delivery: BroadcastDelivery = { body: undefined }
       for (const onMessage of targets) {
         delivered++
-        onMessage(data, info)
+        onMessage(data, info, delivery)
       }
     }
     return { ...info, meta: { delivered, transport: 'in-memory' } }
@@ -263,15 +271,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   // ── Shared ──
 
-  private deliver<T>(
-    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
-    key: string,
-    data: T,
-    info: WirePublishInfo,
-  ): void {
+  private deliver<T>(subs: Map<string, Set<Deliver<T>>>, key: string, data: T, info: WirePublishInfo): void {
     const set = subs.get(key)
     if (!set) return
-    for (const onMessage of set) onMessage(data, info)
+    const delivery: BroadcastDelivery = { body: undefined }
+    for (const onMessage of set) onMessage(data, info, delivery)
   }
 
   private releaseSeq(key: string): void {

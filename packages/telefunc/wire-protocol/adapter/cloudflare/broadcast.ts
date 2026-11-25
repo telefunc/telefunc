@@ -11,6 +11,7 @@ import { OrderedStubs } from './OrderedStubs.js'
 import { Outcome } from '../../channel/channel.js'
 import type {
   BroadcastBinaryOnMessage,
+  BroadcastDelivery,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
@@ -715,11 +716,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
 /** Calls each of `subs` the Durable Object `doName` owns with `payload`. */
 function deliverToOwned<T>(
-  subs: Map<(payload: T, info: WirePublishInfo) => void, string> | undefined,
+  subs: Map<(payload: T, info: WirePublishInfo, delivery?: BroadcastDelivery) => void, string> | undefined,
   doName: string,
   payload: T,
   info: WirePublishInfo,
 ): void {
   if (subs === undefined) return
-  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info)
+  const delivery: BroadcastDelivery = { body: undefined }
+  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info, delivery)
 }
