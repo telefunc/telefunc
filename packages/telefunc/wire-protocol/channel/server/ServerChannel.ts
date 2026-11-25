@@ -146,6 +146,8 @@ type CallPage = {
 /** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
 const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
 
+type ChannelOptions = { ack?: boolean; id?: string }
+
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
 {
@@ -234,7 +236,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  Each returns `true` on success or an error string — callers decide the action (drop, throw). */
   _validators: ShieldValidators = new Map()
 
-  constructor({ ack = false, id }: { ack?: boolean; id?: string } = {}) {
+  constructor({ ack = false, id }: ChannelOptions = {}) {
     // The control-frame cap counts each channel's id at this length (`WIRE_MAX_CTRL_FRAME_BYTES`).
     assertUsage(
       id === undefined || isChannelId(id),
@@ -1347,15 +1349,19 @@ type Channel<ClientToServer = unknown, ServerToClient = unknown, TDefault extend
 // `Channel` interface so internal `_method` members are hidden, and so the third generic
 // `TDefault` is inferred from `opts.ack` (gives `send()` the right ack-aware return type).
 const Channel = ServerChannel as unknown as {
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
-    ack?: false
-  }): Channel<ClientToServer, ServerToClient, false>
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts: {
-    ack: true
-  }): Channel<ClientToServer, ServerToClient, true>
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
-    ack?: boolean
-  }): Channel<ClientToServer, ServerToClient, false>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts?: ChannelOptions & {
+      ack?: false
+    },
+  ): Channel<ClientToServer, ServerToClient, false>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts: ChannelOptions & {
+      ack: true
+    },
+  ): Channel<ClientToServer, ServerToClient, true>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts?: ChannelOptions,
+  ): Channel<ClientToServer, ServerToClient, false>
 }
 
 /** Settles a send that waited for room with the outcome of making it. */
