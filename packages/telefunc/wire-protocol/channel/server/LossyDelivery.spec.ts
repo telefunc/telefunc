@@ -40,6 +40,18 @@ function lossyPage() {
   return { replay, delivery, sent, release: () => releaseHolder(holder) }
 }
 
+test('a report measures when its page took the value, excluding time held at the page', () => {
+  const { replay, delivery, release } = lossyPage()
+  try {
+    delivery.send(new PublishBody(new Uint8Array(4096)))
+    vi.advanceTimersByTime(1000)
+    replay.acknowledge(1, 600)
+    expect(replay.leastConfirmMs).toBe(400)
+  } finally {
+    release()
+  }
+})
+
 test('a confirmation of all its page was handed, at a rate that takes far longer than a page that keeps up for what waits, lets only the newest of that go', () => {
   const { replay, delivery, sent, release } = lossyPage()
   try {

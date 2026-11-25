@@ -102,7 +102,7 @@ class ServerReplay {
   }
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
-  acknowledge(lastSeq: number): void {
+  acknowledge(lastSeq: number, heldMs = 0): void {
     if (lastSeq >= this.unkeptEnd) this.unkeptEnd = 0
     const frames = this.frames.indexAfter(lastSeq)
     for (let i = 0; i < frames; i++) {
@@ -116,6 +116,7 @@ class ServerReplay {
     // Only the oldest can be alone: the others were sent while it was unconfirmed.
     const alone = this.publishes.at(0).alone
     const newest = this.publishes.at(publishes - 1)
+    const hold = heldMs > 0 && this.publishes.seqAt(publishes - 1) === lastSeq ? heldMs : 0
     for (let i = 0; i < publishes; i++) {
       this.confirmedBytes += this.publishes.at(i).body.frame.byteLength
       this.letPublishGo(this.publishes.at(i))
@@ -123,7 +124,7 @@ class ServerReplay {
     this.publishes.dropOldest(publishes)
     // Sent before the wire its confirmation came on: its page may have had it long before.
     if (newest.at < this.movedAt) return
-    const confirmMs = performance.now() - newest.at
+    const confirmMs = Math.max(1, performance.now() - newest.at - hold)
     // One that went alone, or before any least, took a round trip that no rate is in.
     if (!(publishes === 1 && alone) && this.leastConfirmMs !== Number.POSITIVE_INFINITY)
       this.confirms.measured(

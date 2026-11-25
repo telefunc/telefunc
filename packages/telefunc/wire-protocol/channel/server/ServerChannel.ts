@@ -779,7 +779,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
-        this.onPageHasThrough(frame.lastSeq)
+        this.onPageHasThrough(frame.lastSeq, frame.heldMs)
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -1032,13 +1032,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** As `onPageHas`, from the low 32 bits of `lastSeq` the wire carries. */
-  private onPageHasThrough(lastSeq: number): void {
-    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
+  private onPageHasThrough(lastSeq: number, heldMs?: number): void {
+    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0), heldMs)
   }
 
   /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  protected onPageHas(lastSeq: number): void {
-    this._replayBuffer?.acknowledge(lastSeq)
+  protected onPageHas(lastSeq: number, heldMs?: number): void {
+    this._replayBuffer?.acknowledge(lastSeq, heldMs)
     this.lossySends?.mayGo()
   }
 

@@ -75,6 +75,7 @@ type ClientChannelOptions = {
   ack?: boolean
   key?: string
   maxFrameBytes?: number
+  lossyBroadcast?: boolean
   connection: ConnectionOptions
 }
 
@@ -119,6 +120,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     ack = false,
     key,
     maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
+    lossyBroadcast = false,
     connection,
   }: ClientChannelOptions) {
     this.id = channelId
@@ -148,6 +150,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       connectionKey: connection.connectionKey,
       headers: connection.headers,
       idleTimeout: connection.idleTimeout,
+      lossyBroadcast,
     })
   }
 
