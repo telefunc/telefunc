@@ -34,7 +34,6 @@ import {
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { reportBroadcastDeliveryLost } from '../../backend/broadcast/reportBroadcastDeliveryLost.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
-import type { OrderingInfo } from '../../backend/driverOrdering.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
 import type { BroadcastDelivery, CloudflareRegions } from './extensions.js'
