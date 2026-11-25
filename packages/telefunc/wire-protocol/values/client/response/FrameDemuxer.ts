@@ -134,6 +134,7 @@ class FrameDemuxer {
         if (this.dispatch(frame.index, frame.payload)) return this.warnIfStillStalledLater()
       }
     } catch (err) {
+      this.streamReader.cancel()
       this.failWaiters(err)
     } finally {
       this.reading = false

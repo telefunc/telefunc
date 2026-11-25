@@ -1,6 +1,7 @@
 import { afterEach, assert, beforeEach, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/envelope.js'
+import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 
 // A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
 // finish, or fails, as the chunk's request would.
@@ -92,7 +93,10 @@ const GENERATOR = tag('!TelefuncGenerator:', { __index: 0 })
 const text = (ret: unknown) => () => new Response(JSON.stringify({ ret }))
 
 /** A streamed response whose stream 0 sends `42` and stays open; a fetch that is aborted errors it, as browsers do. */
-function streamed(ret: Record<string, string>) {
+function streamed(
+  ret: Record<string, string>,
+  { sse = false, frames = [encodeIndexedFrame(0, textEncoder.encode('42'))] } = {},
+) {
   return (signal: AbortSignal | undefined) => {
     const metadata = textEncoder.encode(JSON.stringify({ ret }))
     let sent = false
@@ -103,15 +107,14 @@ function streamed(ret: Record<string, string>) {
       pull(controller) {
         if (sent) return
         sent = true
-        controller.enqueue(
-          concat(encodeU32(metadata.length), metadata, encodeIndexedFrame(0, textEncoder.encode('42'))),
-        )
+        const bytes = concat(encodeU32(metadata.length), metadata, ...frames)
+        controller.enqueue(sse ? textEncoder.encode(`data: ${uint8ArrayToBase64url(bytes)}\n\n`) : bytes)
       },
       cancel() {
         cancelled++
       },
     })
-    return new Response(body, { headers: { 'content-type': 'application/octet-stream' } })
+    return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
   }
 }
 
@@ -144,6 +147,26 @@ test('a load that fails after the streamed body is read cancels the body, whiche
   expect(await settledWithin(call([]), 1000)).toBeInstanceOf(ConnectionError)
   // The first call's body is still being read, by its generator.
   await vi.waitFor(() => expect(cancelled).toBe(1))
+})
+
+test.each([false, true])('a failed load releases the acquired response reader (SSE: %s)', async (sse) => {
+  const { call, ConnectionError } = await page()
+  gates.streams.open()
+  const response = streamed({ channel: CHANNEL, gen: GENERATOR }, { sse })(undefined)
+  respond = () => response
+  failing.add('channels')
+  gates.channels.open()
+
+  await expect(call([])).rejects.toBeInstanceOf(ConnectionError)
+  expect(cancelled).toBe(1)
+  assert(response.body)
+  expect(response.body.locked).toBe(false)
+  const reader = response.body.getReader()
+  try {
+    expect(await reader.read()).toEqual({ done: true, value: undefined })
+  } finally {
+    reader.releaseLock()
+  }
 })
 
 test('a call aborted while its chunk loads rejects at once, cancels its body once, and leaves no unhandled rejection', async () => {

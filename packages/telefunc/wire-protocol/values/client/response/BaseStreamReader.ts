@@ -19,14 +19,24 @@ type CallContext = {
  *  `readExact`. Each transport implements only `readExact` (the byte source). */
 abstract class BaseStreamReader {
   cancelled = false
-  protected callContext: CallContext
 
-  constructor(callContext: CallContext) {
-    this.callContext = callContext
+  constructor(
+    protected readonly reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
+    protected readonly callContext: CallContext,
+  ) {
+    // Cancel before an aborted fetch can produce an unhandled reader rejection in the browser.
+    callContext.abortController.signal.addEventListener('abort', this.onAbort, { once: true })
   }
 
-  /** Cancel reading — sets cancelled flag and cleans up the transport resource. */
-  abstract cancel(): void
+  private readonly onAbort = () => this.cancel()
+
+  cancel(): void {
+    if (this.cancelled) return
+    this.cancelled = true
+    this.callContext.abortController.signal.removeEventListener('abort', this.onAbort)
+    this.reader.cancel().catch(() => {})
+    this.reader.releaseLock()
+  }
 
   /** Implemented by each transport — pull exactly n bytes from the wire source. */
   abstract readExact(n: number): Promise<Uint8Array<ArrayBuffer>>

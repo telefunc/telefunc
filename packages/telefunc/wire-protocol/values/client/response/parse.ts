@@ -80,6 +80,9 @@ async function parseStreamedResponse(
     streamReader = streams.createBodyReader(body.getReader(), isSse, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
+    if (callContext.abortController.signal.aborted) {
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+    }
     const metaText = new TextDecoder().decode(metaBytes)
     await loadFeaturesIn(metaText, false, callContext)
     return await reviveResponse(metaText, callContext, connection, streamReader)

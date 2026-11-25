@@ -11,45 +11,21 @@ const EMPTY = new Uint8Array(0)
  *  readExact: read N bytes (low-level byte I/O with buffering).
  *  readU32 + readNextFrame: inherited from BaseStreamReader. */
 class StreamReader extends BaseStreamReader {
-  private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
-
-  constructor(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    callContext: {
-      telefunctionName: string
-      telefuncFilePath: string
-      abortController: AbortController
-    },
-  ) {
-    super(callContext)
-    this.reader = reader as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
-
-    // When the fetch is aborted, cancel the reader first to prevent the browser
-    // from generating a spurious unhandled "BodyStreamBuffer was aborted" rejection.
-    callContext.abortController.signal.addEventListener('abort', () => reader.cancel().catch(() => {}), { once: true })
-  }
-
-  cancel(): void {
-    this.cancelled = true
-    // An errored body rejects its cancel; that error already reached the reads.
-    this.reader.cancel().catch(() => {})
-  }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
     let parts: Uint8Array<ArrayBuffer>[] | undefined
     let length = this.buffer.length
     while (length < n) {
-      let done: boolean
-      let value: Uint8Array<ArrayBuffer> | undefined
+      let read: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>
       let readError: unknown
       try {
-        ;({ done, value } = await this.reader.read())
+        read = await this.reader.read()
       } catch (err) {
         readError = err
-        done = true
+        read = { done: true, value: undefined }
       }
-      if (done) {
+      if (read.done) {
         if (this.callContext.abortController.signal.aborted) {
           throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
         }
@@ -57,8 +33,8 @@ class StreamReader extends BaseStreamReader {
         throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
       }
       parts ??= this.buffer.length > 0 ? [this.buffer] : []
-      parts.push(value!)
-      length += value!.length
+      parts.push(read.value)
+      length += read.value.length
     }
     if (parts) {
       const [result, rest] = splitOwned(parts, n)
