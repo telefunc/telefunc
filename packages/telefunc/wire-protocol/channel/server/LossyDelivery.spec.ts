@@ -40,19 +40,43 @@ function lossyPage() {
   return { replay, delivery, sent, release: () => releaseHolder(holder) }
 }
 
-test('a first confirmation of all its page was handed, at a rate that takes far longer than a page that keeps up for what waits, lets only the newest of that go', () => {
+test('a confirmation of all its page was handed, at a rate that takes far longer than a page that keeps up for what waits, lets only the newest of that go', () => {
   const { replay, delivery, sent, release } = lossyPage()
   try {
+    // A value alone, confirmed in the round trip: 100 ms.
+    delivery.send(new PublishBody(new Uint8Array(16)))
+    vi.advanceTimersByTime(100)
+    replay.acknowledge(1)
     const bodies = Array.from({ length: 30 }, () => new PublishBody(new Uint8Array(16 * 1024)))
     for (const body of bodies) delivery.send(body)
     // The one its page takes and 64 KiB ahead go; the 6th crosses that, and the other 24, 384 KiB, wait.
-    expect(sent.length).toBe(6)
-    // 96 KiB confirmed in 2 s, 49 B/ms: what waits takes it 8 s, past the 2.6 s one that keeps up confirms in.
-    vi.advanceTimersByTime(2_000)
-    replay.acknowledge(6)
-    delivery.mayGo()
     expect(sent.length).toBe(7)
+    // 96 KiB confirmed 1.9 s past the round trip, 52 B/ms: what waits takes it 7.6 s, past the 2.6 s one that keeps up
+    // confirms in.
+    vi.advanceTimersByTime(2_000)
+    replay.acknowledge(7)
+    delivery.mayGo()
+    expect(sent.length).toBe(8)
     expect(sent.at(-1)).toBe(bodies.at(-1))
+  } finally {
+    release()
+  }
+})
+
+test('on a 900 ms round trip that keeps up, a confirmation of what its page was handed lets all that waits go, in order', () => {
+  const { replay, delivery, sent, release } = lossyPage()
+  try {
+    delivery.send(new PublishBody(new Uint8Array(16)))
+    vi.advanceTimersByTime(900)
+    replay.acknowledge(1)
+    const bodies = Array.from({ length: 30 }, () => new PublishBody(new Uint8Array(16 * 1024)))
+    for (const body of bodies) delivery.send(body)
+    expect(sent.length).toBe(7)
+    // 96 KiB confirmed 50 ms past the round trip: what waits takes it 200 ms.
+    vi.advanceTimersByTime(950)
+    replay.acknowledge(7)
+    delivery.mayGo()
+    expect(sent.slice(1)).toEqual(bodies)
   } finally {
     release()
   }
