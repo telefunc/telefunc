@@ -619,9 +619,8 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
-    // One that goes before its deadline, because the outbox is full, waited for no throttle, so the next frame doesn't
-    // wait for one after it either.
-    if (this.outbox.some(({ deadline }) => deadline <= now)) this.lastPostStartedAt = now
+    // Every POST starts the throttle, whatever made it go: the next waits for it.
+    this.lastPostStartedAt = now
     const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
@@ -907,15 +906,14 @@ class SseTransport implements UpgradeSource {
     switch (kind) {
       case 'reconcile':
         return now + SSE_RECONCILE_DEADLINE_MS
-      // The app awaits the server's answer to an `ack` send: nothing that could join its POST brings that sooner.
       case 'control':
       case 'urgent-flow-control':
-      case 'ack':
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
       case 'flow-control':
       case 'acknowledgement':
+      case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
         return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
