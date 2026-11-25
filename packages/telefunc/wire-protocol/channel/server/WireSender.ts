@@ -37,9 +37,9 @@ type WireSenderOptions = {
   sseFlushThrottle: number
   /** What the wire delivered. */
   deliveries: Deliveries
-  /** The channels of the session the wire carries, which its headroom counts; undefined before its RECONCILED. */
+  /** The channels of the session the wire carries, which its backlog counts; undefined before its RECONCILED. */
   heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
-  /** The channels attaching to the wire in this turn, which its headroom counts too. */
+  /** The channels attaching to the wire in this turn, which its backlog counts too. */
   attaching: ReadonlySet<ServerChannel>
   /** The wire's backlog passed what its channels allow, in a frame the sender was handed: the owner ends the wire. */
   onPastBacklog: () => void
@@ -68,7 +68,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
-  private headroom = 0
+  private backlogRoom = 0
   /** The largest frame sent on the wire. */
   private largestSent = 0
   /** Its backlog passed that, and its owner ends the wire. */
@@ -131,7 +131,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     assertProtocol(!this.owed, 'RECONCILE while its wire owes a RECONCILED')
     this.owed = true
     // What is held is measured from its first frame, on every host.
-    this.headroom = 0
+    this.backlogRoom = 0
   }
 
   /** An attach probe's answer precedes the RECONCILED, which may take time to arrive in full. */
@@ -218,15 +218,15 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private admit(frame: Uint8Array<ArrayBuffer>): boolean {
     if (this.closed || this.pastBacklog) return false
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
-    if (frame.byteLength > this.headroom) {
-      this.headroom = this.measureHeadroom()
-      if (this.headroom < 0) {
+    if (frame.byteLength > this.backlogRoom) {
+      this.backlogRoom = this.measureBacklogRoom()
+      if (this.backlogRoom < 0) {
         this.pastBacklog = true
         queueMicrotask(this.onPastBacklog)
         return false
       }
     }
-    this.headroom -= frame.byteLength
+    this.backlogRoom -= frame.byteLength
     return true
   }
 
@@ -312,7 +312,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
    *  the socket's while no RECONCILED is owed: what is held counts on every host, the socket's as nothing where unknown.
    *  Its data is what its channels hold, so what passes this is what nothing else bounds: a page flooding it with what
    *  it answers at once. */
-  private measureHeadroom(): number {
+  private measureBacklogRoom(): number {
     const socket = this.bufferedAmount()
     if (socket === undefined && !this.owed) return Infinity
     let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
@@ -320,7 +320,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     return allowed - (socket ?? 0) - this.heldBytes
   }
 
-  /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
+  /** The channels the wire's send backlog counts: its session's, and those attaching in this turn. */
   private channels(): Set<ServerChannel> {
     const channels = new Set(this.attaching)
     for (const { channel } of this.heldChannels()?.values() ?? []) channels.add(channel)

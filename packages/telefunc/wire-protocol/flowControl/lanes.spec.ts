@@ -30,9 +30,9 @@ const FAST = { bytesPerMs: 100_000, delayMs: 2 }
 /** Slow 3G: 400 kbit/s, 200 ms each way. */
 const SLOW = { bytesPerMs: 50, delayMs: 200 }
 
-/** A server wire to a page through a socket that takes whatever it is handed and reports none of it buffered, as one
- *  whose kernel buffers hold it: the link carries what the socket took, in order, at its rate, `delayMs` each way, and
- *  both can change. The page takes every message as it arrives and answers through its receiver. */
+/** A server wire to a page through a socket that reports what its link holds as buffered, as Node's does once its
+ *  kernel buffers are full: the link carries what the socket took, in order, at its rate, `delayMs` each way, and both
+ *  can change. The page takes every message as it arrives and answers through its receiver. */
 function wireTo(
   { bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: number },
   { pingInterval = 60_000, copiesOnSend = false } = {},
@@ -100,7 +100,9 @@ function wireTo(
         link.push(message)
         linkBytes += message.byteLength
       },
-      bufferedAmount: 0,
+      get bufferedAmount() {
+        return linkBytes
+      },
       copiesOnSend,
     },
     pingInterval,
@@ -213,14 +215,16 @@ function framesOfFourChannels(wire: Wire): void {
 }
 
 /** A wire that carried a 64 KiB download on a fast link, then nineteen on Slow 3G 2.5 s apart, each over and the link
- *  idle by the next. */
+ *  idle by the next. Each goes as two frames: the second queues behind the first, so its acknowledgement measures the
+ *  link. */
 async function wireThatSlowed(): Promise<Wire> {
   const wire = wireTo({ bytesPerMs: 1_000, delayMs: 10 })
   wire.binary(1, 64 * 1024)
   await sleep(500)
   wire.reshape(SLOW)
   for (let n = 0; n < 19; n++) {
-    wire.binary(1, 64 * 1024)
+    wire.binary(1, 32 * 1024)
+    wire.binary(1, 32 * 1024)
     await sleep(2_500)
   }
   expect(wire.linkBytes()).toBe(0)
@@ -326,34 +330,34 @@ describe('the lanes', () => {
           const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
           if (frames.some((frame) => frame[0] === TAG.PIECES_ACK_REQ)) asks.push(headroom.sender.transmittedBytes)
         },
-        // The kernel holds what the socket took, so the data handed queued and its acknowledgement measures the path.
-        bufferedAmount: 1024 * 1024,
+        bufferedAmount: 0,
+        copiesOnSend: true,
       },
       pingInterval: 60_000,
     })
+    addWireCopies(ALL_COPIES)
     try {
       let seq = 0
-      for (let n = 0; n < 50; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
-      await sleep(30)
-      // 100 kB over a second: a window of the least send-ahead.
-      headroom.acknowledged({ bytes: headroom.sender.transmittedBytes, heldMs: 0, spanUs: 1_000_000 })
-      const confirmed = headroom.sender.confirmedBytes
-      // 2 KiB frames past the window, which wait whole: no probe, and the blocked window asks.
+      // 2 KiB frames past what copies may hold, which wait for the page's word: it hears none, so it asks.
       for (let n = 0; n < 200; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
-      await Promise.resolve()
-      const first = headroom.sender.transmittedBytes
-      // Half the window confirmed frees room for more data while the request is open.
       await sleep(10)
-      headroom.acknowledged({ bytes: confirmed + Math.floor((first - confirmed) / 2), heldMs: 0, spanUs: 0 })
-      // The answer to the first request, 20 ms after it, asks again of the data handed since.
+      const [asked = 0] = asks
+      expect(asks).toEqual([asked])
+      // Half of what went confirmed frees copy room for more data while the request is open.
       await sleep(10)
-      headroom.acknowledged({ bytes: asks[0]!, heldMs: 0, spanUs: 0 })
-      expect(asks.length).toBe(2)
+      headroom.acknowledged({ bytes: Math.floor(asked / 2), heldMs: 0, spanUs: 0 })
+      // The answer to the request, 20 ms after it: the page hears nothing again, and it asks of the data handed since.
+      await sleep(10)
+      headroom.acknowledged({ bytes: asked, heldMs: 0, spanUs: 0 })
+      await sleep(10)
+      const [, again = 0] = asks
+      expect(asks).toEqual([asked, again])
       // 1 ms after that request, the page's report of all it got before it: the request ends its message.
       await sleep(1)
-      headroom.acknowledged({ bytes: asks[1]! - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
+      headroom.acknowledged({ bytes: again - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
       expect(headroom['leastRtt']).toBe(20)
     } finally {
+      dropWireCopies(ALL_COPIES)
       headroom.close()
     }
   })
