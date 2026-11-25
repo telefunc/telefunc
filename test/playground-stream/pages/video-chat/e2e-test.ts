@@ -3,8 +3,16 @@ export { testVideoChat }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page } from 'playwright-chromium'
 import { canCutWire, cutWire } from '../../e2e-utils'
+import { present } from '../../checked'
 
 type Tally = { draws: Record<string, Record<string, number>>; decodeErrors: number }
+
+declare global {
+  /** What `tallyDraws()` counts, on a page it was injected into. */
+  interface Window {
+    tally?: Tally
+  }
+}
 
 function testVideoChat() {
   test('video chat: alone in the call, Remote says it’s waiting for someone', async () => {
@@ -23,7 +31,9 @@ function testVideoChat() {
     await join(page, 'Alice', 'Join as Alice')
     await join(page, 'Bob', 'Join as Bob')
     await page.evaluate(() => {
-      ;(window as unknown as { tally: Tally }).tally.draws = {}
+      const { tally } = window
+      if (!tally) throw new Error('The page counts no draws')
+      tally.draws = {}
     })
 
     await autoRetry(async () => {
@@ -32,8 +42,8 @@ function testVideoChat() {
         Object.entries(draws).map(([column, senders]) => [column, Object.keys(senders).filter((s) => s !== 'either')]),
       )
       expect(seen).deep.equal({ Alice: ['Bob'], Bob: ['Alice'] })
-      expect(draws.Alice!.Bob).to.be.greaterThan(15)
-      expect(draws.Bob!.Alice).to.be.greaterThan(15)
+      expect(draws.Alice?.Bob).to.be.greaterThan(15)
+      expect(draws.Bob?.Alice).to.be.greaterThan(15)
       expect(decodeErrors).to.equal(0)
     })
     // 10 s on a link that keeps up: a frame the server skipped would log 'fell behind', which fails the test.
@@ -62,7 +72,7 @@ function testVideoChat() {
     await openPage(page, ['Alice'])
     await join(page, 'Alice', 'Join as Alice')
 
-    const otherTab = await page.context().browser()!.newPage()
+    const otherTab = await present(page.context().browser(), 'the browser').newPage()
     await openPage(otherTab, ['Alice'])
     await autoRetry(async () => {
       expect(await column(otherTab, 'Alice').textContent()).to.contain('Alice is already in the call in another tab')
@@ -74,9 +84,11 @@ function testVideoChat() {
       expect(await column(page, 'Alice').textContent()).to.contain('Alice moved to another tab')
       const cameraStopped = await column(page, 'Alice')
         .locator('video')
-        .evaluate((video: HTMLVideoElement) =>
-          (video.srcObject as MediaStream).getTracks().every((track) => track.readyState === 'ended'),
-        )
+        .evaluate((video: HTMLVideoElement) => {
+          const camera = video.srcObject
+          if (!(camera instanceof MediaStream)) throw new Error('The video shows no camera')
+          return camera.getTracks().every((track) => track.readyState === 'ended')
+        })
       expect(cameraStopped).to.equal(true)
       expect(await column(otherTab, 'Alice').textContent()).to.contain('Waiting for someone to join…')
     })
@@ -88,14 +100,16 @@ function testVideoChat() {
     test('video chat: while the other side’s page can’t be reached, you see them reconnecting', async () => {
       await openPage(page, ['Alice'])
       await join(page, 'Alice', 'Join as Alice')
-      const bobTab = await page.context().browser()!.newPage()
+      const bobTab = await present(page.context().browser(), 'the browser').newPage()
       await openPage(bobTab, ['Bob'])
       await join(bobTab, 'Bob', 'Join as Bob')
       const callText = () => page.locator('p', { hasText: 'In the call:' }).textContent()
       // Bob's frames come from another page's encoder, so they count as 'unknown' here
       const aliceDraws = async (expectDraws: (draws: Record<string, number>) => void) => {
         await page.evaluate(() => {
-          ;(window as unknown as { tally: Tally }).tally.draws = {}
+          const { tally } = window
+          if (!tally) throw new Error('The page counts no draws')
+          tally.draws = {}
         })
         await autoRetry(async () => expectDraws((await tally(page)).draws.Alice ?? {}))
       }
@@ -147,7 +161,7 @@ async function leave(p: Page, name: string) {
 }
 
 async function tally(p: Page) {
-  return await p.evaluate(() => (window as unknown as { tally: Tally }).tally)
+  return present(await p.evaluate(() => window.tally), "the page's tally")
 }
 
 /** Labels each VP8 chunk with the person whose encoder produced it (encoders start in `encoderNames` order), and
@@ -164,12 +178,13 @@ function tallyDraws(encoderNames: string[]) {
   const senderOf = new Map<string, string>()
   const tally: Tally = { draws: {}, decodeErrors: 0 }
   let drawing: string | null = null
-  ;(window as unknown as { tally: Tally }).tally = tally
+  window.tally = tally
 
   const Encoder = VideoEncoder
   window.VideoEncoder = class extends Encoder {
     constructor(init: VideoEncoderInit) {
-      const name = encoderNames.shift()!
+      const name = encoderNames.shift()
+      if (name === undefined) throw new Error('More encoders started than the page named')
       super({
         ...init,
         output(chunk, metadata) {
@@ -204,14 +219,18 @@ function tallyDraws(encoderNames: string[]) {
       super.decode(chunk)
     }
   }
-  const drawImage = CanvasRenderingContext2D.prototype.drawImage
-  CanvasRenderingContext2D.prototype.drawImage = function (this: CanvasRenderingContext2D, ...args: unknown[]) {
-    if (drawing) {
-      let el: Element = this.canvas
-      while (!el.querySelector('h2')) el = el.parentElement!
-      const column = (tally.draws[el.querySelector('h2')!.textContent!] ??= {})
-      column[drawing] = (column[drawing] ?? 0) + 1
-    }
-    return (drawImage as (...a: unknown[]) => void).apply(this, args)
-  } as typeof drawImage
+  CanvasRenderingContext2D.prototype.drawImage = new Proxy(CanvasRenderingContext2D.prototype.drawImage, {
+    apply(drawImage, context, args) {
+      if (drawing && context instanceof CanvasRenderingContext2D) {
+        // The column the canvas is in: the nearest element with a heading.
+        let el: Element | null = context.canvas
+        while (el && !el.querySelector('h2')) el = el.parentElement
+        const name = el?.querySelector('h2')?.textContent
+        if (!name) throw new Error('A drawn canvas is in no column')
+        const column = (tally.draws[name] ??= {})
+        column[drawing] = (column[drawing] ?? 0) + 1
+      }
+      return Reflect.apply(drawImage, context, args)
+    },
+  })
 }

@@ -3,6 +3,7 @@ export { LossySends, LossyFromPage, initialLossySendsState, type LossySendsState
 import React, { useEffect, useRef } from 'react'
 import { onChannelLossySends, onChannelLossyFromPage } from './Channel.telefunc'
 import { openChannel } from './openChannel'
+import { present } from '../../checked'
 
 type LossySendsState = {
   lossySends: string[] | null
@@ -57,7 +58,7 @@ function LossyFromPage({ show }: { show: Show }) {
   /** 60 lossy sends, 1000 / 30 ms apart, each its ordinal, with a plain one after every 20th, then a plain `'done'`. */
   async function testLossyFromPage() {
     await openLossyFromPage()
-    const channel = channelRef.current!
+    const channel = present(channelRef.current, 'the open channel')
     for (let i = 0; i < 60; i++) {
       void channel.send(String(i), { lossy: true })
       if (i % 20 === 19) void channel.send(`R${i}`)
@@ -68,7 +69,7 @@ function LossyFromPage({ show }: { show: Show }) {
 
   /** What the page sends while it is offline: two lossy, a plain one, two lossy. */
   function sendLossyFromPage() {
-    const channel = channelRef.current!
+    const channel = present(channelRef.current, 'the open channel')
     void channel.send('L1', { lossy: true })
     void channel.send('L2', { lossy: true })
     void channel.send('R1')

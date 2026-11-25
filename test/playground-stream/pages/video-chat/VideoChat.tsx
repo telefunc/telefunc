@@ -2,6 +2,7 @@ export { VideoChat }
 
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { onGetCall, onJoinCall, onSwitchHere } from './VideoChat.telefunc'
+import { booleanAt, numberAt, present } from '../../checked'
 
 type Call = Awaited<ReturnType<typeof onGetCall>>
 type Me = Awaited<ReturnType<typeof onJoinCall>>
@@ -47,15 +48,15 @@ function Person({ call, name }: { call: Call; name: string }) {
     : others.length === 0
       ? 'Waiting for someone to join…'
       : others.every((p) => !p.isConnected)
-        ? `${others[0]!.meta.name} is reconnecting…`
+        ? `${present(others[0], 'the other person').meta.name} is reconnecting…`
         : null
 
   async function join() {
     const camera = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
-    localVideo.current!.srcObject = camera
+    present(localVideo.current, 'the local video').srcObject = camera
     const me = inOtherTab ? await onSwitchHere(name) : await onJoinCall(name)
 
-    const stopReceiving = showVideo(call, me, remoteVideo.current!)
+    const stopReceiving = showVideo(call, me, present(remoteVideo.current, 'the remote video'))
     const stopSending = sendVideo(camera, me)
     setMessages([])
     const stopChat = call.subscribe((message, { from }) => {
@@ -77,7 +78,7 @@ function Person({ call, name }: { call: Call; name: string }) {
   async function send(event: React.FormEvent) {
     event.preventDefault()
     setDraft('')
-    await me!.publish({ text: draft })
+    await present(me, 'the joined member').publish({ text: draft })
   }
 
   return (
@@ -144,13 +145,14 @@ const noticeStyle = {
 
 // Draws the other person's video.
 function showVideo(call: Call, me: Me, canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext('2d')!
+  const ctx = present(canvas.getContext('2d'), "the canvas's 2D context")
   // One player per sender: VP8 frames of two senders through one decoder corrupt the picture
   const players = new Map<string, ReturnType<typeof createPlayer>>()
   const stopFrames = call.subscribeBinary(
     (frame, { from, meta }) => {
       if (from.id === me.id) return
-      const { isKeyframe, ordinal } = meta as { isKeyframe: boolean; ordinal: number }
+      const isKeyframe = booleanAt(meta, 'isKeyframe')
+      const ordinal = numberAt(meta, 'ordinal')
       let player = players.get(from.id)
       // A frame is missing: the delta frames after it can't be decoded, so restart from the next key frame
       if (player?.next !== ordinal) {
@@ -198,7 +200,7 @@ function createPlayer(ctx: CanvasRenderingContext2D) {
   const starting = setTimeout(() => {
     playing = setInterval(() => {
       // More than a second behind (a backgrounded tab plays slower): catch up instead of falling further behind
-      while (queue.length > 15) decoder.decode(queue.shift()!)
+      while (queue.length > 15) decoder.decode(present(queue.shift(), 'a queued chunk'))
       const chunk = queue.shift()
       if (chunk) decoder.decode(chunk)
     }, 1000 / 15)
@@ -242,7 +244,9 @@ function sendVideo(camera: MediaStream, me: Me) {
   })
   encoder.configure({ codec: 'vp8', width: 320, height: 240, bitrate: 500_000, framerate: 15 })
 
-  const frames = new MediaStreamTrackProcessor({ track: camera.getVideoTracks()[0]! }).readable.getReader()
+  const frames = new MediaStreamTrackProcessor({
+    track: present(camera.getVideoTracks()[0], 'the camera track'),
+  }).readable.getReader()
   void (async () => {
     // Ends when the camera stops
     for (let i = 0; ; i++) {

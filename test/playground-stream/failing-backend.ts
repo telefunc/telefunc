@@ -29,6 +29,7 @@ import {
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
 import { createDeferred } from './createDeferred'
+import { fieldOf, listOf, optionalFieldOf, present, textAt, textListOf, textOf } from './checked'
 
 /** `op` is a driver method (its next matching call rejects; with `after`, once it ran, as a store whose reply is lost),
  *  'subscribe' (the next matching subscribe throws, a refusal), 'deliver' (the next message a matching subscription
@@ -46,16 +47,7 @@ type Call = { roomId?: string; keys: string[] }
 type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
 type RetainedReadsHold = { roomId: string; waiting: number; released: Promise<void> }
 
-const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } = ((
-  globalThis as Record<symbol, unknown>
-)[Symbol.for('playground-stream:failingBackend')] ??= {
-  faults: [],
-  subscriptions: new Set(),
-  holds: [],
-  holding: new WeakSet(),
-  retainedHolds: [],
-  holdingRetained: new WeakSet(),
-}) as {
+type FailingBackendState = {
   faults: (BackendFault & { times: number })[]
   subscriptions: Set<FailingAttempt>
   holds: CellPagesHold[]
@@ -63,6 +55,21 @@ const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } 
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomPlane['direct']['reads']>
 }
+
+declare global {
+  /** The faults and holds, per process: a dev server's second module graph shares the first one's. */
+  var playgroundFailingBackend: FailingBackendState | undefined
+}
+
+const { faults, subscriptions, holds, holding, retainedHolds, holdingRetained } =
+  (globalThis.playgroundFailingBackend ??= {
+    faults: [],
+    subscriptions: new Set(),
+    holds: [],
+    holding: new WeakSet(),
+    retainedHolds: [],
+    holdingRetained: new WeakSet(),
+  })
 
 type FailingAttemptOptions = {
   source: Source
@@ -162,13 +169,15 @@ function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Dri
       return (...args: unknown[]) => {
         const call = callOfArgs(op, args)
         if (op === 'commitLane' && takeFault('handoff', call)) {
-          return handoffLost(Reflect.apply(value, target, args) as Promise<CommitResult>)
+          const commit = Reflect.apply(value, target, args)
+          if (!(commit instanceof Promise)) throw new Error('failing-backend: a commit that is no promise')
+          return handoffLost(commit)
         }
         const fault = takeFault(op, call)
         if (!fault) return Reflect.apply(value, target, args)
         const error = new Error(`failing-backend: ${op} failed`)
         if (fault.after) {
-          return (Reflect.apply(value, target, args) as Promise<unknown>).then(() => Promise.reject(error))
+          return Promise.resolve(Reflect.apply(value, target, args)).then(() => Promise.reject(error))
         }
         return value.constructor.name === 'AsyncGeneratorFunction'
           ? (async function* () {
@@ -273,14 +282,15 @@ async function* heldCellPages(pages: AsyncIterable<CellsRead>, hold: CellPagesHo
 function takeFault(op: string, call: Call): BackendFault | null {
   const index = faults.findIndex((fault) => fault.op === op && matches(fault, call))
   if (index === -1) return null
-  const fault = faults[index]!
+  const fault = present(faults[index], 'the fault')
   if (--fault.times === 0) faults.splice(index, 1)
   return fault
 }
 
 function matches(fault: { roomId?: string; key?: string }, call: Call): boolean {
   if (fault.roomId !== undefined && fault.roomId !== call.roomId) return false
-  return fault.key === undefined || call.keys.some((key) => key.startsWith(fault.key!))
+  const { key } = fault
+  return key === undefined || call.keys.some((each) => each.startsWith(key))
 }
 
 function callOf(source: Source): Call {
@@ -288,22 +298,30 @@ function callOf(source: Source): Call {
 }
 
 function callOfArgs(op: string, args: unknown[]): Call {
-  if (op === 'publish') return { keys: [(args[0] as BroadcastRoute).key] }
+  const [first, , selector] = args
+  if (op === 'publish') return { keys: [textAt(first, 'key')] }
   if (op === 'commitLane') {
-    const target = args[0] as { roomId: string; lane: { kind: string } }
-    const opts = args[2] as { requiredCellKeys?: string[] } | undefined
-    return { roomId: target.roomId, keys: [target.lane.kind, ...(opts?.requiredCellKeys ?? [])] }
+    const required = optionalFieldOf(args[2], 'requiredCellKeys')
+    return {
+      roomId: textAt(first, 'roomId'),
+      keys: [textAt(fieldOf(first, 'lane'), 'kind'), ...(required === undefined ? [] : textListOf(required))],
+    }
   }
-  const [roomId, , selector] = args as [string, string, unknown]
-  if (op === 'runOperation') return { roomId, keys: [(selector as { name: string }).name] }
-  if (op === 'readCellPages') return { roomId, keys: [selector as string] }
+  const roomId = typeof first === 'string' ? first : undefined
+  if (op === 'runOperation') return { roomId, keys: [textAt(selector, 'name')] }
+  if (op === 'readCellPages') return { roomId, keys: [textOf(selector)] }
   if (op === 'readCells') {
-    const sel = selector as { keys: string[] } | { prefix: string }
-    return { roomId, keys: 'keys' in sel ? sel.keys : [sel.prefix] }
+    const keys = optionalFieldOf(selector, 'keys')
+    return { roomId, keys: keys === undefined ? [textAt(selector, 'prefix')] : textListOf(keys) }
   }
   if (op === 'compareExchangeCells') {
-    const cx = selector as { expect: { key: string }[]; mutations: { key: string }[]; counts?: { key: string }[] }
-    return { roomId, keys: [...cx.expect, ...cx.mutations, ...(cx.counts ?? [])].map((cell) => cell.key) }
+    const counts = optionalFieldOf(selector, 'counts')
+    const cells = [
+      ...listOf(fieldOf(selector, 'expect')),
+      ...listOf(fieldOf(selector, 'mutations')),
+      ...(counts === undefined ? [] : listOf(counts)),
+    ]
+    return { roomId, keys: cells.map((cell) => textAt(cell, 'key')) }
   }
   return { roomId, keys: [] }
 }

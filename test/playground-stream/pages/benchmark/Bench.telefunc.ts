@@ -16,6 +16,7 @@ export {
 import { BroadcastChannel, Channel } from 'telefunc'
 import { Room, type LocalParticipant } from '@telefunc/room'
 import { anyoneCanJoin } from '../../anyone-can-join'
+import { entryOf } from '../../checked'
 
 const INSTANCE_ID = process.env.INSTANCE_ID ?? 'local'
 
@@ -198,7 +199,7 @@ async function onBenchRoomTrack(roomId: string) {
 
 /** The room's member publishes `count` frames on its `bench` track without `lossy`, pipelined, then leaves. */
 async function onBenchRoomTrackPublish(roomId: string, count: number, payloadSize: number) {
-  const member = await roomPublishers.get(roomId)!
+  const member = await entryOf(roomPublishers, roomId)
   roomPublishers.delete(roomId)
   const frame = new Uint8Array(payloadSize).fill(0xab)
   await Promise.all(Array.from({ length: count }, () => member.publishBinary(frame, { track: 'bench' })))

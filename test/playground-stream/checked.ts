@@ -8,8 +8,10 @@ export {
   listOf,
   recordOf,
   fieldOf,
+  optionalFieldOf,
   textAt,
   numberAt,
+  booleanAt,
   byteAt,
   present,
   entryOf,
@@ -58,6 +60,11 @@ function fieldOf(value: unknown, key: string): unknown {
   return value[key]
 }
 
+/** An object's field `key`, if it has one; nothing, for no object. */
+function optionalFieldOf(value: unknown, key: string): unknown {
+  return typeof value === 'object' && value !== null && hasKey(value, key) ? value[key] : undefined
+}
+
 function hasKey<Key extends string>(value: object, key: Key): value is Record<Key, unknown> {
   return key in value
 }
@@ -68,6 +75,12 @@ function textAt(value: unknown, key: string): string {
 
 function numberAt(value: unknown, key: string): number {
   return numberOf(fieldOf(value, key))
+}
+
+function booleanAt(value: unknown, key: string): boolean {
+  const field = fieldOf(value, key)
+  if (typeof field !== 'boolean') throw new Error(`Expected a boolean ${key}, read ${String(field)}`)
+  return field
 }
 
 /** The byte at `at` of a frame that has it. */
