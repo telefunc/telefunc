@@ -353,8 +353,9 @@ class PieceSender {
   private release(): void {
     this.passControl()
     let idle = 0
-    for (let turn = this.lanes.entries().next(); !turn.done; turn = this.lanes.entries().next()) {
-      const [key, lane] = turn.value
+    for (const key of this.lanes.keys()) {
+      const lane = this.lanes.get(key)
+      assert(lane !== undefined)
       const served = this.serveTurn(key, lane)
       if (served === 'held') return
       this.lanes.delete(key)
