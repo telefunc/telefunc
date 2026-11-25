@@ -18,6 +18,7 @@ export type { Lease, LeaseOrder, LeaseRegistered, LeaseRemoved, LeaseRenewed, Le
 
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { CallNotSent, type Invoke } from './OrderedStubs.js'
+import { CLOUDFLARE_RETRY_WINDOW_MS } from './transientRetry.js'
 import { integerColumn, nullableIntegerColumn, textColumn, type SqlRow, type SqlStore } from './sqlStorage.js'
 
 // A Durable Object's leases at an authority (a Room route, a Broadcast presence): one row per scope and holder DO. A
@@ -31,7 +32,7 @@ import { integerColumn, nullableIntegerColumn, textColumn, type SqlRow, type Sql
 const LEASE_TTL_MS = 90_000
 const LEASE_RENEW_EVERY_MS = LEASE_TTL_MS / 3
 /** How long a registration's or removal's call is waited for, as long as Cloudflare's runtime retries one itself. */
-const LEASE_CALL_DEADLINE_MS = 10_000
+const LEASE_CALL_DEADLINE_MS = CLOUDFLARE_RETRY_WINDOW_MS
 
 /** Whether a renewal that failed with `error` was only kept from being sent by its target's overload pause, while its
  *  lease, last confirmed at `confirmedAt` by this side's clock, still lasts: it is made again once the pause ends, and

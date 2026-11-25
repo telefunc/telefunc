@@ -2,11 +2,7 @@ export { OrderedStubs, CallNotSent, CallTimedOut }
 export type { CallOptions, Invoke }
 
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
-import { isOverloaded } from './transientRetry.js'
-
-/** How long a target that answered overloaded gets no call that opts into its pause: Cloudflare's runtime makes its own
- *  retries within 10 s of a call, so ours add none to them. */
-const OVERLOAD_PAUSE_MS = 10_000
+import { CLOUDFLARE_RETRY_WINDOW_MS, isOverloaded } from './transientRetry.js'
 
 type Line<Stub> = {
   readonly stub: Stub
@@ -131,7 +127,10 @@ class OrderedStubs<Stub> {
       this.pass(line, place, own)
       // What kept it from being sent says nothing of the stub.
       if (call.sent) line.failed = true
-      if (call.sent && isOverloaded(err)) this.pauses.set(target, { until: Date.now() + OVERLOAD_PAUSE_MS, error: err })
+      // A target that answered overloaded gets no call that opts into its pause while Cloudflare's runtime may still be
+      // making its own retries of this one, so ours add none to them.
+      if (call.sent && isOverloaded(err))
+        this.pauses.set(target, { until: Date.now() + CLOUDFLARE_RETRY_WINDOW_MS, error: err })
       throw err
     } finally {
       this.settle(target, line)
