@@ -115,6 +115,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   /** What `queued` holds: at most `CHANNEL_HOLD_MAX_BYTES`, or one message whatever its size. */
   private queuedBytes = 0
   private delivering = false
+  /** In-memory deliveries run one at a time, including those taken from the queue. */
+  private readonly inMemoryDelivery: BroadcastDelivery = { body: undefined }
   /** How many answers deep the publish being delivered is: 0 for one from outside a listener. */
   private depth = 0
 
@@ -252,10 +254,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): BroadcastPublishResult {
     let delivered = 0
     if (targets) {
-      const delivery: BroadcastDelivery = { body: undefined }
-      for (const onMessage of targets) {
-        delivered++
-        onMessage(data, info, delivery)
+      const delivery = this.inMemoryDelivery
+      try {
+        for (const onMessage of targets) {
+          delivered++
+          onMessage(data, info, delivery)
+        }
+      } finally {
+        delivery.body = undefined
       }
     }
     return { ...info, meta: { delivered, transport: 'in-memory' } }
