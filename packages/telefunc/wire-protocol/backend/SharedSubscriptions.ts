@@ -240,19 +240,16 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   }
 
   /** Its consumers' `ready` rejects: with the store's `BackendError` itself where the store refused it, else with this
-   *  error, the driver's `reason` as its cause. Closed with a `reason`, it failed, which is reported once, however many
-   *  consumers share it; without one, the backend ended it on purpose. */
+   *  error, the driver's `reason` as its cause. Closed with a `reason`, it failed, which is reported once as this error,
+   *  however many consumers share it; without one, the backend ended it on purpose. */
   private close(reason: unknown): void {
-    const failure =
-      reason instanceof BackendError
-        ? reason
-        : new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
+    const failure = new Error(`Backend subscription closed: ${this.key}`, reason === undefined ? {} : { cause: reason })
     this.finish()
     // A resolved readiness can't carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this.current === 'ready') this.latestReadiness = createReadiness()
     this.enter('closed')
-    this.latestReadiness.reject(failure)
-    if (reason !== undefined) void this.latestReadiness.promise.catch(handleCallbackBug)
+    this.latestReadiness.reject(reason instanceof BackendError ? reason : failure)
+    if (reason !== undefined) handleCallbackBug(failure)
   }
 
   /** Checked once for all consumers; one that fails is reported and dropped. */
