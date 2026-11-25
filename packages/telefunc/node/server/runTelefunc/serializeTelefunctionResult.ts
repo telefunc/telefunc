@@ -24,6 +24,7 @@ import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
+import { restoreContext } from '../context/context.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
 import { getServerExtensionTypes } from '../serverConfig.js'
@@ -93,7 +94,8 @@ function serializeTelefunctionResult(runContext: {
     channel.onClose(requestContext.trackPending())
     channel._validators = makeValidators(channel, valueShields, shieldCtx)
   }
-  function sendStream(createProducer: () => StreamingProducer) {
+  function sendStream(createProducerOfValue: () => StreamingProducer) {
+    const createProducer = () => producerInContext(createProducerOfValue(), runContext.context)
     if (useChannelPump) {
       const channelId = pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
       return {
@@ -182,5 +184,14 @@ function serializeTelefunctionResult(runContext: {
       flowId,
     }),
     streamTransport: runContext.streamTransport,
+  }
+}
+
+/** The pumps pull and cancel a generator or stream the telefunction returned with its request's context. */
+function producerInContext(producer: StreamingProducer, context: Context): StreamingProducer {
+  let chunks: StreamingProducer['chunks'] | undefined
+  return {
+    chunks: { next: () => restoreContext(context, () => (chunks ??= producer.chunks).next()) },
+    cancel: (reason) => restoreContext(context, () => producer.cancel(reason)),
   }
 }

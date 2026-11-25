@@ -4,9 +4,10 @@ export { PROVIDED_CONTEXT }
 export type { Telefunc }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
+import { isCallable } from '../../../utils/isCallable.js'
 import { isObject } from '../../../utils/isObject.js'
 import { objectAssign } from '../../../utils/objectAssign.js'
-import { getRawContext, provideContext, isAsyncMode } from './context.js'
+import { getRawContext, provideContext, restoreContext, isAsyncMode } from './context.js'
 import { REQUEST_CONTEXT } from './requestContext.js'
 import type { RequestContext } from './requestContext.js'
 import type { Telefunc } from './TelefuncNamespace.js'
@@ -26,7 +27,7 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
 
   const reqCtx = raw[REQUEST_CONTEXT] as RequestContext | undefined
   const builtins: TelefuncBuiltins = reqCtx
-    ? { onClose: (cb) => reqCtx.onClose(cb), signal: reqCtx.signal }
+    ? { onClose: (cb) => reqCtx.onClose(() => restoreContext(raw, cb)), signal: reqCtx.signal }
     : // SSR — no request context available
       { onClose: () => {}, signal: new AbortController().signal }
 
@@ -44,10 +45,21 @@ type TelefuncBuiltins = {
   signal: AbortSignal
 }
 
-function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {
+function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void
+function provideTelefuncContext<Context extends object, Result>(context: Context, fn: () => Result): Result
+function provideTelefuncContext(context: object, fn?: () => unknown): unknown {
   /* TO-DO/eventually: check whether it's possible to deprecate Async Hooks for Nuxt.
   assertWarning(false, 'provideTelefuncContext() is deprecated', { onlyOnce: true })
   */
   assertUsage(isObject(context), '[provideTelefuncContext()] Argument `context` should be an object')
-  provideContext(context as Telefunc.Context)
+  assertUsage(
+    arguments.length === 1 || isCallable(fn),
+    '[provideTelefuncContext(context, fn)] Argument `fn` should be a function',
+  )
+  if (fn) return restoreContext({ [PROVIDED_CONTEXT]: context }, fn)
+  assertUsage(
+    isAsyncMode(),
+    '[provideTelefuncContext(context, fn)] Argument `fn` missing, see https://telefunc.com/migration/provideTelefuncContext',
+  )
+  provideContext(context)
 }

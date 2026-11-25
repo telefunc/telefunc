@@ -1,0 +1,20 @@
+import { Link } from '@brillout/docpress'
+
+When using `provideTelefuncContext()`, you must now call your telefunction inside the `provideTelefuncContext()` callback:
+
+```ts
+// Environment: server
+
+provideTelefuncContext(context) // [!code --]
+const { todoItems } = await onLoadTodoItems() // [!code --]
+// @docpress-replace todoItemsDedupe todoItems
+const { todoItemsDedupe } = await provideTelefuncContext(context, () => onLoadTodoItems()) // [!code ++]
+```
+
+See: <Link href="/provideTelefuncContext" />
+
+## See also
+
+- <Link href="/provideTelefuncContext" />
+- <Link href="/getContext" />
+- <Link href="/testing" />
