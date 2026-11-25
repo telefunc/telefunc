@@ -266,8 +266,10 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
   if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   const most = heldAtMost(maxMemory, memory.reserved)
-  if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
-  reclaim(bytes, target)
+  if (memory.total + bytes > target) {
+    for (const holder of [...memory.holders]) replace(holder)
+    if (memory.total + bytes > target) reclaim(bytes, target)
+  }
   if (memory.total + bytes <= most) return
   for (const [newest, holders] of newestsThatEndingFrees()) {
     if (memory.total + bytes <= most) return
