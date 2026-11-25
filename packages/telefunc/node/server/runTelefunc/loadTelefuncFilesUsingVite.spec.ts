@@ -41,7 +41,10 @@ it("the build's telefuncUrl applies to the first request when the production ent
       body: JSON.stringify({ file: '/hello.telefunc.ts', name: 'hello', args: [] }),
     })
     const httpResponse = await serve({ request })
-    expect({ statusCode: httpResponse.statusCode, err: (httpResponse.err as Error | undefined)?.message }).toEqual({
+    expect({
+      statusCode: httpResponse.statusCode,
+      err: httpResponse.err instanceof Error ? httpResponse.err.message : httpResponse.err,
+    }).toEqual({
       statusCode: 200,
       err: undefined,
     })

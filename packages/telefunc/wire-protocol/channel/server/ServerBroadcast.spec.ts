@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, assert, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
@@ -282,8 +282,9 @@ describe('in-memory publishes in answer', () => {
     await timerRan
     await attempt.unsubscribe()
     expect(errors).toHaveLength(1)
-    expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
-    expect((errors[0] as Error).message).toContain('a listener that answers its own messages')
+    const [error] = errors
+    assert(error instanceof ChannelOverflowError)
+    expect(error.message).toContain('a listener that answers its own messages')
   }, 60_000)
 })
 
@@ -303,8 +304,7 @@ describe('binary in-process broadcast', () => {
     receiver.subscribeBinary((data) => received.push(data))
     sender.publishBinary(new Uint8Array([0x00, 0x7f, 0x80, 0xff]))
 
-    expect(received).toHaveLength(1)
-    expect(Array.from(received[0]!)).toEqual([0x00, 0x7f, 0x80, 0xff])
+    expect(received.map((data) => Array.from(data))).toEqual([[0x00, 0x7f, 0x80, 0xff]])
   })
 
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
@@ -322,8 +322,7 @@ describe('binary in-process broadcast', () => {
     sender.publishBinary(new Uint8Array([1, 2, 3]))
 
     expect(text).toEqual([{ text: 'just text' }])
-    expect(bin).toHaveLength(1)
-    expect(Array.from(bin[0]!)).toEqual([1, 2, 3])
+    expect(bin.map((data) => Array.from(data))).toEqual([[1, 2, 3]])
   })
 })
 
@@ -360,7 +359,7 @@ describe('ServerBroadcastEnd', () => {
       }),
     )
 
-    expect(frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
+    expect(frames.map((frame) => decode(new Uint8Array(frame)).tag)).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH])
   })
 
   it("sends a stream's held lossy publish before a plain one of that stream", () => {
@@ -411,8 +410,8 @@ describe('ServerBroadcastEnd', () => {
 
 /** The publishes a reconnect of `end`'s page would get, in order. */
 function replayed(end: ServerBroadcastEnd): string[] {
-  return end
-    ._replayBuffer!.getAfter(0)
+  return replayOf(end)
+    .getAfter(0)
     .map((frame) => decode(frame))
     .flatMap((decoded) => (decoded.tag === TAG.PUBLISH ? [decoded.text] : []))
 }
@@ -442,7 +441,7 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
   const peer = new IndexedPeer({
     sender: {
       send: (frame) => {
-        const decoded = decode(frame as Uint8Array<ArrayBuffer>)
+        const decoded = decode(new Uint8Array(frame))
         if (decoded.tag === TAG.PUBLISH_BINARY) binary.push([...decoded.data])
         else if (decoded.tag === TAG.PUBLISH) sent.push(decoded.text)
         else return
@@ -462,7 +461,7 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
     },
     index: 7,
     // Its own replay: what it hasn't confirmed there is what makes its page behind.
-    replay: end._replayBuffer!,
+    replay: replayOf(end),
   })
   end._attachPeer(peer, { want: { version: 1, text: true, binary: true } })
   return { end, peer, sent, seqs, binary }
@@ -1785,8 +1784,8 @@ describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', async () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
     broadcast._publishShield = (value) => {
-      const v = value as { text?: unknown }
-      return typeof v?.text === 'string' ? true : 'expected { text: string }'
+      const text = typeof value === 'object' && value !== null && 'text' in value ? value.text : undefined
+      return typeof text === 'string' ? true : 'expected { text: string }'
     }
     broadcast._end._registerChannel()
 
@@ -1816,7 +1815,7 @@ describe('Broadcast shield validation', () => {
 
     await broadcast._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
-    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
+    const ack = frames.map((f) => decode(new Uint8Array(f))).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
     expect(ack.status).toBe(ACK_STATUS.SHIELD_ERROR)
@@ -1885,7 +1884,7 @@ describe('lossy broadcast under memory pressure', () => {
           },
         },
         index: 7,
-        replay: end._replayBuffer!,
+        replay: replayOf(end),
       }),
       { want: { version: 1, text: true, binary: false } },
     )
@@ -2168,3 +2167,10 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(received).toEqual([])
   })
 })
+
+/** The replay `end` keeps for its page. */
+function replayOf(end: ServerBroadcastEnd): ServerReplay {
+  const replay = end._replayBuffer
+  assert(replay, 'The end keeps no replay')
+  return replay
+}

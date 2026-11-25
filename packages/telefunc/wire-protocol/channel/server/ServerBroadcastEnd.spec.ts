@@ -51,7 +51,7 @@ function awayEnd(): ServerBroadcastEnd {
       },
     },
     index: 7,
-    replay: end._replayBuffer!,
+    replay: replayOf(end),
   })
   end._attachPeer(peer)
   end._onPeerDisconnect(peer, 60_000)
@@ -71,14 +71,13 @@ const PAGES = {
 }
 const STREAMS = [null, 'a', 'b'] as const
 
-describe.each(Object.keys(PAGES) as (keyof typeof PAGES)[])('to a page that %s', (page) => {
+describe.each(Object.entries(PAGES))('to a page that %s', (page, { behindAfter, waiting, goesAway }) => {
   it.each(Array.from({ length: 300 }, (_, seed) => seed + 1))('delivers what the rule says, seed %i', (seed) => {
     const random = mulberry32(seed)
     const publishes = Array.from({ length: 1 + Math.floor(random() * 30) }, (_, i) => {
       const stream = STREAMS[Math.floor(random() * STREAMS.length)] ?? null
       return { id: i + 1, stream, lossy: stream !== null && random() < 0.6 }
     })
-    const { behindAfter, waiting, goesAway } = PAGES[page]
     const { end, peer } = pageEnd(behindAfter, waiting)
     const awayAt = page === 'is away' ? 0 : goesAway ? Math.floor(random() * publishes.length) : publishes.length
     const replacingAt = behindAfter < 0 ? 0 : awayAt

@@ -44,7 +44,10 @@ it("the server's telefuncFiles take precedence over a leftover production entry"
       body: JSON.stringify({ file: '/hello.telefunc.mjs', name: 'hello', args: [] }),
     })
     const httpResponse = await serve({ request })
-    expect({ statusCode: httpResponse.statusCode, err: (httpResponse.err as Error | undefined)?.message }).toEqual({
+    expect({
+      statusCode: httpResponse.statusCode,
+      err: httpResponse.err instanceof Error ? httpResponse.err.message : httpResponse.err,
+    }).toEqual({
       statusCode: 200,
       err: undefined,
     })
