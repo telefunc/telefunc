@@ -16,6 +16,7 @@ export {
   onSubscribeHeld,
   onMetaKeyOrder,
   onThrowingReceiver,
+  onTwoRoutes,
   onJoinClosing,
   onJoinRefused,
 }
@@ -173,6 +174,38 @@ async function onMetaKeyOrder() {
   const replaced = (await Room.get(id)).meta
   await Room.close(id)
   return { merged: Object.entries(merged), replaced: Object.entries(replaced) }
+}
+
+/** What each of two listeners of one handle got of a member's frames m1…m40 on track 't': one listens to her every
+ *  track, the other to every member's 't'. */
+async function onTwoRoutes() {
+  const id = `two-routes:${crypto.randomUUID()}`
+  const room = await Room.create(id)
+  Room.guard(room, { anyoneCanJoin: true })
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const view = await Room.get(id)
+  const aliceHere = view.getParticipant(alice.id)
+  if (aliceHere === null) throw new Error(`${id}'s view has no Alice`)
+  const heard = { everyTrack: [] as string[], everyMember: [] as string[] }
+  const named = (data: Uint8Array) => `m${data[0]}`
+  aliceHere.subscribeBinary((data) => void heard.everyTrack.push(named(data)))
+  view.subscribeBinary((data) => void heard.everyMember.push(named(data)), { track: 't' })
+  const lists = Object.values(heard)
+  const frame = (n: number) => Uint8Array.from([n])
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  // Both subscriptions are live once each heard a frame.
+  for (let tries = 0; lists.some((list) => list.length === 0) && tries < 400; tries++) {
+    await alice.publishBinary(frame(0), { track: 't' })
+    await sleep(25)
+  }
+  await sleep(200)
+  for (const list of lists) list.length = 0
+  for (let n = 1; n <= 40; n++) await alice.publishBinary(frame(n), { track: 't' })
+  for (let tries = 0; !lists.every((list) => list.includes('m40')) && tries < 400; tries++) await sleep(25)
+  // Long enough for a second copy to arrive.
+  await sleep(200)
+  await Room.close(id)
+  return heard
 }
 
 /** A store handing a control frame to a receiver that throws: no write sees its delivery lost, and the next frame still

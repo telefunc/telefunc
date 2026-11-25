@@ -102,6 +102,7 @@ export {
   onJoinAnswering,
   onJoinClosed,
   onThrowingReceiver,
+  onTwoRoutes,
   onPublishLoop,
   onSubscriberDropped,
   onPublishOverRedisLimit,
@@ -129,7 +130,7 @@ import { getRoomPlane } from '@telefunc/room/backend'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
 import { sleep } from '../../sleep'
-import { dropRedisSubscribers } from '../../redis'
+import { dropRedisSubscribers, redis } from '../../redis'
 import { createDeferred } from '../../createDeferred'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
@@ -1386,6 +1387,47 @@ async function onThrowingReceiver(roomId: string) {
   await sleep(300)
   await Promise.all(attempts.map((attempt) => attempt.unsubscribe()))
   return { thrower, healthy }
+}
+
+/** What each of two listeners of one handle got of Alice's frames m1…m80 on track 't': one listens to her every track,
+ *  the other to every member's 't'. `startOver`: Redis loses her member order record after m40, so her frames start at
+ *  place 1 again. */
+async function onTwoRoutes(roomId: string, startOver: boolean) {
+  const room = anyoneCanJoin(await Room.get(roomId))
+  const alice = await room.join({ meta: { name: 'Alice' } })
+  const view = await Room.get(roomId)
+  const aliceHere = view.getParticipant(alice.id)
+  if (aliceHere === null) throw new Error(`${roomId}'s view has no Alice`)
+  const heard = { everyTrack: [] as string[], everyMember: [] as string[] }
+  const named = (data: Uint8Array) => `m${data[0]}`
+  aliceHere.subscribeBinary((data) => void heard.everyTrack.push(named(data)))
+  view.subscribeBinary((data) => void heard.everyMember.push(named(data)), { track: 't' })
+  const lists = Object.values(heard)
+  const frame = (n: number) => Uint8Array.from([n])
+  const until = async (done: () => boolean) => {
+    for (let tries = 0; !done() && tries < 400; tries++) await sleep(25)
+  }
+  // Both subscriptions are live once each heard a frame.
+  for (let tries = 0; lists.some((list) => list.length === 0) && tries < 400; tries++) {
+    await alice.publishBinary(frame(0), { track: 't' })
+    await sleep(25)
+  }
+  await sleep(200)
+  for (const list of lists) list.length = 0
+  for (let n = 1; n <= 40; n++) await alice.publishBinary(frame(n), { track: 't' })
+  await until(() => lists.every((list) => list.includes('m40')))
+  let recordsLost = 0
+  if (startOver) {
+    if (redis === undefined) throw new Error('onTwoRoutes(): startOver needs REDIS_URL')
+    const pattern = `*room:{${encodeURIComponent(roomId)}}:g:*:om:${encodeURIComponent(alice.id)}`
+    for (const key of await redis.keys(pattern)) recordsLost += await redis.del(key)
+  }
+  for (let n = 41; n <= 80; n++) await alice.publishBinary(frame(n), { track: 't' })
+  await until(() => lists.every((list) => list.includes('m80')))
+  // Long enough for a second copy to arrive.
+  await sleep(200)
+  await alice.leave()
+  return { recordsLost, ...heard }
 }
 
 /** Joins on closed rooms, through handles with no listeners, so none of them hears of the close. */

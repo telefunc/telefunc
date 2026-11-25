@@ -107,6 +107,7 @@ import {
   onJoinAnswering,
   onJoinClosed,
   onThrowingReceiver,
+  onTwoRoutes,
   onPublishLoop,
   onSubscriberDropped,
   onPublishOverRedisLimit,
@@ -1110,6 +1111,14 @@ function Room() {
       {scenario('throwing-receiver', 'A throwing receiver', 'A store delivers past it', async () => {
         const roomId = await createRoomId('throwing-receiver')
         setResult(JSON.stringify(await onThrowingReceiver(roomId)))
+      })}
+
+      {scenario('two-routes', 'A track through two subscriptions', 'Each frame once on each', async () => {
+        setResult(JSON.stringify(await onTwoRoutes(await createRoomId('two-routes'), false)))
+      })}
+
+      {scenario('two-routes-start-over', null, 'Each frame once, after her order starts over', async () => {
+        setResult(JSON.stringify(await onTwoRoutes(await createRoomId('two-routes-start-over'), true)))
       })}
 
       {scenario('join-closed', 'Joins on closed rooms', 'Handles that never heard of the close', async () => {
