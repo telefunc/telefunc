@@ -30,9 +30,9 @@ const FAST = { bytesPerMs: 100_000, delayMs: 2 }
 /** Slow 3G: 400 kbit/s, 200 ms each way. */
 const SLOW = { bytesPerMs: 50, delayMs: 200 }
 
-/** A server wire to a page through a socket that takes whatever it is handed and reports none of it buffered, as one
- *  whose kernel buffers hold it: the link carries what the socket took, in order, at its rate, `delayMs` each way, and
- *  both can change. The page takes every message as it arrives and answers through its receiver. */
+/** A server wire to a page through a socket that reports what its link holds as buffered, as Node's does once its
+ *  kernel buffers are full: the link carries what the socket took, in order, at its rate, `delayMs` each way, and both
+ *  can change. The page takes every message as it arrives and answers through its receiver. */
 function wireTo(
   { bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: number },
   { pingInterval = 60_000, copiesOnSend = false } = {},
@@ -100,7 +100,9 @@ function wireTo(
         link.push(message)
         linkBytes += message.byteLength
       },
-      bufferedAmount: 0,
+      get bufferedAmount() {
+        return linkBytes
+      },
       copiesOnSend,
     },
     pingInterval,
@@ -213,14 +215,16 @@ function framesOfFourChannels(wire: Wire): void {
 }
 
 /** A wire that carried a 64 KiB download on a fast link, then nineteen on Slow 3G 2.5 s apart, each over and the link
- *  idle by the next. */
+ *  idle by the next. Each goes as two frames: the second queues behind the first, so its acknowledgement measures the
+ *  link. */
 async function wireThatSlowed(): Promise<Wire> {
   const wire = wireTo({ bytesPerMs: 1_000, delayMs: 10 })
   wire.binary(1, 64 * 1024)
   await sleep(500)
   wire.reshape(SLOW)
   for (let n = 0; n < 19; n++) {
-    wire.binary(1, 64 * 1024)
+    wire.binary(1, 32 * 1024)
+    wire.binary(1, 32 * 1024)
     await sleep(2_500)
   }
   expect(wire.linkBytes()).toBe(0)

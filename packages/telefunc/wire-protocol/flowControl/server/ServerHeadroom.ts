@@ -3,7 +3,6 @@ export { ServerHeadroom }
 import {
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECES_ACK_GAP_MS,
-  WIRE_PROBE_CLOCK_MS,
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
   WIRE_SEND_AHEAD_ROUND_TRIPS,
@@ -54,8 +53,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private appLimitedTo = 0
   /** Whether what the page hasn't confirmed reached half the window since the last ask: the next send asks. */
   private askEarly = false
-  /** Whether the sender is sending what waited for headroom. */
+  /** Whether the sender is sending what waited for headroom, and whether it handed data of it yet. */
   private releasing = false
+  private releasedData = false
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
   /** Looks again for copy room, which another wire's page may free. */
@@ -149,8 +149,11 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       return
     }
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.socket.bufferedAmount <= this.handedSinceData && !this.sender.dataWaits)
-      this.appLimitedTo = end
+    // Unmeasured, what waits in the sender waits for the probe's answer, not for the path: a release's first data
+    // arrives after that wait, and only what follows it arrives as the path takes it.
+    const pathHeld = this.pathRate() > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
+    if (this.releasing) this.releasedData = true
+    if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) this.appLimitedTo = end
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
     // Asked at half the window, the page's answer frees its first half while the second still crosses.
@@ -213,9 +216,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
-    const queuedMs = newest === undefined ? 0 : arrived - newest.at - this.leastRtt
-    // Data that queued in the path came at its rate; data the app handed alone that queued nowhere sets no rate.
-    if (before < this.appLimitedTo && queuedMs <= WIRE_PROBE_CLOCK_MS) this.drain.dropSpan()
+    // Arrivals of data handed while nothing waited came at the app's rate: they neither set the rate nor lower it.
+    if (before < this.appLimitedTo) this.drain.dropSpan()
     else this.drain.spanned(acknowledged - before, spanMs)
     this.releaseCopies(acknowledged)
     this.sendWaiting()
@@ -277,6 +279,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
       this.releasing = true
       this.sender.sendWaiting(this.headroom())
       this.releasing = false
+      this.releasedData = false
     }
     this.askIfHalf()
     this.pace()

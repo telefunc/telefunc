@@ -15,10 +15,10 @@ const sleep = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 /** 125 kB/s, 1 Mbit/s. */
 const LINK_BYTES_PER_MS = 125
 
-/** A server wire to a page behind a slow link, through a socket that takes whatever it is handed and reports none of
- *  it buffered, as one whose kernel buffers hold it: the link carries what the socket took, in order, at its rate,
- *  `delayMs` each way. */
-function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}) {
+/** A server wire to a page behind a slow link, through a socket that reports what its link holds as buffered, as
+ *  Node's does once its kernel buffers are full, or, `buffersNothing`, none of it, as Bun's does while its kernel takes
+ *  all it is handed: the link carries what the socket took, in order, at its rate, `delayMs` each way. */
+function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0, buffersNothing = false } = {}) {
   const link: Uint8Array<ArrayBuffer>[] = []
   let linkBytes = 0
   const receiver: ClientPieceReceiver = new ClientPieceReceiver({
@@ -59,7 +59,9 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}
         link.push(message)
         linkBytes += message.byteLength
       },
-      bufferedAmount: 0,
+      get bufferedAmount() {
+        return buffersNothing ? 0 : linkBytes
+      },
       copiesOnSend: false,
     },
     pingInterval: 5_000,
@@ -110,6 +112,18 @@ describe('ServerHeadroom.headroom', () => {
       // A message may cross the window, and does: the link holds the next while the page acknowledges the last.
       expect(most).toBeGreaterThan(131_104)
       expect(most).toBeLessThanOrEqual(131_104 + 65_552)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it("a large message's rest, released by its probe's answer, measures the link through a socket that reports nothing buffered", async () => {
+    const wire = wireBehindSlowLink({ buffersNothing: true })
+    try {
+      wire.send((seq) => encode.binary(1, new Uint8Array(1024 * 1024), seq))
+      // The probe's answer releases the rest a round trip in; its pieces after the first arrive as the link takes them.
+      await sleep(2_000)
+      expect(wire.window()).toBeLessThan(Number.POSITIVE_INFINITY)
     } finally {
       wire.stop()
     }

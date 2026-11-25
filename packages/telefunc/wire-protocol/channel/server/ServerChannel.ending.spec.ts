@@ -260,6 +260,8 @@ function overWebSocket(
   })
   return {
     headroom,
+    /** The wire's socket: a row sets what it reports buffered. */
+    socket,
     peers,
     attach,
     /** Each frame the page got, whole. */
@@ -1811,6 +1813,8 @@ test("a subscriber its server shed to nothing for another object's publish, its 
   // replay of p1 waits for the wire.
   const blocker = new ServerChannel()
   const back = overWebSocket([])
+  // Its kernel holds what the socket took, so what the wire hands queues and its acknowledgements measure the link.
+  back.socket.bufferedAmount = 1024 * 1024
   blocker._registerChannel(ATTACHABLE_NOW)
   back.attach(blocker, 1)
   void blocker.send('b1' + 'x'.repeat(600_000))
