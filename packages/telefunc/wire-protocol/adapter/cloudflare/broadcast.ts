@@ -226,11 +226,7 @@ class CloudflareBroadcastAuthorityState {
 
   /** A grant for a member DO's writes of presence here; a member DO that holds no presence lapses with its grant. */
   async grant(member: string): Promise<number> {
-    const now = Date.now()
-    const grant = this.transaction((sql) => {
-      sweepLeases(sql, now)
-      return grantHolder(sql, member, now)
-    })
+    const grant = this.transaction((sql) => grantHolder(sql, member, Date.now()))
     await this.scheduleSweep()
     return grant
   }

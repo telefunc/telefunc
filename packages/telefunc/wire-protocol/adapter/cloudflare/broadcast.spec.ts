@@ -1105,7 +1105,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await first.ready
         first()
         await vi.advanceTimersByTimeAsync(100_000)
-        // Another Durable Object subscribes: its grant drops the first one's.
+        // Another Durable Object subscribes. The first one's grant ended 90 s after it left, and it asks for another.
         const other = inObject(() => Broadcast.subscribe('room:test', () => {}), sessions.second)
         await vi.advanceTimersByTimeAsync(0)
         await other.ready
