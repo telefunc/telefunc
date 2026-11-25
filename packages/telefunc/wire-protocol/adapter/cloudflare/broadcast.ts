@@ -120,15 +120,14 @@ class MemberRoute {
   readonly route: BroadcastRoute
   readonly lease = crypto.randomUUID()
   /** Its presence lapsed and was reported, and is recorded again before it is renewed. */
-  private lapsed = false
+  lapsed = false
   /** When the write its key's authority last confirmed its presence by went out, by this DO's clock: the authority's
    *  lease runs from no earlier. */
   private confirmedAt = 0
   /** When its last hold went out, by this DO's clock. */
   private heldAt = 0
-  private refreshTimer: ReturnType<typeof setInterval> | undefined
-  /** A refresh its key's authority's overload pause kept from being sent, made once the pause ends. */
-  private refreshAfterPause: ReturnType<typeof setTimeout> | undefined
+  /** Its presence's next refresh, which the member sets after each one, while the route is wanted. */
+  refreshTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor({ route }: MemberRouteOptions) {
     this.route = route
@@ -139,58 +138,22 @@ class MemberRoute {
     this.heldAt = Date.now()
   }
 
-  /** Its key's authority recorded the hold that went out last. */
+  /** Its key's authority recorded the hold that went out last: no longer lapsed. */
   presenceRecorded(): void {
+    this.lapsed = false
     this.confirmed(this.heldAt)
   }
 
   /** Its key's authority confirmed its presence by a write that went out at `sentAt`: ready. */
-  private confirmed(sentAt: number): void {
+  confirmed(sentAt: number): void {
     this.confirmedAt = sentAt
     this.attempt?.recorded()
   }
 
-  startRefresh(
-    renew: () => Promise<LeaseRenewed>,
-    hold: () => Promise<LeaseRegistered>,
-    pausedFor: () => number,
-  ): void {
-    this.refreshTimer = setInterval(() => void this.refreshPresence(renew, hold, pausedFor), LEASE_RENEW_EVERY_MS)
-  }
-
-  /** A lapse its key's authority answers is reported once, however many renewals it answers it to, until the presence
-   *  is recorded again. */
-  private async refreshPresence(
-    renew: () => Promise<LeaseRenewed>,
-    hold: () => Promise<LeaseRegistered>,
-    pausedFor: () => number,
-  ): Promise<void> {
-    clearTimeout(this.refreshAfterPause)
-    this.refreshAfterPause = undefined
-    const sentAt = Date.now()
-    try {
-      if (!this.lapsed) {
-        if ((await renew()) === 'renewed') return this.confirmed(sentAt)
-        this.lapsed = true
-        const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
-        reportBroadcastDeliveryLost(this.route.key, reason)
-      }
-      // Else a later write of this DO's on the route came first: its release.
-      if ((await hold()) !== 'registered') return
-    } catch (error) {
-      if (!this.lapsed && renewsAfterPause(error, this.confirmedAt)) {
-        this.refreshAfterPause = setTimeout(() => void this.refreshPresence(renew, hold, pausedFor), pausedFor())
-        return
-      }
-      return this.attempt?.lost(error)
-    }
-    this.lapsed = false
-    this.presenceRecorded()
-  }
-
-  stopRefresh(): void {
-    clearInterval(this.refreshTimer)
-    clearTimeout(this.refreshAfterPause)
+  /** Whether a renewal `error` kept from being sent is sent again once its authority's overload pause ends: while the
+   *  presence it renews is still live there. */
+  renewsAfterPause(error: unknown): boolean {
+    return !this.lapsed && renewsAfterPause(error, this.confirmedAt)
   }
 }
 
@@ -454,16 +417,42 @@ class CloudflareBroadcastMember {
     }
     memberRoute.presenceRecorded()
     if (memberRoute.attempt === null) return this.release(routeKey, memberRoute)
-    const name = this.broadcast.authorityName(memberRoute.route.key)
-    memberRoute.startRefresh(
-      () => this.renew(memberRoute),
-      () => this.hold(memberRoute),
-      () => this.calls.pausedFor(name),
-    )
+    this.refreshIn(memberRoute, LEASE_RENEW_EVERY_MS)
+  }
+
+  /** The route's presence is refreshed `delay` from now, while it is still the route's. */
+  private refreshIn(memberRoute: MemberRoute, delay: number): void {
+    if (this.routes.get(broadcastRouteKey(memberRoute.route)) !== memberRoute) return
+    memberRoute.refreshTimer = setTimeout(() => void this.refreshPresence(memberRoute), delay)
+  }
+
+  /** Renewed, or recorded again once it lapsed, then refreshed again: 30 s after this one went out, or once its key's
+   *  authority's overload pause ends where that pause kept the renewal from being sent. A lapse its key's authority
+   *  answers is reported once, however many renewals it answers it to, until the presence is recorded again. */
+  private async refreshPresence(memberRoute: MemberRoute): Promise<void> {
+    const sentAt = Date.now()
+    try {
+      if (!memberRoute.lapsed) {
+        if ((await this.renew(memberRoute)) === 'renewed') {
+          memberRoute.confirmed(sentAt)
+          return this.refreshIn(memberRoute, renewalDue(sentAt))
+        }
+        memberRoute.lapsed = true
+        const reason = `this Durable Object's presence lapsed, so what was published since didn't reach it`
+        reportBroadcastDeliveryLost(memberRoute.route.key, reason)
+      }
+      // A hold that isn't registered was overtaken by a later write of this DO's on the route: its release.
+      if ((await this.hold(memberRoute)) === 'registered') memberRoute.presenceRecorded()
+    } catch (error) {
+      if (memberRoute.renewsAfterPause(error))
+        return this.refreshIn(memberRoute, this.calls.pausedFor(this.broadcast.authorityName(memberRoute.route.key)))
+      memberRoute.attempt?.lost(error)
+    }
+    this.refreshIn(memberRoute, renewalDue(sentAt))
   }
 
   private release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
-    memberRoute.stopRefresh()
+    clearTimeout(memberRoute.refreshTimer)
     this.routes.delete(routeKey)
     return this.removeUntilDone(memberRoute)
   }
@@ -761,4 +750,9 @@ function carriedError(error: unknown): CarriedError {
 /** The error `carried` holds, with the marks a return across Workers RPC took off it put back. */
 function restoredError({ error, marks }: CarriedError): unknown {
   return error instanceof Error ? Object.assign(error, marks) : error
+}
+
+/** How long from now until the refresh that is due 30 s after one that went out at `sentAt`. */
+function renewalDue(sentAt: number): number {
+  return Math.max(0, sentAt + LEASE_RENEW_EVERY_MS - Date.now())
 }
