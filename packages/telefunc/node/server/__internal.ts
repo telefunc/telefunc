@@ -1,4 +1,4 @@
-// Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs` and `@telefunc/redis`.
+// Every add-on: Room (`@telefunc/room`), `@telefunc/rxjs`, `@telefunc/redis` and `@telefunc/live`.
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
 export type { OrderingInfo } from '../../wire-protocol/backend/driverOrdering.js'
 export { tetherTo, untether } from '../../utils/wrapProxy.js'
@@ -67,6 +67,10 @@ export {
 } from '../../wire-protocol/backend/memory/memorySubscribers.js'
 export { isCloudflareWorkers } from '../../utils/isCloudflareWorkers.js'
 export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+
+// An add-on that sends messages of its own over the installed Broadcast: `@telefunc/live`'s changes.
+export { getBroadcastPlane } from '../../wire-protocol/backend/install.js'
+export type { BroadcastPlane } from '../../wire-protocol/backend/broadcast/BroadcastPlane.js'
 
 // A Cloudflare extension: Room's session and authority Durable Objects.
 export {

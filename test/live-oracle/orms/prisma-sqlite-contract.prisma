@@ -1,0 +1,46 @@
+// use prisma-8
+
+model User {
+  id    Int     @id @default(autoincrement())
+  name  String
+  team  Int
+  nick  String?
+  todos Todo[]
+  @@map("users")
+}
+
+model Todo {
+  id        Int     @id @default(autoincrement())
+  userId    Int     @map("user_id")
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  text      String
+  done      Int     @default(0)
+  priority  Int     @default(0)
+  amount    Float   @default(0)
+  updatedAt DateTime(as: string) @map("updated_at")
+  due       Int?
+  tags      Tag[]
+  @@map("todos")
+}
+
+model Tag {
+  id     Int    @id @default(autoincrement())
+  todoId Int    @map("todo_id")
+  todo   Todo   @relation(fields: [todoId], references: [id], onDelete: Cascade)
+  name   String
+  @@map("tags")
+}
+
+model Setting {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  value Int
+  @@map("settings")
+}
+
+model DeletedTodo {
+  id     Int @id @default(autoincrement())
+  userId Int @map("user_id")
+  todoId Int @map("todo_id")
+  @@map("deleted_todos")
+}

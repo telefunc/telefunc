@@ -1,0 +1,17 @@
+{
+  "name": "live-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bulk": "node --expose-gc bulk.ts",
+    "engine": "node --expose-gc engine.ts",
+    "latency": "node --expose-gc latency.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@telefunc/live": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "pg": "^8.23.1",
+    "telefunc": "workspace:*"
+  }
+}

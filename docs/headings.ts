@@ -161,6 +161,11 @@ const headings = [
   },
   {
     level: 2,
+    title: '`@telefunc/live`',
+    url: '/live',
+  },
+  {
+    level: 2,
     title: '`@telefunc/rxjs`',
     url: '/rxjs',
   },
