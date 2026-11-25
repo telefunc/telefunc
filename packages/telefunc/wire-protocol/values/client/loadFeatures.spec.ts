@@ -321,6 +321,21 @@ test('a later invalid argument cancels a resource created by an extension replac
   expect(posts).toEqual([])
 })
 
+test('a reply chunk load failure cancels the ongoing request upload', async () => {
+  const { call, ConnectionError } = await page()
+  const cancel = vi.fn()
+  const upload = new ReadableStream({ cancel })
+  gates.channels.open()
+  failing.add('streams')
+  gates.streams.open()
+  respond = streamed({ gen: GENERATOR })
+
+  await expect(call([upload])).rejects.toBeInstanceOf(ConnectionError)
+  expect(cancel).toHaveBeenCalledOnce()
+  expect(upload.locked).toBe(false)
+  expect(posts).toHaveLength(1)
+})
+
 test('a returned promise stays a promise when another value of the response loads its chunk', async () => {
   const { call } = await page()
   await warmStreams(call)

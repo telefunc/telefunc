@@ -59,6 +59,7 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
   return {
     metadata: { channelId: channel.id },
     async close() {
+      doCancel(null)
       await channel.close()
     },
     abort() {

@@ -52,17 +52,22 @@ async function parseResponse(
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
 
-  // HTTP streaming (binary / SSE): its body carries streams, which the stream readers read.
-  if (isStreaming) {
-    const { body } = response
-    assert(body)
-    return parseStreamedResponse(body, contentType.includes('text/event-stream'), callContext, connection)
-  }
+  try {
+    // HTTP streaming (binary / SSE): its body carries streams, which the stream readers read.
+    if (isStreaming) {
+      const { body } = response
+      assert(body)
+      return await parseStreamedResponse(body, contentType.includes('text/event-stream'), callContext, connection)
+    }
 
-  // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
-  const body = await response.text()
-  await loadFeaturesIn(body, true, callContext)
-  return reviveResponse(body, callContext, connection, null)
+    // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
+    const body = await response.text()
+    await loadFeaturesIn(body, true, callContext)
+    return await reviveResponse(body, callContext, connection, null)
+  } catch (err) {
+    for (const close of callContext.requestCloseHandlers) void closeOnFailure(close)
+    throw err
+  }
 }
 
 /** Until its values are handed out, the call owns the body: an abort or a failed load cancels it, so that the server
@@ -120,7 +125,7 @@ async function reviveResponse(
   }
 
   const pendingValues: PendingValue<unknown>[] = []
-  const allCloseHandlers = [...callContext.requestCloseHandlers]
+  const responseCloseHandlers: CloseHandler[] = []
   let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
     createChannel(opts) {
@@ -160,7 +165,7 @@ async function reviveResponse(
 
   function handOut(revived: ReturnType<ReviverType['revive']>) {
     const { value, abort, close, onEnd } = revived
-    allCloseHandlers.push(close)
+    responseCloseHandlers.push(close)
     callContext.abortController.signal.addEventListener(
       'abort',
       () => {
@@ -194,7 +199,7 @@ async function reviveResponse(
     }
     demuxer?.valuesHandedOut()
   } catch (err) {
-    for (const close of allCloseHandlers) close()
+    for (const close of responseCloseHandlers) void closeOnFailure(close)
     throw err
   }
   if (!isObject(parsed)) return parsed
@@ -207,4 +212,12 @@ async function reviveResponse(
   }
 
   return { ret }
+}
+
+async function closeOnFailure(close: CloseHandler): Promise<void> {
+  try {
+    await close()
+  } catch {
+    // The caller gets the response failure.
+  }
 }
