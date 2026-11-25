@@ -238,9 +238,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       if (this.callListener(listener, data, info)) return
     }
     if (!this.takesPublish(this.pageWant.text)) return this.endOverflowed()
-    const body = bodyOf(encode.publish, serialized, rawInfo, delivery, this.owner, (holder) =>
-      this.replaceIn(holder, false),
-    )
+    const body = bodyOf(encode.publish, serialized, rawInfo, delivery, this.owner, this.replaceIn)
     this.forwardPublish(body)
   }
 
@@ -258,9 +256,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       if (this.callListener(listener, new Uint8Array(data), info)) return
     }
     if (!this.takesPublish(this.pageWant.binary)) return this.endOverflowed()
-    const body = bodyOf(encode.publishBinary, data, rawInfo, delivery, this.owner, (holder) =>
-      this.replaceIn(holder, true),
-    )
+    const body = bodyOf(encode.publishBinary, data, rawInfo, delivery, this.owner, this.replaceIn)
     this.forwardPublish(body)
   }
 
@@ -365,10 +361,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   /** Where `holder` is a lossy page of this publish's key, on its object, subscribed to its kind, it lets go of what the
    *  publish replaces; one that is closing, which the publish doesn't reach, of all that waits for its wire but its
    *  newest. */
-  private replaceIn(holder: MemoryHolder, binary: boolean): void {
+  private readonly replaceIn = (holder: MemoryHolder, body: PublishBody): void => {
     if (!ServerBroadcast.isServerBroadcast(holder) || !holder.lossyPublishes || holder.key !== this.key) return
     if (holder.owner !== this.owner) return
-    const subscribed = binary ? holder.pageWant.binary : holder.pageWant.text
+    const subscribed = body.frame[0] === TAG.PUBLISH_BINARY ? holder.pageWant.binary : holder.pageWant.text
     if (holder.takesPublish(subscribed)) holder.lossyPublishes.letWaitingGo()
     else if (subscribed && holder._phase === 'closing') holder.keepOnlyNewest()
   }
@@ -797,7 +793,7 @@ function bodyOf<T>(
   info: WirePublishInfo,
   delivery: BroadcastDelivery | undefined,
   owner: string | undefined,
-  replace: (holder: MemoryHolder) => void,
+  replace: (holder: MemoryHolder, body: PublishBody) => void,
 ): PublishBody {
   let body = delivery?.body
   if (!body) {
