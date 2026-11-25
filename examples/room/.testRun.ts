@@ -13,7 +13,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
 
   test('Two tabs join the room, see each other and exchange a message', async () => {
-    const otherContext = await page.context().browser()!.newContext()
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('The page runs in no browser')
+    const otherContext = await browser.newContext()
     const otherTab = await otherContext.newPage()
     await page.goto(serverUrl)
     await otherTab.goto(serverUrl)
