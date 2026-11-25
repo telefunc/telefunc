@@ -436,6 +436,29 @@ describe('cloudflare broadcast routing', () => {
       alarm: await storage.getAlarm(),
     }).toEqual({ leases: 0, holders: 0, alarm: null })
   })
+
+  // A Cloudflare alarm can run late: it is retried with backoff when it throws.
+  for (const granted of [false, true]) {
+    it(`a key's authority refuses a write under the grant of a member Durable Object that has held nothing for 90 s, while its alarm hasn't run${granted ? ', after another member asked for a grant' : ''}`, async () => {
+      vi.useFakeTimers()
+      onTestFinished(() => void vi.useRealTimers())
+      const authority = createAuthorityState()
+      const member = 'telefunc-shard-weur-0'
+      const grant = await authority.grant(member)
+      const route: BroadcastLeaseRequest = { key: 'room:test', kind: 'text', member, lease: crypto.randomUUID() }
+      await authority.hold({ ...route, bucket: 'weur', order: { grant, seq: 1 } })
+      await authority.release({ ...route, order: { grant, seq: 2 } })
+      vi.setSystemTime(Date.now() + 90_000)
+      if (granted) await authority.grant('telefunc-shard-weur-1')
+      const late: BroadcastHoldRequest = {
+        ...route,
+        lease: crypto.randomUUID(),
+        bucket: 'weur',
+        order: { grant, seq: 3 },
+      }
+      expect(await authority.hold(late)).toBe('regrant')
+    })
+  }
 })
 
 // What a subscriber's `ready` says, on a Worker without AsyncLocalStorage: the REAL ServerBroadcast on the REAL

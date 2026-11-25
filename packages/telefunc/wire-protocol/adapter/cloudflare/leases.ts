@@ -221,11 +221,19 @@ function dropLeaseScopes(sql: SqlStore, prefix: string): void {
   sql.exec('DELETE FROM telefunc_lease WHERE substr(scope, 1, length(?)) = ?', prefix, prefix)
 }
 
-/** Whether `grant` is `holder`'s; it then counts as active now. */
+/** Whether `grant` is `holder`'s, and the holder hasn't gone idle as `sweepLeases()` tells it, whether or not a sweep
+ *  ran since: a Cloudflare alarm can run late. It then counts as active now. */
 function isCurrentGrant(sql: SqlStore, holder: string, grant: number, now: number): boolean {
   return (
-    sql.exec('UPDATE telefunc_lease_holder SET active_at = ? WHERE holder = ? AND grant_id = ?', now, holder, grant)
-      .rowsWritten > 0
+    sql.exec(
+      'UPDATE telefunc_lease_holder SET active_at = ? WHERE holder = ? AND grant_id = ? AND (active_at > ? OR EXISTS ' +
+        '(SELECT 1 FROM telefunc_lease l WHERE l.holder = telefunc_lease_holder.holder AND l.expires_at > ?))',
+      now,
+      holder,
+      grant,
+      now - LEASE_TTL_MS,
+      now,
+    ).rowsWritten > 0
   )
 }
 
