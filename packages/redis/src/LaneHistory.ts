@@ -64,7 +64,8 @@ class LaneHistory {
   /** The routes it delivers through: it lives while one holds it. */
   readonly routes = new Set<LaneRoute>()
   private started = false
-  private followed: string | null = null
+  /** The history it follows, from its last start or a proof that its key lost nothing in a move: null before its first. */
+  follows: string | null = null
   private last = 0
   private tip = NO_ID
   private branch = 0
@@ -105,26 +106,18 @@ class LaneHistory {
     early: LaneFrame[],
     resuming: boolean,
     passed: (frame: LaneFrame) => number,
-    history: string = this.followed ?? '',
+    history: string = this.follows ?? '',
     resumedFrom: string = history,
   ): string | null {
-    if (!this.started) {
+    const first = !this.started
+    if (first) {
       this.started = true
-      this.followed = resuming ? resumedFrom : history
+      this.follows = resuming ? resumedFrom : history
       // A lane new to a resuming route had no commit when the route was last ready.
       this.follow(resuming ? NO_START : (start ?? NO_START), null, 0)
-      if (!resuming) {
-        const covered = start === undefined ? null : coveredBy(start, early)
-        for (const frame of early) {
-          if (covered?.has(frame)) route.dropped(frame)
-          // The read that started the lane saw these frames' history.
-          else this.offer(frame, Number.POSITIVE_INFINITY, 'accounted')
-        }
-        return null
-      }
     }
-    const left = this.followed !== history ? this.followed : null
-    this.followed = history
+    const left = this.follows !== history ? this.follows : null
+    this.follows = history
     if (left !== null) {
       this.switchTo(start ?? NO_START, early, passed)
       return left
@@ -136,19 +129,11 @@ class LaneHistory {
     const covered = start === undefined ? null : coveredBy(start, early)
     for (const frame of early) {
       if (covered?.has(frame) && frame.place <= this.last) route.dropped(frame)
+      // The read that started the lane saw these frames' history.
+      else if (first) this.offer(frame, Number.POSITIVE_INFINITY, 'accounted')
       else this.offer(frame, passed(frame))
     }
     return null
-  }
-
-  /** The history it follows, from its last start or a proof: null before its first. */
-  get follows(): string | null {
-    return this.followed
-  }
-
-  /** Its key moved to `history`, where it lost nothing in the move. */
-  followHistory(history: string): void {
-    this.followed = history
   }
 
   /** Frames a route that left brought and the lane didn't decide yet: they go on through a route that stays. */

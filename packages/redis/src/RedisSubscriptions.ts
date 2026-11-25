@@ -639,7 +639,7 @@ class RedisAttempt extends DriverAttempt implements LaneRoute {
   followHistory(authority: string): void {
     if (this.state() !== 'ready') return
     this.authority = authority
-    for (const { history } of this.lanes.values()) history.followHistory(historyOf(authority))
+    for (const { history } of this.lanes.values()) history.follows = historyOf(authority)
   }
 
   /** Its lanes start at `starts`; a lane missing from them has no commit yet. A first establish promises nothing from
