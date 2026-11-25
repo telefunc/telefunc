@@ -49,6 +49,9 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   let up: PacedDirection | null = null
   const proxy = net.createServer((page) => {
     const server = net.connect(Number(targetPort), hostname)
+    // A link forwards bytes as they come: with Nagle, a small write here would wait for the other end's delayed ACK.
+    page.setNoDelay(true)
+    server.setNoDelay(true)
     const link: Link = { page, server, webSocket: false, dead: false, muted: null }
     links.add(link)
     page.on('data', (chunk: Buffer) => {
