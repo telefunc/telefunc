@@ -132,7 +132,7 @@ async function onBroadcastStartReadFailed() {
       if (command === REDIS_COMMANDS.broadcastStart && startReads++ === 0) throw new Error('the start read failed')
       return run(command, input)
     }) as typeof connection.run
-    const binary = backend.subscribe({ key: route.key, kind: 'binary' }, { deliver() {} })
+    const binary = backend.subscribe({ key: route.key, kind: 'binary' }, { deliver() {} }, 'binary')
     await backend.publish(route, 'beside the failed read')
     await receivedCount(received, 2)
     return { received, reported, binary: binary.state(), startReads }
@@ -158,7 +158,7 @@ function ownRedisBackend(route: BroadcastRoute) {
     if (key === route.key) reported.push(reason)
   }
   const received: string[] = []
-  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) })
+  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) }, 'text')
   const stop = async () => {
     config.broadcast.onDeliveryLost = ({ key, reason }) =>
       console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
@@ -203,7 +203,7 @@ async function onRedisSubscribeFailure() {
   const text = { key: user, kind: 'text' } as const
   const received: string[] = []
   const subscribe = (receive: (value: string) => void) =>
-    backend.subscribe(text, { deliver: (value) => receive(value as string) })
+    backend.subscribe(text, { deliver: (value) => receive(value as string) }, 'text')
   let attempt: DriverAttempt | undefined
   try {
     await subscribeRefused(client, user)
@@ -255,7 +255,7 @@ async function onRedisChannelDenied() {
   const route = (name: string) => ({ key: `${user}:${name}`, kind: 'text' }) as const
   const received: string[] = []
   const subscribe = (name: string) =>
-    backend.subscribe(route(name), { deliver: (value) => received.push(`${name}: ${value}`) })
+    backend.subscribe(route(name), { deliver: (value) => received.push(`${name}: ${value}`) }, name)
   const up = subscribe('allowed-up')
   const upChanges: string[] = []
   let denied: DriverAttempt | undefined

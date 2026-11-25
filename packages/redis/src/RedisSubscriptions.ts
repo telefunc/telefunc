@@ -47,9 +47,9 @@ type RedisAttemptOptions = {
   receiver: BackendReceiver
   /** Pub/sub keeps no log, so what a drop or the reorder wait passed by is gone. `null`: how many isn't known. */
   reportMissed: (count: number | null) => void
-  /** The consumer its frames reach on this connection, by name: a Room's replica (its demand lane's exchange apart), a
-   *  Broadcast channel's subscription. The attempts of one holder share each lane's order, so a commit two of them
-   *  carry reaches it once, and they tell it once of each history they leave. */
+  /** The consumer its frames reach on this connection, by name (`SubscriptionDriver.subscribe`'s). The attempts of one
+   *  holder share each lane's order, so a commit two of them carry reaches it once, and they tell it once of each
+   *  history they leave. */
   holder: string
 }
 

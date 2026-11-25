@@ -229,13 +229,17 @@ describe('in-memory publishes in answer', () => {
     const backend = new MemoryBackend()
     const route = { key: 'room:finite', kind: 'text' } as const
     let received = 0
-    const attempt = backend.subscribe(route, {
-      deliver(payload) {
-        received++
-        const n = Number(payload)
-        if (n < 5000) void backend.publish(route, String(n + 1))
+    const attempt = backend.subscribe(
+      route,
+      {
+        deliver(payload) {
+          received++
+          const n = Number(payload)
+          if (n < 5000) void backend.publish(route, String(n + 1))
+        },
       },
-    })
+      'finite',
+    )
     await backend.publish(route, '0')
     await attempt.unsubscribe()
     expect(received).toBe(5001)
@@ -247,6 +251,7 @@ describe('in-memory publishes in answer', () => {
     const binary = backend.subscribe(
       { key: 'room:reused', kind: 'binary' },
       { deliver: (data) => received.push(typeof data === 'string' ? [] : Array.from(data)) },
+      'binary',
     )
     const text = backend.subscribe(
       { key: 'room:reused', kind: 'text' },
@@ -257,6 +262,7 @@ describe('in-memory publishes in answer', () => {
           bytes.fill(0)
         },
       },
+      'text',
     )
     await backend.publish({ key: 'room:reused', kind: 'text' }, 'question')
     const unsubscribe = () => void text.unsubscribe()
@@ -270,12 +276,16 @@ describe('in-memory publishes in answer', () => {
     const backend = new MemoryBackend()
     const route = { key: 'room:endless', kind: 'text' } as const
     const errors: unknown[] = []
-    const attempt = backend.subscribe(route, {
-      deliver() {
-        const result = backend.publish(route, 'again')
-        if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+    const attempt = backend.subscribe(
+      route,
+      {
+        deliver() {
+          const result = backend.publish(route, 'again')
+          if (result instanceof Promise) result.catch((err: unknown) => errors.push(err))
+        },
       },
-    })
+      'endless',
+    )
     const timerRan = new Promise((resolve) => setTimeout(resolve, 0))
     void backend.publish(route, 'start')
     await timerRan
@@ -1197,8 +1207,8 @@ class SteeredAttempt extends DriverAttempt {
 class BackendOfSteeredAttempts extends MemoryBackend {
   readonly attempts: SteeredAttempt[] = []
 
-  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
-    const attempt = new SteeredAttempt(super.subscribe(route, receiver))
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver, holder: string): DriverAttempt {
+    const attempt = new SteeredAttempt(super.subscribe(route, receiver, holder))
     this.attempts.push(attempt)
     return attempt
   }

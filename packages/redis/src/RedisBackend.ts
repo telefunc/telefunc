@@ -41,7 +41,7 @@ class RedisBackend implements BroadcastDriver {
     return this.publishInTurn(route, waiting)
   }
 
-  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver, holder: string): DriverAttempt {
     const channel = broadcastChannel(this.connection.prefix, route)
     return this.connection.subscriptions.subscribe({
       channel,
@@ -55,7 +55,7 @@ class RedisBackend implements BroadcastDriver {
       receiver,
       reportMissed: (count) =>
         reportBroadcastDeliveryLost(route.key, neverReachedSubscription(count, `${route.kind} message`)),
-      holder: channel,
+      holder,
     })
   }
 

@@ -146,11 +146,11 @@ function installFailingBackend() {
 
 /** `memory`, failing what a test asks it to fail. */
 function failing<Driver extends SubscriptionDriver<Source>>(memory: Driver): Driver {
-  const subscribe = (source: Source, outer: BackendReceiver): DriverAttempt => {
+  const subscribe = (source: Source, outer: BackendReceiver, holder: string): DriverAttempt => {
     if (takeFault('subscribe', callOf(source))) throw new Error('failing-backend: subscribe refused')
     const attempt = new FailingAttempt({ source, outer })
     subscriptions.add(attempt)
-    attempt.follow(memory.subscribe(source, attempt))
+    attempt.follow(memory.subscribe(source, attempt, holder))
     return attempt
   }
   return new Proxy(memory, {

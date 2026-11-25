@@ -13,6 +13,8 @@ type BroadcastPlaneOptions = { driver: BroadcastDriver }
 const broadcastSources: SourceRules<BroadcastRoute> = {
   key: broadcastRouteKey,
   deliveryKind: (route) => route.kind,
+  // A route's subscriptions on a host reach its listeners.
+  holder: broadcastRouteKey,
 }
 
 /** What core consumes: Broadcast on a driver, its publishes checked, its subscriptions shared by route and host. */

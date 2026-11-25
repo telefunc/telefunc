@@ -1365,7 +1365,7 @@ async function onPublishLoop(roomId: string) {
   return { otherWorkRan: turns > 0 }
 }
 
-/** A store handing a frame to a receiver that throws, ahead of a healthy one: both get every frame. */
+/** A store handing a frame to a receiver that throws, ahead of a healthy one, each its own holder: both get every frame. */
 async function onThrowingReceiver(roomId: string) {
   const { driver } = getRoomPlane()
   const inc = (await driver.readHead(roomId))!.currentInc!
@@ -1373,13 +1373,17 @@ async function onThrowingReceiver(roomId: string) {
   let thrower = 0
   let healthy = 0
   const attempts = [
-    driver.subscribe(source, {
-      deliver() {
-        thrower++
-        throw new Error('Test: a receiver throws')
+    driver.subscribe(
+      source,
+      {
+        deliver() {
+          thrower++
+          throw new Error('Test: a receiver throws')
+        },
       },
-    }),
-    driver.subscribe(source, { deliver: () => void healthy++ }),
+      'thrower',
+    ),
+    driver.subscribe(source, { deliver: () => void healthy++ }, 'healthy'),
   ]
   while (attempts.some((attempt) => attempt.state() !== 'ready')) await sleep(10)
   await Room.publish(roomId, 'first')

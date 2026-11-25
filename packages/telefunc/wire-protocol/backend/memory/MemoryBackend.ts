@@ -54,7 +54,8 @@ class MemoryBackend implements BroadcastDriver {
     }
   }
 
-  subscribe({ kind, key }: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+  // One order per source, delivered once to each receiver: a holder asks nothing more of it.
+  subscribe({ kind, key }: BroadcastRoute, receiver: BackendReceiver, _holder: string): DriverAttempt {
     addSubscriber(this.broadcastSubs[kind], key, receiver)
     return new MemoryBroadcastAttempt(() => {
       if (removeSubscriber(this.broadcastSubs[kind], key, receiver)) this.released(key)

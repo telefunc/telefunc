@@ -60,7 +60,8 @@ class TransportBroadcastDriver implements BroadcastDriver {
     return isPromise(result) ? result.then(checkOrdering) : checkOrdering(result)
   }
 
-  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+  // One order per source, delivered once to each receiver: a holder asks nothing more of it.
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver, _holder: string): DriverAttempt {
     let listening: BroadcastUnsubscribe
     try {
       listening =

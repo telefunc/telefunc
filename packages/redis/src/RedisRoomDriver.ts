@@ -267,7 +267,7 @@ class RedisRoomDriver implements RoomDriver {
     return this.commitInTurn(target, waiting, opts)
   }
 
-  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver, holder: string): DriverAttempt {
     const { prefix } = this.connection
     const { kind } = source.lane
     const fanIn = kind === 'binary-all' || kind === 'binary-track'
@@ -286,9 +286,7 @@ class RedisRoomDriver implements RoomDriver {
       receiver,
       reportMissed: (count) =>
         this.kit.reportLaneLost(source.roomId, source.lane, neverReachedSubscription(count, 'commit')),
-      // Every lane but demand reaches the room's replica, which tells the app of a loss as the room's; demand's reach its
-      // exchange, which asks the servers again.
-      holder: kind === 'demand' ? `${roomId} demand` : roomId,
+      holder,
     })
   }
 

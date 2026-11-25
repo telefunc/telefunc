@@ -224,6 +224,7 @@ async function onThrowingReceiver() {
         throw new Error('Test: a receiver throws')
       },
     },
+    'thrower',
   )
   while (attempt.state() !== 'ready') await new Promise((resolve) => setTimeout(resolve, 10))
   const write = (n: number) =>

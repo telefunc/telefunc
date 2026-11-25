@@ -43,7 +43,8 @@ class CloudflareBackend implements BroadcastDriver {
     return currentCloudflareHostKey()
   }
 
-  subscribe(route: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
+  // One order per source, delivered once to each receiver: a holder asks nothing more of it.
+  subscribe(route: BroadcastRoute, receiver: BackendReceiver, _holder: string): DriverAttempt {
     const session = currentCloudflareSession()
     assert(session !== undefined) // `hostKey()` refused a subscribe outside a session
     return session.broadcast.openSubscription(route, receiver)

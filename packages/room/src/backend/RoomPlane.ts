@@ -34,6 +34,8 @@ const laneSources: SourceRules<RoomSubscriptionSource> = {
   key: roomSubscriptionSourceKey,
   // A lane carries bytes.
   deliveryKind: () => 'binary',
+  // A room's lanes on a host reach its replica there, its demand lane the replica's exchange.
+  holder: ({ roomId, inc, lane }) => JSON.stringify(lane.kind === 'demand' ? [roomId, inc, 'demand'] : [roomId, inc]),
 }
 
 /** What Room's server code calls: the driver's writes and orderings checked, its lane subscriptions shared by source
