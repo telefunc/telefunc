@@ -2,7 +2,7 @@
 // or replayed. A REAL ClientChannel and its connection against a scripted server (scriptedServer.fixture.ts), with
 // Telefunc's own throttle and idle delay.
 
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { SSE_FLUSH_THROTTLE_MS, SSE_POST_IDLE_FLUSH_DELAY_MS, SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { TAG } from '../../wire/tags.js'
 import { advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
@@ -99,15 +99,14 @@ test('a send that asks for the answer, replayed after a reconnect, goes as the R
   expect(replayed.at - reopened.openedAt).toBe(SSE_RECONCILE_DEADLINE_MS)
 })
 
-test('a send just after a full POST started goes in the idle delay, not the throttle', async () => {
+test('a send just after a full POST started waits for the throttle from that POST', async () => {
   const page = await openIdle()
   void page.channel.send('x'.repeat(100_000)).catch(() => {})
   await advance(5)
-  const sentAt = performance.now()
   void page.channel.send('small').catch(() => {})
   await advance(1_000)
-  const [, small] = world.server.got.filter(({ ix }) => ix === 0)
-  expect(defined(small, 'the small send').at - sentAt).toBe(SSE_POST_IDLE_FLUSH_DELAY_MS)
+  const [full, small] = world.server.got.filter(({ ix }) => ix === 0)
+  expect(defined(small, 'the small send').at - defined(full, 'the full POST').at).toBe(SSE_FLUSH_THROTTLE_MS)
 })
 
 test('frames held while the page reconnects go in the order they were sent, whatever each asks for', async () => {
@@ -174,4 +173,25 @@ test("a send that asks for the answer, made while another's POST is out, goes in
   await advance(1_000)
   expect(askedAt(2).at - sentAt).toBe(SSE_POST_IDLE_FLUSH_DELAY_MS + SSE_FLUSH_THROTTLE_MS)
   expect(world.posts.slice(before).filter(({ data }) => data)).toHaveLength(2)
+})
+
+test("sends 100 ms apart go a POST per throttle, though the timer that starts each POST fires a moment before its deadline, as Node's do", async () => {
+  const page = await openIdle()
+  const fakeSetTimeout = globalThis.setTimeout
+  // Node starts a timer from its loop's clock, which lags: the timer fires before its deadline by `performance.now()`.
+  const early = vi
+    .spyOn(globalThis, 'setTimeout')
+    .mockImplementation((run, ms = 0) => fakeSetTimeout(run, Math.max(0, ms - 1)))
+  try {
+    for (let i = 0; i < 10; i++) {
+      void page.channel.send(`data ${i}`).catch(() => {})
+      await advance(100)
+    }
+    await advance(1_000)
+  } finally {
+    early.mockRestore()
+  }
+  const posts = new Set(world.server.got.filter(({ ix }) => ix === 0).map(({ at }) => at))
+  // At 50 ms, then at 350, 650 and 950 ms, each a throttle after the one before.
+  expect(posts.size).toBe(4)
 })

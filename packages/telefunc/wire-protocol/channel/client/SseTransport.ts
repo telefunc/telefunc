@@ -619,9 +619,8 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
-    // One that goes before its deadline, because the outbox is full, waited for no throttle, so the next frame doesn't
-    // wait for one after it either.
-    if (this.outbox.some(({ deadline }) => deadline <= now)) this.lastPostStartedAt = now
+    // Every POST starts the throttle, whatever made it go: the next waits for it.
+    this.lastPostStartedAt = now
     const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
