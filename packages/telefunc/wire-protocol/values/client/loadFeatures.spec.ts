@@ -198,20 +198,37 @@ test.each([false, true])(
   },
 )
 
-test('a call aborted while its chunk loads rejects at once, cancels its body once, and leaves no unhandled rejection', async () => {
+test('a call aborted while its chunk loads rejects at once, and leaves no unhandled rejection', async () => {
   const { call, withContext } = await page()
   const unhandled: unknown[] = []
   const onUnhandled = (reason: unknown) => unhandled.push(reason)
   process.on('unhandledRejection', onUnhandled)
-  respond = streamed({ gen: GENERATOR })
+  try {
+    respond = streamed({ gen: GENERATOR })
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([])
+    await vi.waitFor(() => expect(imported).toEqual(['streams']))
+    controller.abort()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(unhandled).toEqual([])
+})
+
+test("a call aborted while its chunk loads cancels the body of an app's fetch that doesn't end it", async () => {
+  const { call, withContext } = await page()
+  let ownCancels = 0
+  // An app's `config.fetch` whose body outlives the call's signal: only the call's own cancel stops it.
+  respond = () => streamed({ gen: GENERATOR }, { onCancel: () => ownCancels++ })(undefined)
   const controller = new AbortController()
   const pending = withContext(call, { signal: controller.signal })([])
-  await vi.waitFor(() => expect(imported).toEqual(['streams']))
+  // The chunk's first load in this process may wait behind an earlier test's load of it.
+  await vi.waitFor(() => expect(imported).toEqual(['streams']), { timeout: 5_000 })
   controller.abort()
   expect(isAbort(await settledWithin(pending, 200))).toBe(true)
-  await new Promise((resolve) => setTimeout(resolve, 20))
-  process.off('unhandledRejection', onUnhandled)
-  expect(unhandled).toEqual([])
+  expect(ownCancels).toBe(1)
 })
 
 test('a call aborted while its text response waits for its chunk rejects at once, telling onAbort() once', async () => {
