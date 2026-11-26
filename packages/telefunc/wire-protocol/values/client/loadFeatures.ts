@@ -1,4 +1,4 @@
-export { loadFeatures, loadedFeatures, loadedChannels, channelsLoadedBy }
+export { loadFeatures, loadedFeatures, loadedFeature, loadedWithExtensions }
 export type { Feature, Features }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -31,19 +31,19 @@ async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Fea
   return globalObject.loaded
 }
 
-/** The channel code that an extension's value creates its channel with. */
-function loadedChannels(): NonNullable<Features['channels']> {
-  const { channels } = globalObject.loaded
+/** A loaded feature's code: an extension's value creates its channel or broadcast with what the extension loaded. */
+function loadedFeature<F extends 'channels' | 'broadcasts'>(feature: F): NonNullable<Features[F]> {
+  const loaded = globalObject.loaded[feature]
   assertUsage(
-    channels,
-    "A Telefunc extension's value creates a channel, yet the page hasn't loaded Telefunc's channel code: the extension's client code should `import 'telefunc/__internal'`.",
+    loaded,
+    `A Telefunc extension's value creates a ${feature === 'channels' ? 'channel' : 'broadcast'}, yet the page hasn't loaded Telefunc's code for it: the extension's client code should \`import 'telefunc/__internal'\`.`,
   )
-  return channels
+  return loaded
 }
 
-/** The extension code that imports `channels` statically has them loaded with it. */
-function channelsLoadedBy(channels: NonNullable<Features['channels']>): void {
-  globalObject.loaded.channels = channels
+/** The code that `telefunc/__internal` imports statically, for the extensions that import it. */
+function loadedWithExtensions(features: Required<Pick<Features, 'channels' | 'broadcasts'>>): void {
+  Object.assign(globalObject.loaded, features)
 }
 
 const ABORTED = Symbol('ABORTED')

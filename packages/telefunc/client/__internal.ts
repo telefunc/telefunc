@@ -1,6 +1,7 @@
 // The browser half of telefunc/__internal: what extension code shared with the browser imports. An extension whose
-// values create channels imports it, so that the page loads Telefunc's channel code with the extension's own.
+// values create channels or broadcasts imports it, so that the page loads Telefunc's code for them with the extension's.
 import * as channels from '../wire-protocol/values/client/channels.js'
-import { channelsLoadedBy } from '../wire-protocol/values/client/loadFeatures.js'
+import * as broadcasts from '../wire-protocol/values/client/broadcasts.js'
+import { loadedWithExtensions } from '../wire-protocol/values/client/loadFeatures.js'
 
-channelsLoadedBy(channels)
+loadedWithExtensions({ channels, broadcasts })

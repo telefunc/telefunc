@@ -375,9 +375,9 @@ test('a response carrying an inline stream and a channel loads both, then revive
 test('an extension response can create a broadcast and a channel', async () => {
   const { call, config } = await page()
   gates.channels.open()
-  // The extension's client code: its values create channels.
-  await import('../../../client/__internal.js')
   gates.broadcasts.open()
+  // The extension's client code: its values create channels and broadcasts.
+  await import('../../../client/__internal.js')
   const created: string[] = []
   config.extensions.push({
     name: 'probe',
@@ -402,6 +402,57 @@ test('an extension response can create a broadcast and a channel', async () => {
   expect(await call([])).toHaveProperty('subscribe', expect.any(Function))
   expect(created).toEqual(['p1'])
   expect(imported).toEqual(['channels', 'broadcasts'])
+})
+
+test('an extension response whose values create channels loads no other code', async () => {
+  const { call, config } = await page()
+  gates.channels.open()
+  gates.broadcasts.open()
+  // The extension's client code: its values create channels.
+  await import('../../../client/__internal.js')
+  imported = []
+  failing.add('broadcasts')
+  config.extensions.push({
+    name: 'subject',
+    responseTypes: [
+      {
+        prefix: '!TelefuncSubject:',
+        revive(metadata: { channelId: string }, context) {
+          const channel = context.createChannel({ channelId: metadata.channelId })
+          return {
+            value: { channel },
+            async close() {
+              await channel.close()
+            },
+            abort: () => channel.abort(),
+          }
+        },
+      },
+    ],
+  })
+  respond = text(tag('!TelefuncSubject:', { channelId: 's1' }))
+  expect(await call([])).toHaveProperty('channel.id', 's1')
+  expect(imported).toEqual([])
+})
+
+test('an extension response whose values are their metadata loads no code', async () => {
+  const { call, config } = await page()
+  for (const feature of FEATURES) {
+    failing.add(feature)
+    gates[feature].open()
+  }
+  config.extensions.push({
+    name: 'count',
+    responseTypes: [
+      {
+        prefix: '!Count:',
+        revive: (metadata: { count: number }) => ({ value: { count: metadata.count }, close() {}, abort() {} }),
+      },
+    ],
+  })
+  respond = text(tag('!Count:', { count: 7 }))
+  expect(await call([])).toHaveProperty('count', 7)
+  expect(imported).toEqual([])
 })
 
 test('a second client module instance gets native Files and Blobs from the shared feature cache', async () => {

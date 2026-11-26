@@ -8,7 +8,7 @@ import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
-import { loadedFeatures, loadedChannels } from '../../wire-protocol/values/client/loadFeatures.js'
+import { loadedFeatures, loadedFeature } from '../../wire-protocol/values/client/loadFeatures.js'
 import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB } from '../../wire-protocol/constants.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
@@ -141,11 +141,11 @@ function createCallReplacer(args: HeldArguments, callContext: CallContext, hold:
         return index
       },
       createChannel(opts) {
-        const { ClientChannel } = loadedChannels()
+        const { ClientChannel } = loadedFeature('channels')
         return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
       },
       sendStream(createProducer) {
-        return loadedChannels().pumpClientProducerToChannel(createProducer, connection)
+        return loadedFeature('channels').pumpClientProducerToChannel(createProducer, connection)
       },
     },
     ({ value, close, abort }) => {

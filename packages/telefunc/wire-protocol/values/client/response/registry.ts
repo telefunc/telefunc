@@ -51,13 +51,11 @@ class ResponseValues {
 
         const type = responseType(wire, extensions)
         if (!type) return undefined
-        const features = (this.features ??= new Set())
+        // An extension's value creates what its own client code loaded (`telefunc/__internal`).
         if ('feature' in type) {
+          const features = (this.features ??= new Set())
           features.add(type.feature)
           if (type.feature === 'streams' && streamsRideChannels) features.add('channels')
-        } else {
-          features.add('channels')
-          features.add('broadcasts')
         }
 
         const metadata = parseMetadata(wire.slice(type.prefix.length))

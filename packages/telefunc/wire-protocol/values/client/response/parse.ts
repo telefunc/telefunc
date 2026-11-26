@@ -16,7 +16,7 @@ import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 import { ResponseValues } from './registry.js'
-import { loadFeatures, loadedFeatures, loadedChannels } from '../loadFeatures.js'
+import { loadFeatures, loadedFeatures, loadedFeature } from '../loadFeatures.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
   gcRegistry: new GcRegistry(),
@@ -118,7 +118,7 @@ async function reviveResponse(
   let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
     createChannel(opts) {
-      const { ClientChannel } = loadedChannels()
+      const { ClientChannel } = loadedFeature('channels')
       return new ClientChannel({
         channelId: opts.channelId,
         ack: opts.ack,
@@ -127,9 +127,8 @@ async function reviveResponse(
       })
     },
     createBroadcast(opts) {
-      const { broadcasts } = loadedFeatures()
-      assert(broadcasts)
-      return new broadcasts.ClientBroadcast({
+      const { ClientBroadcast } = loadedFeature('broadcasts')
+      return new ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
         lossy: opts.lossy,
@@ -139,7 +138,7 @@ async function reviveResponse(
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        const { ClientChannel, ChannelStreamSource } = loadedChannels()
+        const { ClientChannel, ChannelStreamSource } = loadedFeature('channels')
         const channel = new ClientChannel({ channelId: metadata.channelId, connection })
         return ChannelStreamSource.create(channel, { throwError: throwStreamError })
       }
