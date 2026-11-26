@@ -182,6 +182,8 @@ test("a reconcile that throws ends its wire as lost, before the page's deadline,
     expect(late).not.toHaveBeenCalled()
   } finally {
     for (const page of pages) page.abort()
+    // Its wire closes before the next test counts what the server sends.
+    await Promise.all([...pages.map((page) => page.closed), first.closed, second.closed])
     handOver.mockRestore()
     bug.mockRestore()
     opened.mockRestore()
@@ -209,11 +211,14 @@ test("a join of 1,000 channels with 256-byte ids, about 300 kB, goes on the serv
     const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
     pages.push(leadPage)
     await Promise.all([lead.opened, leadPage.opened])
+    // Only the PONGs of this join count.
+    pongs.mockClear()
     for (const channel of rest) pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
     await Promise.all([...rest.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
     expect(pongs).not.toHaveBeenCalled()
   } finally {
     for (const page of pages) page.abort()
+    await Promise.all(pages.map((page) => page.closed))
     pings.mockRestore()
     pongs.mockRestore()
   }
