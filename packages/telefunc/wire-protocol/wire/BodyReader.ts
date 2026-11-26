@@ -91,7 +91,7 @@ class BodyReader {
    *  ahead for them. */
   private holder: FileRead | null = null
   /** What the reads that wait for the position await: a file's end, a pull letting go of the position, a cancel, a file
-   *  taking the piece read ahead for it. */
+   *  taking the piece read ahead for it, or a reader releasing its lock. */
   private fileEnd: Deferred<void> | null = null
   private stop: Stop | null = null
   /** Who ended the file reads: the client, whose request ended through its abort, or the server, which answered or let
@@ -320,14 +320,12 @@ class BodyReader {
    * The body is one forward-only sequence, so the reader owns its position and lends it to one pull at a time. A read of
    * a later file reaches each earlier file in turn. One whose stream isn't locked, or that was cancelled, is passed: its
    * bytes are dropped. One whose stream is locked gets its next piece read for it, kept until its own read takes it, and
-   * the later read waits until it does, the file is cancelled, or the files end; it looks again each time it wakes. A
-   * cancelled read reads nothing: its file's bytes are dropped once a later read passes them. The files end at the body's
-   * let-go, at a read that fails, and where the client leaves. A release of a file's reader can't be seen (nothing tells
-   * the stream), so a later read that waits behind a file whose piece was read for it, released with more left, waits
-   * until that file is read, cancelled or let go of, or the client leaves.
+   * the later read waits until the piece is read, the reader releases its lock, the file is cancelled, or the files end.
+   * A cancelled file's bytes are dropped once a later read passes it. The files end at the body's let-go, at a read
+   * that fails, and where the client leaves.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
-    const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver)
+    const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver, () => this.wake())
     this.files.set(index, file)
     if (this.filesEndedBy !== null) file.fail(this.stopped())
     return file.stream
@@ -463,15 +461,14 @@ class BodyReader {
   private async pass(by: FileRead): Promise<void> {
     this.holder = by
     try {
+      const passed = this.files.get(this.next)
       assertWarning(
-        this.files.get(this.next)?.over === true,
+        passed?.over === true,
         `File arguments are being consumed out of order (reading ${by.index}, expected ${this.next}). Skipped files will be unreadable. For correct behavior, consume file arguments in the order they appear.`,
         { onlyOnce: true },
       )
-      await this.skipBytes(this.leftOfNext(), by)
-      // Its bytes are dropped: no File reads it anymore.
-      const passed = this.files.get(this.next)
       if (passed) passed.ahead = null
+      await this.skipBytes(this.leftOfNext(), by)
       this.fileGone(this.next)
       this.next++
       this.left = undefined
@@ -649,6 +646,7 @@ class FileRead {
     pull: (file: FileRead) => Promise<void>,
     cancel: (file: FileRead) => void,
     onOver: (file: FileRead) => void,
+    onReaderReleased: () => void,
   ) {
     this.index = index
     this.onOver = onOver
@@ -660,6 +658,20 @@ class FileRead {
       },
       { highWaterMark: 0 },
     )
+    const stream = this.stream
+    Object.defineProperty(stream, 'getReader', {
+      configurable: true,
+      writable: true,
+      value(this: typeof stream, ...args: Parameters<typeof stream.getReader>) {
+        const reader = ReadableStream.prototype.getReader.apply(this, args)
+        if (this === stream) {
+          void reader.closed.catch(() => {
+            if (!stream.locked) onReaderReleased()
+          })
+        }
+        return reader
+      },
+    })
   }
 
   enqueue(chunk: Uint8Array<ArrayBuffer>): void {
