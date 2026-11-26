@@ -35,7 +35,7 @@ class SseStreamReader extends BaseStreamReader {
         if (this.callContext.abortController.signal.aborted) {
           throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
         }
-        if (this.cancelled) return EMPTY
+        if (this.released) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }
       const gathered = (parts ??= this.binary.length > 0 ? [this.binary] : [])

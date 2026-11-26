@@ -27,7 +27,7 @@ const STALL_WARNING_MS = 5_000
  *
  *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
- *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
+ *  Once every consumer is terminal, the upstream reader is cancelled if one cancelled, else released. */
 class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
@@ -73,15 +73,15 @@ class FrameDemuxer {
       this.indexWaiters.delete(index)
       waiter.resolve(null)
     }
-    this.cancelUpstreamIfAllTerminal()
+    this.endUpstreamIfAllTerminal()
     // Reading may have stopped on this index's buffer, with another consumer waiting behind it.
     this.ensureReading()
   }
 
-  private cancelUpstreamIfAllTerminal(): void {
-    if (this.cancelledIndices.size > 0 && this.cancelledIndices.size + this.doneIndices.size >= this.totalConsumers) {
-      this.streamReader.cancel()
-    }
+  private endUpstreamIfAllTerminal(): void {
+    if (this.cancelledIndices.size + this.doneIndices.size < this.totalConsumers) return
+    if (this.cancelledIndices.size > 0) this.streamReader.cancel()
+    else this.streamReader.release()
   }
 
   async readNextChunkForIndex(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
@@ -156,7 +156,7 @@ class FrameDemuxer {
     // Empty payload = per-index "done" signal
     if (payload.length === 0) {
       this.doneIndices.add(index)
-      this.cancelUpstreamIfAllTerminal()
+      this.endUpstreamIfAllTerminal()
       if (waiter) {
         this.indexWaiters.delete(index)
         waiter.resolve(null)

@@ -18,7 +18,8 @@ type CallContext = {
  *  `readU32` and `readNextFrame` are pure wire-protocol logic — they only call
  *  `readExact`. Each transport implements only `readExact` (the byte source). */
 abstract class BaseStreamReader {
-  cancelled = false
+  /** Cancelled or released: nothing reads the body anymore. */
+  released = false
 
   constructor(
     protected readonly reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
@@ -31,10 +32,16 @@ abstract class BaseStreamReader {
   private readonly onAbort = () => this.cancel()
 
   cancel(): void {
-    if (this.cancelled) return
-    this.cancelled = true
-    this.callContext.abortController.signal.removeEventListener('abort', this.onAbort)
+    if (this.released) return
     this.reader.cancel().catch(() => {})
+    this.release()
+  }
+
+  /** Lets go of the body once its values read all they carried: the rest of it stays unread. */
+  release(): void {
+    if (this.released) return
+    this.released = true
+    this.callContext.abortController.signal.removeEventListener('abort', this.onAbort)
     this.reader.releaseLock()
   }
 
@@ -43,14 +50,14 @@ abstract class BaseStreamReader {
 
   async readU32(): Promise<number> {
     const buf = await this.readExact(4) // sizeof uint32
-    return this.cancelled ? 0 : decodeU32(buf)
+    return this.released ? 0 : decodeU32(buf)
   }
 
   /** Read the next indexed frame from the wire.
    *  Returns { index, payload } or null on terminator. Throws on error frames. */
   async readNextFrame(): Promise<{ index: number; payload: Uint8Array<ArrayBuffer> } | null> {
     const len = await this.readU32()
-    if (this.cancelled) return null
+    if (this.released) return null
     if (len === 0) return null
     if (len === STREAMING_ERROR_FRAME_MARKER) {
       // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
@@ -65,7 +72,7 @@ abstract class BaseStreamReader {
       throwBugError()
     }
     const frameData = await this.readExact(len)
-    if (this.cancelled) return null
+    if (this.released) return null
     return decodeIndexedFrame(frameData)
   }
 }

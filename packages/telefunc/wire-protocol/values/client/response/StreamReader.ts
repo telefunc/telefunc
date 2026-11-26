@@ -29,7 +29,7 @@ class StreamReader extends BaseStreamReader {
         if (this.callContext.abortController.signal.aborted) {
           throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
         }
-        if (this.cancelled) return EMPTY
+        if (this.released) return EMPTY
         throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
       }
       parts ??= this.buffer.length > 0 ? [this.buffer] : []

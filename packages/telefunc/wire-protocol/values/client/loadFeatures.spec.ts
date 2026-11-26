@@ -169,6 +169,32 @@ test.each([false, true])('a failed load releases the acquired response reader (S
   }
 })
 
+test.each([false, true])(
+  'a streamed response releases its reader once its values read all they carried (SSE: %s)',
+  async (sse) => {
+    const { call } = await page()
+    const { close } = await import('../../../client/close.js')
+    gates.streams.open()
+    const frames = [
+      encodeIndexedFrame(0, textEncoder.encode('41')),
+      encodeIndexedFrame(0, textEncoder.encode('42')),
+      encodeIndexedFrame(0, new Uint8Array()),
+      encodeU32(0),
+    ]
+    const response = streamed({ gen: GENERATOR }, { sse, frames })(undefined)
+    respond = () => response
+    const ret = await call([])
+    assertHas(ret, 'gen')
+    assert(isAsyncIterable(ret.gen))
+    expect(await Array.fromAsync(ret.gen)).toEqual([41, 42])
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+    await close(ret)
+    expect(response.body.locked).toBe(false)
+    expect(cancelled).toBe(0)
+  },
+)
+
 test('a call aborted while its chunk loads rejects at once, cancels its body once, and leaves no unhandled rejection', async () => {
   const { call, withContext } = await page()
   const unhandled: unknown[] = []
@@ -566,6 +592,10 @@ test('plain RPC: sent at once, an app string that looks like a value loads nothi
 
 async function* oneChunk(byte: number) {
   yield new Uint8Array([byte])
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value
 }
 
 function assertHas<K extends string>(value: unknown, key: K): asserts value is Record<K, unknown> {
