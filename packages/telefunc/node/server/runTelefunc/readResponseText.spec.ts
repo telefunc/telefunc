@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { Readable } from 'node:stream'
 import { readResponseText } from './readResponseText.js'
 
@@ -36,6 +36,32 @@ describe('a Web stream', () => {
     const error = new Error('the source fails, as the test means it to')
     const stream = webStream([bytes(0x61)], error)
     await expect(readResponseText(stream)).rejects.toBe(error)
+    expect(stream.locked).toBe(false)
+  })
+
+  test('cancels the stream and unlocks when decoding throws mid-stream', async () => {
+    const error = new RangeError('Invalid string length')
+    let cancelReason: unknown
+    let pulls = 0
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++
+        controller.enqueue(bytes(0x61))
+      },
+      cancel(reason) {
+        cancelReason = reason
+      },
+    })
+    const decodeSpy = vi.spyOn(TextDecoder.prototype, 'decode').mockImplementationOnce(() => {
+      throw error
+    })
+    try {
+      await expect(readResponseText(stream)).rejects.toBe(error)
+    } finally {
+      decodeSpy.mockRestore()
+    }
+    expect(cancelReason).toBe(error)
+    expect(pulls).toBe(1)
     expect(stream.locked).toBe(false)
   })
 })
