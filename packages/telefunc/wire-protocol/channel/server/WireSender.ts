@@ -10,7 +10,7 @@ import { encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
-import type { ServerChannel } from './ServerChannel.js'
+import type { MuxChannel } from './ServerChannel.js'
 import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { ChannelHandle } from './SessionRegistry.js'
@@ -42,7 +42,7 @@ type WireSenderOptions = {
   /** The channels of the session the wire carries, which its backlog counts; undefined before its RECONCILED. */
   heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   /** The channels attaching to the wire in this turn, which its backlog counts too. */
-  attaching: ReadonlySet<ServerChannel>
+  attaching: ReadonlySet<MuxChannel>
   /** The ledger refused the wire what it holds for its page beyond its channels, in a frame the sender was handed: the
    *  owner ends the wire's session. */
   onPastBacklog: () => void
@@ -66,7 +66,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
   private readonly heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
-  private readonly attaching: ReadonlySet<ServerChannel>
+  private readonly attaching: ReadonlySet<MuxChannel>
   private readonly onPastBacklog: () => void
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
@@ -393,7 +393,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   /** The channels the wire's send backlog counts: its session's, and those attaching in this turn. */
-  private channels(): Set<ServerChannel> {
+  private channels(): Set<MuxChannel> {
     const channels = new Set(this.attaching)
     for (const { channel } of this.heldChannels()?.values() ?? []) channels.add(channel)
     return channels
