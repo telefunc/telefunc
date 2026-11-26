@@ -11,7 +11,7 @@ import {
   droppingPublishes,
 } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 import { pairPublishes } from '../../wire-protocol/channel/client/pairPublishes.js'
-import { decode, encode, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 import { WireSender } from '../../wire-protocol/channel/server/WireSender.js'
@@ -615,11 +615,17 @@ describe('a large lossy send near the memory budget', () => {
       async readFirst() {
         const sse = new SseEvents()
         let first = false
-        const read = (frame: Uint8Array) => {
-          const { tag } = decode(frame)
-          first ||= tag === TAG.TEXT || tag === TAG.BINARY
+        const read = (event: Uint8Array<ArrayBuffer>) => {
+          for (const frame of isOneFrame(event) ? [event] : messageFrames(event)) {
+            const { tag } = decode(frame)
+            first ||= tag === TAG.TEXT || tag === TAG.BINARY
+          }
         }
-        while (!first) sse.push((await reader.read()).value!, read)
+        while (!first) {
+          const chunk = await reader.read()
+          if (chunk.done) throw new Error('the event stream ended before its first send')
+          sse.push(chunk.value, read)
+        }
         await post([encode.window(0, 1 << 30, 1)])
       },
       /** The page asks for more and reads no further: the next event starts, and what follows waits for it. */
@@ -632,10 +638,12 @@ describe('a large lossy send near the memory budget', () => {
         ;(await owed)()
         const sse = new SseEvents()
         const read: string[] = []
-        const label = (frame: Uint8Array) => {
-          const decoded = decode(frame)
-          if (decoded.tag === TAG.RECONCILED) read.push('RECONCILED')
-          if (decoded.tag === TAG.BINARY) read.push(String.fromCharCode(decoded.data[0] ?? 0))
+        const label = (event: Uint8Array<ArrayBuffer>) => {
+          for (const frame of isOneFrame(event) ? [event] : messageFrames(event)) {
+            const decoded = decode(frame)
+            if (decoded.tag === TAG.RECONCILED) read.push('RECONCILED')
+            if (decoded.tag === TAG.BINARY) read.push(String.fromCharCode(decoded.data[0] ?? 0))
+          }
         }
         while (!read.includes(last)) {
           const chunk = await (asked ?? reader.read())

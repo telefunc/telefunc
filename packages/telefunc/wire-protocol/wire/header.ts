@@ -22,10 +22,10 @@ const SEQ_OFFSET = 3
 /** How many seqs a u32 tells apart. */
 const SEQ_SPAN = 2 ** 32
 
-function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number): void {
-  frame[0] = tag
-  writeU16(frame, 1, index)
-  writeU32(frame, SEQ_OFFSET, seq)
+function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number, offset = 0): void {
+  frame[offset] = tag
+  writeU16(frame, offset + 1, index)
+  writeU32(frame, offset + SEQ_OFFSET, seq)
 }
 
 function writeU16(frame: Uint8Array, offset: number, n: number): void {

@@ -259,15 +259,21 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
  *  publishes it replaces lets go of them first (`replace`), so what's measured is what stays. Past that, it ends the
  *  pages whose newest no wire has, fewest sharers first, until the body fits or none is left: where ending them can't
  *  make room, they end all the same, and so do its own pages (`fitsPublish`). */
-function admitPublish(body: PublishBody, owner: string | undefined, replace: (holder: MemoryHolder) => void): void {
+function admitPublish(
+  body: PublishBody,
+  owner: string | undefined,
+  replace: (holder: MemoryHolder, body: PublishBody) => void,
+): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
   // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
   if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   const most = heldAtMost(maxMemory, memory.reserved)
-  if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
-  reclaim(bytes, target)
+  if (memory.total + bytes > target) {
+    for (const holder of [...memory.holders]) replace(holder, body)
+    if (memory.total + bytes > target) reclaim(bytes, target)
+  }
   if (memory.total + bytes <= most) return
   for (const [newest, holders] of newestsThatEndingFrees()) {
     if (memory.total + bytes <= most) return

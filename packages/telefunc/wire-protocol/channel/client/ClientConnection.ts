@@ -41,6 +41,7 @@ type OutboundFrame = {
   kind: OutboundFrameKind
   frame: Uint8Array<ArrayBuffer>
   released?: boolean
+  receivedAt?: number
 }
 
 interface MuxChannel {
@@ -112,6 +113,7 @@ interface MuxConnection {
 }
 
 type ClientConnectionOptions = {
+  lossyBroadcast?: boolean
   transports: ChannelTransports
   fetchImpl: typeof fetch
   /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
@@ -185,7 +187,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
       connection = new ClientConnection({ telefuncUrl, options, cacheKey: key })
       globalObject.connections.set(key, connection)
     }
-    connection.lifecycle.register(channel)
+    connection.lifecycle.register(channel, options.lossyBroadcast)
     return connection
   }
 
@@ -367,7 +369,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    this.gate.sendUnsequenced(record, encode.window(record.ix, limit, record.lastSeq), urgency)
+    this.gate.sendUnsequenced(record, encode.window(record.ix, limit, record.lastSeq), urgency, record.receivedAt)
   }
 
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {

@@ -28,6 +28,17 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   ...extra,
 })
 
+test('a WINDOW reports the last seq and how long the page held its report', () => {
+  expect(decode(encode.window(2, 1024, 7, 650))).toEqual({
+    tag: TAG.WINDOW,
+    index: 2,
+    bytes: 1024,
+    lastSeq: 7,
+    heldMs: 650,
+  })
+  expect(decode(encode.window(2, 1024, 7, 70_000))).toMatchObject({ heldMs: 65_535 })
+})
+
 describe('upgrade wire vocabulary', () => {
   test('PREPARE and READY round-trip', () => {
     const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0', attempt: 2 }

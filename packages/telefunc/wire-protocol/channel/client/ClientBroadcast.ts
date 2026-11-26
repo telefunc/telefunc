@@ -29,7 +29,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly lossy: boolean
 
   constructor(options: ClientBroadcastOptions) {
-    super(options)
+    super({ ...options, lossyBroadcast: options.lossy })
     this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()

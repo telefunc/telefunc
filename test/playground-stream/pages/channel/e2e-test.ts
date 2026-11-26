@@ -14,6 +14,7 @@ import {
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { WIRE_VERSION } from '../../../../packages/telefunc/wire-protocol/constants'
 import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
 import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
@@ -1564,13 +1565,13 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
     const bugsBefore = await bugs()
-    const answer = await page.evaluate(async () => {
-      const resp = await fetch('/_telefunc?_telefunc=sse&wire=3', {
+    const answer = await page.evaluate(async (url) => {
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'x-telefunc-request': 'sse' },
       })
       return { status: resp.status, text: await resp.text() }
-    })
+    }, `/_telefunc?_telefunc=sse&wire=${WIRE_VERSION}`)
     expect(answer).deep.equal({
       status: 400,
       text: 'The request has no body: an SSE channel request starts with its metadata.',

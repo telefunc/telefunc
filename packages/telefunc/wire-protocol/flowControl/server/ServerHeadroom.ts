@@ -84,6 +84,13 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.pace()
   }
 
+  /** The headroom for gathering a publish while no copy-room receipt request is scheduled. */
+  gatherRoom(bytes: number): number | undefined {
+    if (this.askTimer !== null) return
+    const room = this.headroom()
+    return this.sender.canGatherPublish(bytes, room) ? room : undefined
+  }
+
   waitingPublishes(ix: number): number {
     return countWaitingPublishes(this.sender.waitingFrames, ix)
   }

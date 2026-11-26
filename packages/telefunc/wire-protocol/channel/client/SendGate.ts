@@ -13,6 +13,7 @@ type BufferedFrame = {
   channelIx: number
   seq?: number
   waitingSince: number
+  receivedAt?: number
 }
 type HeldFrame = BufferedFrame & { seq: number }
 
@@ -124,12 +125,17 @@ class SendGate {
   }
 
   /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
-  sendUnsequenced(record: ChannelRecord, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
+  sendUnsequenced(
+    record: ChannelRecord,
+    frame: Uint8Array<ArrayBuffer>,
+    kind: OutboundFrameKind,
+    receivedAt?: number,
+  ): void {
     if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, kind, channelIx: record.ix, seq: undefined, waitingSince: performance.now() })
+      this.settleQueue().push({ frame, kind, channelIx: record.ix, waitingSince: performance.now(), receivedAt })
       return
     }
-    this.owner.transport.sendFrame({ kind, frame })
+    this.owner.transport.sendFrame({ kind, frame, receivedAt })
   }
 
   /** What waits for headroom goes, from the front, while the transport has headroom. */
@@ -179,7 +185,7 @@ class SendGate {
     let behind = false
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
-      const { frame, kind, channelIx, seq } = entry
+      const { frame, kind, channelIx, seq, receivedAt } = entry
       if (behind || !releasable(channelIx)) {
         behind ||= this.channels.isUndeclared(channelIx) || this.holdsBack(channelIx)
         sendBuffer[writeIx++] = entry
@@ -195,7 +201,7 @@ class SendGate {
         headroom -= frame.byteLength
         this.channels.get(channelIx)?.replay.push(seq, frame, kind)
       }
-      frames.push({ kind, frame, released: true })
+      frames.push({ kind, frame, released: true, receivedAt })
     }
     sendBuffer.length = writeIx
     this.awaitedPrefix = 0
