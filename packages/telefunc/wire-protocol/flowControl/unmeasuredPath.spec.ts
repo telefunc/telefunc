@@ -143,6 +143,58 @@ describe('ServerHeadroom.headroom', () => {
     }
   })
 
+  it('measures a large message still in flight when a small message is sent behind it', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 1_000, delayMs: 30, buffersNothing: true })
+    try {
+      wire.send((seq) => encode.binary(1, new Uint8Array(4 * 1024 * 1024), seq))
+      await sleep(100)
+      expect(wire.linkBytes()).toBeGreaterThan(64 * 1024)
+      wire.send((seq) => encode.text(1, 'answered behind the body', seq))
+      await sleep(4_500)
+      // Four round trips, including the first 64 KiB on the link and the 30 ms each way.
+      const window = wire.window()
+      expect(window).toBeGreaterThan(384 * 1024)
+      expect(window).toBeLessThan(640 * 1024)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('measures the pieces after the first when a large message goes out in one cut', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 1_000, delayMs: 30, buffersNothing: true })
+    try {
+      // Its probe and the rest measure pieces, but the rest crosses in too little time to set the window.
+      wire.send((seq) => encode.binary(1, new Uint8Array(96 * 1024), seq))
+      await sleep(500)
+      expect(wire.linkBytes()).toBe(0)
+      expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+
+      wire.send((seq) => encode.binary(1, new Uint8Array(512 * 1024), seq))
+      expect(wire.linkBytes()).toBeGreaterThan(512 * 1024)
+      await sleep(1_000)
+      expect(wire.window()).toBeLessThan(Number.POSITIVE_INFINITY)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('does not measure the rate of an app trickling messages on a faster link', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 10_000, delayMs: 50, buffersNothing: true })
+    try {
+      const frame = new Uint8Array(64 * 1024)
+      for (let n = 0; n < 20; n++) {
+        wire.send((seq) => encode.binary(1, frame, seq))
+        await sleep(50)
+        expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+      }
+      await sleep(200)
+      expect(wire.arrivals).toHaveLength(20)
+      expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+    } finally {
+      wire.stop()
+    }
+  })
+
   it('a measured link that frames wait for wakes its wire as the window frees what goes next, not every millisecond', async () => {
     const wire = wireBehindSlowLink()
     try {

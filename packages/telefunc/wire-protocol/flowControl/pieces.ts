@@ -54,8 +54,8 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 
 /** Tracks what a piece sender hands its socket: a page's `ClientHeadroom` or a server's `ServerHeadroom`. */
 interface PieceSenderOwner {
-  /** The sender handed the socket `bytes`, or carried them into its next message; `data` says whether they are data. */
-  handed(bytes: number, data: boolean, copied: boolean): void
+  /** The sender handed or carried `bytes`. A burst's `firstBytes` includes its first piece's header. */
+  handed(bytes: number, data: boolean, copied: boolean, firstBytes?: number): void
   /** The bytes of data the socket may copy now. What goes past them waits, and the owner has it sent. */
   copyRoom?(): number
   /** The most data the path may hold: a frame past it goes in pieces, one within it waits whole for its room. */
@@ -615,8 +615,10 @@ class PieceSender {
     const awaitsAck = end < bytes
     if (awaitsAck || (offset === 0 && bytes > this.wholeUpTo)) this.sendEmptyPiece(bytes)
     const size = awaitsAck ? Math.ceil((end - offset) / 2) : Math.max(1, Math.floor(this.wholeUpTo))
-    const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
-    this.countHanded(handed, data, true)
+    const count = Math.ceil((end - offset) / size)
+    const handed = end - offset + count * PIECE_HEADER_BYTES
+    const firstBytes = count > 1 ? size + PIECE_HEADER_BYTES : handed
+    this.countHanded(handed, data, true, firstBytes)
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
       this.messages.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
@@ -635,10 +637,10 @@ class PieceSender {
   }
 
   /** Counts `bytes` handed to the socket, of data or not, or carried into the next message. */
-  private countHanded(bytes: number, data: boolean, copied = false): void {
+  private countHanded(bytes: number, data: boolean, copied = false, firstBytes = bytes): void {
     this.transmittedBytes += bytes
     this.headroom -= bytes
-    this.owner.handed(bytes, data, copied)
+    this.owner.handed(bytes, data, copied, firstBytes)
   }
 
   /** Hands the socket the empty piece a frame of `total` bytes starts with. */
@@ -745,7 +747,9 @@ class PieceSender {
     }
     let end = this.transmittedBytes
     const handed = bytes - offset + n * PIECE_HEADER_BYTES
-    this.countHanded(handed, data, true)
+    const firstSize = sizes[0]
+    assert(firstSize !== undefined)
+    this.countHanded(handed, data, true, firstSize + PIECE_HEADER_BYTES)
     if (acknowledges(bytes)) this.track(handed, now, false)
     let at = offset
     for (const size of sizes) {

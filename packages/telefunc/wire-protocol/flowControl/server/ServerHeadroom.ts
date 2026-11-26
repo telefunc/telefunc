@@ -43,8 +43,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
   private readonly sent = new Fifo<{ end: number; at: number }>()
-  /** Where the newest data handed with nothing waiting ahead ends: arrivals up to it came at the app's rate. */
-  private appLimitedTo = 0
+  /** Ranges whose acknowledgement spans may include time spent waiting on the app. */
+  private readonly appLimited = new Fifo<{ start: number; end: number }>()
+  private lastAppLimited: { start: number; end: number } | null = null
   /** Whether the sender is sending what waited for headroom, and whether it handed data of it yet. */
   private releasing = false
   private releasedData = false
@@ -127,8 +128,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
   }
 
-  /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
-  handed(bytes: number, data: boolean, copied: boolean): void {
+  /** `PieceSenderOwner`: the path holds `bytes`. Only the first piece of a burst can follow an app idle gap. */
+  handed(bytes: number, data: boolean, copied: boolean, firstBytes = bytes): void {
     const now = performance.now()
     this.inPath = this.pathHolds(now) + bytes
     this.inPathAt = now
@@ -145,9 +146,23 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     // first data arrives after that wait, and only what follows it arrives as the path takes it.
     const pathHeld = this.drain.rate > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
     if (this.releasing) this.releasedData = true
-    if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) this.appLimitedTo = end
+    if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) {
+      const start = end - bytes
+      this.markAppLimited(start, start + firstBytes)
+    }
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
+  }
+
+  private markAppLimited(start: number, end: number): void {
+    // Control bytes between two app-limited sends have no arrival time of their own.
+    if (this.lastAppLimited !== null && start - this.handedSinceData <= this.lastAppLimited.end) {
+      this.lastAppLimited.end = end
+      return
+    }
+    const range = { start, end }
+    this.appLimited.push(range)
+    this.lastAppLimited = range
   }
 
   /** `PieceSenderOwner`: the most copies this wire may hold once its page took all it handed. */
@@ -205,8 +220,14 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
-    // Arrivals of data handed while nothing waited came at the app's rate: they neither set the rate nor lower it.
-    if (before < this.appLimitedTo) this.drain.dropSpan()
+    // Only measure spans that ran without waiting for the app.
+    let limited = this.appLimited.peek()
+    while (limited !== undefined && limited.end <= before) {
+      this.appLimited.shift()
+      if (limited === this.lastAppLimited) this.lastAppLimited = null
+      limited = this.appLimited.peek()
+    }
+    if (limited !== undefined && limited.start < acknowledged) this.drain.dropSpan()
     else this.drain.spanned(acknowledged - before, spanMs)
     // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
     const now = performance.now()
@@ -260,6 +281,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.paceTimer = null
     this.sender.close()
     this.releaseCopies(Number.POSITIVE_INFINITY)
+    while (this.appLimited.length > 0) this.appLimited.shift()
+    this.lastAppLimited = null
   }
 
   /** Sends what waits for headroom, as far as the headroom goes now. */
