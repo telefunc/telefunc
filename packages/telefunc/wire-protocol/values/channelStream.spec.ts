@@ -8,7 +8,7 @@ import { ResponseValues } from './client/response/registry.js'
 import * as streams from './client/streams.js'
 import * as channels from './client/channels.js'
 import * as broadcasts from './client/broadcasts.js'
-import { readableStreamReplacer } from './client/request/readableStream.js'
+import { readableStreamType } from './client/request/readableStream.js'
 import { createStreamProducer } from './server/response/createStreamProducer.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
 import { sendChunks } from './sendChunks.js'
@@ -226,7 +226,7 @@ describe("a client's upload stream that fails", () => {
       })
       const channel = memoryChannel()
       ChannelStreamSource.create(channel)
-      const sending = sendChunks(channel, readableStreamReplacer.createProducer(stream), new Promise(() => {}))
+      const sending = sendChunks(channel, readableStreamType.createProducer(stream), new Promise(() => {}))
       const message = 'Stream chunks given to a telefunction must be Uint8Array.'
       await expect(sending).rejects.toThrow(message)
       expect(logged).toEqual([expect.objectContaining({ message: expect.stringContaining(message) })])
@@ -257,7 +257,7 @@ describe('a stream sent over transport channel and read to its end', () => {
   test.each([
     [
       "a page's upload argument",
-      (stream: ReadableStream<Uint8Array<ArrayBuffer>>) => readableStreamReplacer.createProducer(stream),
+      (stream: ReadableStream<Uint8Array<ArrayBuffer>>) => readableStreamType.createProducer(stream),
     ],
     ["a telefunction's returned stream", createStreamProducer],
   ])('%s is let go of: unlocked, and its own cancel() resolves', async (_, producerOf) => {

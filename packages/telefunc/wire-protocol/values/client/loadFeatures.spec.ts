@@ -343,6 +343,32 @@ test('the channel a cold call opens is the one its tag names', async () => {
   }
 })
 
+test("a cold callback's channel is the call's once: the call's abort aborts it once", async () => {
+  let aborts = 0
+  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+    const original = await importOriginal()
+    class CountedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+      override abort(abortValue?: unknown, message?: string) {
+        aborts++
+        super.abort(abortValue, message)
+      }
+    }
+    return { ...original, ClientChannel: CountedChannel }
+  })
+  try {
+    const { call, withContext } = await page()
+    respond = text(1)
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([() => {}])
+    gates.channels.open()
+    await pending
+    controller.abort()
+    expect(aborts).toBe(1)
+  } finally {
+    vi.doUnmock('../../channel/client/ClientChannel.js')
+  }
+})
+
 test('a held callback preserves an extension tag that shares the replay prefix', async () => {
   const { call, config } = await page()
   const prefix = '!TelefuncHeld:'

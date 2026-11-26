@@ -3,13 +3,12 @@ export { remoteTelefunctionCall }
 import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
 import {
   serializeTelefunctionArguments,
-  serializeHeldArguments,
-  cancelUnsentArguments,
-  type HeldArguments,
+  openClaimedChannels,
+  type CallRequest,
+  type Claimed,
 } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
 import { assertUsage } from '../utils/assert.js'
-import { loadFeatures } from '../wire-protocol/values/client/loadFeatures.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
@@ -89,24 +88,18 @@ type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
   Omit<Parameters<typeof makeHttpRequest>[0], 'httpRequestBody' | 'requestCloseHandlers'>
 
 /** Sends the call. Its arguments are serialized now, at its invocation: a serialization error throws here, except for
- *  a call holding a value carried over a channel before the page loaded channels, whose returned promise rejects. */
+ *  a stream argument the app has locked, on a page that hasn't loaded channels' code, whose call's promise rejects. */
 function sendCall(callContext: CallContext): Promise<unknown> {
-  const serialized = serializeTelefunctionArguments(callContext)
-  if ('held' in serialized) return sendHeldCall(serialized, callContext)
-  objectAssign(callContext, serialized)
+  const request = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, request)
+  if (request.claimed) return sendOnceChannelsOpen(request, request.claimed, callContext)
   return makeHttpRequest(callContext)
 }
 
-/** A call whose arguments hold a value carried over a channel, before the page loaded channels: it loads them, then
- *  sends what its invocation serialized. */
-async function sendHeldCall(args: HeldArguments, callContext: CallContext): Promise<unknown> {
-  try {
-    await loadFeatures(['channels'], callContext)
-    objectAssign(callContext, serializeHeldArguments(args, callContext))
-  } catch (err) {
-    cancelUnsentArguments(args, callContext, err)
-    throw err
-  }
+/** A call that claimed values before the page loaded channels' code: it sends what its invocation serialized once
+ *  their channels are open. */
+async function sendOnceChannelsOpen(request: CallRequest, claimed: Claimed[], callContext: CallContext & CallRequest) {
+  await openClaimedChannels(request, claimed, callContext)
   return makeHttpRequest(callContext)
 }
 
