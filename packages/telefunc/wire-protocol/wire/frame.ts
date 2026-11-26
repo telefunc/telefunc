@@ -101,6 +101,7 @@ const ERROR_REASON = {
   UNCONFIRMED: END_CAUSE.unconfirmed.code,
   UNREADABLE: END_CAUSE.unreadable.code,
   RECEIVE_BUDGET: END_CAUSE.receiveBudget.code,
+  SEND_BUDGET: END_CAUSE.sendBudget.code,
   END_NOT_KEPT: END_CAUSE.endNotKept.code,
 }
 

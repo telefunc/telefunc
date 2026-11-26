@@ -415,21 +415,22 @@ class SseServerTransport {
    *  The bodies the server reads for the wire are read off for one ping deadline at most, the frame each was reading
    *  let go of at once: a page that lives ends each by then, as it reads the end or takes the wire for lost. Past it, the
    *  server lets go of each and reads it no further, which answers each data POST `retry` (the event stream's own POST
-   *  was answered at its open): the host ends the connection in its own time. It cancels none, since cancelling a body
-   *  can close the connection under the answer, and reads none on, since that never ends for a sender that writes on. */
+   *  was answered at its open), and of what its event stream holds that the page didn't take (`EventStream.close`): the
+   *  host ends the connection in its own time. It cancels none, since cancelling a body can close the connection under
+   *  the answer, and reads none on, since that never ends for a sender that writes on. */
   private endStream(wire: SseWire, refused: Refusal | null, held: SessionHold | null): void {
     if (wire.closed) return
     wire.closed = true
     this.rememberClosed(wire, held)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed wire and bails.
     wire.resolveReady()
-    wire.events.close(refused === null ? null : encode.end(wireEnd(refused)))
+    const readOff = pingDeadline(this.mux.pingInterval, CHANNEL_TRANSPORT.SSE)
+    wire.events.close(refused === null ? null : encode.end(wireEnd(refused)), readOff)
     const { bodies } = wire
     // Each request's own read awaits the same read-off, and takes its failure.
     for (const body of bodies) body.discardRest('server').catch(() => {})
     // Also with no body under read: a request that found the wire just before its end may yet start reading one. The
     // timer holds the bodies alone, not the closed wire.
-    const readOff = pingDeadline(this.mux.pingInterval, CHANNEL_TRANSPORT.SSE)
     unrefTimer(
       setTimeout(() => {
         for (const body of bodies) body.letGo()

@@ -177,9 +177,6 @@ export const MAX_CHANNELS_PER_CONNECTION = 4_096
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
-/** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
-export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
-
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 /** Largest metadata of a binary call the server will read: the most a V8 server can decode into one string, which holds

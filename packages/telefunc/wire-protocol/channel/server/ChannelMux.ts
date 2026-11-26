@@ -308,7 +308,7 @@ class ChannelMux implements UpgradeStagesOwner {
         deliveries,
         heldChannels: () => entry.holds?.channels,
         attaching,
-        onPastBacklog: () => this.endFault(wire, { scope: 'loss' }),
+        onPastBacklog: () => this.endFault(wire, { scope: 'session', cause: 'sendBudget' }),
       }),
       request,
       holds: null,
