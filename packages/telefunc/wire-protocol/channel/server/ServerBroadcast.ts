@@ -62,7 +62,7 @@ const NOT_IN_EFFECT_IN_TIME =
 
 class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder {
   readonly [SERVER_BROADCAST_BRAND] = true
-  /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
+  /** @see ChannelShield in ../channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
    *  receipts are server-generated, not client-supplied. */
   declare readonly [TELEFUNC_SHIELDS]: {
@@ -156,7 +156,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return broadcastMessages<ChannelData<T>>(this, options, queueMemory())
   }
 
-  /** In effect once its backend delivers what any server publishes to the key. */
+  /** In effect once it is registered with its backend. */
   subscribe(callback: BroadcastListener<T>, options: { signal?: AbortSignal } = {}): Unsubscribe {
     return this.addSubscriber(this.broadcastListeners, false, callback, options)
   }
@@ -171,9 +171,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.addSubscriber(this.broadcastBinaryListeners, true, callback, options)
   }
 
-  /** Its `opened` settles as a page's does: once the backend delivers to it what any server publishes to the key, or once
-   *  it is removed, with the end as known then where the close callbacks were called; one still registered rejects
-   *  where the broadcast ends first. One added to an ended broadcast never takes effect. */
+  /** Its `opened` settles as a page's does: once it is registered with its backend, or once it is removed, with the end
+   *  as known then where the close callbacks were called; one still registered rejects where the broadcast ends first.
+   *  One added to an ended broadcast never takes effect. */
   private addSubscriber<L>(
     listeners: Listeners<L>,
     binary: boolean,
@@ -478,9 +478,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     this.unsubscribeUnusedBroadcasts()
   }
 
-  /** Tells the page its want is in effect, and the calls waiting for it, where its backend delivers what any server
-   *  publishes to the key already; else that waits for the backend (`whenListening`). A page that never asked for one has
-   *  nothing to confirm. */
+  /** Tells the page its want is in effect, and the calls waiting for it, where both wanted kinds are registered with its
+   *  backend already; else that waits for the backend (`whenListening`). A page that never asked for one has nothing to
+   *  confirm. */
   override _confirmWant(): void {
     if (this.pageWant.version === 0 || !this.pageWantInEffect()) return
     this.peer?.sendWanted(this.pageWant.version)
@@ -690,10 +690,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     return this.textListening === listening || this.binaryListening === listening
   }
 
-  /** Once its backend delivers to `listening` what any server publishes to the key, the subscribers in `waiting` and
-   *  the page's want are in effect. A subscription its backend failed stays failed (Redis doesn't try it again), so the
-   *  broadcast ends: with the backend's error on the server, reported as a server error, and on its page as a
-   *  subscription that didn't take effect; every `opened` waiting rejects with that end. One removed meanwhile left `waiting` at its removal. */
+  /** Once `listening` is registered with its backend, the subscribers in `waiting` and the page's want are in effect. A
+   *  subscription its backend failed stays failed, so the broadcast ends: with the backend's error on the server,
+   *  reported as a server error, and on its page as a subscription that didn't take effect; every `opened` waiting
+   *  rejects with that end. One removed meanwhile left `waiting` at its removal. */
   private async whenListening(listening: Listening, opened: Outcome, waiting: Set<Outcome>): Promise<void> {
     try {
       await opened.promise
@@ -757,11 +757,12 @@ type BroadcastChannel<T = unknown> = {
   }
   /** Serializes `data` as JSON: bytes go through `publishBinary()`. */
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  /** Receive `(data, info)` for each publish to the key. The subscription is in effect once it gets what any server
-   *  publishes to the key (`opened`): while the broadcast backend is unreachable, that waits, and where the backend gives
-   *  it up, the broadcast ends: with its error on the server, and on its page with a `ChannelClosedError` that says its
-   *  subscription didn't take effect. A telefunction the page calls after `subscribe()` runs once the
-   *  subscription is in effect, or once the broadcast ended.
+  /** Receive `(data, info)` for each publish to the key. `opened` resolves once the subscription is registered with the
+   *  broadcast backend, or once you remove it while the channel is open (on Cloudflare, other locations see it once KV
+   *  propagates: https://telefunc.com/stream/cloudflare#delivery-guarantees). While the backend is unreachable, `opened`
+   *  waits, and where the backend gives it up, the broadcast ends: with its error on the server, and on its page with a
+   *  `ChannelClosedError` that says its subscription didn't take effect. A telefunction the page calls after `subscribe()`
+   *  runs once the subscription is registered, or once the broadcast ended.
    *
    *  https://telefunc.com/channel#chat-example */
   subscribe(callback: BroadcastListener<T>, options?: { signal?: AbortSignal }): Unsubscribe
@@ -835,7 +836,9 @@ const Broadcast = {
     const serialized = stringifyValue(data, 'publish')
     return receiptOf(key, adapter.publish(key, serialized))
   },
-  /** Receive `(data, info)` for each publish to `key`, in effect once it gets what any server publishes to `key`. */
+  /** Receive `(data, info)` for each publish to `key`. `opened` resolves once the subscription is registered with the
+   *  broadcast backend, or once you remove it (on Cloudflare, other locations see it once KV propagates:
+   *  https://telefunc.com/stream/cloudflare#delivery-guarantees). */
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>, options?: { signal?: AbortSignal }): Unsubscribe {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return unsubscribeOf(() => {})

@@ -87,7 +87,7 @@ type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Pr
 
 A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
 
-> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }` instead, and resolve `opened` once the listener receives what any server publishes to the key.
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }` instead, and resolve `opened` once the broker has registered the subscription.
 
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 

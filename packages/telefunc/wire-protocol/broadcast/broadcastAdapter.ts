@@ -40,8 +40,9 @@ type Deliver<T> = (data: T, info: WirePublishInfo, delivery?: BroadcastDelivery)
 type BroadcastDelivery = { body: PublishBody | undefined }
 
 /** What starting to listen returns: a function that stops listening, where the listener is in effect from the moment it
- *  is returned; else that function as `unsubscribe`, with `opened`, which resolves once the backend delivers to the
- *  listener what any server publishes to its key, and rejects where the backend gives the subscription up. */
+ *  is returned; else that function as `unsubscribe`, with `opened`, which resolves once the backend registered the
+ *  listener (on an eventually consistent backend, other locations see it as it propagates), and rejects where the
+ *  backend gives the subscription up. */
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 
 /** A `BroadcastUnsubscribe` in one form: `opened` is undefined where the listener is in effect already, else the one
