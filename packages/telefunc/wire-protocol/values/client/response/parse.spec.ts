@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import { parseResponse } from './parse.js'
 import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../../wire/envelope.js'
@@ -47,7 +47,7 @@ test('a download read to its end and then cancelled leaves the next download of 
 })
 
 /** The body of a call that returned `{ a, b, c }`, three downloads: 1 KiB and then 1 MiB of `a`, then a chunk of `b` and
- *  of `c`, then the ends. It is sent one wire piece per pull, counting them in `sent`. */
+ *  of `c`, then the ends. It is sent one wire piece per pull, counting them in `sent`; `beforePull` runs before each. */
 function threeDownloadsBody() {
   const download = (index: number, chunks: number) =>
     SERIALIZER_PREFIX_BLOB_DOWNLOAD + JSON.stringify({ __index: index, type: '', size: chunks * 64 * KiB })
@@ -65,10 +65,11 @@ function threeDownloadsBody() {
     encodeIndexedFrame(0, new Uint8Array(0)),
     encodeU32(0),
   ]
-  const state = { sent: 0 }
+  const state: { sent: number; beforePull?: (sent: number) => void } = { sent: 0 }
   const body = new ReadableStream<Uint8Array<ArrayBuffer>>(
     {
       pull(controller) {
+        state.beforePull?.(state.sent)
         const piece = pieces[state.sent++]
         if (piece) controller.enqueue(piece)
         else controller.close()
@@ -80,7 +81,7 @@ function threeDownloadsBody() {
 }
 
 async function settle(): Promise<void> {
-  for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0))
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
 test.each(['read', 'cancelled'])(
@@ -112,5 +113,44 @@ test.each(['read', 'cancelled'])(
     }
     expect((await bBytes).byteLength).toBe(64 * KiB)
     expect((await cBytes).byteLength).toBe(64 * KiB)
+  },
+)
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
+
+test.each(['left unread', 'read'])(
+  'a download waited for once reading stopped on another, with none waiting then, warns after 5 s while that one is %s',
+  async (release) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { body, state } = threeDownloadsBody()
+    const ret = await parseBinaryBody(body)
+    if (!(typeof ret === 'object' && ret !== null && 'a' in ret && 'b' in ret && 'c' in ret)) {
+      throw new Error('Expected `{ a, b, c }`')
+    }
+    const { a, b, c } = ret
+    if (!isBlobDownload(a) || !isBlobDownload(b) || !isBlobDownload(c)) throw new Error('Expected three downloads')
+    // `b` stops waiting while the piece that fills `a`'s 1 MiB is on its way: reading stops on `a` with none waiting.
+    state.beforePull = (sent) => sent === 17 && b.cancel()
+    const bBytes = b.bytes()
+    await expect(bBytes).rejects.toThrow('Stream cancelled')
+    await settle()
+    expect(state.sent).toBe(18)
+    const cBytes = c.bytes()
+    await settle()
+    expect(state.sent).toBe(18)
+
+    if (release === 'read') {
+      expect((await a.stream().getReader().read()).value?.byteLength).toBe(KiB)
+      expect((await cBytes).byteLength).toBe(64 * KiB)
+    }
+    vi.advanceTimersByTime(4_999)
+    expect(warn).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    if (release === 'read') expect(warn).not.toHaveBeenCalled()
+    else expect(warn).toHaveBeenCalledWith(expect.stringContaining('onDownloads() returned is waiting for a stream'))
   },
 )

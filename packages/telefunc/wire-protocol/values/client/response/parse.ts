@@ -313,9 +313,14 @@ class FrameDemuxer {
   }
 
   private async ensureReading() {
-    if (this.reading || this.pausedByIndex !== null) return
+    if (this.reading) return
+    // Reading may have stopped while no consumer waited, so no warning is on its way for this one.
+    if (this.pausedByIndex !== null) {
+      if (this.stallTimer === undefined) this.warnIfStillStalledLater()
+      return
+    }
     this.reading = true
-    clearTimeout(this.stallTimer)
+    this.clearStallTimer()
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
@@ -381,7 +386,7 @@ class FrameDemuxer {
   }
 
   private failWaiters(err: unknown): void {
-    clearTimeout(this.stallTimer)
+    this.clearStallTimer()
     this.streamError ??= err
     for (const [, w] of this.indexWaiters) w.reject(err)
     this.indexWaiters.clear()
@@ -393,8 +398,14 @@ class FrameDemuxer {
     this.stallTimer = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
   }
 
+  private clearStallTimer(): void {
+    clearTimeout(this.stallTimer)
+    this.stallTimer = undefined
+  }
+
   private warnStalled(): void {
     this.stallWarned = true
+    this.stallTimer = undefined
     assertWarning(
       false,
       `Reading what ${this.telefunctionName}() returned is waiting for a stream of it with 1 MiB unread: read all of the streams a call returned concurrently, or cancel the ones you don't want.`,
