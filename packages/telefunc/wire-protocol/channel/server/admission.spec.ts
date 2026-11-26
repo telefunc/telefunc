@@ -15,15 +15,7 @@ import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceive
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { pairPublishes } from '../client/pairPublishes.js'
 import { ChannelOverflowError } from '../channelErrors.js'
-import {
-  cancelWait,
-  hold,
-  letGo,
-  queueMemory,
-  releaseHolder,
-  type MemoryHolder,
-  type RoomWait,
-} from './channelMemory.js'
+import { hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ATTACHABLE_NOW, ServerChannel } from './ServerChannel.js'
@@ -53,7 +45,7 @@ async function collect() {
 // Each row starts on an empty ledger: what a row's channels still hold or wait with as it ends goes.
 afterEach(() => {
   const { holders, waiting } = channelLedger()
-  for (const wait of waiting) cancelWait(wait)
+  for (const wait of waiting) wait.cancel()
   // A channel's publish bodies go first, as other holders share them (`releaseHolder`).
   for (const holder of holders) if (holder instanceof ServerChannel) holder._replayBuffer?.dispose()
   for (const holder of [...holders]) releaseHolder(holder)

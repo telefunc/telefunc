@@ -32,13 +32,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
   admitSend,
-  cancelWait,
-  joinLine,
-  parkWait,
-  releaseBehind,
-  reserveBehind,
-  takeWait,
-  waitForRoom,
   admit,
   fits,
   heldAnswerBytes,
@@ -48,9 +41,9 @@ import {
   holdsEnough,
   letGo,
   releaseHolder,
+  RoomWait,
   tryHold,
   type MemoryHolder,
-  type RoomWait,
 } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -130,8 +123,8 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
 type LossySend = { data: EntryData; held: number }
 /** A lossy send, and what it holds. */
 type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; bytes: number; held: number }
-/** A send that waits for room, how its promise settles if the channel ends first, and the lossy send behind it. */
-type WaitingSend = { wait: RoomWait; reject: (err: Error) => void; lossy: LossyBehind | null }
+/** A send that waits for room, with the lossy send behind it, and how its promise settles if the channel ends first. */
+type WaitingSend = { wait: RoomWait<LossyBehind>; reject: (err: Error) => void }
 
 /** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
  *  attaches only once it has sent the call's whole body. */
@@ -428,15 +421,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Behind a send of its channel that waits for room, a lossy one waits too, as the newest, reserved in that one's turn:
    *  it goes right after it, so nothing passes it. */
-  private sendLossyBehind(waiting: WaitingSend, lossy: LossyBehind): void | Promise<void> {
+  private sendLossyBehind({ wait }: WaitingSend, lossy: LossyBehind): void | Promise<void> {
     // The two go together, so a lossy one they can't both fit in its channel is refused, leaving the other its turn.
-    if (waiting.wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
-    const replaced = waiting.lossy?.held ?? 0
-    if (lossy.held > replaced && !reserveBehind(waiting.wait, lossy.held - replaced))
-      return Promise.reject<void>(this.refuseSend(lossy.held - replaced, false))
-    if (lossy.held < replaced) releaseBehind(waiting.wait, replaced - lossy.held)
+    if (wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
     // The caller may write into its bytes once `send` returned, as for a send that waits.
-    waiting.lossy = { ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) }
+    const kept = { ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) }
+    if (!wait.putBehind(kept, lossy.held))
+      return Promise.reject<void>(this.refuseSend(lossy.held - wait.behindBytes, false))
   }
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
@@ -528,28 +519,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     keep?.()
     return new Promise<unknown>((resolve, reject) => {
       const made = () => {
-        const lossy = this.roomWait?.lossy ?? null
         this.roomWait = null
         void settleMade(go(), resolve, reject)
-        if (lossy === null) return
-        releaseBehind(wait, lossy.held)
-        void this.makeLossy(lossy)
+        const lossy = wait.takeBehind()
+        if (lossy !== null) void this.makeLossy(lossy)
       }
-      const wait = this.didRegister ? waitForRoom(this, held, made) : parkWait(this, held, made)
-      this.roomWait = { wait, reject, lossy: null }
+      const wait = new RoomWait<LossyBehind>({ holder: this, bytes: held, go: made, inLine: this.didRegister })
+      this.roomWait = { wait, reject }
     })
   }
 
   /** Its send that waits for room goes now, ahead of its end, holding what it reserved, as the end holds what went
    *  before it; the lossy send behind it goes too, unless the end drops lossy sends. */
   private sendWaitingNow({ dropLossy }: { dropLossy: boolean }): void {
-    const waiting = this.roomWait
-    if (waiting === null) return
-    if (dropLossy && waiting.lossy !== null) {
-      releaseBehind(waiting.wait, waiting.lossy.held)
-      waiting.lossy = null
-    }
-    takeWait(waiting.wait)
+    const wait = this.roomWait?.wait
+    if (wait === undefined) return
+    if (dropLossy) wait.takeBehind()
+    wait.goNow()
   }
 
   /** A send that would hold `bytes` wasn't admitted. */
@@ -680,7 +666,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
     // Its send waiting for room joins the line behind them, or is refused where `maxMemory` has no room for it.
     const waiting = this.roomWait
-    if (waiting !== null && !joinLine(waiting.wait)) {
+    if (waiting !== null && !waiting.wait.joinLine()) {
       this.roomWait = null
       waiting.reject(this.refuseSend(waiting.wait.bytes))
     }
@@ -1304,7 +1290,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const waiting = this.roomWait
     if (waiting === null) return
     this.roomWait = null
-    cancelWait(waiting.wait)
+    waiting.wait.cancel()
     waiting.reject(this.lifecycle.waitingSendOutcome ?? err ?? this.endError())
   }
 
