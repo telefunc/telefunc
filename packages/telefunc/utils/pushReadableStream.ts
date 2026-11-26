@@ -30,6 +30,8 @@ type PushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>> = {
   readonly readable: ReadableStream<T>
   push(chunk: T): boolean
   close(): void
+  /** Ends it at once, with what the consumer hasn't read: the body handed on fails. */
+  abort(): void
   readonly isClosed: boolean
   /** Bytes pushed that the consumer hasn't read yet, while open. */
   readonly bufferedAmount: number
@@ -71,6 +73,10 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
       if (closed) return
       closed = true
       controller.close()
+    },
+    abort: () => {
+      closed = true
+      controller.error(new Error('Stream aborted'))
     },
     get isClosed() {
       return closed

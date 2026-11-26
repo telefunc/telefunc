@@ -2,6 +2,7 @@ export { EventStream }
 
 import { Fifo } from '../../../utils/Fifo.js'
 import { assert } from '../../../utils/assert.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { SSE_EVENT_SLICE_BYTES, WIRE_GATHER_BYTES } from '../../constants.js'
@@ -38,14 +39,46 @@ class EventStream implements WireQueue {
   private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** Whether the stream asks for more. */
   private takes: boolean
+  /** Runs once the stream let go of what it holds (`letGo`); null once it ran. */
+  private onLetGo: (() => void) | null = null
+  private letGone = false
+  /** Lets go of what the closed stream holds, once its page had the time to take it. */
+  private letGoTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor({ useNodeStream, onCancel }: EventStreamOptions) {
     // A Web stream asks from inside `enqueue`: an ask waits, so that no push runs inside another.
     const onTake = () => queueMicrotask(() => this.handWaiting())
+    const onGone = () => {
+      this.letGo()
+      onCancel()
+    }
     this.stream = useNodeStream
-      ? createPushReadable(onCancel, onTake)
-      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel, onTake)
+      ? createPushReadable(onGone, onTake)
+      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onGone, onTake)
     this.takes = this.stream.push(textEncoder.encode(': open\n\n'))
+  }
+
+  /** The events the stream holds: copies of their frames, which nothing else holds. */
+  get copiedBytes(): number {
+    return this.stream.bufferedAmount
+  }
+
+  /** `onLetGo` runs once the stream let go of what it holds, its page gone or past the time `close` gave it, at once
+   *  where it did. */
+  whenLetGo(onLetGo: () => void): void {
+    if (this.letGone) return onLetGo()
+    this.onLetGo = onLetGo
+  }
+
+  /** What its page hasn't taken goes: the stream ends at once, and so does the body it is. */
+  private letGo(): void {
+    if (this.letGone) return
+    this.letGone = true
+    clearTimeout(this.letGoTimer)
+    this.stream.abort()
+    const onLetGo = this.onLetGo
+    this.onLetGo = null
+    onLetGo?.()
   }
 
   /** The encoded bytes the stream holds, and those waiting for it to ask. */
@@ -143,8 +176,9 @@ class EventStream implements WireQueue {
    *  wait here for as long as the socket stays open taking nothing. An end the server decided goes as the `last` event,
    *  after the event under way, which nothing passes once it started: what waits ended with the wire, but for the
    *  channels' ends decided before it (`ERROR`), which go ahead of it in the order they were decided, so the page reads
-   *  each channel's end as its server channel settled with it. */
-  close(last: Uint8Array<ArrayBuffer> | null): void {
+   *  each channel's end as its server channel settled with it. What the stream then holds goes `letGoAfter` ms later,
+   *  unless its page left before: a page that lives took it by then. */
+  close(last: Uint8Array<ArrayBuffer> | null, letGoAfter: number): void {
     const ends = last === null ? [] : [...this.passing, ...this.waiting].filter((frame) => frame[0] === TAG.ERROR)
     this.passing = new Fifo()
     this.waiting = new Fifo()
@@ -156,6 +190,7 @@ class EventStream implements WireQueue {
     }
     this.current = null
     this.stream.close()
+    if (!this.letGone) this.letGoTimer = unrefTimer(setTimeout(() => this.letGo(), letGoAfter))
   }
 
   /** Hands the stream the data that waits, as far as it asks. */

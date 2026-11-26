@@ -9,6 +9,8 @@ type PushReadable = {
   readonly readable: Readable
   push(chunk: Uint8Array): boolean
   close(): void
+  /** Ends it at once, with what the consumer hasn't read: the body handed on fails. */
+  abort(): void
   /** Bytes pushed that the consumer hasn't read yet. */
   readonly bufferedAmount: number
 }
@@ -36,6 +38,11 @@ function createPushReadable(onCancel?: () => void, onDrain?: () => void): PushRe
       if (ended || cancelled) return
       ended = true
       readable.push(null)
+    },
+    abort: () => {
+      // The body's consumer takes the failure; none may be listening.
+      readable.on('error', () => {})
+      readable.destroy(new Error('Stream aborted'))
     },
     get bufferedAmount() {
       return readable.readableLength

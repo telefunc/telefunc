@@ -65,6 +65,14 @@ const END_CAUSE = {
     ChannelOverflowError,
     'The page sent more on its connection than the server holds while it works on what came before.',
   ),
+  /** Its page's connection made the server hold more than its share of `maxMemory` beyond what its channels hold (the
+   *  answers to what the page sent, the copies of what the server sent it), as its page didn't take it: every channel of
+   *  the session ends. */
+  sendBudget: sessionCause(
+    0x0b,
+    ChannelOverflowError,
+    "The page didn't take what the server sent on its connection, and the server held more for it than its share of config.channel.maxMemory.",
+  ),
   /** A reconnect needed its channel's end, which the server had no room to keep. */
   endNotKept: {
     code: 0x0a,
@@ -79,7 +87,7 @@ const END_CAUSE = {
 /** The causes of a frame of one channel the server can't take, which end that channel. */
 type FrameRefusalCause = 'frameOverLimit' | 'frameRefused'
 /** The causes that end every channel of the page's session, the page's connection with them. */
-type SessionCause = 'unreadable' | 'receiveBudget'
+type SessionCause = 'unreadable' | 'receiveBudget' | 'sendBudget'
 /** The causes a `frames` refusal names. */
 type RefusalCause = FrameRefusalCause | SessionCause
 /** What a `frames` refusal's cause ends: the channel it names, or the page's session, naming none. */

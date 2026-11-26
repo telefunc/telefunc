@@ -1,9 +1,10 @@
 // What a wire holds while its RECONCILED is owed is bounded by the limit on what waits on its socket or stream, whatever
-// keeps the hold on (decisions/516-sse-carrier.md msg44, the review's R1.1); a channel's replay is its own, not the
-// limit's. The real SSE handler and ChannelMux run.
+// keeps the hold on (decisions/516-sse-carrier.md msg44, the review's R1.1): the wire's share of `maxMemory`; a
+// channel's replay is its own, not the limit's. The real SSE handler and ChannelMux run.
 
 import { expect, test, vi } from 'vitest'
 
+import { config } from '../../../node/server/serverConfig.js'
 import { MAX_CHANNELS_PER_CONNECTION, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
 import { decode, encode } from '../../wire/frame.js'
@@ -15,17 +16,14 @@ import { openStream, openWebSocket, order } from './serverPage.fixture.js'
 import { handleSseChannelRequest } from './sse.js'
 import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
-// The send backlog's base at 1 MiB, not 64 MiB: the rows that pass it build what passes it in milliseconds.
-vi.mock('../../constants.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../constants.js')>()),
-  WIRE_SEND_BACKLOG_BASE_BYTES: 2 ** 20,
-}))
+// A budget the rows that pass it pass in milliseconds, with room for the replay of the last row.
+config.channel = { maxMemory: '4m' }
 
 /** A PING listing as many channels as a page may have, none of them open: its PONG answers each, about 28 KB. */
 const widePing = () => encode.ping(Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({ ix, lastSeq: 0 })))
 
-/** More wide PINGs than the send backlog's base (mocked above) allows PONGs for. */
-const PINGS_PAST_THE_LIMIT = 100
+/** More wide PINGs than the budget (set above) holds PONGs for. */
+const PINGS_PAST_THE_LIMIT = 200
 
 test.each([
   ['tells', true],
@@ -80,7 +78,7 @@ test('on SSE, PINGs in batch POSTs while a hold is kept on by anything else end 
   vi.restoreAllMocks()
 })
 
-test("over SSE, a reconnect whose replay passes the backlog base is not ended by the limit: the replay is its channel's", async () => {
+test("over SSE, a reconnect whose replay passes room for a largest frame is not ended by the limit: the replay is its channel's", async () => {
   const mux = getChannelMux()
   const channel = new ServerChannel()
   mux.registerChannel(channel, ATTACHABLE_NOW)
@@ -95,8 +93,7 @@ test("over SSE, a reconnect whose replay passes the backlog base is not ended by
   const [reconciled] = await first.readUntil((frame) => frame[0] === TAG.RECONCILED)
   const answer = reconciled === undefined ? undefined : decode(reconciled)
   if (answer?.tag !== TAG.RECONCILED) throw new Error('no RECONCILED on the first wire')
-  // 2.5 MiB the page never confirms, past what the backlog allows a wire beside its channels' (its base, mocked to
-  // 1 MiB, and its largest frame).
+  // 2.5 MiB the page never confirms, past what the backlog allows a wire beside its channels' (its largest frame).
   const names = ['m1', 'm2', 'm3', 'm4', 'm5']
   for (const name of names) void channel.send(name + 'x'.repeat(2 ** 19))
   /** The frame of the last message, read from its header alone. */
