@@ -203,7 +203,7 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     if (!source) return refuseEndedEnvelope(runContext)
-    const reader = new BodyReader(source, clientLeft)
+    const reader = new BodyReader(source, clientLeft, queueMemory)
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
     const clientGone = holdUploadResponse(runContext, reader.restRead)
@@ -227,7 +227,7 @@ async function readBody(
     const leftDuringCall = () => void reader.readSettled().then(() => reader.clientGaveUp())
     clientGone.addEventListener('abort', leftDuringCall, { once: true })
     runContext.requestContext.onAnswered(() => {
-      reader.keepRest(queueMemory)
+      reader.keepRest()
       watchClient()
     })
     runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
@@ -308,7 +308,7 @@ async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient:
   if (signal.aborted) await reader.readSettled()
   watchClient()
   try {
-    await reader.endCall(signal.aborted ? 'client' : 'server', queueMemory)
+    await reader.endCall(signal.aborted ? 'client' : 'server')
   } catch (err: unknown) {
     handleTelefunctionBug(err)
   }

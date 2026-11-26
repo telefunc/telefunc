@@ -4,12 +4,13 @@
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
 import { BodyReader } from './BodyReader.js'
+import { queueMemory } from '../channel/server/channelMemory.js'
 
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 test("an error a Node source emits after the reader let go of it is the reader's, and nothing is thrown to the process", async () => {
   const source = new Readable({ read() {} })
-  const reader = new BodyReader(source, () => true)
+  const reader = new BodyReader(source, () => true, queueMemory)
   const reading = reader.readFrame(1 << 20)
   await turn()
   reader.letGo()
@@ -25,7 +26,7 @@ test("an error a Node source emits after the reader let go of it is the reader's
 
 test("a Node source the reader let go of with a read under way reads on for its owner: a `'data'` listener and `resume()` drain it", async () => {
   const source = new Readable({ read() {} })
-  const reader = new BodyReader(source, () => false)
+  const reader = new BodyReader(source, () => false, queueMemory)
   const reading = reader.readFrame(1 << 20)
   await turn()
   reader.letGo()

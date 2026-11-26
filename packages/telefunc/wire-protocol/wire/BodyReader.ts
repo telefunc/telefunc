@@ -5,6 +5,7 @@ import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { concatAll, decodeU32 } from './envelope.js'
 import { ProtocolViolationError } from './protocolViolation.js'
+import { Fifo } from '../../utils/Fifo.js'
 import type { QueueMemory } from '../channel/channelMessages.js'
 import type { RequestFile } from '../values/types.js'
 
@@ -102,6 +103,9 @@ class BodyReader {
   /** The read-off of the rest of the body, once it began: from then on it alone reads the source. */
   private readOff: Promise<void> | null = null
   private readOffDone = false
+  /** Where the reader counts what it keeps of the body for the file reads: what the read-off keeps (`keeping`), and what
+   *  a file's reads read ahead for an earlier file the app began and left without a reader. */
+  private readonly memory: () => QueueMemory
   /** What the read-off keeps for the file reads, from the call's answer or end on (`keepRest`), while a file is left to
    *  read: the chunks it read, in order, each held on `keeping` until a file read takes it. Null where it drops what it
    *  reads. */
@@ -123,8 +127,10 @@ class BodyReader {
   constructor(
     source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
     clientLeft: (err: unknown) => boolean | null,
+    memory: () => QueueMemory,
   ) {
     this.clientLeft = clientLeft
+    this.memory = memory
     if (source instanceof ReadableStream) {
       const reader = source.getReader()
       this.source = {
@@ -185,20 +191,20 @@ class BodyReader {
   /** At the call's end: each File the app can still read keeps its bytes, kept from the answer on (`keepRest`) or from
    *  now, until it reads them or lets go of the File, and the rest of the body is read off and dropped, to its end or its
    *  client's leaving. Where no File is left to read, as `discardRest`. */
-  async endCall(endedBy: 'client' | 'server', memory: () => QueueMemory): Promise<void> {
+  async endCall(endedBy: 'client' | 'server'): Promise<void> {
     if (this.unread.size === 0) return this.discardRest(endedBy)
-    this.keepRest(memory)
+    this.keepRest()
     await this.readOff
   }
 
   /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, or at the
    *  call's end (`endCall`): the client's upload ends, so that a browser, which delivers an answer only once it has sent
-   *  the whole body, gets it. While a file is left to read, each chunk is kept on `memory` for the file reads, which take
-   *  them in order as they read; a chunk `memory` refuses is dropped, and so is every one after it: a file read that
+   *  the whole body, gets it. While a file is left to read, each chunk is kept on the reader's memory for the file reads,
+   *  which take them in order as they read; a chunk it refuses is dropped, and so is every one after it: a file read that
    *  reaches them fails, saying why. What is kept goes once no file is left to read. */
-  keepRest(memory: () => QueueMemory): void {
+  keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
-    if (this.unread.size > 0) this.keeping = memory()
+    if (this.unread.size > 0) this.keeping = this.memory()
     this.readOff = this.readRest()
     // A failure, the app's own error, goes to `endCall` or `discardRest`, which await the same read-off.
     this.readOff.catch(() => {})
@@ -304,12 +310,13 @@ class BodyReader {
     }
   }
 
-  /** No File reads the file at `index` anymore: its end's callbacks run, and once no file is left to read, what is kept
-   *  goes. */
+  /** No File reads the file at `index` anymore: what was read ahead for it goes, its end's callbacks run, and once no
+   *  file is left to read, what is kept goes. */
   private fileGone(index: number): void {
     const onGone = this.unread.get(index)
     if (onGone === undefined) return
     this.unread.delete(index)
+    this.files.get(index)?.dropAhead()
     for (const callback of onGone) callback()
     if (this.unread.size === 0) this.dropKept()
   }
@@ -318,24 +325,27 @@ class BodyReader {
    * The file at `index`: a stream of its bytes, read off the body only as the app reads it (`highWaterMark: 0`).
    *
    * The body is one forward-only sequence, so the reader owns its position and lends it to one pull at a time. A read of
-   * a later file reaches each earlier file in turn. One whose stream isn't locked, or that was cancelled, is passed: its
-   * bytes are dropped. One whose stream is locked gets its next piece read for it, kept until its own read takes it, and
-   * the later read waits until the piece is read, the reader releases its lock, the file is cancelled, or the files end.
-   * A cancelled file's bytes are dropped once a later read passes it. The files end at the body's let-go, at a read
-   * that fails, and where the client leaves.
+   * a later file reaches each earlier file in turn. One the app never read whose stream isn't locked, or one that was
+   * cancelled, is passed: its bytes are dropped. One whose stream is locked gets its next piece read for it, kept until
+   * its own read takes it, and the later read waits until the piece is read, the reader releases its lock, the file is
+   * cancelled, or the files end. One the app began and left without a reader may take a reader again: its rest is read
+   * for it, kept within the reader's memory, and the later read goes on; where its memory refuses a piece, the file
+   * fails, saying why, and the rest of it is dropped. A cancelled file's bytes are dropped once a later read passes it.
+   * The files end at the body's let-go, at a read that fails, and where the client leaves.
    */
   private fileStream(index: number): ReadableStream<Uint8Array<ArrayBuffer>> {
-    const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver, () => this.wake())
+    const file = new FileRead(index, this.pullFile, this.cancelFile, this.fileOver, () => this.wake(), this.memory)
     this.files.set(index, file)
     if (this.filesEndedBy !== null) file.fail(this.stopped())
     return file.stream
   }
 
-  /** One chunk of `file`: the piece read ahead for it, or once it holds the position, the buffer's or the source's. */
+  /** One chunk of `file`: a piece read ahead for it, or once it holds the position, the buffer's or the source's. */
   private readonly pullFile = async (file: FileRead): Promise<void> => {
     if (file.over) return
+    file.started = true
     const turn =
-      file.ahead === null && this.holder === null && this.next === file.index
+      !file.hasAhead && this.holder === null && this.next === file.index
         ? this.hold(file)
         : await this.takePosition(file)
     if (turn === 'ahead') return this.takeAhead(file)
@@ -377,14 +387,12 @@ class BodyReader {
     return bytes.subarray(0, left)
   }
 
-  /** The piece read ahead for `file`, handed to its stream, which closes at its last piece; the reads waiting behind it
-   *  look again. */
+  /** The oldest piece read ahead for `file`, handed to its stream, which closes at its last piece; the reads waiting
+   *  behind it look again. */
   private takeAhead(file: FileRead): void {
-    const ahead = file.ahead
-    file.ahead = null
-    if (ahead === null) return
-    if (ahead.piece.length > 0) file.enqueue(ahead.piece)
-    if (ahead.last) file.close()
+    const piece = file.takeAhead()
+    if (piece !== undefined) file.enqueue(piece)
+    if (file.aheadEnded) file.close()
     this.wake()
   }
 
@@ -405,7 +413,7 @@ class BodyReader {
     for (;;) {
       if (this.filesEndedBy !== null) throw this.stopped()
       if (file.over) return 'none'
-      if (file.ahead !== null) return 'ahead'
+      if (file.hasAhead) return 'ahead'
       assertUsage(
         file.index >= this.next,
         `File argument ${file.index} has already been consumed (currently at ${this.next}). File arguments must be read in order.`,
@@ -413,11 +421,12 @@ class BodyReader {
       if (this.holder === null) {
         if (this.next === file.index) return this.hold(file)
         const earlier = this.files.get(this.next)
-        if (earlier === undefined || earlier.over || !earlier.stream.locked) {
+        if (earlier === undefined || earlier.over || !(earlier.stream.locked || earlier.started)) {
           await this.pass(file)
           continue
         }
-        if (earlier.ahead === null) {
+        // A locked file's own reads take its pieces one at a time; one begun and left without a reader has its rest read.
+        if (!earlier.stream.locked || !earlier.hasAhead) {
           await this.readAheadFor(earlier, file)
           continue
         }
@@ -427,8 +436,9 @@ class BodyReader {
     }
   }
 
-  /** Reads the next piece of `earlier`, the file at the position whose stream is locked, for it, as its own pull would,
-   *  for `by`, which holds the position meanwhile. A file cancelled meanwhile drops it. */
+  /** Reads the next piece of `earlier`, the file at the position whose stream is locked or that the app began, for it, as
+   *  its own pull would, for `by`, which holds the position meanwhile. A file cancelled meanwhile drops it; one whose
+   *  memory refuses it fails. */
   private async readAheadFor(earlier: FileRead, by: FileRead): Promise<void> {
     this.holder = by
     try {
@@ -450,13 +460,13 @@ class BodyReader {
         this.next++
         this.left = undefined
       }
-      if (!earlier.over) earlier.ahead = { piece, last }
+      if (!earlier.over && !earlier.keepAhead(piece, last)) earlier.fail(leftBehindError(earlier.index))
     } finally {
       this.release()
     }
   }
 
-  /** Drops the bytes of the file at the position, and the piece read ahead for it, for `by`, which holds the position
+  /** Drops the bytes of the file at the position, and what was read ahead for it, for `by`, which holds the position
    *  meanwhile. A failure is the stop's own: the truncation, or the app's error. */
   private async pass(by: FileRead): Promise<void> {
     this.holder = by
@@ -467,7 +477,7 @@ class BodyReader {
         `File arguments are being consumed out of order (reading ${by.index}, expected ${this.next}). Skipped files will be unreadable. For correct behavior, consume file arguments in the order they appear.`,
         { onlyOnce: true },
       )
-      if (passed) passed.ahead = null
+      passed?.dropAhead()
       await this.skipBytes(this.leftOfNext(), by)
       this.fileGone(this.next)
       this.next++
@@ -636,8 +646,14 @@ class FileRead {
   readonly index: number
   readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>
   over = false
-  /** The piece of it a later file's read read ahead for it (`readAheadFor`), and whether that is its last. */
-  ahead: { piece: Uint8Array<ArrayBuffer>; last: boolean } | null = null
+  /** Whether the app read it: its stream was pulled. */
+  started = false
+  /** The pieces of it later files' reads read ahead for it (`readAheadFor`), oldest first, and whether the newest is its
+   *  last. The oldest is the one piece the reader keeps for any file; each behind it is held on `aheadMemory`. */
+  private ahead = new Fifo<Uint8Array<ArrayBuffer>>()
+  private aheadLast = false
+  private aheadMemory: QueueMemory | null = null
+  private readonly memory: () => QueueMemory
   private controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null = null
   private readonly onOver: (file: FileRead) => void
 
@@ -647,9 +663,11 @@ class FileRead {
     cancel: (file: FileRead) => void,
     onOver: (file: FileRead) => void,
     onReaderReleased: () => void,
+    memory: () => QueueMemory,
   ) {
     this.index = index
     this.onOver = onOver
+    this.memory = memory
     this.stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
       {
         start: (controller) => void (this.controller = controller),
@@ -678,10 +696,46 @@ class FileRead {
     this.controller?.enqueue(chunk)
   }
 
+  /** Whether a piece read ahead for it, or its end, waits for its read. */
+  get hasAhead(): boolean {
+    return this.ahead.length > 0 || this.aheadLast
+  }
+
+  /** Whether its read took every piece read ahead for it, the last of it among them. */
+  get aheadEnded(): boolean {
+    return this.aheadLast && this.ahead.length === 0
+  }
+
+  /** Keeps `piece`, read ahead for it, and whether it is its last; false where its memory refuses the piece. */
+  keepAhead(piece: Uint8Array<ArrayBuffer>, last: boolean): boolean {
+    if (piece.length > 0) {
+      if (this.ahead.length > 0 && !(this.aheadMemory ??= this.memory()).tryHold(piece.length)) return false
+      this.ahead.push(piece)
+    }
+    this.aheadLast = last
+    return true
+  }
+
+  /** The oldest piece read ahead for it; the one behind it becomes the one the reader keeps for it. */
+  takeAhead(): Uint8Array<ArrayBuffer> | undefined {
+    const piece = this.ahead.shift()
+    const next = this.ahead.peek()
+    if (next !== undefined) this.aheadMemory?.letGo(next.length)
+    return piece
+  }
+
+  /** Lets go of what was read ahead for it. */
+  dropAhead(): void {
+    if (this.ahead.length > 0) this.ahead = new Fifo()
+    this.aheadLast = false
+    this.aheadMemory?.release()
+    this.aheadMemory = null
+  }
+
   markOver(): void {
     if (this.over) return
     this.over = true
-    this.ahead = null
+    this.dropAhead()
     this.onOver(this)
   }
 
@@ -696,6 +750,14 @@ class FileRead {
     this.markOver()
     this.controller?.error(error)
   }
+}
+
+/** A file the app began and left without a reader, whose rest a later file's read read for it past what its memory
+ *  allows. */
+function leftBehindError(index: number): Error {
+  return new Error(
+    `File argument ${index} was read in part and left without a reader while a later File argument was read, and the server keeps no more of a File read ahead than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped. Read a File to its end, or keep its reader, before reading the next one.`,
+  )
 }
 
 const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }

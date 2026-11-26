@@ -5,6 +5,7 @@
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
 import { BodyReader } from './BodyReader.js'
+import { queueMemory } from '../channel/server/channelMemory.js'
 import type { RequestFile } from '../values/types.js'
 
 type Kind = 'node' | 'web'
@@ -40,7 +41,7 @@ async function readTransferring(stream: ReadableStream<Uint8Array<ArrayBuffer>>)
 
 /** A reader of `chunks`, a body of `{}` and files of `sizes`, its metadata read; its files' streams. */
 async function setup(kind: Kind, chunks: string[], sizes: number[]) {
-  const reader = new BodyReader(bodyOf(kind, chunks.map(chunkOf)), () => false)
+  const reader = new BodyReader(bodyOf(kind, chunks.map(chunkOf)), () => false, queueMemory)
   await reader.readFrame(1024)
   return sizes.map((size, index) => reader.registerFile(index, size))
 }

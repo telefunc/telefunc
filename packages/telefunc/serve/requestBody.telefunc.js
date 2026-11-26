@@ -35,6 +35,24 @@ export async function holdsFirstReadsSecond(first, second) {
   }
 }
 
+/** Reads its first `Blob`'s first chunk and releases that reader, then reads its second, and the rest of its first with a
+ *  new reader a turn later: answers with how many bytes of each it read. */
+export async function peeksFirstReadsBoth(first, second) {
+  const stream = first.stream()
+  const peek = stream.getReader()
+  const { value } = await peek.read()
+  peek.releaseLock()
+  process.emit('requestBody.telefunc:read')
+  const rest = (async () => {
+    await new Promise((resolve) => setImmediate(resolve))
+    let bytes = value.length
+    for await (const chunk of stream) bytes += chunk.length
+    return bytes
+  })()
+  const [firstBytes, secondText] = await Promise.all([rest, second.text()])
+  return `${firstBytes} ${secondText.length}`
+}
+
 /** Answers without reading its `Blob`. */
 export async function ignoresBlob() {
   return 'ignored'

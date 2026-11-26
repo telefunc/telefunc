@@ -79,6 +79,17 @@ const holdsFirstStart = concat(
   ),
   encoder.encode('x'.repeat(10)),
 )
+/** A binary call to `peeksFirstReadsBoth` up to the first bytes of its first `Blob`. */
+const peeksFirstStart = concat(
+  frame(
+    JSON.stringify({
+      file,
+      name: 'peeksFirstReadsBoth',
+      args: [0, 1].map((index) => `!TelefuncBlob:${JSON.stringify({ index, size: FILE_SIZE, type: '' })}`),
+    }),
+  ),
+  encoder.encode('x'.repeat(10)),
+)
 /** A binary call to `startsReadingBlob` up to the first bytes of its `Blob`. */
 const readStartedStart = concat(
   frame(
@@ -221,6 +232,39 @@ async function sendWhole(body: Uint8Array, via: keyof typeof servers) {
   socket.write(body)
   return { socket, answered }
 }
+
+test.each(vias)(
+  'a binary call that reads its first `Blob` in part, releases that reader, and reads its rest with a new one a turn later while it reads its second, reads both whole (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const port = ports.get(via)
+    if (port === undefined) throw new Error('no server')
+    const rest = concat(encoder.encode('x'.repeat(FILE_SIZE - 10)), encoder.encode('y'.repeat(FILE_SIZE)))
+    const socket = connect(port, '127.0.0.1')
+    socket.on('error', () => {})
+    let answer = ''
+    const answered = new Promise<string>((resolve) => {
+      socket.on('data', (chunk: Buffer) => {
+        answer += chunk.toString('latin1')
+        if (answer.includes(`${FILE_SIZE} ${FILE_SIZE}`) || answer.includes('\r\n0\r\n')) resolve(answer)
+      })
+    })
+    await once(socket, 'connect')
+    const peeked = blobRead()
+    socket.write(
+      `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${peeksFirstStart.length + rest.length}\r\n\r\n`,
+    )
+    socket.write(peeksFirstStart)
+    await peeked
+    socket.write(rest)
+    expect({ answer: await answered, printed, bugs }).toEqual({
+      answer: expect.stringMatching(new RegExp(`^HTTP/1\\.1 200[\\s\\S]*${FILE_SIZE} ${FILE_SIZE}`)),
+      printed: [],
+      bugs: [],
+    })
+    socket.destroy()
+  },
+)
 
 /** A Fetch request of `kind` whose body gives `start`, then fails with `error` once `when` resolves. */
 function failingRequest(kind: keyof typeof kinds, start: Uint8Array, error: Error, when: Promise<void>): Request {

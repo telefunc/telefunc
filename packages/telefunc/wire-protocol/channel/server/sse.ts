@@ -17,6 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../../wire/env
 import { OversizeFrameError, BodyReader, StreamTruncatedError } from '../../wire/BodyReader.js'
 import { getChannelMux } from './ChannelMux.js'
 import { EventStream } from './EventStream.js'
+import { queueMemory } from './channelMemory.js'
 import type { Fault, ReconcileOutcome, ServerTransport, SessionHold, WireClose } from './ChannelMux.js'
 import { channelOf, encode } from '../../wire/frame.js'
 import { HEADER } from '../../wire/header.js'
@@ -100,7 +101,7 @@ class SseServerTransport {
     // and should answer with a Node `Readable` so it pipes straight to the socket. Web
     // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
     const useNodeStream = readable !== undefined
-    const reader = new BodyReader(source, clientLeft)
+    const reader = new BodyReader(source, clientLeft, queueMemory)
     let metadata: SseRequestMetadata
     try {
       const rawMetadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)

@@ -6,8 +6,10 @@
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
 import { BodyReader, StreamTruncatedError } from './BodyReader.js'
+import { queueMemory } from '../channel/server/channelMemory.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 import { LazyFile } from '../values/LazyFile.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 type Kind = 'node' | 'web'
 type Outcome = { state: 'pending' } | { state: 'done'; value: string } | { state: 'failed'; error: string }
@@ -83,6 +85,11 @@ async function textOf(reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer
 }
 
 const settled = (promise: Promise<unknown>) => track(promise.then(() => 'settled'))
+/** What the ledger holds, for every holder together: a row reads it against what it held at the row's start, as a row
+ *  that leaves a file unread and its reader open keeps what was read ahead for it. */
+const ledger = getGlobalObject<{ total: number }>('channelMemory.ts', { total: 0 })
+const turn = () => new Promise((resolve) => setImmediate(resolve))
+const latin1 = (bytes: Uint8Array | undefined) => String.fromCharCode(...(bytes ?? []))
 /** What a truncated read throws, by who stopped the body. */
 const CLIENT_LEFT = new StreamTruncatedError('client').message
 const BODY_ENDED = new StreamTruncatedError('body').message
@@ -96,7 +103,7 @@ const C = 'c'.repeat(10)
 async function setup(kind: Kind, sizes = [10, 10, 10], clientLeft = false) {
   const source = sourceOf(kind)
   source.push('\0\0\0\x02{}')
-  const reader = new BodyReader(source.body, () => clientLeft)
+  const reader = new BodyReader(source.body, () => clientLeft, queueMemory)
   await reader.readFrame(1024)
   const files = sizes.map((size, index) => reader.registerFile(index, size))
   const file = (index: number) => {
@@ -104,7 +111,9 @@ async function setup(kind: Kind, sizes = [10, 10, 10], clientLeft = false) {
     if (!registered) throw new Error(`no file ${index}`)
     return registered.stream()
   }
-  return { source, reader, file }
+  /** No File reads file `index` anymore, as when its File is collected. */
+  const letGo = (index: number) => files[index]?.letGo()
+  return { source, reader, file, letGo }
 }
 
 /** File 0's first 4 bytes read by the app, its stream left reading ahead for more. */
@@ -278,6 +287,169 @@ const rows: [string, (kind: Kind) => Promise<unknown>, unknown][] = [
       return { before, next: next.now }
     },
     { before: { state: 'pending' }, next: { state: 'failed', error: CLIENT_LEFT } },
+  ],
+  [
+    "W8. file 0's first piece read, its reader released, and a new one taken a turn later for its rest, while file 1 is read: both read their own bytes",
+    async (kind) => {
+      const { source, file } = await setup(kind, [20, 10])
+      const stream = file(0)
+      const peek = stream.getReader()
+      source.push(A)
+      const { value } = await peek.read()
+      peek.releaseLock()
+      const next = track(text(file(1)))
+      source.push(A + B)
+      source.end()
+      await turn()
+      const rest = track(text(stream))
+      await settle()
+      return { first: latin1(value), rest: rest.now, next: next.now }
+    },
+    { first: A, rest: { state: 'done', value: A }, next: { state: 'done', value: B } },
+  ],
+  [
+    "W9. file 0's first piece read and its reader released, its rest coming in two pieces while file 1 is read: the piece behind the first read for it is held on the ledger till file 0's new reader takes it",
+    async (kind) => {
+      const { source, file } = await setup(kind, [30, 10])
+      const base = ledger.total
+      const stream = file(0)
+      const peek = stream.getReader()
+      source.push(A)
+      const { value } = await peek.read()
+      peek.releaseLock()
+      const next = track(text(file(1)))
+      await settle()
+      source.push(A)
+      await settle()
+      source.push(A)
+      await settle()
+      const held = ledger.total - base
+      source.push(B)
+      source.end()
+      await settle()
+      const again = stream.getReader()
+      const second = latin1((await again.read()).value)
+      // The piece behind it is now the one the reader keeps for file 0.
+      const heldOnceOneTaken = ledger.total - base
+      const rest = track(textOf(again))
+      await settle()
+      return {
+        first: latin1(value),
+        held,
+        next: next.now,
+        second,
+        heldOnceOneTaken,
+        rest: rest.now,
+        after: ledger.total - base,
+      }
+    },
+    {
+      first: A,
+      held: A.length,
+      next: { state: 'done', value: B },
+      second: A,
+      heldOnceOneTaken: 0,
+      rest: { state: 'done', value: A },
+      after: 0,
+    },
+  ],
+  [
+    "W12. file 0's first piece read and its reader released, its rest read for it while file 1 is read, then its File let go of: what was read ahead for it leaves the ledger",
+    async (kind) => {
+      const { source, file, letGo } = await setup(kind, [30, 10])
+      const base = ledger.total
+      const peek = file(0).getReader()
+      source.push(A)
+      await peek.read()
+      peek.releaseLock()
+      const next = track(text(file(1)))
+      await settle()
+      source.push(A)
+      await settle()
+      source.push(A + B)
+      await settle()
+      const held = ledger.total - base
+      letGo(0)
+      return { held, next: next.now, after: ledger.total - base }
+    },
+    { held: A.length, next: { state: 'done', value: B }, after: 0 },
+  ],
+  [
+    "W13. file 0's first piece read and its reader released, its rest read for it while file 1 is read, then file 0 cancelled: what was read ahead for it leaves the ledger",
+    async (kind) => {
+      const { source, file } = await setup(kind, [30, 10])
+      const base = ledger.total
+      const stream = file(0)
+      const peek = stream.getReader()
+      source.push(A)
+      await peek.read()
+      peek.releaseLock()
+      const next = track(text(file(1)))
+      await settle()
+      source.push(A)
+      await settle()
+      source.push(A + B)
+      await settle()
+      const held = ledger.total - base
+      const cancel = settled(stream.cancel())
+      await settle()
+      return { held, cancel: cancel.now, next: next.now, after: ledger.total - base }
+    },
+    { held: A.length, cancel: { state: 'done', value: 'settled' }, next: { state: 'done', value: B }, after: 0 },
+  ],
+  [
+    "W10. file 0's first piece read through `values({ preventCancel: true })` and a `break`, while file 1 is read: file 0's next reader reads its rest",
+    async (kind) => {
+      const { source, file } = await setup(kind, [20, 10])
+      const base = ledger.total
+      const stream = file(0)
+      source.push(A)
+      let first = ''
+      for await (const chunk of stream.values({ preventCancel: true })) {
+        first = latin1(chunk)
+        break
+      }
+      const next = track(text(file(1)))
+      source.push(A + B)
+      source.end()
+      await turn()
+      const rest = track(text(stream))
+      await settle()
+      return { first, rest: rest.now, next: next.now, after: ledger.total - base }
+    },
+    { first: A, rest: { state: 'done', value: A }, next: { state: 'done', value: B }, after: 0 },
+  ],
+  [
+    "W11. file 0 piped with `preventCancel: true` to a sink that fails at its first piece, while file 1 is read: file 0's next reader reads its rest",
+    async (kind) => {
+      const { source, file } = await setup(kind, [20, 10])
+      const base = ledger.total
+      const stream = file(0)
+      let first = ''
+      const sink = new WritableStream<Uint8Array>({
+        write(chunk) {
+          first += latin1(chunk)
+          throw new Error('the sink is full')
+        },
+      })
+      const piped = track(stream.pipeTo(sink, { preventCancel: true }).then(() => 'piped'))
+      source.push(A)
+      await settle()
+      const next = track(text(file(1)))
+      source.push(A + B)
+      source.end()
+      await settle()
+      const rest = track(text(stream))
+      await settle()
+      return { first, piped: piped.now, rest: rest.now, next: next.now, after: ledger.total - base }
+    },
+    {
+      first: A,
+      piped: { state: 'failed', error: 'the sink is full' },
+      rest: { state: 'done', value: A },
+      next: { state: 'done', value: B },
+      after: 0,
+    },
   ],
   [
     '1. file 0 cancelled before its first byte: file 1 reads its own bytes',
