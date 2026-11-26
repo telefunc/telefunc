@@ -89,7 +89,7 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ### WebSocket
 
-The server opens a WebSocket for pages of its own origin. A page of another origin stays on SSE, unless you list its origin:
+The server opens a WebSocket for pages of its own origin. A page of another origin uses SSE if enabled, unless you list its origin:
 
 ```ts
 // Environment: server

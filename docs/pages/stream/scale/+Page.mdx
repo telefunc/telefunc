@@ -19,8 +19,6 @@ A <Link href="/channel">`Channel`</Link> is a stateful connection. Its server-si
 
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
 
-> Sanity check: after deploying behind a sticky load balancer, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions.
-
 
 ### Nginx — `ip_hash`
 
@@ -40,6 +38,8 @@ backend telefunc
   server app1 app1:3000 check cookie app1
   server app2 app2:3000 check cookie app2
 ```
+
+> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. If two consecutive requests carry different values, the load balancer isn't configured for sticky sessions.
 
 ### Caddy — `lb_policy cookie`
 
@@ -83,7 +83,9 @@ type BroadcastTransport = {
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 ```
 
-`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function, and Telefunc calls each at most once per key at a time.
+`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function, or `{ unsubscribe, opened }`, and Telefunc calls each at most once per key at a time.
+
+A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
 
 > If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }` instead, and resolve `opened` once the listener receives what any server publishes to the key.
 

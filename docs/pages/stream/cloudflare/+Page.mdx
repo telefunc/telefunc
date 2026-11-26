@@ -106,7 +106,7 @@ Every telefunction call and channel message from a client must reach the **same 
 
 <Warning>
 
-**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels.
+**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels. For a cross-origin client, expose `x-telefunc-home` with `Access-Control-Expose-Headers`.
 
 </Warning>
 
@@ -136,40 +136,9 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 <Link href="/channel#broadcast">Broadcasts</Link> fan out across all regions automatically.
 
-### How it works
-
-<Advanced>
-
-You can skip this section — it's Telefunc's internal fan-out, not anything you configure.
-
-</Advanced>
-
-```
-Publisher (Durable Object)
-  → Authority DO (one per key — assigns sequence numbers)
-    → Coordinators (one per active region)
-      → Durable Objects (deliver to local subscribers)
-```
-
-1. The publisher forwards the message to an **authority** Durable Object for the key.
-2. The authority assigns a monotonic sequence number, reads active presence from KV, and forwards to each region with subscribers.
-3. Each region's coordinator fans out to the Durable Objects in that region.
-4. Each Durable Object delivers to its local subscribers.
-
 ### Ordering
 
 <Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
-
-### Presence
-
-Telefunc uses KV to track which Durable Objects have active subscribers:
-
-| Setting | Value |
-|---|---|
-| TTL | 90 seconds |
-| Refresh | every 30 seconds |
-
-A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fan-out.
 
 
 ## Delivery guarantees
@@ -179,7 +148,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server holds messages while the client is disconnected, up to <Link href="/channel-config">`config.channel.maxMemory`</Link> (default on Cloudflare: 64 MiB). |
+| Buffering | The server holds messages while the client is disconnected, within <Link href="/channel-config">`config.channel.maxMemory`</Link>, which all its channels share (default on Cloudflare: 64 MiB). |
 | Replay | On reconnect, missing messages are resent and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
 | Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
@@ -189,7 +158,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Publishes for a given key are serialized and delivered in order. |
-| Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Delivery to clients then happens over the channel connection. |
+| Delivery | `publish()` resolves after all Durable Objects with subscribers visible to the publisher at the time have received the message. Delivery to clients then happens over the channel connection. |
 | Presence lag | A new subscriber may miss publishes from other locations until KV shows its presence record there, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/). |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.

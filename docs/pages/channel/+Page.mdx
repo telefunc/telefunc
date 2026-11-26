@@ -109,7 +109,7 @@ channel.send('Hello!')
 | `onClose(cb)` | Called when the channel closes. |
 | `opened` | Promise that resolves when the channel opens. |
 | `closed` | Promise that resolves when the channel has closed: with `null`, or with the error it ended with. |
-| `close()` | Close gracefully. |
+| `close()` | Close gracefully. Resolves with `null` once closed, or with the error it ended with. |
 | `abort(value?)` | Terminate immediately. |
 
 > `onOpen()` and `onClose()` return a function that removes the callback. `listen()`, `listenBinary()`, `onOpen()` and `onClose()` also accept `{ signal }` as their second argument: aborting it removes the callback.
@@ -383,7 +383,7 @@ broadcast.subscribe((n) => showToast(n))
 | `onClose(cb)` | Called when the channel closes. |
 | `opened` | Promise that resolves when the channel opens. |
 | `closed` | Promise that resolves when the channel has closed: with `null`, or with the error it ended with. |
-| `close()` | Close gracefully. |
+| `close()` | Close gracefully. Resolves with `null` once closed, or with the error it ended with. |
 | `abort(abortValue?)` | Terminate immediately. |
 
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link href="#broadcast"><code>Broadcast.publish(key, data)</code></Link> / `Broadcast.subscribe(key, cb)` have no `onOpen` / `onClose` / `close` / `abort` since there's no instance to manage.
@@ -443,7 +443,7 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect.
+- When a channel reconnects, Telefunc resends the reliable messages it kept for the other end.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
