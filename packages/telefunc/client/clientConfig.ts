@@ -59,7 +59,7 @@ type ConfigUser = {
 type ConfigResolved = {
   telefuncUrl: string
   headers: Record<string, string> | null
-  fetch: typeof globalThis.fetch | null
+  fetch: typeof globalThis.fetch
   stream?: StreamConfigUser
   channel: { transports: ChannelTransports }
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
@@ -126,7 +126,7 @@ function resolveClientConfig(): ConfigResolved {
   return {
     headers: configState.headers ?? configState.httpHeaders ?? null,
     telefuncUrl: configState.telefuncUrl || '/_telefunc',
-    fetch: configState.fetch ?? null,
+    fetch: configState.fetch ?? globalThis.fetch,
     stream: configState.stream.transport ? { ...configState.stream } : undefined,
     channel: { transports: configState.channel.transports ?? [...DEFAULT_CLIENT_CHANNEL_TRANSPORTS] },
     extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),

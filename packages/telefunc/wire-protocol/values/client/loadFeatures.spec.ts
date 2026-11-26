@@ -38,6 +38,10 @@ beforeEach(() => {
   vi.stubGlobal('window', {
     scrollY: 0,
     location: { href: 'http://localhost/' },
+    // The page's global object.
+    get fetch() {
+      return globalThis.fetch
+    },
     addEventListener() {},
     removeEventListener() {},
   })
@@ -308,6 +312,72 @@ test('a call aborted while its text response waits for its chunk rejects at once
   expect(told).toBe(1)
 })
 
+test("a call aborted while its text response's body arrives, channels' code loaded, opens no channel", async () => {
+  const { config, call, withContext } = await page()
+  gates.channels.open()
+  respond = text(CHANNEL)
+  await call([])
+  const used: string[] = []
+  config.fetch = recordingFetch('page', used)
+  let sink: ReadableStreamDefaultController<Uint8Array> | undefined
+  let pulled = false
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        sink = controller
+      },
+      pull() {
+        pulled = true
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body)
+  const controller = new AbortController()
+  const connectionKey = crypto.randomUUID()
+  const pending = withContext(call, { signal: controller.signal, channel: { connectionKey } })([])
+  await vi.waitFor(() => expect(pulled).toBe(true))
+  controller.abort()
+  assert(sink)
+  sink.enqueue(textEncoder.encode(JSON.stringify({ ret: tag('!TelefuncChannel:', { channelId: 'c2' }) })))
+  sink.close()
+  expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(used).toEqual(['page:call'])
+})
+
+test('a cold upload aborted as its channel opens sends nothing and cancels the upload once', async () => {
+  const controller = new AbortController()
+  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+    const original = await importOriginal()
+    class AbortingChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+      constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
+        super(options)
+        controller.abort()
+      }
+    }
+    return { ...original, ClientChannel: AbortingChannel }
+  })
+  try {
+    const { call, withContext } = await page()
+    respond = text(1)
+    let sourceCancelled = 0
+    const upload = new ReadableStream({
+      cancel() {
+        sourceCancelled++
+      },
+    })
+    const pending = withContext(call, { signal: controller.signal })([upload])
+    gates.channels.open()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    expect(posts).toEqual([])
+    expect(sourceCancelled).toBe(1)
+    expect(upload.locked).toBe(false)
+  } finally {
+    vi.doUnmock('../../channel/client/ClientChannel.js')
+  }
+})
+
 test('a call with an upload aborted while channels load sends nothing and cancels the upload, as a sent one does', async () => {
   const { call, withContext } = await page()
   let sourceCancelled = 0
@@ -383,6 +453,20 @@ test("a cold upload's call and the wire its channel opens use the fetch of the c
   config.fetch = recordingFetch('before', used)
   const pending = call([new ReadableStream()])
   config.fetch = recordingFetch('after', used)
+  gates.channels.open()
+  await pending
+  await vi.waitFor(() => expect(used).toContain('before:wire'))
+  expect(used.filter((use) => use.startsWith('after'))).toEqual([])
+  expect(used).toContain('before:call')
+})
+
+test("without config.fetch, a cold upload's call and the wire its channel opens use the page's fetch of the call's invocation", async () => {
+  const used: string[] = []
+  respond = text(1)
+  vi.stubGlobal('fetch', recordingFetch('before', used))
+  const { remoteTelefunctionCall } = await import('../../../client/remoteTelefunctionCall.js')
+  const pending = remoteTelefunctionCall('/p.telefunc.ts', 'onP', [new ReadableStream()])
+  vi.stubGlobal('fetch', recordingFetch('after', used))
   gates.channels.open()
   await pending
   await vi.waitFor(() => expect(used).toContain('before:wire'))

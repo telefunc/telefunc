@@ -10,11 +10,11 @@ function getConnectionOptions(callContext: {
   channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
-  fetch: typeof globalThis.fetch | null
+  fetch: typeof globalThis.fetch
 }): ConnectionOptions {
   return {
     transports: callContext.channel.transports,
-    fetch: callContext.fetch ?? globalThis.fetch,
+    fetch: callContext.fetch,
     connectionKey: callContext.connectionKey,
     headers: callContext.headers ?? undefined,
     telefuncUrl: callContext.telefuncUrl,

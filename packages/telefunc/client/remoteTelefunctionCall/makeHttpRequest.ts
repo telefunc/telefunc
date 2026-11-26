@@ -32,7 +32,7 @@ async function makeHttpRequest(callContext: {
   telefunctionName: string
   telefuncFilePath: string
   headers: Record<string, string> | null
-  fetch: typeof globalThis.fetch | null
+  fetch: typeof globalThis.fetch
   abortController: AbortController
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
@@ -47,7 +47,7 @@ async function makeHttpRequest(callContext: {
   const requestKindHeader = { [REQUEST_KIND_HEADER]: requestKind }
   let response: Response
   try {
-    const fetch = callContext.fetch ?? window.fetch
+    const { fetch } = callContext
     response = await fetch(requestUrl, {
       method,
       body: callContext.httpRequestBody,

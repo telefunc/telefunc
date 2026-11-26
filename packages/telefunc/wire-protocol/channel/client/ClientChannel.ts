@@ -147,7 +147,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._attach = new ChannelAttach({ channel: this, sendCredit: this.sendCredit, receiveCredit: this.receiveCredit })
     this.connection = ClientConnection.getOrCreate(connection.telefuncUrl, this, {
       transports: connection.transports,
-      fetchImpl: (connection.fetch ?? resolveClientConfig().fetch ?? globalThis.fetch).bind(globalThis),
+      fetchImpl: (connection.fetch ?? resolveClientConfig().fetch).bind(globalThis),
       connectionKey: connection.connectionKey,
       headers: connection.headers,
       idleTimeout: connection.idleTimeout,

@@ -90,7 +90,6 @@ async function parseStreamedResponse(
     streamReader = streams.createBodyReader(body.getReader(), isSse, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
-    throwIfAborted(callContext)
     const metaText = new TextDecoder().decode(metaBytes)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
@@ -188,10 +187,8 @@ async function reviveResponse(
     const values = new ResponseValues(body, callContext.extensionResponseTypes, !bodyStreamReader)
     const loaded = loadedFeatures()
     const needed = values.missingFeatures(loaded)
-    if (needed?.length) {
-      await loadFeatures(needed, callContext)
-      throwIfAborted(callContext)
-    }
+    if (needed?.length) await loadFeatures(needed, callContext)
+    throwIfAborted(callContext)
     parsed = values.revive(context, handOut, loaded)
     if (pendingValues.length > 0) {
       parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))

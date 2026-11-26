@@ -4,6 +4,7 @@ import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
 import { serializeTelefunctionArguments } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
 import { assertUsage } from '../utils/assert.js'
+import { throwIfAborted } from './remoteTelefunctionCall/errors.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
@@ -96,6 +97,7 @@ async function sendOnceChannelsPrepared(
   callContext: Parameters<typeof makeHttpRequest>[0],
 ) {
   await prepareChannels()
+  throwIfAborted(callContext)
   return makeHttpRequest(callContext)
 }
 
