@@ -299,3 +299,24 @@ describe('a stream sent over transport channel and read to its end', () => {
     await expect(stream.cancel('the caller is done with it')).resolves.toBeUndefined()
   })
 })
+
+describe('a stream whose producer is cancelled before its first read', () => {
+  test.each([
+    [
+      "a page's upload argument",
+      (stream: ReadableStream<Uint8Array<ArrayBuffer>>) => readableStreamReplacer.createProducer(stream),
+    ],
+    ["a telefunction's returned stream", createStreamProducer],
+  ])('%s is let go of: unlocked, and its own cancel() resolves', async (_, producerOf) => {
+    let cancelledFor: unknown = null
+    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      cancel(reason) {
+        cancelledFor = reason
+      },
+    })
+    producerOf(stream).cancel(new Error('the call ended'))
+    await vi.waitFor(() => expect(stream.locked).toBe(false))
+    expect(cancelledFor).toEqual(new Error('the call ended'))
+    await expect(stream.cancel('mine')).resolves.toBeUndefined()
+  })
+})

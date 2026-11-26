@@ -13,8 +13,8 @@ import type { RequestFile } from '../values/types.js'
 const EMPTY = new Uint8Array(0)
 
 /** What the reader reads the body through: a Web body's reader, or a Node body's chunks (`ReadableChunks`). `letGo`
- *  reads no more of the body, and does nothing more where called again: it hands the body back to its owner unread, or
- *  cancels it where the runtime keeps the reader's lock (workerd). */
+ *  reads no more of the body, and does nothing more where called again: it hands the body back to its owner, or cancels
+ *  it where the runtime keeps the reader's lock (workerd). The reader lets go of it at its end or its failed read too. */
 type ChunkSource = {
   next(): Promise<IteratorResult<Uint8Array<ArrayBuffer>>>
   letGo(): void
@@ -550,6 +550,7 @@ class BodyReader {
       const { value, done } = await this.reading
       if (done) {
         this.stop ??= { why: 'ended' }
+        this.source.letGo()
         return null
       }
       this.onChunk?.()
@@ -558,6 +559,7 @@ class BodyReader {
       // A stop that came while the read was under way ends it as that stop: the body let go of (a Web reader's released
       // lock fails the read), or its client's leaving as the request's signal says it (`leftByClient`).
       if (this.stop !== null) return null
+      this.source.letGo()
       const clientLeft = this.clientLeft(error)
       this.stop = { why: clientLeft === null ? 'unknown' : clientLeft ? 'clientLeft' : 'app', error }
       if (this.stop.why === 'app') throw error

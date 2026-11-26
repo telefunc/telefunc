@@ -10,6 +10,10 @@ function producerOfStream(
   checkChunk?: (chunk: unknown) => void,
 ): StreamingProducer {
   const reader = stream.getReader()
+  let lettingGo: Promise<void> | null = null
+  // The stream is the app's: at its end or on `cancel()`, whichever comes first, it is let go of for the app's own
+  // `cancel()` or another read. A `cancel()` before the first read ends `chunks` without running its `finally`.
+  const letGo = (reason?: unknown) => (lettingGo ??= cancelAndRelease(reader, reason))
   const chunks = (async function* () {
     try {
       while (true) {
@@ -19,16 +23,26 @@ function producerOfStream(
         yield chunk
       }
     } finally {
-      // The stream is the app's: at its end, it is let go of for the app's own `cancel()` or another read.
-      await reader.cancel().finally(() => reader.releaseLock())
+      await letGo()
     }
   })()
   return {
     chunks,
     cancel: (reason) => {
-      // Nothing awaits these: they reject with the source's error, or its cancel() failure.
+      // Nothing awaits it: it rejects with the source's error.
       chunks.return(undefined).catch(() => {})
-      reader.cancel(reason).catch(() => {})
+      void letGo(reason)
     },
+  }
+}
+
+/** Cancels `reader`'s stream, then releases it. */
+async function cancelAndRelease(reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>, reason: unknown) {
+  try {
+    await reader.cancel(reason)
+  } catch {
+    // The app's source failed to cancel: a read that failed already threw its error, and nothing else awaits a cancel.
+  } finally {
+    reader.releaseLock()
   }
 }
