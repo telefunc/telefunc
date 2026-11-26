@@ -59,6 +59,8 @@ async function buildCopy(): Promise<PageBuild> {
     const partial = new URL(`${name}.partial/`, copiesDir)
     const copy = new URL(`${name}/`, copiesDir)
     await cp(new URL('dist/', packageDir), new URL('dist/', partial), { recursive: true })
+    // Node finds no package scope inside `node_modules/`, so the copy's `.js` files need their own `"type": "module"`.
+    await writeFile(new URL('package.json', partial), '{ "type": "module" }\n')
     await rename(partial, copy)
     return { dist: new URL('dist/', copy).href }
   })
