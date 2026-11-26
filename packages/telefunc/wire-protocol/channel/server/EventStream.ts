@@ -7,7 +7,7 @@ import { createPushReadableStream, type PushReadableStream } from '../../../util
 import { SSE_EVENT_SLICE_BYTES, WIRE_GATHER_BYTES } from '../../constants.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { textEncoder } from '../../wire/envelope.js'
-import { encode } from '../../wire/frame.js'
+import { HEADER, writeHeader } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import {
   countWaitingPublishes,
@@ -74,8 +74,10 @@ class EventStream implements WireQueue {
   }
 
   /** Gives an idle stream both frames of a publish in one event. */
-  gatherPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>): void {
-    const message = encode.message([head, body], head.byteLength + body.byteLength)
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
+    const message = new Uint8Array(HEADER + body.byteLength)
+    writeHeader(message, TAG.PUBLISH_TO, index, seq)
+    message.set(body, HEADER)
     this.takes = this.stream.push(encodeChunk(message, 0, message.byteLength))
   }
 

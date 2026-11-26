@@ -16,7 +16,7 @@ interface PeerSender {
    *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
   behindAfter(roundTrip: number): number
   send(frame: Uint8Array): void
-  sendPublish?(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>): void
+  sendPublish?(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
@@ -164,10 +164,9 @@ class IndexedPeer {
   }
 
   private sendBehindHead(seq: number, body: PublishBody): void {
-    const head = encode.publishTo(this.index, seq)
     this.replay.pushPublish(seq, this.index, body)
-    if (this.sender.sendPublish) return this.sender.sendPublish(head, body.frame)
-    this.sender.send(head)
+    if (this.sender.sendPublish) return this.sender.sendPublish(this.index, seq, body.frame)
+    this.sender.send(encode.publishTo(this.index, seq))
     this.sender.send(body.frame)
   }
 

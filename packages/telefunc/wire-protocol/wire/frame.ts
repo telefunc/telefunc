@@ -57,6 +57,7 @@ import {
 } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
+import { assert } from '../../utils/assert.js'
 import { END_CAUSE } from '../channel/endCause.js'
 
 const PING_ENTRY_BYTES = 6
@@ -317,15 +318,26 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (`lengthBytes`), in one message. */
-  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+  /** Writes the frames in order. A null slot takes the next publish index and sequence from `routes`. */
+  message(frames: readonly (Uint8Array | null)[], bytes: number, routes?: readonly number[]): Uint8Array<ArrayBuffer> {
     const message = new Uint8Array(bytes)
     const last = frames.length - 1
     let at = 0
+    let route = 0
     for (let i = 0; i <= last; i++) {
-      const frame = frames[i]!
-      if (i < last && lengthBytes(frame[0]!) > 0) {
-        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
+      const frame = frames[i]
+      if (frame === null) {
+        const index = routes?.[route++]
+        const seq = routes?.[route++]
+        assert(index !== undefined && seq !== undefined)
+        writeHeader(message, TAG.PUBLISH_TO, index, seq, at)
+        at += HEADER
+        continue
+      }
+      assert(frame !== undefined)
+      const tag = frame[0]
+      if (i < last && (tag === undefined || lengthBytes(tag) > 0)) {
+        writeHeader(message, TAG.LENGTH, 0, frame.byteLength, at)
         at += HEADER
       }
       message.set(frame, at)

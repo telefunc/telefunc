@@ -2,6 +2,7 @@ export { WireSender }
 
 import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
+import { HEADER } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { ServerChannel } from './ServerChannel.js'
@@ -118,30 +119,31 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.heldBytes += frame.byteLength
   }
 
-  sendPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>): void {
-    const bytes = head.byteLength + body.byteLength
-    if (!this.closed && !this.pastBacklog && !this.owed && bytes <= this.headroom) {
+  sendPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
+    if (this.closed || this.pastBacklog) return
+    const bytes = HEADER + body.byteLength
+    if (!this.owed && bytes <= this.headroom) {
       const headroom = this.pieces?.headroom
       if (headroom) {
         const room = headroom.gatherRoom(bytes)
         if (room !== undefined) {
-          this.handGatheredPublish(head, body, bytes)
-          headroom.sender.gatherPublish(head, body, room)
+          this.handGatheredPublish(body.byteLength, bytes)
+          headroom.sender.gatherPublish(index, seq, body, room)
           return
         }
       } else if (this.wireQueue instanceof EventStream && this.wireQueue.canGatherPublish(bytes)) {
-        this.handGatheredPublish(head, body, bytes)
-        this.wireQueue.gatherPublish(head, body)
+        this.handGatheredPublish(body.byteLength, bytes)
+        this.wireQueue.gatherPublish(index, seq, body)
         return
       }
     }
-    this.send(head)
+    this.send(encode.publishTo(index, seq))
     this.send(body)
   }
 
-  private handGatheredPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>, bytes: number): void {
+  private handGatheredPublish(bodyBytes: number, bytes: number): void {
     this.headroom -= bytes
-    this.largestSent = Math.max(this.largestSent, head.byteLength, body.byteLength)
+    this.largestSent = Math.max(this.largestSent, HEADER, bodyBytes)
     this.wait.handed(bytes, false, performance.now())
   }
 

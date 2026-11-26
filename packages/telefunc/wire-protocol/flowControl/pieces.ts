@@ -25,7 +25,7 @@ import {
 import type { PieceRate } from './PieceRate.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, lengthBytes, type PiecesAck } from '../wire/frame.js'
 import { TAG, isPublishBody, isSequencedTag, passesData } from '../wire/tags.js'
-import { readU16 } from '../wire/header.js'
+import { HEADER, readU16 } from '../wire/header.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { assert } from '../../utils/assert.js'
@@ -147,9 +147,6 @@ class PieceSender {
   private bodyLane = 0
   /** The bytes waiting for headroom. */
   waitingBytes = 0
-  /** The head that left of a publish whose body, which names no channel, may be the rest or at the front of what waits.
-   *  A frame after that body starts only once the body has left. */
-  private headStarted: Uint8Array<ArrayBuffer> | null = null
   /** The open announcement the current task's frames go behind; a microtask closes it when the task ends. */
   private open: { start: number; at: number; bytes: number } | null = null
   /** The bytes of the newest message it announced. */
@@ -225,8 +222,6 @@ class PieceSender {
     const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= frame.byteLength
-      // A head that goes names no body any more.
-      if (frame === this.headStarted) this.headStarted = null
       return true
     }
     for (const [key, lane] of this.lanes) {
@@ -240,14 +235,8 @@ class PieceSender {
   /** Removes the frames of which the socket has been given no byte that `drops` says go, called on each in order: those
    *  gathered for the next message, a rest none of which went, then those waiting behind it. */
   dropUngiven(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
-    // A head that goes names no body any more.
-    const goes = (frame: Uint8Array<ArrayBuffer>) => {
-      if (!drops(frame)) return false
-      if (frame === this.headStarted) this.headStarted = null
-      return true
-    }
-    this.messages.remove(goes)
-    this.dropWaiting(goes)
+    this.messages.remove(drops)
+    this.dropWaiting(drops)
   }
 
   /** Whether the rest of a data frame waits for headroom. */
@@ -316,15 +305,14 @@ class PieceSender {
   }
 
   /** Gathers a publish that fits (`canGatherPublish`), in one message with its head. */
-  gatherPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>, headroom: number): void {
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>, headroom: number): void {
     this.headroom = headroom
     if (this.sentBytes === 0) {
-      this.firstBytes = head.byteLength
+      this.firstBytes = HEADER
       this.firstAt = performance.now()
     }
-    this.headStarted = isPublishBody(body[0]) ? head : null
-    this.gather(head, true)
-    this.messages.gather(body)
+    this.messages.gatherPublish(index, seq, body)
+    this.queueFlush()
   }
 
   /** The lane `frame` waits in: its channel's on a sender with lanes, a publish body its head's, anything else last. */
@@ -476,8 +464,6 @@ class PieceSender {
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
     const tag = frame[0]!
-    if (tag === TAG.PUBLISH_TO) this.headStarted = frame
-    else if (!isPublishBody(tag)) this.headStarted = null
     if (isSequencedTag(tag) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
       // An open announcement names whole frames.
       return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
@@ -581,6 +567,10 @@ class PieceSender {
       messages.flush()
     }
     messages.gather(frame)
+    this.queueFlush()
+  }
+
+  private queueFlush(): void {
     if (this.endQueued) return
     this.endQueued = true
     queueMicrotask(this.endTask)
@@ -594,10 +584,9 @@ class PieceSender {
 
   /** Counts a gathered or carried `frame` as handed as its message goes, after the LENGTH `length` the frame before it
    *  needs there. */
-  private readonly gave = (frame: Uint8Array<ArrayBuffer>, length: number): void => {
+  private readonly gave = (bytes: number, tag: number | undefined, length: number): void => {
     if (length > 0) this.countHanded(length, false)
-    const tag = frame[0]
-    this.countHanded(frame.byteLength, tag !== undefined && isSequencedTag(tag), this.copiesOnSend)
+    this.countHanded(bytes, tag !== undefined && isSequencedTag(tag), this.copiesOnSend)
   }
 
   /** Before a message that gathers nothing: the frames sent before it go ahead, and those only carried ride on it,
@@ -931,16 +920,19 @@ class SocketMessages {
   lengthAhead = 0
   /** The largest message handed: a browser may count a message in full while sending it. */
   largest = 0
-  private readonly frames: Uint8Array<ArrayBuffer>[] = []
+  private readonly frames: (Uint8Array<ArrayBuffer> | null)[] = []
+  /** Each null frame has an index and sequence here, written into the outgoing message by the encoder. */
+  private readonly routes: number[] = []
+  private routeLength = 0
   /** How many of its first frames are counted as handed: carried frames a message handed at once takes along. */
   private given = 0
   /** The bytes of those. */
   private givenBytes = 0
   /** Counts a frame it holds as handed, after the LENGTH the frame before it needs: as the socket takes it. */
-  private readonly give: (frame: Uint8Array<ArrayBuffer>, length: number) => void
+  private readonly give: (bytes: number, tag: number | undefined, length: number) => void
   private closed = false
 
-  constructor(socket: PieceSocket, give: (frame: Uint8Array<ArrayBuffer>, length: number) => void) {
+  constructor(socket: PieceSocket, give: (bytes: number, tag: number | undefined, length: number) => void) {
     this.socket = socket
     this.give = give
   }
@@ -954,8 +946,8 @@ class SocketMessages {
     for (let i = 0; ; i++) {
       const frame = this.frames[i]
       if (frame === undefined) break
-      if (i >= this.given) this.give(frame, length)
-      const tag = frame[0]
+      const tag = frame === null ? TAG.PUBLISH_TO : frame[0]
+      if (i >= this.given) this.give(frame === null ? HEADER : frame.byteLength, tag, length)
       length = tag === undefined ? 0 : lengthBytes(tag)
     }
     this.given = this.frames.length
@@ -970,9 +962,21 @@ class SocketMessages {
   /** Lets go of the frames it holds that `drops` says go, called on each it hasn't counted, in order: their message
    *  hasn't gone, so the socket has no byte of them. */
   remove(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
-    const kept = this.frames.filter((frame, i) => i < this.given || !drops(frame))
+    const kept: Uint8Array<ArrayBuffer>[] = []
+    let route = 0
+    for (let i = 0; i < this.frames.length; i++) {
+      let frame = this.frames[i]
+      if (frame === null) {
+        const index = this.routes[route++]
+        const seq = this.routes[route++]
+        assert(index !== undefined && seq !== undefined)
+        frame = encode.publishTo(index, seq)
+      }
+      if (frame !== undefined && (i < this.given || !drops(frame))) kept.push(frame)
+    }
     if (kept.length === this.frames.length) return
     this.frames.length = 0
+    this.routeLength = 0
     this.bytes = 0
     this.lengthAhead = 0
     for (const frame of kept) this.add(frame)
@@ -980,6 +984,7 @@ class SocketMessages {
 
   private clear(): void {
     this.frames.length = 0
+    this.routeLength = 0
     this.given = this.givenBytes = 0
     this.bytes = 0
     this.lengthAhead = 0
@@ -991,6 +996,15 @@ class SocketMessages {
     this.gathered = true
     if (!isSequencedTag(frame[0]!)) this.atOnce = true
     this.add(frame)
+  }
+
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
+    this.frames.push(null)
+    this.routes[this.routeLength++] = index
+    this.routes[this.routeLength++] = seq
+    this.bytes += this.lengthAhead + HEADER
+    this.lengthAhead = 0
+    this.gather(body)
   }
 
   /** Adds a gathered or carried `frame`, after the LENGTH the frame before it now needs. */
@@ -1018,7 +1032,8 @@ class SocketMessages {
     const n = this.frames.length
     if (n === 0 || this.closed) return
     this.commit()
-    const message = n === 1 ? this.frames[0]! : encode.message(this.frames, this.bytes)
+    const first = this.frames[0]
+    const message = n === 1 && first ? first : encode.message(this.frames, this.bytes, this.routes)
     this.clear()
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.socket.send(message)
