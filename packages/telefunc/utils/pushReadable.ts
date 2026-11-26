@@ -3,13 +3,14 @@ export type { PushReadable }
 
 import type { Readable } from 'node:stream'
 import { getStreamNodeModule } from './loadStreamNodeModule.js'
+import { StreamAbortedError } from './StreamAbortedError.js'
 
 /** A Node `Readable` fed by `push`: `readable` is the body handed on, the rest stays with the producer. */
 type PushReadable = {
   readonly readable: Readable
   push(chunk: Uint8Array): boolean
   close(): void
-  /** Ends it at once, with what the consumer hasn't read: the body handed on fails. */
+  /** Ends it at once, with what the consumer hasn't read: the body handed on fails with `StreamAbortedError`. */
   abort(): void
   /** Bytes pushed that the consumer hasn't read yet. */
   readonly bufferedAmount: number
@@ -42,7 +43,7 @@ function createPushReadable(onCancel?: () => void, onDrain?: () => void): PushRe
     abort: () => {
       // The body's consumer takes the failure; none may be listening.
       readable.on('error', () => {})
-      readable.destroy(new Error('Stream aborted'))
+      readable.destroy(new StreamAbortedError())
     },
     get bufferedAmount() {
       return readable.readableLength

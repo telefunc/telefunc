@@ -3,7 +3,7 @@
 // hold, over any number of connections. A real Node server over SSE; each page reads its event stream's first chunk and
 // nothing more, so what the server sends it stays in the server's userland once the kernel's buffers are full.
 
-import { afterAll, beforeAll, expect, test } from 'vitest'
+import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { Telefunc } from './node.js'
@@ -104,6 +104,7 @@ const PONG_EVENT_BYTES = eventBytes(withTook(encode.pong(ended.map(({ ix }) => (
 test.each([1, 4])(
   '%i pages that flood PINGs and read nothing hold no more than `maxMemory` together, and each that passes its share ends its channels with `ChannelOverflowError`',
   async (count) => {
+    const consoleError = vi.spyOn(console, 'error')
     const maxMemory = getChannelConfig().maxMemory
     const opened = await Promise.all(Array.from({ length: count }, openPage))
     /** Each page, with the PONGs the server was asked for and whether its POSTs are still answered 200. */
@@ -136,6 +137,9 @@ test.each([1, 4])(
       ledger: 0,
       destroyed: pages.map(() => true),
     })
+    // An event stream let go of is a page gone, not a bug: nothing in the log.
+    expect(consoleError).not.toHaveBeenCalled()
+    consoleError.mockRestore()
   },
   60_000,
 )
