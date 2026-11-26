@@ -151,25 +151,35 @@ test('a load that fails after the streamed body is read cancels the body, whiche
   await vi.waitFor(() => expect(cancelled).toBe(1))
 })
 
-test.each([false, true])('a failed load releases the acquired response reader (SSE: %s)', async (sse) => {
-  const { call, ConnectionError } = await page()
-  gates.streams.open()
-  const response = streamed({ channel: CHANNEL, gen: GENERATOR }, { sse })(undefined)
-  respond = () => response
-  failing.add('channels')
-  gates.channels.open()
+test.each([
+  ['the channel', false],
+  ['the generator', false],
+  ['the channel', true],
+  ['the generator', true],
+] as const)(
+  'a load that fails after the streamed body is read cancels the body once and releases its reader (%s first, SSE: %s)',
+  async (first, sse) => {
+    const { call, ConnectionError } = await page()
+    gates.streams.open()
+    const ret = first === 'the channel' ? { channel: CHANNEL, gen: GENERATOR } : { gen: GENERATOR, channel: CHANNEL }
+    let ownCancels = 0
+    const response = streamed(ret, { sse, onCancel: () => ownCancels++ })(undefined)
+    respond = () => response
+    failing.add('channels')
+    gates.channels.open()
 
-  await expect(call([])).rejects.toBeInstanceOf(ConnectionError)
-  expect(cancelled).toBe(1)
-  assert(response.body)
-  expect(response.body.locked).toBe(false)
-  const reader = response.body.getReader()
-  try {
-    expect(await reader.read()).toEqual({ done: true, value: undefined })
-  } finally {
-    reader.releaseLock()
-  }
-})
+    await expect(call([])).rejects.toBeInstanceOf(ConnectionError)
+    expect(ownCancels).toBe(1)
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+    const reader = response.body.getReader()
+    try {
+      expect(await reader.read()).toEqual({ done: true, value: undefined })
+    } finally {
+      reader.releaseLock()
+    }
+  },
+)
 
 test.each([false, true])(
   'a streamed response releases its reader once its values read all they carried (SSE: %s)',
