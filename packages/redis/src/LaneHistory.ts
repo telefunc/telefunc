@@ -20,6 +20,8 @@ type LaneFrame = {
 
 /** One subscription on a channel that carries the lane: it delivers what the lane decides to deliver, and reports. */
 type LaneRoute = {
+  /** The history its last ready start came from: null before its first. */
+  readonly history: string | null
   /** `rewound`: the lane follows a frame at or below the last place it delivered. */
   deliver(frame: LaneFrame, rewound: boolean): void
   /** The frame isn't delivered: its fence settles. */
@@ -146,9 +148,10 @@ class LaneHistory {
   /** A frame, decided by the first row that matches. `passedBefore` is the highest place its route brought the lane
    *  before it; a frame the lane held has passed. `unplaced`: what the frame is if the lane can't place it. */
   offer(frame: LaneFrame, passedBefore = Number.POSITIVE_INFINITY, unplaced: Unplaced = 'live'): void {
-    // A lane with no commit when its route went live: every one of its commits is after.
+    // A lane with no commit when its route went live: every one of its commits is after, on that route's history.
     if (!this.started) {
       this.started = true
+      this.follows = frame.via.history
       this.follow(NO_START, null, 0)
     }
     this.decide(frame, passedBefore, unplaced)

@@ -34,6 +34,7 @@ function route(log: string[]) {
     pass(frame: LaneFrame): number
     read(lane: LaneHistory, start: LaneStart, switched?: boolean): void
   } = {
+    history: null,
     deliver: (frame, rewound) => void log.push(`${name(frame)}${rewound ? ' rewound' : ''}`),
     dropped: () => {},
     reportMissed: (count) => void log.push(`lost ${count}`),

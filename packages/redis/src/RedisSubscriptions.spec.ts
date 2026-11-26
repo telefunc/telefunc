@@ -221,6 +221,25 @@ describe('a resume', () => {
     expect(missed).toEqual([null])
   })
 
+  it('tells once where a lane with no commit at its first start resumes on another history set back below it', async () => {
+    const { listen, publish, close, delivered, missed } = setup()
+    let start: Starts = { authority: 'a', starts: new Map() }
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    for (let i = 1; i <= 7; i++) publish(TEXT, frameOf(i, `x${i}`))
+    // A restart from a snapshot at x4 starts another history there.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+    close()
+    await expect.poll(() => missed.length).toBe(1)
+    // y5 continues the new history from x4, where x5 continued the old one; a read now finds y5.
+    start = { authority: 'b', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(4) }))
+    publish(TEXT, frameOf(6, 'y6', { id: BigInt(106), prev: BigInt(105) }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered.slice(7)).toEqual(['y5', 'y6'])
+    expect(missed).toEqual([null])
+  })
+
   it('reports once, with no count, that it may have missed some, from another history, with lanes or none', async () => {
     for (const form of ['same place', 'ahead', 'none'] as const) {
       const { listen, close, missed } = setup()
