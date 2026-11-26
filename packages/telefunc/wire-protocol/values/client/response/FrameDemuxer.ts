@@ -60,7 +60,7 @@ class FrameDemuxer {
 
   /** Cancel the given index. Follows .tee() semantics:
    *  drops its buffered/future frames, resolves any pending waiter with null. */
-  cancelIndex(index: number): void {
+  private cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index)) return
     // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
     // the body under a stream still being read.
@@ -84,7 +84,7 @@ class FrameDemuxer {
     else this.streamReader.release()
   }
 
-  async readNextChunkForIndex(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  private async readNextChunkForIndex(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
     if (this.cancelledIndices.has(index)) return null
     if (this.streamError) throw this.streamError
 
