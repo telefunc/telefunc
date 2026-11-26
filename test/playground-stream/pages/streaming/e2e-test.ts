@@ -8,7 +8,34 @@ const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
 
-function testStreaming() {
+function testStreaming(isDev: boolean) {
+  if (!isDev) {
+    test("streaming: a call whose streams code can't load rejects with ConnectionError, and the next call loads it", async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      // The hydrated page has the code it imports: the next chunk it asks for is the one a returned stream needs.
+      const chunk = /\/assets\/chunks\/[^/]+\.js$/
+      const requested: string[] = []
+      await page.route(chunk, (route) => {
+        requested.push(route.request().url())
+        return requested.length === 1 ? route.fulfill({ status: 503 }) : route.fallback()
+      })
+      try {
+        await page.click('#test-readable-stream')
+        await autoRetry(async () => {
+          expect(await getResult('#streaming-result')).deep.equal({ connectionError: true })
+        })
+        await page.click('#test-readable-stream')
+        await autoRetry(async () => {
+          expect((await getResult('#streaming-result')).content).toBe('hello stream')
+        })
+        expect(requested.filter((url) => url === requested[0]).length).toBe(2)
+      } finally {
+        await page.unroute(chunk)
+      }
+      expectLog('the server responded with a status of 503')
+    })
+  }
+
   test('streaming: ReadableStream return', async () => {
     await navigate(`${getServerUrl()}/streaming`)
 
