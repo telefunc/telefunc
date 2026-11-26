@@ -165,7 +165,7 @@ function ownRedisBackend(route: BroadcastRoute) {
     if (key === route.key) reported.push(reason)
   }
   const received: string[] = []
-  const attempt = backend.subscribe(route, { deliver: (value) => received.push(value as string) }, 'text')
+  const attempt = backend.subscribe(route, { deliver: (value) => received.push(String(value)) }, 'text')
   const stop = async () => {
     config.broadcast.onDeliveryLost = ({ key, reason }) =>
       console.error(`Broadcast delivery of '${key}' lost: ${reason}`)
@@ -210,7 +210,7 @@ async function onRedisSubscribeFailure() {
   const text = { key: user, kind: 'text' } as const
   const received: string[] = []
   const subscribe = (receive: (value: string) => void) =>
-    backend.subscribe(text, { deliver: (value) => receive(value as string) }, 'text')
+    backend.subscribe(text, { deliver: (value) => receive(String(value)) }, 'text')
   let attempt: DriverAttempt | undefined
   try {
     await subscribeRefused(client, user)

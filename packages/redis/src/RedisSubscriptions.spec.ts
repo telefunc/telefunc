@@ -280,9 +280,10 @@ describe('a Cluster slot whose master changed', () => {
   })
   const moved = new Map([[slotOf(TEXT), '127.0.0.1:7001']])
   /** The connection to the old master, which a start read is sent on to read from its own data. */
-  const OLD = {} as RedisClient
+  // The old master's own connection, which the rows never open.
+  const OLD = new Redis({ lazyConnect: true })
   const node = (view: Pick<FormerMaster, 'master' | 'history'> & Partial<FormerMaster>): FormerMaster => ({
-    client: OLD as FormerMaster['client'],
+    client: OLD,
     previous: null,
     serves: async () => false,
     close() {},
