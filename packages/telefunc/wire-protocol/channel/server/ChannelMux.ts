@@ -683,6 +683,7 @@ class ChannelMux implements UpgradeStagesOwner {
     if (took !== null && pieces) {
       const known = pieces.headroom.heartbeat(took, performance.now())
       assertProtocol(known, 'the page says it took more bytes than this wire sent it')
+      entry.sender.rebalanceMemory()
     }
     if (frame.tag === TAG.PING) {
       const { ended } = frame
@@ -703,6 +704,7 @@ class ChannelMux implements UpgradeStagesOwner {
     if (frame.tag === TAG.PIECES_ACK) {
       const known = entry.sender.pieces?.headroom.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
+      entry.sender.rebalanceMemory()
       return null
     }
     assertProtocol(this.stages.get(entry.wire) === undefined, 'frame on a staged probe')

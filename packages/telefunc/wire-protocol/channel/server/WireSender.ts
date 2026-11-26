@@ -114,6 +114,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.heldChannels = heldChannels
     this.attaching = attaching
     this.onPastBacklog = onPastBacklog
+    if (this.wireQueue instanceof EventStream) this.wireQueue.whenTaken(this.rebalanceMemory)
   }
 
   /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
@@ -350,6 +351,13 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   queuedAhead(): number | undefined {
     if (this.closed) return 0
     return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
+  }
+
+  /** Its page took what it was sent: what the ledger holds for the wire and it no longer holds goes. A wire the ledger
+   *  holds nothing for has nothing to let go of. */
+  readonly rebalanceMemory = (): void => {
+    if (this.closed || this.memory.heldBytes === 0) return
+    this.backlogRoom = Math.max(0, this.measureBacklogRoom())
   }
 
   /** What the wire may hold, less what it holds, in its socket, for a RECONCILED and as its events' copies: below 0 once

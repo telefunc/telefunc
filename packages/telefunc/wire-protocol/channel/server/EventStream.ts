@@ -41,6 +41,8 @@ class EventStream implements WireQueue {
   private takes: boolean
   /** Runs once the stream let go of what it holds (`letGo`); null once it ran. */
   private onLetGo: (() => void) | null = null
+  /** Runs once the stream took all that waited for it. */
+  private onTaken: (() => void) | null = null
   private letGone = false
   /** Lets go of what the closed stream holds, once its page had the time to take it. */
   private letGoTimer: ReturnType<typeof setTimeout> | undefined
@@ -68,6 +70,11 @@ class EventStream implements WireQueue {
   whenLetGo(onLetGo: () => void): void {
     if (this.letGone) return onLetGo()
     this.onLetGo = onLetGo
+  }
+
+  /** `onTaken` runs each time the stream took all that waited for it and asks for more. */
+  whenTaken(onTaken: () => void): void {
+    this.onTaken = onTaken
   }
 
   /** What its page hasn't taken goes: the stream ends at once, and so does the body it is. */
@@ -199,7 +206,7 @@ class EventStream implements WireQueue {
     if (this.current !== null) this.pushChunks()
     while (this.takes) {
       const frame = this.waiting.shift()
-      if (frame === undefined) return
+      if (frame === undefined) return this.onTaken?.()
       this.waitingBytes -= eventBytes(frame)
       this.startInOrder(frame)
     }

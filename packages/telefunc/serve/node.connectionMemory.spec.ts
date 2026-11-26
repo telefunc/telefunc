@@ -4,7 +4,7 @@
 // nothing more, so what the server sends it stays in the server's userland once the kernel's buffers are full.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
-import { createServer, request, type Server, type ServerResponse } from 'node:http'
+import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { Telefunc } from './node.js'
 import { config, getChannelConfig } from '../node/server/serverConfig.js'
@@ -52,13 +52,13 @@ async function settle(turns = 100) {
  *  further. */
 async function post(body: Blob, headers: Record<string, string> = {}) {
   const bytes = Buffer.from(await body.arrayBuffer())
-  return new Promise<{ status: number }>((resolve, reject) => {
+  return new Promise<{ status: number; res: IncomingMessage }>((resolve, reject) => {
     const req = request(base, { method: 'POST', headers: { 'x-telefunc-request': 'sse', ...headers } }, (res) => {
       res.once('data', () => {
         res.pause()
-        resolve({ status: res.statusCode ?? 0 })
+        resolve({ status: res.statusCode ?? 0, res })
       })
-      res.once('end', () => resolve({ status: res.statusCode ?? 0 }))
+      res.once('end', () => resolve({ status: res.statusCode ?? 0, res }))
     })
     req.on('error', reject)
     req.end(bytes)
@@ -79,10 +79,12 @@ async function openPage() {
     attempt: 1,
     open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }],
   })
-  await post(encodeSseRequest({ connId, streamResponse: true }, [reconcile]), { 'x-row': row })
+  const { res: page } = await post(encodeSseRequest({ connId, streamResponse: true }, [reconcile]), { 'x-row': row })
   const res = await stream
   return {
     channel,
+    /** The page reads its event stream again, to its end. */
+    catchUp: () => page.on('data', () => {}).resume(),
     ends,
     /** What the server handed the kernel of this page's event stream, or every byte it pushed once it let go of it. */
     written: (pushed: number) => (res.destroyed ? pushed : (res.socket?.bytesWritten ?? pushed)),
@@ -136,6 +138,24 @@ test.each([1, 4])(
     })
   },
   60_000,
+)
+
+test.each(['PONGs', 'data'])(
+  'a page that stopped reading and caught up: the ledger lets go of the %s its event stream held for it',
+  async (sent) => {
+    const page = await openPage()
+    if (sent === 'PONGs') for (let i = 0; i < 10; i++) expect((await page.pings()).status).toBe(200)
+    // Within the page's credit, so each goes to its event stream at once.
+    else for (let i = 0; i < 340; i++) page.channel.send('x'.repeat(15 * 1024)).catch(() => {})
+    await settle()
+    const peak = ledger.total - page.channel.heldBytes
+    expect(peak).toBeGreaterThan(2 ** 20)
+    page.catchUp()
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    await settle()
+    expect(ledger.total - page.channel.heldBytes).toBeLessThan(peak / 4)
+  },
+  30_000,
 )
 
 test("a page that reads nothing: the copies its event stream holds of the server's sends are held in `maxMemory`", async () => {
