@@ -19,8 +19,9 @@ function setTelefuncLoaders({
   loadTelefuncFiles: LoadTelefuncFiles
   loadManifest: LoadManifest
 }) {
-  globalObject.loadTelefuncFiles = loadTelefuncFiles
+  // A build that fails the manifest's check must leave no loader: each later load then imports the build again and fails
   setServerConfig(loadManifest)
+  globalObject.loadTelefuncFiles = loadTelefuncFiles
 }
 
 function setServerConfig(loadManifest: LoadManifest) {
