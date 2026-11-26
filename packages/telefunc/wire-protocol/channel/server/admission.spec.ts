@@ -623,6 +623,40 @@ test('on a WebSocket, a binary lossy send that maxMemory refuses behind a send o
   }
 })
 
+test('a binary lossy send of detached bytes while no page is attached throws, and the lossy send it was to replace still reaches the page', async () => {
+  const channel = new ServerChannel()
+  try {
+    void channel.send('l1', { lossy: true })
+    const detached = new Uint8Array(1024)
+    structuredClone(detached.buffer, { transfer: [detached.buffer] })
+    expect(() => channel.sendBinary(detached, { lossy: true })).toThrow(TypeError)
+    void channel.send('a2')
+    const page = overWebSocket([channel])
+    expect(await page.readAll()).toEqual(['0:l1', '0:a2'])
+  } finally {
+    channel.abort()
+  }
+})
+
+test('on a WebSocket, a binary lossy send of detached bytes while a lossy send waits for credit throws, and the waiting one still goes', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  try {
+    // Past the page's start credit: it goes, and the lossy one after it waits for credit.
+    void channel.send('a0' + 'x'.repeat(1280 * 1024))
+    void channel.send('l1', { lossy: true })
+    const detached = new Uint8Array(1024)
+    structuredClone(detached.buffer, { transfer: [detached.buffer] })
+    expect(() => channel.sendBinary(detached, { lossy: true })).toThrow(TypeError)
+    confirm(channel, 0, 2 * CREDIT_WINDOW_INITIAL_BYTES)
+    await channel.send('a2')
+    await channel.sendBinary(new Uint8Array(0), { lossy: true })
+    expect(await page.readAll()).toEqual(['0:a0', '0:l1', '0:a2', '0:'])
+  } finally {
+    channel.abort()
+  }
+})
+
 test("on a WebSocket, an acknowledged send that waited for its channel's earlier one to be confirmed settles with the page's answer", async () => {
   const channel = new ServerChannel()
   const page = overWebSocket([channel])

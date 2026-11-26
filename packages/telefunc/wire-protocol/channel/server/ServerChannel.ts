@@ -416,6 +416,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Makes a lossy send admitted, or held from what it reserved. */
   private makeLossy({ tag, data, bytes, held }: LossyBehind): void | Promise<void> {
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
+    // Detached bytes read as empty: copying them throws before they take the place of the send that waits.
+    if (typeof data !== 'string' && data.byteLength === 0) new Uint8Array(data)
     this.lossyDelivery().send({ data, held })
   }
 
