@@ -12,6 +12,7 @@ import { SendGate } from './SendGate.js'
 import { decode, encode } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 /** A text frame is its value, a RECONCILE `RECONCILE <the channels it names>`. */
@@ -50,6 +51,7 @@ function connect(carriesReconcileInOpen: boolean) {
       return exchange.takesLive(record)
     },
     reconnecting: false,
+    maxFrameBytesOf: () => WIRE_MAX_RAW_FRAME_BYTES,
   }
   const gate = new SendGate({ owner, channels })
   const exchange = new AttachExchange({ owner, channels, gate })

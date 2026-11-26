@@ -41,7 +41,7 @@ async function newChannel(ack = false) {
   // As a BDP probe's answer does: until a round trip is measured, the page is never behind.
   ;(channel as any).connection.transport.uplink.roundTrips.measured(50)
   // As a RECONCILED that lists it does.
-  const { channels } = (channel as any).connection
+  const { channels } = (channel as any).connection.lifecycle
   channels.open(channels.of(channel))
   return channel
 }
@@ -61,7 +61,7 @@ function unopenedChannel(ack = false) {
 
 /** The frames the gate holds of the page's sends, in order. */
 function heldFrames(channel: ClientChannel<string, never>): Uint8Array[] {
-  return (channel as any).connection.gate.settleQueue().map(({ frame }: { frame: Uint8Array }) => frame)
+  return (channel as any).connection.lifecycle.gate.settleQueue().map(({ frame }: { frame: Uint8Array }) => frame)
 }
 
 /** What the gate holds of the page's sends, in order: a text its value, a binary `[bytes]`, a close `CLOSE`. */
@@ -94,7 +94,7 @@ function useUpCredit(channel: ClientChannel<string, never>) {
 
 /** The server's `MSG_WINDOW` or `WINDOW` for the channel. */
 function grant(channel: ClientChannel<string, never>, limit: { count: number } | { bytes: number }) {
-  const index = (channel as any).connection.channels.of(channel).ix
+  const index = (channel as any).connection.lifecycle.channels.of(channel).ix
   channel._dispatchFrame({ tag: 'count' in limit ? TAG.MSG_WINDOW : TAG.WINDOW, index, ...limit } as any)
 }
 
@@ -297,7 +297,7 @@ test("a lossy send out of credit when the server's close comes doesn't go after 
   channel.onClose(() => new Promise<void>(() => {}))
   useUpCredit(channel)
   send(channel, 'L1')
-  const index = (channel as any).connection.channels.of(channel).ix
+  const index = (channel as any).connection.lifecycle.channels.of(channel).ix
   channel._dispatchFrame({ tag: TAG.CLOSE, index, seq: 1, timeoutMs: 5_000 } as any)
   grant(channel, { count: 2 * CREDIT_MSG_WINDOW_INITIAL })
   const sent = held(channel)

@@ -1,8 +1,9 @@
 export { SendGate }
-export type { SendGateOwner }
+export type { FrameAt, SendGateOwner }
 
+import { assertUsage } from '../../../utils/assert.js'
 import type { ChannelRecord, ChannelTable } from './ChannelTable.js'
-import type { ClientChannelTransport, OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
+import type { ClientChannelTransport, MuxChannel, OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { TAG } from '../../wire/tags.js'
 
@@ -16,6 +17,8 @@ type BufferedFrame = {
   receivedAt?: number
 }
 type HeldFrame = BufferedFrame & { seq: number }
+/** The frame a channel sends at `seq`, made for its `record`. */
+type FrameAt = (record: ChannelRecord, seq: number) => Uint8Array<ArrayBuffer>
 
 /** A WINDOW or MSG_WINDOW frame's key, made of its channel and its tag; null for any other frame. */
 function limitKey({ frame, channelIx }: BufferedFrame): number | null {
@@ -33,6 +36,8 @@ interface SendGateOwner {
   /** The page lost its wire and has none yet. */
   readonly reconnecting: boolean
   readonly transport: ClientChannelTransport
+  /** The largest frame the server accepts from `channel`. */
+  maxFrameBytesOf(channel: MuxChannel): number
 }
 
 type SendGateOptions = {
@@ -88,8 +93,61 @@ class SendGate {
     this.waitForHeadroom({ frame, kind, channelIx: record.ix, seq, waitingSince: performance.now() })
   }
 
-  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits, behind or not, and says whether it did. */
-  replaceHeld(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+  /** Sends at `channel`'s next seq the frame `frameAt` makes, and takes the seq only then, so a frame refused as larger
+   *  than the server accepts takes none. `onQueued` runs before the wire has it. Returns the frame, or null once the
+   *  channel sends nothing more. */
+  sendSequenced(
+    channel: MuxChannel,
+    kind: 'data' | 'ack' | 'control',
+    frameAt: FrameAt,
+    onQueued?: (seq: number) => void,
+  ): Uint8Array<ArrayBuffer> | null {
+    const record = this.channels.of(channel)
+    if (record === undefined) return null
+    const frame = this.fitting(channel, frameAt(record, record.replay.seq + 1))
+    const seq = record.replay.nextSeq()
+    onQueued?.(seq)
+    // A data frame after which its channel is out of the server's credit goes at once: nothing the channel sends next
+    // can join its batch POST before the server has it and grants more.
+    const goesNow = kind === 'data' && !channel._attach.sendCredit.leavesCredit(frame.byteLength)
+    this.send(record, seq, frame, goesNow ? 'control' : kind)
+    return frame
+  }
+
+  /** Sends the frame `frameOf` makes for `channel` without a seq, or holds it as `send` does: a late WINDOW is still
+   *  right, its limit cumulative. A WINDOW goes by the arrival of the newest seq it names. False, sending nothing, once
+   *  the channel sends nothing more. */
+  sendUnsequenced(
+    channel: MuxChannel,
+    kind: OutboundFrameKind,
+    frameOf: (record: ChannelRecord) => Uint8Array<ArrayBuffer>,
+  ): boolean {
+    const record = this.channels.of(channel)
+    if (record === undefined) return false
+    const frame = frameOf(record)
+    const receivedAt = frame[0] === TAG.WINDOW ? record.receivedAt : undefined
+    if (!this.canSendImmediately(record)) {
+      this.settleQueue().push({ frame, kind, channelIx: record.ix, waitingSince: performance.now(), receivedAt })
+      return true
+    }
+    this.owner.transport.sendFrame({ kind, frame, receivedAt })
+    return true
+  }
+
+  /** Throws where the frame `frameAt` makes at `channel`'s next seq is larger than the server accepts, as its send
+   *  would: for a send held before it takes a seq, as a frame's header has the same size at any seq. */
+  assertFits(channel: MuxChannel, frameAt: FrameAt): void {
+    const record = this.channels.of(channel)
+    if (record !== undefined) this.fitting(channel, frameAt(record, record.replay.seq + 1))
+  }
+
+  /** Puts the frame `frameAt` makes in the place of `channel`'s frame `seq` while that waits, behind or not, and is the
+   *  channel's last, and says whether it did. */
+  replaceHeld(channel: MuxChannel, seq: number, frameAt: FrameAt): boolean {
+    const record = this.channels.of(channel)
+    if (record === undefined || seq !== record.replay.seq) return false
+    const frame = frameAt(record, seq)
+    const { ix } = record
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
       this.waitingForHeadroomBytes += frame.byteLength - entry.frame.byteLength
@@ -102,10 +160,15 @@ class SendGate {
     return true
   }
 
-  /** Puts `frame` in the place of channel `ix`'s frame `seq` while that waits and the page is behind, and returns the
-   *  bytes it adds over that one: null once it went, as the wire then has it, or while the link keeps up. A page with no
-   *  wire, and a channel no wire has opened yet, have no link to keep up with. */
-  replaceWaiting(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>): number | null {
+  /** Puts the frame `frameAt` makes in the place of `channel`'s frame `seq` while that waits, is the channel's last, and
+   *  the page is behind, and returns the bytes it adds over that one: null once it went, as the wire then has it, once
+   *  the channel sent a frame after it, which must not arrive ahead of what takes its place, or while the link keeps
+   *  up. A page with no wire, and a channel no wire has opened yet, have no link to keep up with. */
+  replaceWaiting(channel: MuxChannel, seq: number, frameAt: FrameAt): number | null {
+    const record = this.channels.of(channel)
+    if (record === undefined || seq !== record.replay.seq) return null
+    const frame = this.fitting(channel, frameAt(record, seq))
+    const { ix } = record
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
       if (!this.isBehind(this.waitingForHeadroom.peek()!)) return null
@@ -117,25 +180,22 @@ class SendGate {
     const sendBuffer = this.settleQueue()
     const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
     if (held === undefined) return null
-    const away = this.owner.reconnecting || this.channels.get(ix)?.state.tag === 'pending'
+    const away = this.owner.reconnecting || record.state.tag === 'pending'
     if (!away && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return null
     const added = frame.byteLength - held.frame.byteLength
     held.frame = frame
     return added
   }
 
-  /** Sends a frame without a seq, or holds it as `send` does: a late WINDOW is still right, its limit cumulative. */
-  sendUnsequenced(
-    record: ChannelRecord,
-    frame: Uint8Array<ArrayBuffer>,
-    kind: OutboundFrameKind,
-    receivedAt?: number,
-  ): void {
-    if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, kind, channelIx: record.ix, waitingSince: performance.now(), receivedAt })
-      return
-    }
-    this.owner.transport.sendFrame({ kind, frame, receivedAt })
+  /** `frame`, where it is no larger than the server accepts from `channel`: the server ends any wire a larger frame
+   *  arrives on, and the replay would send it again on the next one. */
+  private fitting(channel: MuxChannel, frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+    const maxFrameBytes = this.owner.maxFrameBytesOf(channel)
+    assertUsage(
+      frame.byteLength <= maxFrameBytes,
+      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
+    )
+    return frame
   }
 
   /** What waits for headroom goes, from the front, while the transport has headroom. */

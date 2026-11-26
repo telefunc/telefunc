@@ -195,7 +195,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** The largest credit window, each way, from the last RECONCILED. */
   private creditWindow: number | null = null
   /** The largest frame the server accepts on a WebSocket, from the last RECONCILED. */
-  maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
+  private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   constructor({ owner, telefuncUrl, options }: WireLifecycleOptions) {
     this.owner = owner
     this.telefuncUrl = telefuncUrl
@@ -204,6 +204,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+  }
+
+  /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */
+  maxFrameBytesOf(channel: MuxChannel): number {
+    if (!this.allowsWebSocket) return WIRE_MAX_RAW_FRAME_BYTES
+    return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
   private enterOpen(): void {
