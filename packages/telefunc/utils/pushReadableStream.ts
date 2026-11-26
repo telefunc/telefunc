@@ -33,7 +33,8 @@ type PushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>> = {
   /** Ends it at once, with what the consumer hasn't read: the body handed on fails. */
   abort(): void
   readonly isClosed: boolean
-  /** Bytes pushed that the consumer hasn't read yet, while open. */
+  /** Bytes pushed that the consumer hasn't read yet; once closed, those it hadn't read at `close()`, till `abort()` or a
+   *  cancel. */
   readonly bufferedAmount: number
 }
 
@@ -47,6 +48,8 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
 ): PushReadableStream<T> {
   let controller!: ReadableStreamDefaultController<T>
   let closed = false
+  let closedQueued = 0
+  const queued = () => HIGH_WATER_MARK - (controller.desiredSize ?? HIGH_WATER_MARK)
   const readable = new ReadableStream<T>(
     {
       start: (c) => {
@@ -57,6 +60,7 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
       },
       cancel: () => {
         closed = true
+        closedQueued = 0
         onCancel?.()
       },
     },
@@ -72,17 +76,19 @@ function createPushReadableStream<T extends Uint8Array = Uint8Array<ArrayBuffer>
     close: () => {
       if (closed) return
       closed = true
+      closedQueued = queued()
       controller.close()
     },
     abort: () => {
       closed = true
+      closedQueued = 0
       controller.error(new Error('Stream aborted'))
     },
     get isClosed() {
       return closed
     },
     get bufferedAmount() {
-      return closed ? 0 : HIGH_WATER_MARK - controller.desiredSize!
+      return closed ? closedQueued : queued()
     },
   }
 }
