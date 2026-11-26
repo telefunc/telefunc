@@ -564,13 +564,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     super._onPeerDisconnect(peer, reconnectTimeout)
   }
 
-  /** Where its close ran out, one that was cut ends with why, which its page reads; a close its page asked for or
-   *  answered ends gracefully. */
-  override _end(err?: Error): void {
-    if (err !== undefined && this.overflowed !== null) return this.endOverflowed()
-    super._end(err)
-  }
-
   /** What it held for its first attach goes with the rest it buffered: an error ends it without them. */
   protected override endWithError(reason: ErrorReason, err: Error): void {
     if (this._phase !== 'ended') this.dropBeforeAttach()
