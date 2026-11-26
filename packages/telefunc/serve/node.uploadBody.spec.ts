@@ -456,6 +456,83 @@ test.each(vias)(
 )
 
 test.each(vias)(
+  "a telefunction that starts reading its Blob and answers, its client then leaving: that read ends with the client's truncation (Telefunc given a %s)",
+  async (via) => {
+    recordErrors()
+    const readEnded: { now: string } = { now: 'pending' }
+    const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+    process.on('requestBody.telefunc:readEnded', onReadEnded)
+    onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+    const { socket, answered } = await startUpload('binary', readStartedStart, via)
+    expect(await answered).toBe(200)
+    socket.destroy()
+    await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
+    expect(readEnded.now).toBe(`failed: ${new StreamTruncatedError('client').message}`)
+  },
+)
+
+test("a telefunction that starts reading its Blob and answers, its client then leaving while the app's async transform of the Fetch body waits: that read ends with the client's truncation and the body is let go of", async () => {
+  recordErrors()
+  const readEnded: { now: string } = { now: 'pending' }
+  const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+  process.on('requestBody.telefunc:readEnded', onReadEnded)
+  onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+  const gate = Promise.withResolvers<void>()
+  onTestFinished(() => gate.resolve())
+  const passed: { body: ReadableStream<Uint8Array> | null } = { body: null }
+  const server = createServer((req, res) => {
+    const original = frameworkRequest(req, `http://127.0.0.1${telefuncPath}`)
+    // The app's middleware checks each chunk, and waits on something of its own after the first.
+    const body = original.body?.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        async transform(chunk, controller) {
+          controller.enqueue(chunk)
+          await gate.promise
+        },
+      }),
+    )
+    const init: RequestInit & { duplex: 'half' } = {
+      method: 'POST',
+      headers: original.headers,
+      body,
+      signal: original.signal,
+      duplex: 'half',
+    }
+    const request = new Request(original.url, init)
+    passed.body = request.body
+    telefunc
+      .serve({ request })
+      .then(async (response) => {
+        res.writeHead(response?.status ?? 404)
+        res.end(await response?.text())
+      })
+      .catch(() => {})
+  })
+  server.listen(0, '127.0.0.1')
+  onTestFinished(() => void server.close())
+  await once(server, 'listening')
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no port')
+  const socket = connect(address.port, '127.0.0.1')
+  socket.on('error', () => {})
+  const answered = new Promise<number>((resolve) => {
+    socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ', 2)[1])))
+  })
+  await once(socket, 'connect')
+  socket.write(
+    `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${address.port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\n\r\n`,
+  )
+  socket.write(readStartedStart)
+  expect(await answered).toBe(200)
+  socket.destroy()
+  await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
+  expect({ readEnded: readEnded.now, locked: passed.body?.locked }).toEqual({
+    readEnded: `failed: ${new StreamTruncatedError('client').message}`,
+    locked: false,
+  })
+})
+
+test.each(vias)(
   'a Blob its telefunction keeps and reads once the call is answered and its body read off to the end: the Blob is read whole (Telefunc given a %s)',
   async (via) => {
     const { printed, bugs } = recordErrors()
