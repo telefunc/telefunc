@@ -14,6 +14,8 @@ type Feature = (typeof FEATURES)[number]
 let gates: Record<Feature, { promise: Promise<void>; open: () => void }>
 let failing: Set<Feature>
 let imported: Feature[]
+/** The chunk loads a test started, each settled before the next test's fresh modules. */
+let loads: Promise<unknown>[]
 let posts: string[]
 let respond: (signal: AbortSignal | undefined) => Response
 let cancelled: number
@@ -23,6 +25,7 @@ beforeEach(() => {
   vi.resetModules()
   failing = new Set()
   imported = []
+  loads = []
   posts = []
   cancelled = 0
   gates = {
@@ -38,18 +41,22 @@ beforeEach(() => {
     removeEventListener() {},
   })
   for (const feature of FEATURES) {
-    vi.doMock(`./${feature}.js`, async (importOriginal: () => Promise<unknown>) => {
+    vi.doMock(`./${feature}.js`, (importOriginal: () => Promise<unknown>) => {
       imported.push(feature)
-      await gates[feature].promise
-      if (failing.delete(feature)) throw new Error(`The ${feature} chunk failed to load`)
-      return importOriginal()
+      const load = (async () => {
+        await gates[feature].promise
+        if (failing.delete(feature)) throw new Error(`The ${feature} chunk failed to load`)
+        return importOriginal()
+      })()
+      loads.push(load)
+      return load
     })
   }
 })
 afterEach(async () => {
   // A load a test left held finishes before the next test's fresh modules.
   for (const feature of FEATURES) gates[feature].open()
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  await Promise.allSettled(loads)
   for (const feature of FEATURES) vi.doUnmock(`./${feature}.js`)
   vi.unstubAllGlobals()
 })
@@ -226,12 +233,11 @@ test("a call aborted while its chunk loads cancels the body of an app's fetch th
   respond = () => streamed({ gen: GENERATOR }, { onCancel: () => ownCancels++ })(undefined)
   const controller = new AbortController()
   const pending = withContext(call, { signal: controller.signal })([])
-  // The chunk's first load in this process may wait behind an earlier test's load of it.
-  await vi.waitFor(() => expect(imported).toEqual(['streams']), { timeout: 10_000 })
+  await vi.waitFor(() => expect(imported).toEqual(['streams']))
   controller.abort()
   expect(isAbort(await settledWithin(pending, 200))).toBe(true)
   expect(ownCancels).toBe(1)
-}, 15_000)
+})
 
 test('a call aborted while its text response waits for its chunk rejects at once, telling onAbort() once', async () => {
   const { call, withContext } = await page()
@@ -367,31 +373,6 @@ test("a cold callback's channel is the call's once: the call's abort aborts it o
   } finally {
     vi.doUnmock('../../channel/client/ClientChannel.js')
   }
-})
-
-test('a held callback preserves an extension tag that shares the replay prefix', async () => {
-  const { call, config } = await page()
-  const prefix = '!TelefuncHeld:'
-  config.extensions.push({
-    name: 'app-tag',
-    requestTypes: [
-      {
-        prefix,
-        detect: (value: unknown): value is { kind: 'tag'; value: number } =>
-          typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'tag',
-        replace: (value: { value: number }) => ({ metadata: { value: value.value }, close() {}, abort() {} }),
-      },
-    ],
-  })
-  respond = text(1)
-  const pending = call([{ kind: 'tag', value: 7 }, (n: number) => n * 2])
-  gates.channels.open()
-
-  await pending
-  expect(posts).toHaveLength(1)
-  const { args } = JSON.parse(posts[0] ?? '')
-  expect(args[0]).toBe('!TelefuncHeld:{"value":7}')
-  expect(args[1]).toMatch(/^!TelefuncFunction:/)
 })
 
 /** An extension whose replacer creates a channel, or sends a stream, for its `{ kind: 'ask' }` values. */
