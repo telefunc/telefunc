@@ -376,6 +376,35 @@ test("a cold callback and upload call sends the body a page with channels' code 
   expect(coldBody.replace(UUID, 'id')).toBe(warmBody.replace(UUID, 'id'))
 })
 
+test("a cold upload's call and the wire its channel opens use the fetch of the call's invocation", async () => {
+  const { config, call } = await page()
+  const used: string[] = []
+  respond = text(1)
+  config.fetch = recordingFetch('before', used)
+  const pending = call([new ReadableStream()])
+  config.fetch = recordingFetch('after', used)
+  gates.channels.open()
+  await pending
+  await vi.waitFor(() => expect(used).toContain('before:wire'))
+  expect(used.filter((use) => use.startsWith('after'))).toEqual([])
+  expect(used).toContain('before:call')
+})
+
+test("a second client module instance's channels open with its own fetch", async () => {
+  const first = await page()
+  respond = text(1)
+  gates.channels.open()
+  await first.call([{ callback() {} }])
+  vi.resetModules()
+  const second = await page()
+  const used: string[] = []
+  second.config.fetch = recordingFetch('second', used)
+  const connectionKey = crypto.randomUUID()
+  await second.withContext(second.call, { channel: { connectionKey } })([{ callback() {} }])
+  await vi.waitFor(() => expect(used).toContain('second:wire'))
+  expect(used).toContain('second:call')
+})
+
 test('the channel a cold call opens is the one its tag names', async () => {
   const opened: string[] = []
   vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
@@ -800,6 +829,20 @@ test('plain RPC: sent at once, an app string that looks like a value loads nothi
   expect([...ret]).toEqual(value)
   expect(imported).toEqual([])
 })
+
+/** An app's `config.fetch` that records, in `used`, each request it makes as `<name>:call` or `<name>:wire`. */
+function recordingFetch(name: string, used: string[]): typeof fetch {
+  return async (_url, init) => {
+    const body = init?.body
+    if (typeof body === 'string' && body.includes('"file"')) {
+      used.push(`${name}:call`)
+      posts.push(body)
+      return respond(init?.signal ?? undefined)
+    }
+    used.push(`${name}:wire`)
+    return new Promise<Response>(() => {})
+  }
+}
 
 async function abortAfterTicks(controller: AbortController, ticks: number) {
   for (let tick = 0; tick < ticks; tick++) await null

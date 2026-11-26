@@ -30,6 +30,7 @@ type CallContext = {
   channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
+  fetch: typeof globalThis.fetch | null
 }
 
 /** The call's request, serialized at its invocation. `claimed`: values carried over a channel of their own, claimed
