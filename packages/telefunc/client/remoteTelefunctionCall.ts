@@ -89,8 +89,7 @@ type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
   Omit<Parameters<typeof makeHttpRequest>[0], 'httpRequestBody' | 'requestCloseHandlers'>
 
 /** Sends the call. Its arguments are serialized now, at its invocation: a serialization error throws here, except for
- *  a call holding a value carried over a channel, or an extension's, before the page loaded channels, whose returned
- *  promise rejects. */
+ *  a call holding a value carried over a channel before the page loaded channels, whose returned promise rejects. */
 function sendCall(callContext: CallContext): Promise<unknown> {
   const serialized = serializeTelefunctionArguments(callContext)
   if ('held' in serialized) return sendHeldCall(serialized, callContext)
@@ -98,8 +97,8 @@ function sendCall(callContext: CallContext): Promise<unknown> {
   return makeHttpRequest(callContext)
 }
 
-/** A call whose arguments hold a value carried over a channel, or an extension's, before the page loaded channels: it
- *  loads them, then sends what its invocation serialized. */
+/** A call whose arguments hold a value carried over a channel, before the page loaded channels: it loads them, then
+ *  sends what its invocation serialized. */
 async function sendHeldCall(args: HeldArguments, callContext: CallContext): Promise<unknown> {
   try {
     await loadFeatures(['channels'], callContext)

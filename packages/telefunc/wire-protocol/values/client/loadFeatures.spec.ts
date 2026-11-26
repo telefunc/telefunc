@@ -2,6 +2,7 @@ import { afterEach, assert, beforeEach, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
+import type { ClientReplacerContext } from '../types.js'
 
 // A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
 // finish, or fails, as the chunk's request would.
@@ -304,41 +305,87 @@ test('a held callback preserves an extension tag that shares the replay prefix',
   expect(args[1]).toMatch(/^!TelefuncFunction:/)
 })
 
+/** An extension whose replacer creates a channel, or sends a stream, for its `{ kind: 'ask' }` values. */
+function askExtension(method: 'createChannel' | 'sendStream') {
+  return {
+    name: 'ask',
+    requestTypes: [
+      {
+        prefix: '!Ask:',
+        detect: (value: unknown): value is { kind: 'ask' } =>
+          typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'ask',
+        replace(_value: unknown, context: ClientReplacerContext) {
+          if (method === 'sendStream') return context.sendStream(() => ({ chunks: oneChunk(31), cancel() {} }))
+          const channel = context.createChannel({ ack: true })
+          return {
+            metadata: { channelId: channel.id },
+            async close() {
+              await channel.close()
+            },
+            abort: () => channel.abort(),
+          }
+        },
+      },
+    ],
+  }
+}
+
 test.each(['createChannel', 'sendStream'] as const)(
-  'a cold extension value whose replacer calls %s() waits for channels, then goes in one POST',
+  'an extension that imports telefunc/__internal replaces its value with %s() at invocation, in one POST',
   async (method) => {
     const { call, config } = await page()
-    config.extensions.push({
-      name: 'ask',
-      requestTypes: [
-        {
-          prefix: '!Ask:',
-          detect: (value: unknown): value is { kind: 'ask' } =>
-            typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'ask',
-          replace(_value: unknown, context) {
-            if (method === 'sendStream') return context.sendStream(() => ({ chunks: oneChunk(31), cancel() {} }))
-            const channel = context.createChannel({ ack: true })
-            return {
-              metadata: { channelId: channel.id },
-              async close() {
-                await channel.close()
-              },
-              abort: () => channel.abort(),
-            }
-          },
-        },
-      ],
-    })
+    gates.channels.open()
+    // The extension's client code: its values create channels.
+    await import('../../../client/__internal.js')
+    imported = []
+    config.extensions.push(askExtension(method))
     respond = text(1)
     const pending = call([{ kind: 'ask' }])
-    await vi.waitFor(() => expect(imported).toEqual(['channels']))
-    expect(posts).toEqual([])
-    gates.channels.open()
-    expect(await pending).toBe(1)
     expect(posts).toHaveLength(1)
     expect(JSON.parse(posts[0] ?? '').args[0]).toMatch(/^!Ask:\{"channelId":"[^"]+"\}$/)
+    expect(await pending).toBe(1)
+    expect(imported).toEqual([])
   },
 )
+
+test.each(['createChannel', 'sendStream'] as const)(
+  'an extension whose replacer calls %s() without importing telefunc/__internal gets a usage error naming it',
+  async (method) => {
+    const { call, config } = await page()
+    config.extensions.push(askExtension(method))
+    expect(() => call([{ kind: 'ask' }])).toThrow("the extension's client code should `import 'telefunc/__internal'`")
+    expect(posts).toEqual([])
+    expect(imported).toEqual([])
+  },
+)
+
+test('an extension value of metadata only is replaced once, at invocation, and its call sent at once', async () => {
+  const { call, config } = await page()
+  let detected = 0
+  config.extensions.push({
+    name: 'quantity',
+    requestTypes: [
+      {
+        prefix: '!Quantity:',
+        detect: (value: unknown): value is { kind: 'order'; quantity: number } => {
+          const is = typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'order'
+          if (is) detected++
+          return is
+        },
+        replace: (value: { quantity: number }) => ({ metadata: { quantity: value.quantity }, close() {}, abort() {} }),
+      },
+    ],
+  })
+  respond = text(1)
+  const order = { kind: 'order', quantity: 1 }
+  const pending = call([order])
+  order.quantity = 2
+  expect(posts).toHaveLength(1)
+  expect(await pending).toBe(1)
+  expect(JSON.parse(posts[0] ?? '').args[0]).toBe('!Quantity:{"quantity":1}')
+  expect(detected).toBe(1)
+  expect(imported).toEqual([])
+})
 
 test('serialization failure cancels the stream an earlier replayed argument started', async () => {
   const { call, withContext } = await page()
@@ -364,9 +411,6 @@ test('serialization failure cancels the stream an earlier replayed argument star
 
 test('a later invalid argument cancels a resource created by an extension replacer', async () => {
   const { call, config, withContext } = await page()
-  gates.channels.open()
-  gates.broadcasts.open()
-  await import('../../../client/__internal.js')
   const resource = {}
   const abort = vi.fn()
   config.extensions.push({

@@ -39,8 +39,8 @@ type SerializeResult = {
   requestCloseHandlers: CloseHandler[]
 }
 
-/** Arguments that hold a value carried over a channel, or an extension's, serialized at the call's invocation before the
- *  page loaded channels: each such value is held in `held`, named in `serialized` by `SERIALIZER_PREFIX_HELD`. */
+/** Arguments that hold a value carried over a channel, serialized at the call's invocation before the page loaded
+ *  channels: each such value is held in `held`, named in `serialized` by `SERIALIZER_PREFIX_HELD`. */
 type HeldArguments = {
   held: unknown[]
   serialized: string
@@ -48,10 +48,11 @@ type HeldArguments = {
   requestCloseHandlers: CloseHandler[]
 }
 
+// A held token ends in `!`, which cannot end the JSON payload of a wire tag.
 const SERIALIZER_PREFIX_HELD = '!TelefuncHeld:'
 
-/** Serializes the call's arguments, at its invocation; `HeldArguments` where they hold a value carried over a channel,
- *  or an extension's, and channels aren't loaded. */
+/** Serializes the call's arguments, at its invocation; `HeldArguments` where they hold a value carried over a channel
+ *  and channels aren't loaded. */
 function serializeTelefunctionArguments(callContext: CallContext): SerializeResult | HeldArguments {
   const dataMain: Record<string, unknown> = {
     file: callContext.telefuncFilePath,
@@ -75,7 +76,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
   const replacer = createCallReplacer(
     args,
     callContext,
-    loadedFeatures().channels ? null : (value) => `${SERIALIZER_PREFIX_HELD}${args.held.push(value) - 1}`,
+    loadedFeatures().channels ? null : (value) => `${SERIALIZER_PREFIX_HELD}${args.held.push(value) - 1}!`,
   )
   try {
     args.serialized = serialize(dataMain, callContext, replacer)
@@ -89,15 +90,18 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
 /** Replaces the values `args` held, once channels are loaded. What else the call carries is read from what was
  *  serialized at its invocation, never from the app's objects again. */
 function serializeHeldArguments(args: HeldArguments, callContext: CallContext): SerializeResult {
+  const replacedPrefixes = [
+    SERIALIZER_PREFIX_FILE,
+    SERIALIZER_PREFIX_BLOB,
+    ...callContext.extensionRequestTypes.map((type) => type.prefix),
+  ]
   const dataMain = parse(args.serialized, {
     reviver(_path, value) {
-      if (value.startsWith(SERIALIZER_PREFIX_HELD)) {
-        return { replacement: new Held(args.held[Number(value.slice(SERIALIZER_PREFIX_HELD.length))]) }
+      if (value.startsWith(SERIALIZER_PREFIX_HELD) && value.endsWith('!')) {
+        return { replacement: new Held(args.held[Number(value.slice(SERIALIZER_PREFIX_HELD.length, -1))]) }
       }
-      // A file replaced at the invocation stays as it was serialized: its index is in `args.files` already.
-      if (value.startsWith(SERIALIZER_PREFIX_FILE) || value.startsWith(SERIALIZER_PREFIX_BLOB)) {
-        return { replacement: new Verbatim(value) }
-      }
+      // A value replaced at the invocation stays as it was serialized: a file's index is in `args.files` already.
+      if (replacedPrefixes.some((prefix) => value.startsWith(prefix))) return { replacement: new Verbatim(value) }
       return undefined
     },
   })

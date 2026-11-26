@@ -15,9 +15,8 @@ const bodyTypes: ClientReplacerType[] = [fileReplacer, blobReplacer]
  *  a function. */
 const channelTypes: ClientReplacerType[] = [readableStreamReplacer, functionReplacer]
 
-/** Before the page loaded channels, a value that may be carried over a channel (a built-in one, or an extension's, whose
- *  replacer may create channels) is held: `hold(value)` names it in the request until channels are loaded and it is
- *  replaced. */
+/** Before the page loaded channels, a built-in value carried over a channel is held: `hold(value)` names it in the
+ *  request until channels are loaded and it is replaced. */
 function createRequestReplacer(
   context: ClientReplacerContext,
   onReplaced: (replaced: {
@@ -30,13 +29,13 @@ function createRequestReplacer(
 ) {
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of bodyTypes) if (type.detect(value)) return replace(type, value, serializer)
-    for (const type of channelTypes) if (type.detect(value)) return replaceOrHold(type, value, serializer)
-    for (const type of extensionTypes) if (type.detect(value)) return replaceOrHold(type, value, serializer)
+    for (const type of channelTypes) {
+      if (!type.detect(value)) continue
+      if (hold) return { replacement: hold(value), resolved: true }
+      return replace(type, value, serializer)
+    }
+    for (const type of extensionTypes) if (type.detect(value)) return replace(type, value, serializer)
     return undefined
-  }
-  function replaceOrHold(type: ClientReplacerType, value: unknown, serializer: (v: unknown) => string) {
-    if (hold) return { replacement: hold(value), resolved: true }
-    return replace(type, value, serializer)
   }
   function replace(type: ClientReplacerType, value: unknown, serializer: (v: unknown) => string) {
     const { metadata, close, abort } = type.replace(value, context)
