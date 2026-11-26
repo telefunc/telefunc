@@ -283,6 +283,8 @@ describe("a WebSocket RECONCILE's deadline", () => {
 
   test('drops a wire whose server sends nothing at its heartbeat deadline, while the socket it replaced still delivers', async () => {
     vi.useFakeTimers()
+    // Each reconnect waits nine tenths of its backoff: smaller draws fit a fourth socket in the time this row advances.
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
     vi.stubGlobal('WebSocket', SilentWebSocket)
     ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), {
       transports: [CHANNEL_TRANSPORT.WS],
