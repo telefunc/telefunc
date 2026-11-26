@@ -1213,15 +1213,16 @@ async function onChannelAwaitedFromOffline() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-// 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+// A channel's limit, 2 MiB less the eighth kept for sends waiting for room, is these 1,834,487 UTF-8 bytes, the two
+// quotes around them, a frame's 7 bytes and a held send's 512.
 const atLimitTexts = {
-  twoBytes: `${'é'.repeat(1_048_315)}x`,
-  threeBytes: '€'.repeat(698_877),
-  fourBytes: `${'😀'.repeat(524_157)}xxx`,
+  twoBytes: `${'é'.repeat(917_243)}x`,
+  threeBytes: `${'€'.repeat(611_495)}xx`,
+  fourBytes: `${'😀'.repeat(458_621)}xxx`,
 }
 
-/** A channel sending, as its first send, the text of `kind` that fits `maxMemory` to the byte, or one byte more. Told, it
- *  closes: `maxMemory` is the server's, and the next channel needs all of it.
+/** A channel sending, as its first send, the text of `kind` that fits its limit to the byte, or one byte more. Told, it
+ *  closes: `maxMemory` is the server's, and the next channel needs all it may hold.
  *  cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) {
   const ch = new Channel<never, string>()

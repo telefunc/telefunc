@@ -102,7 +102,7 @@ function testSmallPending() {
     expectLog(sendRefusedWarning)
   })
 
-  test('channel: multi-byte text that fits maxMemory to the byte is accepted, and one byte more is refused', async () => {
+  test("channel: multi-byte text that fits a channel's limit to the byte is accepted, and one byte more is refused", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-at-limit')
     await autoRetry(async () => {
