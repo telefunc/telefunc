@@ -53,7 +53,7 @@ class Listeners<T> {
   }
 
   list(): readonly Registration<T>[] {
-    return (this.snapshot ??= [...this.registrations!.values()])
+    return (this.snapshot ??= [...(this.registrations?.values() ?? NO_LISTENERS)])
   }
 }
 

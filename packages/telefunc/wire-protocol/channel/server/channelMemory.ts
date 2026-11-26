@@ -38,6 +38,7 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
+import { assert } from '../../../utils/assert.js'
 
 /** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, waiting as a lossy
  *  channel's newest, awaiting its answer or credit, kept to replay, or waiting in the in-memory broadcast adapter. A
@@ -271,7 +272,11 @@ function admitPublish(body: PublishBody, owner: string | undefined, replace: (ho
   if (memory.total + bytes <= most) return
   for (const [newest, holders] of newestsThatEndingFrees()) {
     if (memory.total + bytes <= most) return
-    if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
+    if (holders.length !== newest.refs) continue
+    for (const holder of holders) {
+      assert(holder.shed)
+      holder.shed(0, owner)
+    }
   }
 }
 

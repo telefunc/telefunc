@@ -15,7 +15,10 @@ import { parse } from '@brillout/json-serializer/parse'
 
 const FILE = '/channelAbort.telefunc.ts'
 /** The channel the telefunction returned, whose listener throws `Abort(carried.reason)`. */
-const carried = { channel: null as ServerChannel<unknown, unknown> | null, reason: undefined as unknown }
+const carried: { channel: ServerChannel<unknown, unknown> | null; reason: unknown } = {
+  channel: null,
+  reason: undefined,
+}
 vi.mock('../../node/server/runTelefunc/loadTelefuncFiles.js', () => ({
   loadTelefuncFiles: async () => ({
     telefuncFilesLoaded: {

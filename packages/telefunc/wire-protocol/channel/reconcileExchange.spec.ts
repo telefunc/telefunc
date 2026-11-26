@@ -11,6 +11,7 @@ import type { ReconciledPayload } from '../wire/payloads.js'
 import { TAG } from '../wire/tags.js'
 import { ATTACHABLE_NOW, ServerChannel } from './server/ServerChannel.js'
 import { ChannelMux, getChannelMux } from './server/ChannelMux.js'
+import { SessionRegistry } from './server/SessionRegistry.js'
 import { ClientChannel } from './client/ClientChannel.js'
 import { WireLifecycle } from './client/WireLifecycle.js'
 import { WsTransport } from './client/WsTransport.js'
@@ -43,7 +44,8 @@ async function rawPage() {
   let took = 0
   ws.addEventListener('close', ({ code }) => closed.resolve(code))
   ws.addEventListener('message', ({ data }) => {
-    const message = new Uint8Array(data as ArrayBuffer)
+    if (!(data instanceof ArrayBuffer)) throw new Error('Expected a binary message')
+    const message = new Uint8Array(data)
     took += message.byteLength
     for (const raw of isOneFrame(message) ? [message] : messageFrames(message)) {
       const frame = decode(raw)
@@ -55,13 +57,17 @@ async function rawPage() {
   return { ws, tags, reconciled, closed: closed.promise, took: () => took }
 }
 
-/** Server channels of their own ids. */
-function channels(n: number) {
-  return Array.from({ length: n }, () => {
-    const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
-    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
-    return channel
-  })
+/** A server channel of its own id. */
+function serverChannel() {
+  const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+  return channel
+}
+
+/** `value`, which the test must have by now: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
 }
 
 /** Resolves once `check` holds; a stuck row ends at the harness's timeout. */
@@ -70,19 +76,20 @@ async function until(check: () => boolean) {
 }
 
 test("a join's RECONCILE whose last piece rides behind a PIECES_ACK is taken and answered", async () => {
-  const [a, b] = channels(2)
+  const a = serverChannel()
+  const b = serverChannel()
   const page = await rawPage()
   page.ws.send(
     encode.reconcile({
       sessionId: crypto.randomUUID(),
       attempt: 1,
-      open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }],
+      open: [{ id: a.id, ix: 0, lastSeq: 0, initial: true }],
     }),
   )
   await until(() => page.reconciled.length === 1)
   const join = encode.reconcile({
-    sessionId: page.reconciled[0]!.sessionId,
-    open: [{ id: b!.id, ix: 1, lastSeq: 0, initial: true }],
+    sessionId: defined(page.reconciled[0], 'the first RECONCILED').sessionId,
+    open: [{ id: b.id, ix: 1, lastSeq: 0, initial: true }],
     released: [],
   })
   const half = Math.ceil(join.byteLength / 2)
@@ -91,7 +98,7 @@ test("a join's RECONCILE whose last piece rides behind a PIECES_ACK is taken and
   const last = encode.piece(join.byteLength, join.subarray(half))
   page.ws.send(encode.message([ack, last], ack.byteLength + last.byteLength))
   await until(() => page.reconciled.length === 2)
-  expect(page.reconciled[1]!.open).toEqual([{ ix: 1, lastSeq: 0 }])
+  expect(defined(page.reconciled[1], "the join's RECONCILED").open).toEqual([{ ix: 1, lastSeq: 0 }])
   // Each RECONCILE's receipt came ahead of its RECONCILED.
   expect(page.tags.filter((tag) => tag === TAG.RECONCILE_TAKEN || tag === TAG.RECONCILED)).toEqual([
     TAG.RECONCILE_TAKEN,
@@ -103,7 +110,9 @@ test("a join's RECONCILE whose last piece rides behind a PIECES_ACK is taken and
 })
 
 test('a message that completes two RECONCILEs ends its wire as refused, and neither attaches a channel', async () => {
-  const [a, b, c] = channels(3)
+  const a = serverChannel()
+  const b = serverChannel()
+  const c = serverChannel()
   const attached = vi.spyOn(ServerChannel.prototype, '_attachPeer')
   try {
     const page = await rawPage()
@@ -111,14 +120,14 @@ test('a message that completes two RECONCILEs ends its wire as refused, and neit
       encode.reconcile({
         sessionId: crypto.randomUUID(),
         attempt: 1,
-        open: [{ id: a!.id, ix: 0, lastSeq: 0, initial: true }],
+        open: [{ id: a.id, ix: 0, lastSeq: 0, initial: true }],
       }),
     )
     await until(() => page.reconciled.length === 1)
     attached.mockClear()
     const join = encode.reconcile({
-      sessionId: page.reconciled[0]!.sessionId,
-      open: [{ id: b!.id, ix: 1, lastSeq: 0, initial: true }],
+      sessionId: defined(page.reconciled[0], 'the first RECONCILED').sessionId,
+      open: [{ id: b.id, ix: 1, lastSeq: 0, initial: true }],
       released: [],
     })
     const half = Math.ceil(join.byteLength / 2)
@@ -127,7 +136,7 @@ test('a message that completes two RECONCILEs ends its wire as refused, and neit
     const other = encode.reconcile({
       sessionId: crypto.randomUUID(),
       attempt: 1,
-      open: [{ id: c!.id, ix: 0, lastSeq: 0, initial: true }],
+      open: [{ id: c.id, ix: 0, lastSeq: 0, initial: true }],
     })
     // The first frame of the two needs a LENGTH ahead of it.
     page.ws.send(encode.message([last, other], 7 + last.byteLength + other.byteLength))
@@ -141,8 +150,9 @@ test('a message that completes two RECONCILEs ends its wire as refused, and neit
 })
 
 test("a reconcile that throws ends its wire as lost, before the page's deadline, and the page resumes on the next with what it sent", async () => {
-  const [first, second] = channels(2)
-  const reconcile = vi.spyOn(ChannelMux.prototype as unknown as { reconcile: () => unknown }, 'reconcile')
+  const first = serverChannel()
+  const second = serverChannel()
+  const handOver = vi.spyOn(SessionRegistry.prototype, 'handOver')
   const bug = vi.spyOn(console, 'error').mockImplementation(() => {})
   const opened = vi.spyOn(ChannelMux.prototype, 'onWireOpen')
   const closed = vi.spyOn(ChannelMux.prototype, 'onWireClosed')
@@ -154,17 +164,19 @@ test("a reconcile that throws ends its wire as lost, before the page's deadline,
   }
   const pages: ClientChannel<string, string>[] = []
   try {
-    pages.push(new ClientChannel<string, string>({ channelId: first!.id, connection }))
-    await Promise.all([first!.opened, pages[0]!.opened])
+    const firstPage = new ClientChannel<string, string>({ channelId: first.id, connection })
+    pages.push(firstPage)
+    await Promise.all([first.opened, firstPage.opened])
     const received = Promise.withResolvers<string>()
-    first!.listen((message) => void received.resolve(message))
+    first.listen((message) => void received.resolve(message))
     // The join's reconcile throws once.
-    reconcile.mockImplementationOnce(() => {
+    handOver.mockImplementationOnce(() => {
       throw new Error('a bug in the reconcile')
     })
-    pages.push(new ClientChannel<string, string>({ channelId: second!.id, connection }))
-    void pages[0]!.send('during')
-    await Promise.all([second!.opened, pages[1]!.opened])
+    const secondPage = new ClientChannel<string, string>({ channelId: second.id, connection })
+    pages.push(secondPage)
+    void firstPage.send('during')
+    await Promise.all([second.opened, secondPage.opened])
     expect(await received.promise).toBe('during')
     // This page's wires: an earlier row's may close meanwhile.
     const wires = new Set(opened.mock.calls.map(([wire]) => wire))
@@ -175,7 +187,7 @@ test("a reconcile that throws ends its wire as lost, before the page's deadline,
     expect(late).not.toHaveBeenCalled()
   } finally {
     for (const page of pages) page.abort()
-    reconcile.mockRestore()
+    handOver.mockRestore()
     bug.mockRestore()
     opened.mockRestore()
     closed.mockRestore()
@@ -184,7 +196,7 @@ test("a reconcile that throws ends its wire as lost, before the page's deadline,
 })
 
 test("a join of 1,000 channels with 256-byte ids, about 300 kB, goes on the server's PIECES_ACKs alone, with no PING or PONG, to its receipt and its RECONCILED", async () => {
-  const [lead] = channels(1)
+  const lead = serverChannel()
   const rest = Array.from({ length: 1_000 }, (_, ix) => {
     const channel = new ServerChannel({ id: `${crypto.randomUUID()}-${ix}`.padEnd(256, 'x') })
     getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
@@ -196,11 +208,12 @@ test("a join of 1,000 channels with 256-byte ids, about 300 kB, goes on the serv
     connectionKey: crypto.randomUUID(),
   }
   const pings = vi.spyOn(WsTransport.prototype, 'sendPing').mockImplementation(() => {})
-  const pongs = vi.spyOn(ChannelMux.prototype as unknown as { pong: () => void }, 'pong').mockImplementation(() => {})
+  const pongs = vi.spyOn(encode, 'pong')
   const pages: ClientChannel<string, string>[] = []
   try {
-    pages.push(new ClientChannel<string, string>({ channelId: lead!.id, connection }))
-    await Promise.all([lead!.opened, pages[0]!.opened])
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    pages.push(leadPage)
+    await Promise.all([lead.opened, leadPage.opened])
     for (const channel of rest) pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
     await Promise.all([...rest.map((channel) => channel.opened), ...pages.map((page) => page.opened)])
     expect(pongs).not.toHaveBeenCalled()
@@ -212,7 +225,8 @@ test("a join of 1,000 channels with 256-byte ids, about 300 kB, goes on the serv
 }, 30_000)
 
 test('a 10 MB download with a join in it: the server takes each report of what the page took, the download arrives whole, and the join opens', async () => {
-  const [lead, joined] = channels(2)
+  const lead = serverChannel()
+  const joined = serverChannel()
   const opened = vi.spyOn(ChannelMux.prototype, 'onWireOpen')
   const closed = vi.spyOn(ChannelMux.prototype, 'onWireClosed')
   const connection = {
@@ -222,19 +236,21 @@ test('a 10 MB download with a join in it: the server takes each report of what t
   }
   const pages: ClientChannel<string, string>[] = []
   try {
-    pages.push(new ClientChannel<string, string>({ channelId: lead!.id, connection }))
-    await Promise.all([lead!.opened, pages[0]!.opened])
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    pages.push(leadPage)
+    await Promise.all([lead.opened, leadPage.opened])
     let took = 0
     const all = Promise.withResolvers<void>()
-    pages[0]!.listenBinary((data) => {
+    leadPage.listenBinary((data) => {
       took += data.byteLength
       if (took >= 10_000_000) all.resolve()
     })
     const sent = (async () => {
-      for (let i = 0; i < 10; i++) await lead!.sendBinary(new Uint8Array(1_000_000), { ack: false })
+      for (let i = 0; i < 10; i++) await lead.sendBinary(new Uint8Array(1_000_000), { ack: false })
     })()
-    pages.push(new ClientChannel<string, string>({ channelId: joined!.id, connection }))
-    await Promise.all([joined!.opened, pages[1]!.opened, all.promise, sent])
+    const joinedPage = new ClientChannel<string, string>({ channelId: joined.id, connection })
+    pages.push(joinedPage)
+    await Promise.all([joined.opened, joinedPage.opened, all.promise, sent])
     expect(took).toBe(10_000_000)
     // Its wire never ended: a report past what the server sent would have ended it.
     const wires = new Set(opened.mock.calls.map(([wire]) => wire))

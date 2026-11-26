@@ -3,7 +3,7 @@
 // by hand, so a late tick is one the clock moved past without a tick in between.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import type * as net from 'node:net'
+import { Socket } from 'node:net'
 
 import { PacedDirection } from './black-hole-proxy'
 
@@ -14,22 +14,30 @@ let now = 0
 beforeEach(() => {
   now = 0
   vi.spyOn(performance, 'now').mockImplementation(() => now)
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 
-/** A direction of a 1 Mbit/s link and the bytes its receiver got; its own timer is stopped, and `tick` runs it. */
+/** A direction of a 1 Mbit/s link and the bytes its receiver got; `tick` runs its timer. */
 function link() {
   const direction = new PacedDirection(RATE, 64 * 1024, BURST_MS, 0)
-  direction.stop()
   let received = 0
-  const to = { destroyed: false, write: (chunk: Buffer) => void (received += chunk.length) } as unknown as net.Socket
-  const from = { pause() {}, resume() {} } as unknown as net.Socket
+  // Sockets that connect nowhere: the receiver counts what it is written.
+  const to = new Socket()
+  vi.spyOn(to, 'write').mockImplementation((chunk) => {
+    received += chunk.length
+    return true
+  })
+  const from = new Socket()
   return {
     send: (bytes: number) => direction.enqueue(from, to, Buffer.alloc(bytes)),
     /** The clock moves `ms`, then the direction's timer fires once. */
     tick(ms: number) {
       now += ms
-      ;(direction as any).drain()
+      vi.advanceTimersToNextTimer()
     },
     received: () => received,
   }

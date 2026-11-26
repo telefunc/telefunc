@@ -20,6 +20,7 @@ import { createPushReadable } from '../../../../utils/pushReadable.js'
 import { serializeAbortReason, stringifyValue } from '../../../channel/channel.js'
 import { createPushReadableStream } from '../../../../utils/pushReadableStream.js'
 import { Fifo } from '../../../../utils/Fifo.js'
+import { assert } from '../../../../utils/assert.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -155,7 +156,8 @@ function buildInlineResponseBody(runContext: {
       // Consumer is gone: bail before emitting a "this producer is done" frame
       // — would also be misleading for cancelled producers returning done.
       if (cancelled) return
-      const next = settled.shift()!
+      const next = settled.shift()
+      assert(next)
       if ('err' in next) throw next.err
       const { entry, result } = next
       if (result.done) {

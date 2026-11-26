@@ -7,7 +7,7 @@ import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
-import { handleSseChannelRequest } from './sse.js'
+import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
 import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // A ping deadline of 2.5 s: two intervals, after the half interval the page may hold its PING for a POST.
@@ -15,12 +15,15 @@ config.channel = { pingInterval: 1000 }
 
 function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-  return handleSseChannelRequest(
-    new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit),
-    undefined,
-    () => false,
-    noUpgrades,
-  )
+  // Node's Request takes `duplex`, which the DOM's RequestInit doesn't name.
+  const init = { method: 'POST', body, duplex: 'half' }
+  return handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
+}
+
+/** The event stream an open POST was answered with. */
+function eventsOf({ body }: SseChannelHttpResponse): ReadableStream<Uint8Array<ArrayBuffer>> {
+  if (!(body instanceof ReadableStream)) throw new Error('no event stream')
+  return body
 }
 
 test('a batch POST whose wire closed before its frames ran is refused', async () => {
@@ -48,7 +51,7 @@ test('a batch POST whose wire closed before its frames ran is refused', async ()
   const controller = await reading.promise
 
   // The page's event stream is cancelled, closing the wire, while the batch's frame is on its way.
-  await (opened.body as ReadableStream).cancel()
+  await eventsOf(opened).cancel()
   const ping = encode.ping([])
   controller.enqueue(encodeU32(ping.byteLength))
   controller.enqueue(ping)
@@ -66,7 +69,7 @@ test('a page whose upload POST is read only after server code held the event loo
   )
   expect(opened.statusCode).toBe(200)
   // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
-  expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
+  expect((await eventsOf(opened).getReader().read()).done).toBe(false)
 
   // Server code holds the event loop 1 s past the deadline, as a synchronous loop of sends does: the deadline's timer
   // runs 1 s late, which leaves the read of the upload below room on a loaded machine.
@@ -104,7 +107,7 @@ test('a page that held its PING for a POST, then stalled for most of an interval
   )
   expect(opened.statusCode).toBe(200)
   // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
-  expect((await (opened.body as ReadableStream<Uint8Array>).getReader().read()).done).toBe(false)
+  expect((await eventsOf(opened).getReader().read()).done).toBe(false)
 
   // Its PING goes an interval on, held half an interval for a POST, and the page stalls 0.8 interval more.
   await new Promise((resolve) => setTimeout(resolve, 2_300))
@@ -145,8 +148,7 @@ test("a page whose open's RECONCILE crosses for longer than the ping deadline, i
     void answering.then(() => void (answered = true))
     while (!answered) await vi.advanceTimersByTimeAsync(100)
     const opened = await answering
-    if (!(opened.body instanceof ReadableStream)) throw new Error('no event stream')
-    const events = opened.body.getReader()
+    const events = eventsOf(opened).getReader()
     const decoder = new SseEvents()
     // What the page reads first of the two: the RECONCILED, or the stream's end.
     const order: string[] = []
@@ -179,7 +181,7 @@ test('a page that stays silent past the ping deadline loses its wire', async () 
   )
   expect(opened.statusCode).toBe(200)
 
-  const events = (opened.body as ReadableStream<Uint8Array>).getReader()
+  const events = eventsOf(opened).getReader()
   while (!(await events.read()).done);
   expect(performance.now() - openedAt).toBeGreaterThanOrEqual(2_000)
 })
@@ -195,13 +197,10 @@ test('a silent page whose ping deadline is judged while its timer runs ahead of 
   const delays: number[] = []
   let turns = 0
   const realSetTimeout = globalThis.setTimeout
-  const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
-    callback: () => void,
-    delay?: number,
-  ) => {
+  const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay) => {
     delays.push(delay ?? 0)
     return realSetTimeout(callback, delay)
-  }) as typeof setTimeout)
+  })
   try {
     const connId = crypto.randomUUID()
     const opened = await post(
@@ -210,7 +209,7 @@ test('a silent page whose ping deadline is judged while its timer runs ahead of 
       ]),
     )
     expect(opened.statusCode).toBe(200)
-    const events = (opened.body as ReadableStream<Uint8Array>).getReader()
+    const events = eventsOf(opened).getReader()
     // The open's RECONCILE arms the deadline again once the server read the POST's body, some turns after it answered:
     // as many as this Node takes. Its RECONCILED, the stream's first event after a comment, shows it ran.
     const decoder = new TextDecoder()

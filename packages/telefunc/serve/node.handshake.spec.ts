@@ -45,7 +45,8 @@ async function handshake(target: string, hostHeader: string | null): Promise<num
   socket.write(
     `GET ${target} HTTP/1.1\r\n${hostHeader === null ? '' : `Host: ${hostHeader}\r\n`}Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
   )
-  const [head] = (await once(socket, 'data')) as [Buffer]
+  const [head] = await once(socket, 'data')
+  if (!(head instanceof Buffer)) throw new Error('Expected the head of the answer')
   // A wire that opened stays open until the test's end: past its 101, the server reads it.
   await new Promise((resolve) => setTimeout(resolve, 50))
   socket.destroy()
@@ -90,7 +91,8 @@ test('a WebSocket handshake whose request target is a whole URL opens, read by i
 
 test('a page on another wire version is told to reload: its WebSocket opens, then closes with the code a page reloads on', async () => {
   const ws = await openWire(WIRE_VERSION + 1)
-  const [event] = (await once(ws, 'close')) as [CloseEvent]
+  const [event] = await once(ws, 'close')
+  if (!('code' in event && 'reason' in event)) throw new Error('Expected a close event')
   expect(event.code).toBe(WS_CLOSE_WIRE_VERSION)
   expect(event.reason).toBe('reload the page')
 })

@@ -91,7 +91,7 @@ async function acksWaitingOutcome(count: number) {
       await channel.send(n, { ack: true })
       return 'answered'
     } catch (err) {
-      return (err as Error).name
+      return err instanceof Error ? err.name : String(err)
     } finally {
       settledEarly++
     }

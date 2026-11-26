@@ -39,6 +39,12 @@ const settle = async () => {
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
 
+/** `value`, which the test must have by now: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
+}
+
 class FakeWebSocket {
   static OPEN = 1
   static last: FakeWebSocket | null = null
@@ -352,21 +358,21 @@ describe('SSE→WS barrier on batch POSTs', () => {
     const channel = fakeMuxChannel()
     const downstream = makeDownstream()
     const posts: Array<{ frames: DecodedFrame[]; answer: () => void }> = []
-    const fetchImpl = (async (_url: string, init: RequestInit) => {
+    const fetchImpl: typeof fetch = async (_input, init) => {
       // No streaming upload: its frames go in batch POSTs.
-      if (!(init.body instanceof Blob)) throw new TypeError('Failed to fetch')
+      if (!(init?.body instanceof Blob)) throw new TypeError('Failed to fetch')
       const raw = parseLengthPrefixed(new Uint8Array(await init.body.arrayBuffer()))
-      const metadata = JSON.parse(new TextDecoder().decode(raw[0]!))
+      const metadata = JSON.parse(new TextDecoder().decode(defined(raw[0], "the POST's metadata")))
       const frames = raw.slice(1).map((frame) => decode(bytes(frame)))
       if (metadata.streamResponse) {
         let ix = 0
         for (const frame of frames) if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
         downstream.open()
         downstream.push(reconciled({ ix, sessionId: crypto.randomUUID(), pingInterval: 1_000 }))
-        return new Response(downstream.stream as BodyInit, { headers: { 'Content-Type': 'text/event-stream' } })
+        return new Response(downstream.stream, { headers: { 'Content-Type': 'text/event-stream' } })
       }
       return await new Promise<Response>((resolve) => posts.push({ frames, answer: () => resolve(new Response('')) }))
-    }) as unknown as typeof fetch
+    }
     // The old wire keeps delivering, as it would the download the barrier waits behind.
     const delivering = setInterval(() => downstream.push(encode.pong()), 200)
     try {
@@ -377,7 +383,7 @@ describe('SSE→WS barrier on batch POSTs', () => {
       })
       const staged: { upgradeId?: string } = {}
       await settle()
-      const probe = FakeWebSocket.last!
+      const probe = defined(FakeWebSocket.last, 'the probe')
       probe.answer((frame) => {
         if (frame.tag === TAG.PING) probe.deliver(encode.pong())
         if (frame.tag === TAG.PREPARE) staged.upgradeId = frame.payload.upgradeId
@@ -388,7 +394,7 @@ describe('SSE→WS barrier on batch POSTs', () => {
       probe.deliver(encode.ready({ upgradeId: staged.upgradeId }))
       // The next PING queues behind that POST, which is answered within the drain timeout.
       await delay(1_300)
-      posts[0]!.answer()
+      defined(posts[0], 'the first POST').answer()
       await delay(1_200)
       const barrier = posts.slice(1).some(({ frames }) => frames.some((frame) => frame.tag === TAG.BARRIER))
       expect(barrier, 'the barrier should have gone in the POST after the one it waited for').toBe(true)

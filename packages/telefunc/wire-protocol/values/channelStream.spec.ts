@@ -28,11 +28,34 @@ config.channel = { maxMemory: '2m' }
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => getGlobalObject('channelMemory.ts', { total: 0 }).total
 
+/** `value`, which the test must have by now: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
+}
+
+/** Whether `value` is an async generator, as the page revives a returned one. */
+function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown> {
+  return Object.prototype.toString.call(value) === '[object AsyncGenerator]'
+}
+
+/** `value`, which the page revived as a stream. */
+function streamOf(value: unknown): ReadableStream<unknown> {
+  if (!(value instanceof ReadableStream)) throw new Error('Expected a stream')
+  return value
+}
+
+/** The bytes of `chunk`, which a revived stream gave. */
+function bytesOf(chunk: unknown): Uint8Array {
+  if (!(chunk instanceof Uint8Array)) throw new Error('Expected bytes')
+  return chunk
+}
+
 /** A channel in memory: each send waits until the reader takes it, as a channel's credit would. */
 function memoryChannel() {
   let listener: ((frame: Uint8Array) => Promise<void>) | null = null
   let onClose: (() => void) | null = null
-  const send = (frame: Uint8Array) => listener!(frame)
+  const send = (frame: Uint8Array) => defined(listener, 'a listener')(frame)
   return {
     listenBinary(callback: (frame: Uint8Array) => Promise<void>) {
       listener = callback
@@ -84,7 +107,7 @@ function returnOverChannel(value: unknown): unknown {
       if (!('__index' in metadata)) throw new Error('Unexpected metadata')
       const channel = memoryChannel()
       const source = ChannelStreamSource.create(channel)
-      void sendChunks(channel, producers[metadata.__index]!(), new Promise(() => {}))
+      void sendChunks(channel, defined(producers[metadata.__index], 'its producer')(), new Promise(() => {}))
       return source
     },
   }
@@ -98,46 +121,53 @@ describe('a value streamed over transport channel, larger than the 1 MiB parts i
         yield 'x'.repeat(size)
         yield 'done'
       })(),
-    ) as AsyncGenerator<string>
+    )
+    if (!isAsyncGenerator(gen)) throw new Error('Expected a generator')
     expect((await gen.next()).value).toBe('x'.repeat(size))
     expect((await gen.next()).value).toBe('done')
     expect((await gen.next()).done).toBe(true)
   })
 
   test.each([1_048_600, 3_000_000])('a promise resolves to it whole: %i chars', async (size) => {
-    const { p } = returnOverChannel({ p: Promise.resolve('y'.repeat(size)) }) as { p: Promise<string> }
-    expect(await p).toBe('y'.repeat(size))
+    const revived = returnOverChannel({ p: Promise.resolve('y'.repeat(size)) })
+    if (!(typeof revived === 'object' && revived !== null && 'p' in revived && revived.p instanceof Promise))
+      throw new Error('Expected a promise in an object')
+    expect(await revived.p).toBe('y'.repeat(size))
   })
 
   test('a stream gets each chunk whole', async () => {
     const chunk = new Uint8Array(3 * 1024 * 1024 + 7)
     for (let i = 0; i < chunk.length; i++) chunk[i] = i % 251
-    const stream = returnOverChannel(
-      new ReadableStream({
-        start(controller) {
-          controller.enqueue(chunk)
-          controller.close()
-        },
-      }),
-    ) as ReadableStream<Uint8Array>
+    const stream = streamOf(
+      returnOverChannel(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(chunk)
+            controller.close()
+          },
+        }),
+      ),
+    )
     const chunks: Uint8Array[] = []
-    for await (const received of stream) chunks.push(received)
+    for await (const received of stream) chunks.push(bytesOf(received))
     expect(chunks.map((received) => received.byteLength)).toEqual([chunk.byteLength])
-    expect(Buffer.compare(chunks[0]!, chunk)).toBe(0)
+    expect(Buffer.compare(defined(chunks[0], 'the chunk'), chunk)).toBe(0)
   })
 })
 
 test('a stream over transport channel gets nothing of an empty chunk: one between two others arrives as two chunks', async () => {
-  const stream = returnOverChannel(
-    new ReadableStream({
-      start(controller) {
-        for (const text of ['aaa', '', 'bb']) controller.enqueue(new TextEncoder().encode(text))
-        controller.close()
-      },
-    }),
-  ) as ReadableStream<Uint8Array>
+  const stream = streamOf(
+    returnOverChannel(
+      new ReadableStream({
+        start(controller) {
+          for (const text of ['aaa', '', 'bb']) controller.enqueue(new TextEncoder().encode(text))
+          controller.close()
+        },
+      }),
+    ),
+  )
   const chunks: string[] = []
-  for await (const received of stream) chunks.push(new TextDecoder().decode(received))
+  for await (const received of stream) chunks.push(new TextDecoder().decode(bytesOf(received)))
   expect(chunks).toEqual(['aaa', 'bb'])
 })
 
@@ -167,7 +197,7 @@ describe('a chunk sent in parts', () => {
       expect(await read).toBe(null)
     } else {
       sent.push(...(await sendFrames(channel, [CHANNEL_PUMP_TAG_DATA])))
-      expect((await read)!.byteLength).toBe(11 * STREAM_CHUNK_PART_BYTES)
+      expect(defined(await read, 'the chunk').byteLength).toBe(11 * STREAM_CHUNK_PART_BYTES)
     }
     for (let i = 0; i < 8; i++) {
       gc()

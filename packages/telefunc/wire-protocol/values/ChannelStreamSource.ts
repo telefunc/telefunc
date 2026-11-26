@@ -145,7 +145,8 @@ class ChannelStreamSource {
         this.wake = r
       })
     }
-    const entry = this.queue.shift()!
+    const entry = this.queue.shift()
+    assert(entry)
     // Signal the channel that this frame has been consumed — drives window updates.
     entry.onConsumed()
     // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end, 0x03 = a part with more to follow.
