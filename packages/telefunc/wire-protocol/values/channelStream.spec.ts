@@ -8,8 +8,6 @@ import { ResponseValues } from './client/response/registry.js'
 import * as streams from './client/streams.js'
 import * as channels from './client/channels.js'
 import * as broadcasts from './client/broadcasts.js'
-
-const allFeatures = { streams, channels, broadcasts }
 import { readableStreamReplacer } from './client/request/readableStream.js'
 import { createStreamProducer } from './server/response/createStreamProducer.js'
 import { ChannelStreamSource } from './ChannelStreamSource.js'
@@ -26,6 +24,8 @@ import { config } from '../../node/server/serverConfig.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { unsubscribeOf } from '../channel/channel.js'
 import type { ClientReviverContext, ServerReplacerContext, StreamingProducer } from './types.js'
+
+const allFeatures = { streams, channels, broadcasts }
 
 config.channel = { maxMemory: '2m' }
 
