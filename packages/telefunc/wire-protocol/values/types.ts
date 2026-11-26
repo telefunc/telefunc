@@ -202,7 +202,7 @@ type ServerReplacerContext = {
   validators: ShieldValidators
 }
 
-/** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
+/** Context for client-side request replacers: File, Blob and extensions' types. */
 type ClientReplacerContext = {
   registerFile(body: Blob): number
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {

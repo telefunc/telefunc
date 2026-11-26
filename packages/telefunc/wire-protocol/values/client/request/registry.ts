@@ -39,29 +39,20 @@ function createRequestReplacer(
   onClaimed: (value: unknown, claim: Claim) => void,
   extensionTypes: ClientReplacerType[],
 ) {
+  const replace = (type: ClientReplacerType, value: unknown, serializer: (v: unknown) => string) => {
+    const { metadata, close, abort } = type.replace(value, context)
+    onReplaced({ value, close, abort })
+    return { replacement: type.prefix + serializer(metadata), resolved: true }
+  }
   return (_key: string, value: unknown, serializer: (v: unknown) => string) => {
-    for (const type of bodyTypes) if (type.detect(value)) return replace(type, value, context, onReplaced, serializer)
+    for (const type of bodyTypes) if (type.detect(value)) return replace(type, value, serializer)
     for (const type of channelTypes) {
       if (!type.detect(value)) continue
       const claim = type.claim(value)
       onClaimed(value, claim)
       return { replacement: type.prefix + serializer(claim.metadata), resolved: true }
     }
-    for (const type of extensionTypes) {
-      if (type.detect(value)) return replace(type, value, context, onReplaced, serializer)
-    }
+    for (const type of extensionTypes) if (type.detect(value)) return replace(type, value, serializer)
     return undefined
   }
-}
-
-function replace(
-  type: ClientReplacerType,
-  value: unknown,
-  context: ClientReplacerContext,
-  onReplaced: (replaced: Replaced) => void,
-  serializer: (v: unknown) => string,
-) {
-  const { metadata, close, abort } = type.replace(value, context)
-  onReplaced({ value, close, abort })
-  return { replacement: type.prefix + serializer(metadata), resolved: true }
 }

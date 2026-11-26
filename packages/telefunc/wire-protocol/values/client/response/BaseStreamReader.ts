@@ -19,7 +19,7 @@ type CallContext = {
  *  `readExact`. Each transport implements only `readExact` (the byte source). */
 abstract class BaseStreamReader {
   /** Cancelled or released: nothing reads the body anymore. */
-  released = false
+  protected released = false
 
   constructor(
     protected readonly reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
