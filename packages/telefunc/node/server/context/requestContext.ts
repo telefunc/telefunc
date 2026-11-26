@@ -1,5 +1,5 @@
 export { createRequestContext }
-export { REQUEST_CONTEXT, BODY_READ }
+export { REQUEST_CONTEXT }
 export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
@@ -10,8 +10,6 @@ import { createDeferred } from '../../../utils/createDeferred.js'
 import { ATTACHABLE_NOW, type CallPage } from '../../../wire-protocol/channel/server/ServerChannel.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
-/** A call with no body to read off: its upload is over. */
-const BODY_READ: Promise<void> = Promise.resolve()
 
 type ResponseAbortSource = {
   /** Abort the whole telefunc response with Abort semantics. Fires exactly once. */
@@ -45,9 +43,8 @@ type RequestContext = {
   /** @internal Called by `runTelefunc` once the call answered, whichever way: fires the onAnswered callbacks where a hold
    *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
-  /** Settles once the call's body has been read to its end, or its client left: the client's upload is over. Set by the
-   *  binary call's reader; at once otherwise. */
-  bodyRead: Promise<void>
+  /** On Deno, keeps the response open until the call's binary upload ends. */
+  responseHold: { over: Promise<void>; unheld: () => void } | null
   /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
    *  is on its way, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
   page: CallPage
@@ -60,10 +57,12 @@ type RequestContext = {
 function createRequestContext(request: Request): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
+  let closeController: AbortController | undefined
 
   const fireClose = () => {
     if (closed) return
     closed = true
+    closeController?.abort()
     for (const cb of closeCallbacks) invokeCloseCallback(cb)
     closeCallbacks.length = 0
   }
@@ -81,24 +80,30 @@ function createRequestContext(request: Request): RequestContext {
     failedCallbacks.length = 0
   }
 
-  const closeController = new AbortController()
-  closeCallbacks.push(() => closeController.abort())
+  const abortSignal = request.signal
+  // The call holds the request until it answers or its client leaves. Streams and channels can hold it longer.
+  let pendingCount = 1
+  let callPending = true
+  let watchingClient = false
 
-  // Reference counting: fireClose fires when all holds are released.
-  // Each trackPending() adds a hold and returns a one-shot release function.
-  let pendingCount = 0
-  const trackPending = () => {
-    pendingCount++
-    let released = false
-    return () => {
-      if (released) return
-      released = true
-      if (--pendingCount === 0) fireClose()
-    }
+  const releasePending = () => {
+    if (--pendingCount === 0) fireClose()
   }
-  // The call's own hold — released when the call ends, whichever way, or when the client disconnects, whichever comes
-  // first.
-  const releaseCall = trackPending()
+  const releaseCall = () => {
+    if (!callPending) return
+    callPending = false
+    if (watchingClient) abortSignal.removeEventListener('abort', releaseCall)
+    releasePending()
+  }
+  const watchClient = () => {
+    if (!callPending || watchingClient) return
+    if (abortSignal.aborted) {
+      releaseCall()
+      return
+    }
+    abortSignal.addEventListener('abort', releaseCall, { once: true })
+    watchingClient = true
+  }
 
   const answeredCallbacks: Array<() => void> = []
   const markComplete = () => {
@@ -112,8 +117,15 @@ function createRequestContext(request: Request): RequestContext {
 
   const ctx: RequestContext = {
     request,
-    abortSignal: request.signal,
-    signal: closeController.signal,
+    abortSignal,
+    get signal() {
+      if (!closeController) {
+        closeController = new AbortController()
+        if (closed) closeController.abort()
+        else watchClient()
+      }
+      return closeController.signal
+    },
     responseAbort,
     onCallFailed(cb) {
       if (failed) {
@@ -127,6 +139,7 @@ function createRequestContext(request: Request): RequestContext {
       answeredCallbacks.push(cb)
     },
     onClose(cb) {
+      watchClient()
       if (closed) {
         invokeCloseCallback(cb)
         return
@@ -134,17 +147,18 @@ function createRequestContext(request: Request): RequestContext {
       closeCallbacks.push(cb)
     },
     markComplete,
-    bodyRead: BODY_READ,
+    responseHold: null,
     page: ATTACHABLE_NOW,
-    trackPending,
-  }
-
-  // request.signal fires when the page disconnects: it releases the call's hold, so onClose waits only for what
-  // the response still carries.
-  if (request.signal.aborted) {
-    releaseCall()
-  } else {
-    request.signal.addEventListener('abort', releaseCall, { once: true })
+    trackPending() {
+      watchClient()
+      pendingCount++
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        releasePending()
+      }
+    },
   }
 
   return ctx
