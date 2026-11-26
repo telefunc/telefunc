@@ -32,12 +32,14 @@ import { EVERY_STREAM } from '../ownStream.js'
 /** A page's end of a Broadcast: it receives `T`, and publishes `Publish`, which is `T` unless the server takes another
  *  message than it sends. */
 class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
+  readonly key: string
   private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   /** Reads the parts that changed in this task, until it declares them. */
   private dueParts: (() => unknown) | null = null
 
-  constructor(options: ClientChannelOptions) {
+  constructor({ key, ...options }: ClientChannelOptions & { key: string }) {
     super(options)
+    this.key = key
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
   }
@@ -239,7 +241,7 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     bytes: number,
     lossy: boolean,
   ): void {
-    const info = { key: this.key!, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
+    const info = { key: this.key, seq: wireInfo.seq, timestamp: wireInfo.timestamp }
     for (const [i, { listener }] of listeners.entries()) {
       if (!listener) continue
       try {

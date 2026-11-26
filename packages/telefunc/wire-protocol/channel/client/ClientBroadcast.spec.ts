@@ -365,6 +365,7 @@ it('parts changed in a task are declared before a publish made after them in tha
 function channelOptions(telefuncUrl = 'http://test.local/_telefunc') {
   return {
     channelId: crypto.randomUUID(),
+    key: 'k',
     connection: {
       transports: [CHANNEL_TRANSPORT.SSE],
       telefuncUrl,
@@ -378,6 +379,7 @@ function channelOptions(telefuncUrl = 'http://test.local/_telefunc') {
 function behindUplink() {
   const page = new ClientBroadcast({
     channelId: crypto.randomUUID(),
+    key: 'k',
     connection: {
       transports: [CHANNEL_TRANSPORT.SSE],
       telefuncUrl: 'http://test.local/_telefunc',

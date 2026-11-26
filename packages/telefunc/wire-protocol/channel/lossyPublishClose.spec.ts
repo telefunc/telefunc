@@ -55,6 +55,7 @@ for (const transport of ['sse', 'ws'] as const) {
         getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
         const page = new ClientBroadcast<string>({
           channelId: channel.id,
+          key,
           connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
         })
         const read: string[] = []
@@ -97,6 +98,7 @@ for (const transport of ['sse', 'ws'] as const) {
         getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
         const page = new ClientBroadcast<string>({
           channelId: channel.id,
+          key,
           connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
         })
         const read: string[] = []
@@ -119,6 +121,7 @@ for (const transport of ['sse', 'ws'] as const) {
       getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
+        key,
         connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
       })
       const read: string[] = []
@@ -140,6 +143,7 @@ for (const transport of ['sse', 'ws'] as const) {
       getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
+        key,
         connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
       })
       const read: string[] = []
@@ -159,6 +163,7 @@ for (const transport of ['sse', 'ws'] as const) {
       getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
+        key,
         connection: { telefuncUrl, transports: [transport], idleTimeout: 60_000, connectionKey: crypto.randomUUID() },
       })
       const read: string[] = []

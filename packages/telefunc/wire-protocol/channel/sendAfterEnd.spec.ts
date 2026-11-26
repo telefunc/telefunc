@@ -185,6 +185,7 @@ describe("a page's subscribe() callback that publishes after its broadcast ended
       getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
       const page = new ClientBroadcast<string>({
         channelId: channel.id,
+        key,
         connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },
       })
       await Promise.all([channel.opened, page.opened])

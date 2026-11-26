@@ -242,7 +242,7 @@ test("an ended broadcast the app keeps lets go of its page's wire once the page 
   }
   getChannelMux().registerChannel(channel._end, ATTACHABLE_NOW)
   const connection = { telefuncUrl, transports: ['ws' as const], idleTimeout: 0, connectionKey: crypto.randomUUID() }
-  const page = new ClientBroadcast<string>({ channelId: channel.id, connection })
+  const page = new ClientBroadcast<string>({ channelId: channel.id, key: channel.key, connection })
   // Another channel keeps the page's wire open.
   const other = new ServerChannel<unknown, unknown>()
   getChannelMux().registerChannel(other, ATTACHABLE_NOW)

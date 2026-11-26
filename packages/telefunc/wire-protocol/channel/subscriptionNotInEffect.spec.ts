@@ -251,6 +251,7 @@ async function subscribedPage(kind: 'text' | 'binary' = 'text', heard: string[] 
   })
   const page = new ClientBroadcast({
     channelId: crypto.randomUUID(),
+    key: 'k',
     connection: {
       transports: [CHANNEL_TRANSPORT.SSE],
       telefuncUrl: 'http://test.local/_telefunc',

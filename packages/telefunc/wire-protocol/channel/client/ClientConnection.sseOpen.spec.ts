@@ -209,6 +209,7 @@ async function holdBroadcastPost(settings: WireSettings) {
   answers.push(wire(settings))
   const broadcast = new ClientBroadcast({
     channelId: crypto.randomUUID(),
+    key: 'k',
     connection: { telefuncUrl: `${url}/_telefunc`, transports: ['sse'], connectionKey: crypto.randomUUID() },
   })
   channels.push(broadcast)

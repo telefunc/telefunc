@@ -73,7 +73,6 @@ type ConnectionOptions = {
 type ClientChannelOptions = {
   channelId: string
   ack?: boolean
-  key?: string
   maxFrameBytes?: number
   connection: ConnectionOptions
 }
@@ -89,7 +88,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
   readonly id: string
   readonly ack: boolean
-  readonly key: string | undefined
   readonly _maxFrameBytes: number
   protected connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
@@ -112,16 +110,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Sends this page's lossy send that waits for the server to grant more credit; a newer one takes its place. */
   private heldLossy: (() => void) | null = null
 
-  constructor({
-    channelId,
-    ack = false,
-    key,
-    maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
-    connection,
-  }: ClientChannelOptions) {
+  constructor({ channelId, ack = false, maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES, connection }: ClientChannelOptions) {
     this.id = channelId
     this.ack = ack
-    this.key = key
     this._maxFrameBytes = maxFrameBytes
     // Built before the connection: registering the channel fits its credits to the replay buffers.
     const owner: CreditOwner = {

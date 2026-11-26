@@ -306,6 +306,7 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
   test('`publish()` is a usage error naming `publishBinary()`', () => {
     const room = new ClientBroadcast({
       channelId: crypto.randomUUID(),
+      key: 'k',
       connection: {
         transports: [CHANNEL_TRANSPORT.SSE],
         telefuncUrl: 'http://test.local/_telefunc',

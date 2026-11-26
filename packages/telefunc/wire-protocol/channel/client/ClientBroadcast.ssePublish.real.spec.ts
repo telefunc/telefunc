@@ -57,6 +57,7 @@ test.each([
   getChannelMux().registerChannel(server._end, ATTACHABLE_NOW)
   const page = new ClientBroadcast<string>({
     channelId: server.id,
+    key: server.key,
     connection: {
       telefuncUrl: world.telefuncUrl,
       transports: ['sse'],

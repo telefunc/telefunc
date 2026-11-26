@@ -104,7 +104,7 @@ test("the cap counts each key a real page's RECONCILE entry carries, a broadcast
   getChannelMux().registerChannel(broadcast._end, ATTACHABLE_NOW)
   const transports: ('sse' | 'ws')[] = ['sse']
   const connection = { telefuncUrl: world.telefuncUrl, transports, idleTimeout: 0, connectionKey }
-  const page = new ClientBroadcast<string>({ channelId: broadcast.id, connection })
+  const page = new ClientBroadcast<string>({ channelId: broadcast.id, key: broadcast.key, connection })
   page.subscribe(() => {})
   const plain = pair(connectionKey, ['sse'])
   try {
