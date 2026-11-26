@@ -5,7 +5,7 @@ import type { TelefuncId } from './serializeTelefunctionResult.js'
 import { Abort } from '../Abort.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { callBugListeners } from './onBug.js'
-import { handleError } from './handleError.js'
+import { handleError, isPeerDisconnect } from './handleError.js'
 
 function validateTelefunctionError(err: unknown, telefuncId: TelefuncId): void {
   assertUsage(
@@ -19,6 +19,7 @@ function validateTelefunctionError(err: unknown, telefuncId: TelefuncId): void {
 }
 
 function handleTelefunctionBug(err: unknown): void {
+  if (isPeerDisconnect(err)) return
   callBugListeners(err)
   handleError(err)
 }

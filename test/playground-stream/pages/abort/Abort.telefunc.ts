@@ -1,5 +1,14 @@
-export { onSlowAIGenerator, onSlowStreamForAbort, onSlowNormalTelefunc, onUploadAbortSingle, onUploadAbortMultiple }
+export {
+  onSlowAIGenerator,
+  onSlowStreamForAbort,
+  onSlowNormalTelefunc,
+  onUploadAbortSingle,
+  onUploadAbortMultiple,
+  onSaveToStorage,
+}
 
+import { Readable, Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
@@ -89,8 +98,8 @@ async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
 
 // Single file upload — read slowly so client has time to abort mid-upload.
 // The sleep(100) between reads stretches consumption to ~1.6s for ~16 chunks,
-// giving the client's abort time to arrive mid-read.
-async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; error: string | null }> {
+// giving the client's abort time to arrive mid-read. Rethrow the disconnect error after recording it.
+async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number }> {
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
   const context = getContext()
@@ -106,12 +115,10 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
       bytesRead += value.byteLength
       await sleep(100)
     }
-    cleanupState.uploadAbortSingleError = ''
-    return { bytesRead, error: null }
+    return { bytesRead }
   } catch (e: any) {
-    const msg = e?.message || String(e)
-    cleanupState.uploadAbortSingleError = msg
-    return { bytesRead, error: msg }
+    cleanupState.uploadAbortSingleError = e?.message || String(e)
+    throw e
   }
 }
 
@@ -153,4 +160,15 @@ async function onUploadAbortMultiple(
 
   cleanupState.uploadAbortMultiResults = JSON.stringify(results)
   return { results }
+}
+
+// The storage server hangs up before the file is saved: a server bug, though Node reports it as `ERR_STREAM_PREMATURE_CLOSE`.
+async function onSaveToStorage(): Promise<void> {
+  const storage = new Writable({
+    write(_chunk, _encoding, callback) {
+      this.destroy()
+      callback()
+    },
+  })
+  await pipeline(Readable.from(['chunk-0', 'chunk-1']), storage)
 }

@@ -140,7 +140,7 @@ function testAbort() {
   // 1MB file with sleep(100) between reads — the client aborts while the server reads it
   // Node only: Bun and Deno hand the server the whole 1 MB the browser sent before it aborted, and only then report the disconnect.
   if (serverRuntime() === 'node')
-    test('abort: single file upload — client cancel, server disconnect error', async () => {
+    test('abort: single file upload — client cancel, server disconnect error, no bug reported', async () => {
       await navigate(`${getServerUrl()}/abort`)
       await resetCleanupState()
 
@@ -164,7 +164,22 @@ function testAbort() {
         const state = await getCleanupState()
         expect(state.uploadAbortSingle).toBe('cleaned-up')
       })
+      const bugs = Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
+      expect(bugs).deep.equal([])
     })
+
+  test('abort: a server stream that closes early is reported as a bug', async () => {
+    await navigate(`${getServerUrl()}/abort`)
+    await resetCleanupState()
+
+    await page.click('#test-save-to-storage')
+    await autoRetry(async () => {
+      expect((await getResult('#abort-result')).error).toContain('Internal Server Error')
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())['bug:Premature close']).toBe('reported')
+    })
+  })
 
   // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
