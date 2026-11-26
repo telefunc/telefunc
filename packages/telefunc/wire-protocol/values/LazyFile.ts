@@ -78,9 +78,9 @@ class LazyBlob extends BaseStreamBlob {
   readonly [LAZY_BLOB_BRAND] = true
 
   private getStream: GetStream
-  protected consumed = false
+  private consumed = false
 
-  // Brand-checked `instanceof` (Abort.ts pattern) — accepts any object carrying
+  // Brand-checked `instanceof` — accepts any object carrying
   // the brand symbol, including plain objects across realms / serialization.
   static [Symbol.hasInstance](value: unknown): boolean {
     return isLazyBlob(value)

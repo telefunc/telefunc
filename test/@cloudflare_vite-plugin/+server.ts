@@ -11,7 +11,6 @@ const tf = new Telefunc({ scale: 5 })
 // The Cloudflare page's Hibernation snippet, assigned after the adapter.
 config.channel = {
   reconnectTimeout: 5_000,
-  idleTimeout: 5_000,
   pingInterval: 2_000,
 }
 

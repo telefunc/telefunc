@@ -10,7 +10,7 @@ import type {
   ChannelPublishAck,
   ChannelPublishInfo,
 } from '../channel.js'
-import { Readiness, neverInEffect, stringifyMessage, withReady, type Unsubscribe } from '../channel.js'
+import { Outcome, neverOpened, stringifyValue, unsubscribeOf, type Unsubscribe } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../../../utils/assert.js'
@@ -95,14 +95,14 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
 
   publish(data: ChannelData<Publish>, options?: BroadcastPublishOptions): Promise<ChannelPublishAck> {
     const { lossy = false } = options ?? {}
-    const payload = textPayload(stringifyMessage(data, 'publish'), lossy)
+    const payload = textPayload(stringifyValue(data, 'publish'), lossy)
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. Its answer is what the add-on's own end
    *  of the channel answers it with, which only the add-on reads. */
   _publishUnreported(data: ChannelData<Publish>): Promise<unknown> {
-    return this.sendPublish(encode.publishAckReq, stringifyMessage(data, 'publish'), null, false)
+    return this.sendPublish(encode.publishAckReq, stringifyValue(data, 'publish'), null, false)
   }
 
   override messages(options?: { signal?: AbortSignal }) {
@@ -135,7 +135,7 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     stream: string | null,
     lossy: boolean,
   ): Promise<ChannelPublishAck> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     if (stream === null) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data)
     if (!lossy) return this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, { stream })
     const replaced = this.connection.replaceWaiting(this, stream, encodeFrame, data)
@@ -165,36 +165,37 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     if (this._attach.unconfirmedWant === null) this.connection.wantSettled(this)
   }
 
-  override _end(err?: Error): void {
-    super._end(err)
+  override _finalize(err: Error | undefined): void {
+    super._finalize(err)
     // What waits gets the end: one its close callbacks removed too.
     this._attach.failWants(err ?? new ChannelClosedError())
     this.subscribers.text.clear()
     this.subscribers.binary.clear()
   }
 
-  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. Its `ready` settles
-   *  once the server confirmed the want this subscriber needs, or the subscriber is removed. */
+  /** The first listener of a kind subscribes the wire, and the last one's removal unsubscribes it. Its `opened` settles
+   *  once the server confirmed the want this subscriber needs, or the subscriber is removed: with the end as known then
+   *  where the close callbacks were called. */
   private subscribeWired<K extends BroadcastKind>(
     kind: K,
     callback: BroadcastListenerByKind<T>[K],
     options: { signal?: AbortSignal },
   ): Unsubscribe {
-    if (options.signal?.aborted) return withReady(() => {})
+    if (options.signal?.aborted) return unsubscribeOf(() => {})
     // A closing one sends no want any more.
-    if (this.stopped) return neverInEffect(this.endError())
-    const readiness = new Readiness()
+    if (this.stopped) return neverOpened(this.endError())
+    const opened = new Outcome()
     if (this.subscribers[kind].size === 0) this._setSubscribed(kind, true)
     const remove = this.subscribers[kind].add(callback, {
       ...options,
       onRemove: () => {
-        // Once its close callbacks ran, one that waits gets the end, whatever they do.
-        if (!this.lifecycle.closeFired) this._attach.stopWaiting(readiness)
+        // Removed, it can no longer take effect: once its close callbacks were called, that is the end as known now.
+        this._attach.stopWaiting(opened, this.lifecycle.closeFired ? this.endError() : true)
         if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
       },
     })
-    this._attach.waitFor(readiness, this._attach.wants?.version ?? 0)
-    return withReady(remove, readiness)
+    this._attach.waitFor(opened, this._attach.wants?.version ?? 0)
+    return unsubscribeOf(remove, opened)
   }
 
   private sendReplyData(data: unknown): void {

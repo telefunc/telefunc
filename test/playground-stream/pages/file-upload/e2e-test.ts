@@ -1,7 +1,40 @@
 export { testFileUpload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, serverRuntime } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime, sleep } from '../../e2e-utils'
+
+// Calls sent as the Telefunc client sends a binary call (`x-telefunc-request: bin`, then
+// `[u32 metadata length][metadata][the files' bytes]`), for what no page does: a File read after its call.
+const telefuncFile = '/pages/file-upload/FileUpload.telefunc.ts'
+const encoder = new TextEncoder()
+
+/** A binary call to `name` with one File of `size` bytes. */
+function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
+  const metadata = encoder.encode(
+    JSON.stringify({
+      file: telefuncFile,
+      name,
+      args: [`!TelefuncFile:${JSON.stringify({ index: 0, size, name: 'kept.txt', type: '', lastModified: 0 })}`],
+    }),
+  )
+  const body = new Uint8Array(4 + metadata.length + size)
+  new DataView(body.buffer).setUint32(0, metadata.length)
+  body.set(metadata, 4)
+  body.fill(120, 4 + metadata.length)
+  return body
+}
+
+/** `cookie` sends a call to the server instance that set it, behind the Docker lanes' sticky load balancer. */
+async function post(kind: 'bin' | 'txt', body: BodyInit, cookie?: string) {
+  const headers: Record<string, string> = { 'x-telefunc-request': kind }
+  if (cookie !== undefined) headers.cookie = cookie
+  const response = await fetch(`${getServerUrl()}/_telefunc`, { method: 'POST', headers, body })
+  return {
+    status: response.status,
+    text: await response.text(),
+    cookie: response.headers.get('set-cookie')?.split(';', 1)[0],
+  }
+}
 
 function testFileUpload() {
   test('file upload: single file + text arg', async () => {
@@ -82,6 +115,24 @@ function testFileUpload() {
       const result = await getResult('#upload-result')
       expect(result.text2).toBe('BBB')
       expect(result.file1Error).toBeTruthy()
+    })
+  })
+
+  test('file upload: the second file cancelled while the first still arrives, the third reads its own bytes', async () => {
+    await page.click('#test-cancel-second')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.text3).toBe('CCC')
+    })
+  })
+
+  test('file upload: after a skipped file fails to start, the next file reads its own bytes', async () => {
+    await page.click('#test-after-failed-start')
+    await autoRetry(async () => {
+      const result = await getResult('#upload-result')
+      expect(result.text2).toBe('BBB')
+      expect(result.file1Error).toContain('has already been consumed')
+      expect(result.text3).toBe('CCC')
     })
   })
 
@@ -225,4 +276,40 @@ function testFileUpload() {
       expect(result).deep.equal({ ok: true })
     })
   })
+
+  test('file upload: a call that returns a Channel and never reads its 32 MiB File is answered, and its channel opens on the page', async () => {
+    await page.click('#test-channel-unread-file')
+    await autoRetry(
+      async () => {
+        const result = await getResult('#upload-result')
+        expect(result).deep.equal({ received: 'open' })
+      },
+      { timeout: 10_000 },
+    )
+  })
+
+  test('file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end is read whole', async () => {
+    const kept = await post('bin', binaryCall('onKeepFile', 1000))
+    expect(kept.status).toBe(200)
+    // The whole body came with the call, so the read-off that follows its answer has read it to the end: the File keeps
+    // its bytes past its call.
+    await sleep(500)
+    const read = await post(
+      'txt',
+      JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }),
+      kept.cookie,
+    )
+    expect(read.text).toContain('read 1000 bytes')
+  })
+
+  // Bun's and Deno's servers (their lanes serve a production build, so the refusal prints nothing); Node's adapters have
+  // their rows in packages/telefunc/serve/node.uploadBody.spec.ts.
+  if (serverRuntime() !== 'node')
+    test('file upload: a binary call whose body ends before its envelope is complete is refused as malformed (400)', async () => {
+      const statuses: number[] = []
+      for (const body of ['', new Uint8Array([0, 0]), new Uint8Array([0, 0, 3, 232, 123])]) {
+        statuses.push((await post('bin', body)).status)
+      }
+      expect(statuses).deep.equal([400, 400, 400])
+    })
 }

@@ -8,5 +8,7 @@ export default defineConfig({
     exclude: [...configDefaults.exclude, 'packages/redis/src/*.store.spec.ts'],
     // Specs that force real garbage collection need it.
     poolOptions: { forks: { execArgv: ['--expose-gc'] } },
+    // The package as built, for the pages of packages/telefunc/serve's specs.
+    globalSetup: ['packages/telefunc/serve/page.build.fixture.ts'],
   },
 })

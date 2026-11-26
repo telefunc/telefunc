@@ -2,63 +2,37 @@ import { expect, test, vi } from 'vitest'
 
 import { WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest, encodeSseRequestMetadata, encodeU32 } from '../../wire/envelope.js'
-import { encode } from '../../wire/frame.js'
+import { encode, isOneFrame, messageFrames } from '../../wire/frame.js'
+import { SseEvents } from '../../wire/SseEvents.js'
 import { TAG } from '../../wire/tags.js'
-import { base64urlToUint8Array } from '../../wire/base64url.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
-import { handleSseChannelRequest } from './sse.js'
+import { handleSseChannelRequest, type SseChannelHttpResponse } from './sse.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
-// A ping deadline of 2 s.
+// A ping deadline of 2.5 s: two intervals, after the half interval the page may hold its PING for a POST.
 config.channel = { pingInterval: 1000 }
 
 function post(body: BodyInit) {
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-  return handleSseChannelRequest(new Request(url, { method: 'POST', body, duplex: 'half' } as RequestInit))
+  // Node's Request takes `duplex`, which the DOM's RequestInit doesn't name.
+  const init = { method: 'POST', body, duplex: 'half' }
+  return handleSseChannelRequest(new Request(url, init), undefined, () => false, noUpgrades)
 }
 
-/** The event stream an open was answered with. */
-function eventsOf({ body }: Awaited<ReturnType<typeof post>>) {
-  if (!(body instanceof ReadableStream)) throw new Error('The open was answered without an event stream')
-  return body.getReader()
-}
-
-/** The frames an open's event stream carries, one per call, past its comments; null once it ended. */
-function framesOf(opened: Awaited<ReturnType<typeof post>>) {
-  const events = eventsOf(opened)
-  const decoder = new TextDecoder()
-  let buffered = ''
-  return async (): Promise<Uint8Array<ArrayBuffer> | null> => {
-    while (true) {
-      const end = buffered.indexOf('\n\n')
-      if (end !== -1) {
-        const data = buffered
-          .slice(0, end)
-          .split('\n')
-          .find((line) => line.startsWith('data: '))
-        buffered = buffered.slice(end + 2)
-        if (data !== undefined) return base64urlToUint8Array(data.slice('data: '.length))
-        continue
-      }
-      const { done, value } = await events.read()
-      if (done) return null
-      buffered += decoder.decode(value, { stream: true })
-    }
-  }
-}
-
-/** The next frame of `tag` the stream carries; fails, saying so, if it ends first. */
-async function nextOf(next: () => Promise<Uint8Array<ArrayBuffer> | null>, tag: number, name: string) {
-  while (true) {
-    const frame = await next()
-    if (frame === null) throw new Error(`The event stream ended before its ${name}`)
-    if (frame[0] === tag) return frame
-  }
+/** The event stream an open POST was answered with. */
+function eventsOf({ body }: SseChannelHttpResponse): ReadableStream<Uint8Array<ArrayBuffer>> {
+  if (!(body instanceof ReadableStream)) throw new Error('no event stream')
+  return body
 }
 
 test('a batch POST whose wire closed before its frames ran is refused', async () => {
   const connId = crypto.randomUUID()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [
+      encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+    ]),
+  )
   expect(opened.statusCode).toBe(200)
 
   // The batch's metadata arrives at once, its frame only once the handler reads for it.
@@ -77,7 +51,7 @@ test('a batch POST whose wire closed before its frames ran is refused', async ()
   const controller = await reading.promise
 
   // The page's event stream is cancelled, closing the wire, while the batch's frame is on its way.
-  await (opened.body as ReadableStream).cancel()
+  await eventsOf(opened).cancel()
   const ping = encode.ping([])
   controller.enqueue(encodeU32(ping.byteLength))
   controller.enqueue(ping)
@@ -88,12 +62,14 @@ test('a batch POST whose wire closed before its frames ran is refused', async ()
 
 test('a page whose upload POST is read only after server code held the event loop past the ping deadline keeps its wire', async () => {
   const connId = crypto.randomUUID()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [
+      encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+    ]),
+  )
   expect(opened.statusCode).toBe(200)
-  // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline. The stream's first bytes are a
-  // comment the server writes before it reads the open.
-  const next = framesOf(opened)
-  await nextOf(next, TAG.RECONCILED, 'RECONCILED')
+  // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
+  expect((await eventsOf(opened).getReader().read()).done).toBe(false)
 
   // Server code holds the event loop 1 s past the deadline, as a synchronous loop of sends does: the deadline's timer
   // runs 1 s late, which leaves the read of the upload below room on a loaded machine.
@@ -120,53 +96,142 @@ test('a page whose upload POST is read only after server code held the event loo
   )
 
   expect((await upload).statusCode).toBe(200)
-  // The wire it came on is the one the server answers it on.
-  await nextOf(next, TAG.PONG, 'PONG')
+})
+
+test('a page that held its PING for a POST, then stalled for most of an interval, keeps its wire', async () => {
+  const connId = crypto.randomUUID()
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [
+      encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+    ]),
+  )
+  expect(opened.statusCode).toBe(200)
+  // Its RECONCILED: the server ran the open's RECONCILE, which starts the deadline.
+  expect((await eventsOf(opened).getReader().read()).done).toBe(false)
+
+  // Its PING goes an interval on, held half an interval for a POST, and the page stalls 0.8 interval more.
+  await new Promise((resolve) => setTimeout(resolve, 2_300))
+  expect((await post(encodeSseRequest({ connId }, [encode.ping([])]))).statusCode).toBe(200)
+})
+
+test("a page whose open's RECONCILE crosses for longer than the ping deadline, its bytes arriving all along, gets its RECONCILED before its wire ends", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const connId = crypto.randomUUID()
+    // 64 channels' entries, 512 bytes every 500 ms: about 4.5 s, past the deadline of 2.5 s.
+    const open = Array.from({ length: 64 }, (_, ix) => ({ id: crypto.randomUUID(), ix, lastSeq: 0 }))
+    const bytes = new Uint8Array(
+      await encodeSseRequest({ connId, streamResponse: true }, [
+        encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open }),
+      ]).arrayBuffer(),
+    )
+    let sent = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull: (controller) =>
+          new Promise<void>((resolve) => {
+            if (sent >= bytes.byteLength) {
+              controller.close()
+              return resolve()
+            }
+            setTimeout(() => {
+              controller.enqueue(bytes.slice(sent, sent + 512))
+              sent += 512
+              resolve()
+            }, 500)
+          }),
+      },
+      { highWaterMark: 0 },
+    )
+    const answering = post(body)
+    let answered = false
+    void answering.then(() => void (answered = true))
+    while (!answered) await vi.advanceTimersByTimeAsync(100)
+    const opened = await answering
+    const events = eventsOf(opened).getReader()
+    const decoder = new SseEvents()
+    // What the page reads first of the two: the RECONCILED, or the stream's end.
+    const order: string[] = []
+    void (async () => {
+      while (order.length === 0) {
+        const { done, value } = await events.read()
+        if (done) return void order.push('ended')
+        decoder.push(value, (event) => {
+          for (const frame of isOneFrame(event) ? [event] : messageFrames(event)) {
+            if (frame[0] === TAG.RECONCILED) order.push('RECONCILED')
+          }
+        })
+      }
+    })()
+    while (order.length === 0) await vi.advanceTimersByTimeAsync(100)
+    expect(order).toEqual(['RECONCILED'])
+    await events.cancel()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('a page that stays silent past the ping deadline loses its wire', async () => {
   const connId = crypto.randomUUID()
   const openedAt = performance.now()
-  const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+  const opened = await post(
+    encodeSseRequest({ connId, streamResponse: true }, [
+      encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+    ]),
+  )
   expect(opened.statusCode).toBe(200)
 
-  const events = eventsOf(opened)
+  const events = eventsOf(opened).getReader()
   while (!(await events.read()).done);
   expect(performance.now() - openedAt).toBeGreaterThanOrEqual(2_000)
 })
 
-test('a silent page whose ping deadline timer runs before its time on the performance clock loses its wire a timer after its deadline, and no timer gets a negative delay', async () => {
-  // Node runs a timer by the loop's clock, read as its turn began; `performance.now()` moves on as a turn works. Here
-  // it reads 1 ms ahead while the open is handled, and in each turn of timers from the loop's time on, 1 ms later at each
-  // read: so the deadline, judged 1 ms early and armed again for that millisecond, runs a timer before it is due.
+test('a silent page whose ping deadline is judged while its timer runs ahead of the performance clock loses its wire, and no timer gets a negative delay', async () => {
+  // Node runs a timer by the loop's clock, read as its turn began; `performance.now()` moves on as the turn works. Here
+  // it reads 1 ms later at each read in a turn, so a timer armed after some reads runs before its time on that clock.
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
-  let readsThisTurn: number | null = null
-  const now = vi
-    .spyOn(performance, 'now')
-    .mockImplementation(() => Date.now() + (readsThisTurn === null ? 1 : readsThisTurn++))
-  const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+  let readsThisTurn = 0
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => Date.now() + readsThisTurn++)
+  // How many clock reads a turn makes depends on all the code that runs in it, so whether a delay would have been
+  // negative here varies from run to run: DeadlineTimer.spec.ts makes that case on purpose.
+  const delays: number[] = []
+  let turns = 0
+  const realSetTimeout = globalThis.setTimeout
+  const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay) => {
+    delays.push(delay ?? 0)
+    return realSetTimeout(callback, delay)
+  })
   try {
     const connId = crypto.randomUUID()
-    const opened = await post(encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open: [] })]))
+    const opened = await post(
+      encodeSseRequest({ connId, streamResponse: true }, [
+        encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open: [] }),
+      ]),
+    )
     expect(opened.statusCode).toBe(200)
-    const next = framesOf(opened)
-    await nextOf(next, TAG.RECONCILED, 'RECONCILED')
-    const reconciledAt = Date.now()
-    let endedAt: number | null = null
-    async function readToEnd() {
-      while ((await next()) !== null);
-      endedAt = Date.now()
+    const events = eventsOf(opened).getReader()
+    // The open's RECONCILE arms the deadline again once the server read the POST's body, some turns after it answered:
+    // as many as this Node takes. Its RECONCILED, the stream's first event after a comment, shows it ran.
+    const decoder = new TextDecoder()
+    let head = ''
+    while (!head.includes('data: ')) {
+      const { done, value } = await events.read()
+      expect(done).toBe(false)
+      head += decoder.decode(value, { stream: true })
     }
-    void readToEnd()
+    let ended = false
+    void (async () => {
+      while (!(await events.read()).done);
+      ended = true
+    })()
     // The page stays silent: each turn of timers, until the wire is cut.
-    for (let turns = 0; endedAt === null && turns < 100; turns++) {
+    while (!ended && turns < 100) {
       readsThisTurn = 0
       await vi.advanceTimersToNextTimerAsync()
-      readsThisTurn = null
+      turns++
     }
-    // At the 2 s deadline and a recheck a timer later, not a whole deadline more.
-    expect((endedAt ?? Number.POSITIVE_INFINITY) - reconciledAt).toBeLessThan(2_100)
-    expect(setTimeoutSpy.mock.calls.map(([, delay]) => delay ?? 0).filter((delay) => delay < 0)).toEqual([])
+    expect(ended).toBe(true)
+    expect(delays.filter((delay) => delay < 0)).toEqual([])
   } finally {
     setTimeoutSpy.mockRestore()
     now.mockRestore()

@@ -1,3 +1,4 @@
+import { ATTACHABLE_NOW } from './ServerChannel.js'
 import { afterEach, assert, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { createHook } from 'node:async_hooks'
@@ -39,8 +40,8 @@ describe('keyed in-process broadcast', () => {
   it('delivers a published message to a sibling broadcast on the same key', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))
@@ -53,7 +54,7 @@ describe('keyed in-process broadcast', () => {
   // Catches a "skip-self" bug that excludes the source from delivery.
   it('delivers a published message to the source broadcast (self-echo)', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:self' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     broadcast.subscribe((msg) => received.push(msg))
@@ -67,8 +68,8 @@ describe('keyed in-process broadcast', () => {
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
     const a = new ServerBroadcast<{ from: string }>({ key: 'room:A' })
     const b = new ServerBroadcast<{ from: string }>({ key: 'room:B' })
-    a._end._registerChannel()
-    b._end._registerChannel()
+    a._end._registerChannel(ATTACHABLE_NOW)
+    b._end._registerChannel(ATTACHABLE_NOW)
 
     const receivedA: Array<{ from: string }> = []
     const receivedB: Array<{ from: string }> = []
@@ -90,10 +91,10 @@ describe('keyed in-process broadcast', () => {
     const subA = new ServerBroadcast<{ n: number }>({ key: k })
     const subB = new ServerBroadcast<{ n: number }>({ key: k })
     const subC = new ServerBroadcast<{ n: number }>({ key: k })
-    pub._end._registerChannel()
-    subA._end._registerChannel()
-    subB._end._registerChannel()
-    subC._end._registerChannel()
+    pub._end._registerChannel(ATTACHABLE_NOW)
+    subA._end._registerChannel(ATTACHABLE_NOW)
+    subB._end._registerChannel(ATTACHABLE_NOW)
+    subC._end._registerChannel(ATTACHABLE_NOW)
 
     const log: Array<[string, number]> = []
     subA.subscribe((m) => log.push(['A', m.n]))
@@ -114,8 +115,8 @@ describe('keyed in-process broadcast', () => {
   it('preserves publish order across multiple in-flight messages', () => {
     const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
     const receiver = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const seen: number[] = []
     receiver.subscribe((m) => seen.push(m.n))
@@ -129,7 +130,7 @@ describe('keyed in-process broadcast', () => {
   // starve the rest.
   it('isolates subscriber errors — a throwing subscriber does not break others', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
 
     const goodReceived: string[] = []
     broadcast.subscribe(() => {
@@ -150,7 +151,7 @@ describe('keyed in-process broadcast', () => {
   // like duplicate deliveries.
   it('subscribe() returns an unsubscribe that actually stops further delivery', () => {
     const broadcast = new ServerBroadcast<{ n: number }>({ key: 'room:unsub' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
 
     const seen: number[] = []
     const unsubscribe = broadcast.subscribe((m) => seen.push(m.n))
@@ -164,7 +165,7 @@ describe('keyed in-process broadcast', () => {
 
   it('does not call a subscriber that an earlier one unsubscribed during the same delivery', () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:unsub-in-delivery' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
 
     const seen: string[] = []
     broadcast.subscribe(() => unsubscribe())
@@ -180,7 +181,7 @@ describe('keyed in-process broadcast', () => {
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
-    // Note: no `_registerChannel()` calls here — exercises the "publish before register" path.
+    // Note: no `_registerChannel(ATTACHABLE_NOW)` calls here — exercises the "publish before register" path.
 
     sender.publish({ text: 'hello' })
 
@@ -192,8 +193,8 @@ describe('keyed in-process broadcast', () => {
     const k2 = 'room:receipts:B'
     const a = new ServerBroadcast<{ text: string }>({ key: k1 })
     const b = new ServerBroadcast<{ text: string }>({ key: k2 })
-    a._end._registerChannel()
-    b._end._registerChannel()
+    a._end._registerChannel(ATTACHABLE_NOW)
+    b._end._registerChannel(ATTACHABLE_NOW)
 
     const a1 = await a.publish({ text: 'a-one' })
     const a2 = await a.publish({ text: 'a-two' })
@@ -284,7 +285,7 @@ describe('in-memory publishes in answer', () => {
     expect(errors).toHaveLength(1)
     const [error] = errors
     assert(error instanceof ChannelOverflowError)
-    expect(error.message).toContain('a listener that answers its own messages')
+    expect(error.message).toContain("past Telefunc's limit on nested publishes")
   }, 60_000)
 })
 
@@ -297,8 +298,8 @@ describe('binary in-process broadcast', () => {
   it('round-trips binary publishes preserving high-bit bytes', () => {
     const sender = new ServerBroadcast({ key: 'room:bin' })
     const receiver = new ServerBroadcast({ key: 'room:bin' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const received: Uint8Array[] = []
     receiver.subscribeBinary((data) => received.push(data))
@@ -310,8 +311,8 @@ describe('binary in-process broadcast', () => {
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const text: Array<{ text: string }> = []
     const bin: Uint8Array[] = []
@@ -331,7 +332,7 @@ describe('ServerBroadcastEnd', () => {
   it('sends what was delivered before its page attached, once it attaches', () => {
     const end = new ServerBroadcastEnd()
     end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
-    end._registerChannel()
+    end._registerChannel(ATTACHABLE_NOW)
 
     end.deliver(publishBody('"hello"', { seq: 1, timestamp: 1 }, 'room:early', true))
 
@@ -351,6 +352,7 @@ describe('ServerBroadcastEnd', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
+            dropUngiven: () => 0,
             dropWaitingFrom() {},
           },
         },
@@ -434,7 +436,7 @@ function behindEnd(waiting = 0) {
 /** `end`'s page, attached and reading both kinds, as `behindEnd`'s; the text publishes it gets, the binary ones, and the
  *  `info.seq` of both in the order they arrive. */
 function behindPage(end: ServerBroadcastEnd, waiting = 0) {
-  end._registerChannel()
+  end._registerChannel(ATTACHABLE_NOW)
   const sent: string[] = []
   const seqs: number[] = []
   const binary: number[][] = []
@@ -456,6 +458,7 @@ function behindPage(end: ServerBroadcastEnd, waiting = 0) {
       queue: {
         waitingPublishes: () => waiting,
         dropWaitingPublishes() {},
+        dropUngiven: () => 0,
         dropWaitingFrom() {},
       },
     },
@@ -489,7 +492,7 @@ describe('a subscription the adapter refused', () => {
   it('subscribe(): its callback gets no later publish', () => {
     installBackend(() => new BackendRefusingFirstSubscription(), [crypto.randomUUID()])
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
     const refused: string[] = []
     const later: string[] = []
     expect(() => broadcast.subscribe((msg) => refused.push(msg))).toThrow('subscription refused')
@@ -502,7 +505,7 @@ describe('a subscription the adapter refused', () => {
   it('subscribeBinary(): its callback gets no later publish', () => {
     installBackend(() => new BackendRefusingFirstSubscription(), [crypto.randomUUID()])
     const broadcast = new ServerBroadcast<string>({ key: 'room:refused-binary' })
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
     const refused: Uint8Array[] = []
     const later: Uint8Array[] = []
     expect(() => broadcast.subscribeBinary((data) => refused.push(data))).toThrow('subscription refused')
@@ -513,12 +516,12 @@ describe('a subscription the adapter refused', () => {
   })
 })
 
-// The same rule as a page's `ready`: it resolves once the listener is in effect or removed, and rejects where the
+// The same rule as a page's `opened`: it resolves once the listener is in effect or removed, and rejects where the
 // broadcast ends first. The backend here confirms no subscription until each test is over.
-describe("a server subscriber's `ready` while its backend hasn't confirmed the subscription", () => {
+describe("a server subscriber's `opened` while its backend hasn't confirmed the subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  const listen = () => ({ unsubscribe: () => {}, opened: pending })
   const unconfirmed = () =>
     configureBroadcastTransport({
       send: sent,
@@ -543,7 +546,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const remove = binary
         ? broadcast.subscribeBinary(() => {}, { signal })
         : broadcast.subscribe(() => {}, { signal })
-      return { remove, ready: remove.ready, end: () => broadcast.abort() }
+      return { remove, ready: remove.opened, end: () => broadcast.abort() }
     }
   const statically =
     (binary: boolean): Subscribe =>
@@ -552,7 +555,7 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
       const remove = binary
         ? Broadcast.subscribeBinary(key, () => {}, { signal })
         : Broadcast.subscribe(key, () => {}, { signal })
-      return { remove, ready: remove.ready }
+      return { remove, ready: remove.opened }
     }
   const SUBSCRIBERS: Record<string, Subscribe> = {
     'subscribe()': instance(false),
@@ -589,12 +592,12 @@ describe("a server subscriber's `ready` while its backend hasn't confirmed the s
 })
 
 // A backend that refused a key's subscription keeps that outcome: removing a subscriber afterwards doesn't turn its
-// `ready` into a success, whether the app read `ready` before the removal or not.
-describe("a static subscriber's `ready` once its backend refused the key's subscription", () => {
+// `opened` into a success, whether the app read `opened` before the removal or not.
+describe("a static subscriber's `opened` once its backend refused the key's subscription", () => {
   const sent = () => ({ seq: 1, timestamp: 1 })
   const refusing = () => {
     const ready = Promise.reject(new Error('NOPERM'))
-    const listen = () => ({ unsubscribe: () => {}, ready })
+    const listen = () => ({ unsubscribe: () => {}, opened: ready })
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
   }
   const SUBSCRIBE: Record<string, () => Unsubscribe> = {
@@ -608,27 +611,27 @@ describe("a static subscriber's `ready` once its backend refused the key's subsc
         const remove = subscribe()
         await new Promise((resolve) => setTimeout(resolve, 0))
         let ready: Promise<void> | undefined
-        if (removed === 'after') ready = remove.ready
+        if (removed === 'after') ready = remove.opened
         remove()
-        ready ??= remove.ready
+        ready ??= remove.opened
         await expect(ready).rejects.toMatchObject({ cause: { message: 'NOPERM' } })
       })
     }
     it(`${name}: rejects with the store's BackendError itself`, async () => {
       const refusal = new BackendError({ code: 'denied', outcome: 'may-have-run', message: 'refused' })
       const ready = Promise.reject(refusal)
-      const listen = () => ({ unsubscribe: () => {}, ready })
+      const listen = () => ({ unsubscribe: () => {}, opened: ready })
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
-      await expect(subscribe().ready).rejects.toBe(refusal)
+      await expect(subscribe().opened).rejects.toBe(refusal)
     })
   }
 })
 
-// A `ready` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
+// A `opened` nobody reads makes no promise, so subscribers that come and go while the backend waits leave nothing behind.
 describe("subscribers that come and go while their backend hasn't confirmed the key's subscription", () => {
   const pending = new Promise<void>(() => {})
   const sent = () => ({ seq: 1, timestamp: 1 })
-  const listen = () => ({ unsubscribe: () => {}, ready: pending })
+  const listen = () => ({ unsubscribe: () => {}, opened: pending })
   /** How many promises `run` made. */
   const promisesMadeBy = (run: () => void) => {
     let made = 0
@@ -659,12 +662,12 @@ describe("subscribers that come and go while their backend hasn't confirmed the 
   const CHURN: Record<string, (key: string) => Unsubscribe> = {
     'subscribe()': (key) => broadcastOf(key).subscribe(() => {}),
     'subscribeBinary()': (key) => broadcastOf(key).subscribeBinary(() => {}),
-    // In effect at once: its `ready`, read, is one promise every such listener shares.
+    // In effect at once: its `opened`, read, is one promise every such listener shares.
     'Broadcast.subscribe()': (key) => Broadcast.subscribe(key, () => {}),
     'Broadcast.subscribeBinary()': (key) => Broadcast.subscribeBinary(key, () => {}),
-    "a channel's listen(), its `ready` read": (key) => {
+    "a channel's listen(), its `opened` read": (key) => {
       const remove = channelOf(key).listen(() => {})
-      void remove.ready
+      void remove.opened
       return remove
     },
   }
@@ -721,11 +724,11 @@ describe("a transport's listen() that throws", () => {
     return state
   }
 
-  // The throw is the start's failure, as a refusal is: a static subscriber is removed, its `ready` keeping the throw, so
+  // The throw is the start's failure, as a refusal is: a static subscriber is removed, its `opened` keeping the throw, so
   // the one an app subscribes on the rejection is its only subscription; a `BroadcastChannel` ends, its subscription not
   // in effect.
   for (const binary of [false, true]) {
-    it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): \`ready\` rejects with the throw and stays rejected, and the one an app subscribes on the rejection hears each publish once`, async () => {
+    it(`Broadcast.${binary ? 'subscribeBinary' : 'subscribe'}(): \`opened\` rejects with the throw and stays rejected, and the one an app subscribes on the rejection hears each publish once`, async () => {
       const transport = failingFirst()
       const heard: string[] = []
       const subscribe = () =>
@@ -733,13 +736,13 @@ describe("a transport's listen() that throws", () => {
           ? Broadcast.subscribeBinary('room:throws', (data) => heard.push(`${data}`))
           : Broadcast.subscribe<string>('room:throws', (text) => heard.push(text))
       const failed = subscribe()
-      await expect(failed.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+      await expect(failed.opened).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
       const again = subscribe()
-      await again.ready
+      await again.opened
       if (binary) transport.binary(new Uint8Array([1, 2, 3]), { seq: 1, timestamp: 1 })
       else transport.text('"hello"', { seq: 1, timestamp: 1 })
       failed()
-      await expect(failed.ready).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+      await expect(failed.opened).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
       again()
       expect({ heard, active: transport.active, attempts: transport.attempts }).toEqual({
         heard: [binary ? '1,2,3' : 'hello'],
@@ -752,7 +755,7 @@ describe("a transport's listen() that throws", () => {
   it('Broadcast.subscribe(): a subscriber whose start failed stays removed when a transport replaces the plane', async () => {
     failingFirst()
     const failed = Broadcast.subscribe('room:throws', () => {})
-    await expect(failed.ready).rejects.toThrow()
+    await expect(failed.opened).rejects.toThrow()
     let listens = 0
     const listen = () => {
       listens++
@@ -769,8 +772,8 @@ describe("a transport's listen() that throws", () => {
       const transport = failingFirst()
       const room = new ServerBroadcast<string>({ key: 'room:throws' })
       const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
-      await expect(stop.ready).rejects.toThrow()
-      await expect(room.closed).rejects.toThrow()
+      await expect(stop.opened).rejects.toThrow()
+      expect(await room.closed).toBeInstanceOf(Error)
       expect({ active: transport.active, attempts: transport.attempts }).toEqual({ active: 0, attempts: 1 })
     })
   }
@@ -786,7 +789,7 @@ describe("a transport's listener whose broker refuses it", () => {
       state.listens++
       const ready = Promise.withResolvers<void>()
       state.refusals.add(ready.reject)
-      return { unsubscribe: () => void state.stops++, ready: ready.promise }
+      return { unsubscribe: () => void state.stops++, opened: ready.promise }
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
@@ -799,15 +802,15 @@ describe("a transport's listener whose broker refuses it", () => {
   const SURFACES: Record<string, () => { ready: Promise<void>; end: () => void }> = {
     'Broadcast.subscribe()': () => {
       const remove = Broadcast.subscribe('room:refused-listener', () => {})
-      return { ready: remove.ready, end: remove }
+      return { ready: remove.opened, end: remove }
     },
     'Broadcast.subscribeBinary()': () => {
       const remove = Broadcast.subscribeBinary('room:refused-listener', () => {})
-      return { ready: remove.ready, end: remove }
+      return { ready: remove.opened, end: remove }
     },
     'BroadcastChannel.subscribe()': () => {
       const broadcast = new ServerBroadcast({ key: 'room:refused-listener' })
-      return { ready: broadcast.subscribe(() => {}).ready, end: () => broadcast.abort() }
+      return { ready: broadcast.subscribe(() => {}).opened, end: () => broadcast.abort() }
     },
   }
   for (const [surface, subscribe] of Object.entries(SURFACES)) {
@@ -834,19 +837,19 @@ describe("a transport's listener whose broker refuses it", () => {
   }
 
   /** A broker that holds a key from `listen()` until its `unsubscribe()`, and refuses another listener of a key it holds;
-   *  until `accepts` is set, it refuses each new one in its `ready`, or in `listen()` itself, which then holds nothing. */
+   *  until `accepts` is set, it refuses each new one in its `opened`, or in `listen()` itself, which then holds nothing. */
   const reservingBroker = (refusesInListen: boolean) => {
     const state = { accepts: false, unsubscribes: 0, held: new Set<string>() }
     const listen = (key: string) => {
       if (state.held.has(key))
-        return { unsubscribe: () => {}, ready: Promise.reject(new Error('attempt still reserved')) }
+        return { unsubscribe: () => {}, opened: Promise.reject(new Error('attempt still reserved')) }
       if (!state.accepts && refusesInListen) throw new Error('NOPERM')
       state.held.add(key)
       const unsubscribe = () => {
         state.unsubscribes++
         state.held.delete(key)
       }
-      return { unsubscribe, ready: state.accepts ? Promise.resolve() : Promise.reject(new Error('NOPERM')) }
+      return { unsubscribe, opened: state.accepts ? Promise.resolve() : Promise.reject(new Error('NOPERM')) }
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
@@ -888,11 +891,11 @@ describe("a transport's listener whose broker refuses it", () => {
         }
       })
     }
-    it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`ready\` pending keeps none of it reachable`, async () => {
+    it(`Broadcast.${surface}(): a transport's listener stopped while its broker keeps \`opened\` pending keeps none of it reachable`, async () => {
       const pending = new Promise<void>(() => {})
       const state = await subscribeRounds(binary, (onMessage) => ({
         unsubscribe: () => void onMessage,
-        ready: pending,
+        opened: pending,
       }))
       await collectGarbage()
       expect(state.reachable()).toBe(0)
@@ -900,7 +903,7 @@ describe("a transport's listener whose broker refuses it", () => {
     it(`Broadcast.${surface}(): a transport's listener its broker confirmed, then stopped, keeps none of it reachable`, async () => {
       const state = await subscribeRounds(
         binary,
-        (onMessage) => ({ unsubscribe: () => void onMessage, ready: Promise.resolve() }),
+        (onMessage) => ({ unsubscribe: () => void onMessage, opened: Promise.resolve() }),
         'once ready',
       )
       await collectGarbage()
@@ -908,7 +911,7 @@ describe("a transport's listener whose broker refuses it", () => {
     })
   }
   /** Eight rounds of subscribing and unsubscribing on a transport whose listener is `listening(onMessage)`: each
-   *  subscriber removed at once, or once its `ready` resolved. */
+   *  subscriber removed at once, or once its `opened` resolved. */
   const subscribeRounds = async (
     binary: boolean,
     listening: (onMessage: object, counted: { stops: number }) => BroadcastUnsubscribe,
@@ -926,7 +929,7 @@ describe("a transport's listener whose broker refuses it", () => {
       const remove = binary
         ? Broadcast.subscribeBinary('room:held', () => {})
         : Broadcast.subscribe('room:held', () => {})
-      if (removed === 'once ready') await remove.ready
+      if (removed === 'once ready') await remove.opened
       remove()
     }
     return state
@@ -992,7 +995,7 @@ describe("a transport's listener whose broker refuses it", () => {
         ? Broadcast.subscribeBinary(KEY, (data) => hear(new TextDecoder().decode(data)))
         : Broadcast.subscribe<string>(KEY, hear)
       const ready = await Promise.race([
-        subscriber.ready.then(() => 'resolved'),
+        subscriber.opened.then(() => 'resolved'),
         new Promise((resolve) => setTimeout(() => resolve('pending'), 100)),
       ])
       await publish('after')
@@ -1008,9 +1011,9 @@ describe("a transport's listener whose broker refuses it", () => {
   // A broker client's subscription object, whose `unsubscribe()` uses its own state.
   class BrokerSubscription {
     stops = 0
-    readonly ready: Promise<void>
-    constructor(ready: Promise<void>) {
-      this.ready = ready
+    readonly opened: Promise<void>
+    constructor(opened: Promise<void>) {
+      this.opened = opened
     }
     unsubscribe(): void {
       this.stops++
@@ -1034,7 +1037,7 @@ describe("a transport's listener whose broker refuses it", () => {
           const subscriber = binary
             ? Broadcast.subscribeBinary('room:object-stop', () => {})
             : Broadcast.subscribe('room:object-stop', () => {})
-          await subscriber.ready.catch(() => {})
+          await subscriber.opened.catch(() => {})
           subscriber()
           await new Promise((resolve) => setTimeout(resolve, 0))
           const typeErrors = logged.mock.calls.filter(([error]) => error instanceof TypeError)
@@ -1056,7 +1059,7 @@ describe("a transport's listener whose broker refuses it", () => {
         process.on('unhandledRejection', onUnhandled)
         try {
           const listen = () => ({
-            ready: path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
+            opened: path === 'refused' ? Promise.reject(new Error('NOPERM')) : Promise.resolve(),
             unsubscribe: async () => {
               throw teardown
             },
@@ -1066,7 +1069,7 @@ describe("a transport's listener whose broker refuses it", () => {
           const subscriber = binary
             ? Broadcast.subscribeBinary('room:async-stop', () => {})
             : Broadcast.subscribe('room:async-stop', () => {})
-          await subscriber.ready.catch(() => {})
+          await subscriber.opened.catch(() => {})
           if (path === 'removed') subscriber()
           await new Promise((resolve) => setTimeout(resolve, 10))
           expect({ unhandled, logged: logged.mock.calls.some(([error]) => error === teardown) }).toEqual({
@@ -1095,11 +1098,11 @@ describe("a transport's listener whose broker refuses it", () => {
       process.on('unhandledRejection', onUnhandled)
       try {
         let stops = 0
-        const listen = () => ({ ready: Promise.reject(refused), unsubscribe: () => void stops++ })
+        const listen = () => ({ opened: Promise.reject(refused), unsubscribe: () => void stops++ })
         const sent = () => ({ seq: 1, timestamp: 1 })
         configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
         const subscriber = Broadcast.subscribe('room:broker-status', () => {})
-        const cause = await subscriber.ready.then(
+        const cause = await subscriber.opened.then(
           () => 'resolved',
           (err: unknown) => err instanceof Error && err.cause,
         )
@@ -1136,7 +1139,7 @@ describe("a transport's listener whose broker refuses it", () => {
           const { refuse } = refusingBroker()
           const subscriber = Broadcast.subscribe('room:failing-monitoring', () => {})
           refuse()
-          const cause = await subscriber.ready.then(
+          const cause = await subscriber.opened.then(
             () => 'resolved',
             (err: unknown) => err instanceof Error && err.cause instanceof Error && err.cause.message,
           )
@@ -1157,7 +1160,7 @@ describe("a transport's listener whose broker refuses it", () => {
   }
 
   for (const refusesInListen of [false, true]) {
-    it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `ready` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
+    it(`the backend's subscribe(): a listener the broker refused ${refusesInListen ? 'in `listen()` gets no `unsubscribe()` call, as it returned none' : 'in its `opened` gets one `unsubscribe()` call'}, and the next one is accepted`, async () => {
       const broker = reservingBroker(refusesInListen)
       const route = { key: 'room:reserved', kind: 'text' } as const
       const refused = getBroadcastPlane().subscribe(route, () => {})
@@ -1231,16 +1234,16 @@ describe('a server-side subscription in effect whose backend ends it', () => {
       const heard: string[] = []
       const signal = new AbortController().signal
       const ended = subscribe(heard, signal)
-      await ended.ready
+      await ended.opened
       backend.attempts[0]?.steer('closed', new Error('NOPERM renewal refused'))
       await vi.waitFor(() => expect(getEventListeners(signal, 'abort')).toHaveLength(0))
       await publish(binary, 'unheard')
       const fresh = subscribe(heard)
-      await fresh.ready
+      await fresh.opened
       await publish(binary, 'heard')
       ended()
       fresh()
-      await expect(ended.ready).resolves.toBeUndefined()
+      await expect(ended.opened).resolves.toBeUndefined()
       expect({ heard, attempts: backend.attempts.length, reported }).toEqual({
         heard: ['heard'],
         attempts: 2,
@@ -1253,7 +1256,7 @@ describe('a server-side subscription in effect whose backend ends it', () => {
       const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
       const heard: string[] = []
       const stop = subscribe(heard)
-      await stop.ready
+      await stop.opened
       backend.attempts[0]?.steer('lost')
       backend.attempts[0]?.steer('ready')
       await publish(binary, 'after')
@@ -1273,25 +1276,25 @@ describe('a server-side subscription in effect whose backend ends it', () => {
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen: accepted, listenBinary: accepted })
       const signal = new AbortController().signal
       const subscriber = subscribe([], signal)
-      await subscriber.ready
-      const refused = () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: replacement refused')) })
+      await subscriber.opened
+      const refused = () => ({ unsubscribe() {}, opened: Promise.reject(new Error('NOPERM: replacement refused')) })
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen: refused, listenBinary: refused })
       await vi.waitFor(() => expect(getEventListeners(signal, 'abort')).toHaveLength(0))
-      await expect(subscriber.ready).resolves.toBeUndefined()
+      await expect(subscriber.opened).resolves.toBeUndefined()
     })
   }
 
   it("BroadcastChannel: closes with the backend's error", async () => {
     const backend = installBackend(() => new BackendOfSteeredAttempts(), [crypto.randomUUID()])
     const room = new ServerBroadcast<string>({ key: KEY })
-    await room.subscribe(() => {}).ready
+    await room.subscribe(() => {}).opened
     backend.attempts[0]?.steer('closed', new Error('NOPERM renewal refused'))
-    await expect(room.closed).rejects.toMatchObject({ cause: { message: 'NOPERM renewal refused' } })
+    expect(await room.closed).toMatchObject({ cause: { message: 'NOPERM renewal refused' } })
     expect(backend.attempts).toHaveLength(1)
   })
 })
 
-// One failed attempt is one report, however many of the server's subscriptions shared it and whether any read `ready`.
+// One failed attempt is one report, however many of the server's subscriptions shared it and whether any read `opened`.
 describe('a refused attempt that server-side subscriptions of one key share', () => {
   const KEY = 'room:shared-refusal'
   /** A transport whose broker refuses each listener it holds once `refuse()` runs, with `reason`. */
@@ -1302,7 +1305,7 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
       state.listens++
       const ready = Promise.withResolvers<void>()
       refusals.add(ready.reject)
-      return { unsubscribe: () => void state.stops++, ready: ready.promise }
+      return { unsubscribe: () => void state.stops++, opened: ready.promise }
     }
     const sent = () => ({ seq: 1, timestamp: 1 })
     configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
@@ -1322,10 +1325,10 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
     const room = new ServerBroadcast({ key: KEY })
     room.subscribe(() => {})
     // A subscriber that removes another on its own rejection.
-    void first.ready.catch(() => controller.abort())
+    void first.opened.catch(() => controller.abort())
     refuse(new Error('NOPERM'))
-    await expect(first.ready).rejects.toThrow()
-    await expect(room.closed).rejects.toThrow()
+    await expect(first.opened).rejects.toThrow()
+    expect(await room.closed).toBeInstanceOf(Error)
     await new Promise((resolve) => setTimeout(resolve, 0))
     second()
     expect({ ...state, reported }).toEqual({ listens: 1, stops: 1, reported: ['NOPERM'] })
@@ -1333,12 +1336,12 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
 
   for (const binary of [false, true]) {
     const subscribe = () => (binary ? Broadcast.subscribeBinary(KEY, () => {}) : Broadcast.subscribe(KEY, () => {}))
-    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where the broker refuses with no reason in its \`ready\``, async () => {
+    it(`${binary ? 'subscribeBinary' : 'subscribe'}(): is reported where the broker refuses with no reason in its \`opened\``, async () => {
       reported.length = 0
       const { refuse } = refusingBroker()
       const subscriber = subscribe()
       refuse()
-      await expect(subscriber.ready).rejects.toThrow()
+      await expect(subscriber.opened).rejects.toThrow()
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(reported).toHaveLength(1)
     })
@@ -1351,7 +1354,7 @@ describe('a refused attempt that server-side subscriptions of one key share', ()
       const sent = () => ({ seq: 1, timestamp: 1 })
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen: throwing, listenBinary: throwing })
       const subscriber = subscribe()
-      await expect(subscriber.ready).rejects.toThrow()
+      await expect(subscriber.opened).rejects.toThrow()
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(reported).toHaveLength(1)
     })
@@ -1448,10 +1451,10 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       const { subscribe, publish, end } = of()
       const heard: number[] = []
       const stop = subscribe((n) => heard.push(n))
-      await expect(stop.ready).rejects.toThrow()
+      await expect(stop.opened).rejects.toThrow()
       if (end === undefined) {
         const again = subscribe((n) => heard.push(n))
-        await again.ready
+        await again.opened
         await publish()
         again()
       } else end()
@@ -1478,7 +1481,7 @@ describe("a transport's listen() that delivers a message, then throws", () => {
       deliveringThenThrowing()
       const signal = new AbortController().signal
       const subscribed = of(signal)(() => {})
-      await expect(subscribed.ready).rejects.toThrow()
+      await expect(subscribed.opened).rejects.toThrow()
       expect(getEventListeners(signal, 'abort')).toHaveLength(0)
     })
   }
@@ -1587,7 +1590,7 @@ describe('a message the transport delivers inside listen()', () => {
       const transport = deliveringInsideListen()
       const heard: number[] = []
       const { stop, publish, end } = subscribe(heard)
-      await stop.ready
+      await stop.opened
       await publish()
       stop()
       end?.()
@@ -1662,7 +1665,7 @@ describe('a message the transport delivers inside listen()', () => {
       const transport = deliveringInsideListen()
       const heard = { first: [], second: [] }
       const { stops, publish, end } = subscribe(heard)
-      await Promise.all(stops.map((stop) => stop.ready))
+      await Promise.all(stops.map((stop) => stop.opened))
       await publish()
       for (const stop of stops) stop()
       end?.()
@@ -1678,7 +1681,7 @@ describe('a message the transport delivers inside listen()', () => {
 })
 
 // A message its backend delivers before confirming the subscription waits for that confirmation, whether it came inside
-// listen() or after it: until then no listener hears it and `ready` stays pending.
+// listen() or after it: until then no listener hears it and `opened` stays pending.
 describe('a message its backend delivers before it confirmed the subscription', () => {
   for (const binary of [false, true]) {
     for (const inside of [true, false]) {
@@ -1688,7 +1691,7 @@ describe('a message its backend delivers before it confirmed the subscription', 
         const start = (deliverFirst: () => void) => {
           deliver = deliverFirst
           if (inside) deliver()
-          return { unsubscribe: () => {}, ready: confirmed.promise }
+          return { unsubscribe: () => {}, opened: confirmed.promise }
         }
         const sent = () => ({ seq: 1, timestamp: 1 })
         configureBroadcastTransport({
@@ -1702,7 +1705,7 @@ describe('a message its backend delivers before it confirmed the subscription', 
         const stop = binary
           ? room.subscribeBinary(() => order.push('heard'))
           : room.subscribe(() => order.push('heard'))
-        void stop.ready.then(() => order.push('ready'))
+        void stop.opened.then(() => order.push('ready'))
         if (!inside) deliver()
         await new Promise((resolve) => setTimeout(resolve, 0))
         expect(order).toEqual([])
@@ -1714,19 +1717,19 @@ describe('a message its backend delivers before it confirmed the subscription', 
   }
 })
 
-// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the broadcast ended still
+// An app may clean its listeners up in `onClose()`: a listener whose `opened` was pending when the broadcast ended still
 // gets that end, whatever a close callback does after.
 describe('a broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber', () => {
   for (const binary of [false, true]) {
     it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
       const sent = () => ({ seq: 1, timestamp: 1 })
-      const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+      const listen = () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) })
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
       const room = new ServerBroadcast<string>({ key: 'room:cleans-up-on-close' })
       const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
       room.onClose(() => stop())
       room.abort('terminal event')
-      const ready = await stop.ready.then(
+      const ready = await stop.opened.then(
         () => 'resolved',
         (err: unknown) => err,
       )
@@ -1741,7 +1744,7 @@ describe("a broadcast whose graceful close times out on an `onClose()` callback'
     for (const removes of [false, true]) {
       it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
         const sent = () => ({ seq: 1, timestamp: 1 })
-        const listen = () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) })
+        const listen = () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) })
         configureBroadcastTransport({ send: sent, sendBinary: sent, listen, listenBinary: listen })
         const room = new ServerBroadcast<string>({ key: 'room:close-times-out' })
         const stop = binary ? room.subscribeBinary(() => {}) : room.subscribe(() => {})
@@ -1753,7 +1756,7 @@ describe("a broadcast whose graceful close times out on an `onClose()` callback'
         const ended = await room.closed.catch((err: unknown) => err)
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
         expect(
-          await stop.ready.then(
+          await stop.opened.then(
             () => 'resolved',
             (err: unknown) => err,
           ),
@@ -1787,7 +1790,7 @@ describe('Broadcast shield validation', () => {
       const text = typeof value === 'object' && value !== null && 'text' in value ? value.text : undefined
       return typeof text === 'string' ? true : 'expected { text: string }'
     }
-    broadcast._end._registerChannel()
+    broadcast._end._registerChannel(ATTACHABLE_NOW)
 
     const frames: Uint8Array[] = []
     broadcast._end._attachPeer(
@@ -1805,6 +1808,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
+            dropUngiven: () => 0,
             dropWaitingFrom() {},
           },
         },
@@ -1827,8 +1831,8 @@ describe('Broadcast shield validation', () => {
   it('a shield-rejected publish is not delivered to subscribers', async () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     sender._publishShield = () => 'always reject'
 
@@ -1848,6 +1852,7 @@ describe('Broadcast shield validation', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
+            dropUngiven: () => 0,
             dropWaitingFrom() {},
           },
         },
@@ -1866,7 +1871,7 @@ describe('lossy broadcast under memory pressure', () => {
   it('lets go of the newest it holds for a page that is behind', async () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:lossy-shed' })
     const end = broadcast._end
-    end._registerChannel()
+    end._registerChannel(ATTACHABLE_NOW)
     end._attachPeer(
       new IndexedPeer({
         sender: {
@@ -1880,6 +1885,7 @@ describe('lossy broadcast under memory pressure', () => {
           queue: {
             waitingPublishes: () => 0,
             dropWaitingPublishes() {},
+            dropUngiven: () => 0,
             dropWaitingFrom() {},
           },
         },
@@ -1965,8 +1971,8 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
@@ -1986,8 +1992,8 @@ describe('TransportBroadcastDriver — multi-node transport', () => {
     configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    sender._end._registerChannel()
-    receiver._end._registerChannel()
+    sender._end._registerChannel(ATTACHABLE_NOW)
+    receiver._end._registerChannel(ATTACHABLE_NOW)
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))

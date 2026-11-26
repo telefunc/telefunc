@@ -1,7 +1,7 @@
 export { installAsyncContext }
 
 import type { AsyncLocalStorage } from 'node:async_hooks'
-import { assert, assertWarning, assertUsage } from '../../../utils/assert.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { installAsyncMode } from './context.js'
@@ -10,10 +10,7 @@ import { REQUEST_CONTEXT } from './requestContext.js'
 import type { Context } from './context.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
-const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context>; provided?: true }>(
-  'getContext/async.ts',
-  {},
-)
+const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Context> }>('getContext/async.ts', {})
 
 /** Takes `AsyncLocalStorage` from its caller, so that a runtime that may lack `node:async_hooks` loads it itself. */
 function installAsyncContext(AsyncLocalStorageClass: typeof AsyncLocalStorage): void {
@@ -37,21 +34,20 @@ function provideTelefuncContext_async(context: Telefunc.Context): void {
     typeof globalObject.asyncStore.enterWith === 'function',
     '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to serve() instead.',
   )
-  globalObject.provided = true
   globalObject.asyncStore.enterWith({ [PROVIDED_CONTEXT]: context })
 }
 
 function restoreContext_async<T>(rawContext: Context, fn: () => T): T {
   assert(isObject(rawContext))
-  // Async mode also serves adapters (Cloudflare's session scope), so only an app that provides its own context is told.
-  assertWarning(
-    !(globalObject.provided && rawContext[PROVIDED_CONTEXT]),
-    'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `serve()` has no effect.',
-    { onlyOnce: true },
-  )
   assert(globalObject.asyncStore)
-  // A nested scope, such as a request in Cloudflare's session scope, overrides only the keys it sets.
-  return globalObject.asyncStore.run({ ...globalObject.asyncStore.getStore(), ...rawContext }, fn)
+  // A nested scope, such as a request in Cloudflare's session scope, overrides only the keys it sets. The context it
+  // restores is its own: one the outer scope provided or withheld never reaches it.
+  const {
+    [PROVIDED_CONTEXT]: _provided,
+    [WITHHELD_CONTEXT]: _withheld,
+    ...outerScope
+  } = globalObject.asyncStore.getStore() ?? {}
+  return globalObject.asyncStore.run({ ...outerScope, ...rawContext }, fn)
 }
 
 function withoutContext_async<Args extends unknown[], R>(fn: (...args: Args) => R, ...args: Args): R {

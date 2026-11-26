@@ -50,6 +50,7 @@ import {
   onRedisAllowsEveryKey,
   onPublishTo,
 } from './Publish.telefunc'
+import { parseChannelTransports } from '../../channelTransports'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -109,7 +110,7 @@ function Publish() {
       </button>
 
       <button
-        id="test-broadcast-ready"
+        id="test-broadcast-opened"
         onClick={async () => {
           try {
             const { room, key } = await onBroadcastToSubscribe()
@@ -120,28 +121,28 @@ function Publish() {
               received.push(text)
             })
             // The server takes the subscription only once the POST that carries it reaches it.
-            const readyWhileHeld = holdsPosts() ? await settledWithin(stop.ready, 1_000) : null
+            const openedWhileHeld = holdsPosts() ? await settledWithin(stop.opened, 1_000) : null
             const held = holdsPosts() ? await releaseHeldSsePosts() : null
-            await stop.ready
+            await stop.opened
             // Not by a telefunction: a call would carry the subscription and wait for it.
             await fetch(`/api/server-action?key=publish_${key}`, { method: 'POST' })
             const aborted = (await onBroadcastToSubscribe()).room
             const stopAborted = aborted.subscribe(() => {})
             aborted.abort()
-            const abortedReady = await stopAborted.ready.then(
+            const abortedOpened = await stopAborted.opened.then(
               () => 'resolved',
               (err: Error) => err.name,
             )
             // The publish reaches the page over its wire, after the server action that made it answered.
             await new Promise((resolve) => setTimeout(resolve, 1_000))
             await room.close()
-            setResult(JSON.stringify({ readyWhileHeld, held, received, abortedReady }))
+            setResult(JSON.stringify({ openedWhileHeld, held, received, abortedOpened }))
           } catch (err) {
             setResult(String(err))
           }
         }}
       >
-        A subscriber's ready
+        A subscriber's opened
       </button>
 
       <button
@@ -181,7 +182,7 @@ function Publish() {
               text.subscribe((message) => heard.push(message)),
               binary.subscribeBinary((data) => heard.push(`${data}`)),
             ]
-            await Promise.all(stops.map((stop) => stop.ready))
+            await Promise.all(stops.map((stop) => stop.opened))
             await Promise.all([text.publish('text'), binary.publishBinary(new Uint8Array([1]))])
             for (let tries = 1; heard.length < 2 && tries <= 50; tries++)
               await new Promise((resolve) => setTimeout(resolve, 100))
@@ -216,15 +217,12 @@ function Publish() {
             const stop = room.subscribe((text) => {
               received.push(text)
             })
-            const ready = await settledWithin(stop.ready, 5_000)
+            const opened = await settledWithin(stop.opened, 5_000)
             const closed = await Promise.race([
-              room.closed.then(
-                () => 'clean',
-                () => 'with an error',
-              ),
+              room.closed.then((outcome) => (outcome === null ? 'clean' : 'with an error')),
               new Promise((resolve) => setTimeout(() => resolve('open'), 1_000)),
             ])
-            setResult(JSON.stringify({ ready, closed, received }))
+            setResult(JSON.stringify({ opened, closed, received }))
           } catch (err) {
             setResult(String(err))
           } finally {
@@ -302,10 +300,7 @@ function Publish() {
             const remote = await onBroadcastBacklog('held')
             const { room } = remote
             await room.opened
-            const closed = room.closed.then(
-              () => 'clean',
-              (err) => (err as Error).name,
-            )
+            const closed = room.closed.then((outcome) => outcome?.name ?? 'clean')
             let received = 0
             const loop = (async () => {
               try {
@@ -410,7 +405,7 @@ function Publish() {
               room.abort('stop')
               if (caught) outcomes.push(await pending.catch((err) => err.abortValue))
               else outcomes.push('ignored')
-              await room.closed.catch(() => {})
+              await room.closed
               close(remote)
             }
           }
@@ -1020,8 +1015,10 @@ function Publish() {
 /** Whether the page's wire is SSE alone, over HTTP/1.1, where it sends its frames in batch POSTs the server can hold:
  *  over HTTPS the browser can stream them in one upload. */
 function holdsPosts(): boolean {
-  const transports = JSON.stringify(JSON.parse(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]'))
-  return transports === '["sse"]' && location.protocol === 'http:'
+  return (
+    parseChannelTransports(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse' &&
+    location.protocol === 'http:'
+  )
 }
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`. */

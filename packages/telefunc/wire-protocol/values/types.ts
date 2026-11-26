@@ -8,6 +8,7 @@ export type {
   // ===== Contexts =====
   ClientReviverContext,
   ServerReviverContext,
+  RequestFile,
   ClientReplacerContext,
   ServerReplacerContext,
   StreamSource,
@@ -40,7 +41,7 @@ export type {
   DownloadProgress,
 }
 
-import type { ServerChannel } from '../channel/server/ServerChannel.js'
+import type { ResponseChannel, ServerChannel } from '../channel/server/ServerChannel.js'
 import type { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel } from '../channel/client/ClientChannel.js'
@@ -159,10 +160,21 @@ type ClientReviverContext = {
   shareLifecycle(child: object, owner: object): void
 }
 
+/** A file of the call's body, as its File reads it: its bytes are kept for it until it reads them or is let go of, past
+ *  its call too. */
+type RequestFile = {
+  /** Its bytes' stream: a File is read once. */
+  stream: () => ReadableStream<Uint8Array<ArrayBuffer>>
+  /** No File reads it anymore (collected, or its call failed): its bytes aren't kept for it. */
+  letGo: () => void
+  /** Takes what runs once its bytes are gone: read, let go of, or ended with the body. */
+  onGone: (callback: () => void) => void
+}
+
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
-  registerFile(index: number, size: number): void
-  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>>
+  /** Registers a file of the call's body. */
+  registerFile(index: number, size: number): RequestFile
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean
@@ -180,7 +192,7 @@ type ServerReplacerContext = {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
-  registerChannel(channel: ServerChannel<any, any>): void
+  registerChannel(channel: ResponseChannel): void
   /** Creates and registers the server end of a page's `ClientBroadcast`. */
   createBroadcastChannel(): ServerBroadcastEnd
   sendStream(createProducer: () => StreamingProducer): {

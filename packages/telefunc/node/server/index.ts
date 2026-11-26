@@ -17,7 +17,12 @@ export { onBug } from './runTelefunc/onBug.js'
 export { Channel } from '../../wire-protocol/channel/server/ServerChannel.js'
 export { Broadcast, BroadcastChannel } from '../../wire-protocol/channel/server/ServerBroadcast.js'
 export type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/TransportBroadcastDriver.js'
-export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export {
+  ChannelClosedError,
+  ChannelOverflowError,
+  ChannelCloseUnknownError,
+  ChannelPageLeftError,
+} from '../../wire-protocol/channel/channelErrors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 export { BackendError } from '../../wire-protocol/backend/BackendError.js'
 export type { BackendErrorCode, BackendCallOutcome } from '../../wire-protocol/backend/BackendError.js'

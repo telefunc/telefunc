@@ -83,7 +83,15 @@ import {
   onChannelLateOpenAbort,
 } from './Channel.telefunc'
 
-type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
+declare global {
+  interface Window {
+    /** The across-flip row's publish of `bytes`, and its send once the page took the new wire. */
+    publishAcrossFlip?: (bytes: number) => Promise<unknown>
+    sendAcrossFlip?: () => Promise<unknown>
+    /** Lets the send-order row go on. */
+    sendOrderGo?: (value: unknown) => void
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -320,6 +328,13 @@ async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 's
   return result
 }
 
+/** Shows `text` in the page's element at `selector`. */
+function showResult(selector: string, text: string) {
+  const output = document.querySelector(selector)
+  if (!output) throw new Error(`Expected ${selector} on the page`)
+  output.textContent = text
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 })
 }
@@ -436,7 +451,7 @@ function ChannelDemo() {
     })
     channel.onClose((err) => {
       addLog('system', `onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === undefined }))
+      setChannelState((s) => ({ ...s, mainChannelOnCloseFiredClean: err === null }))
     })
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
@@ -553,7 +568,7 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, hookChannelId: channelId }))
     channel.onClose((err) => {
       addLog('system', `hook-channel onClose fired — err=${err ? err.message : 'none'}`)
-      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, hookClientOnCloseClean: err === null }))
       hookChannelRef.current = null
     })
     channel.listen((msg) => {
@@ -852,9 +867,9 @@ function ChannelDemo() {
     if (!channel || channel.isClosed) return
     addLog('system', `queueing send({ ack: true }) + close() for channel ${channelId}`)
     const ackPromise = channel.send('offline-close', { ack: true })
-    // As long as the server keeps the channel for a page that went away (`reconnectTimeout`, 60 s): under Docker the page
-    // reconnects once the proxy is back, and a backoff step of up to 5 s later.
-    const closePromise = channel.close({ timeout: 60_000 })
+    // Made offline, the close waits for the page to be back: its timeout is past any test's, so it doesn't count how
+    // long the page stays offline, which in Docker includes the proxy's restart.
+    const closePromise = channel.close({ timeout: 300_000 })
     void closePromise.finally(() => {
       clientPendingAckCloseReconnectChannelRef.current = null
     })
@@ -877,7 +892,7 @@ function ChannelDemo() {
     channel.listen((msg) => `ack:${msg}`)
     channel.onClose((err) => {
       serverPendingAckCloseReconnectChannelRef.current = null
-      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === undefined }))
+      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === null }))
       addLog('system', `server-pending-ack-close reconnect channel closed — err=${err ? err.message : 'none'}`)
     })
     serverPendingAckCloseReconnectChannelRef.current = channel
@@ -1002,7 +1017,7 @@ function ChannelDemo() {
     const first = await openChannel(() => onChannelSendOrder(id))
     await first.opened
     await new Promise((go) => {
-      ;(window as any).sendOrderGo = go
+      window.sendOrderGo = go
       setChannelState((s) => ({ ...s, sendOrder: { id, sent: false } }))
     })
     await onChannelSendOrder(id)
@@ -1227,7 +1242,7 @@ function ChannelDemo() {
     const { channel } = await openChannel(onChannelOpenBurst)
     let received = 0
     channel.listen(() => {
-      if (++received < 500) return
+      if (++received < 2000) return
       setChannelState((s) => ({ ...s, openBurstReceived: received }))
       channel.close()
     })
@@ -1259,13 +1274,16 @@ function ChannelDemo() {
 
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
-    const err = await channel.closed.catch((error) => error)
-    document.querySelector('#channel-late-abort-result')!.textContent = err.abortValue
+    const outcome = await channel.closed
+    showResult(
+      '#channel-late-abort-result',
+      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome),
+    )
   }, [])
 
   const testBudgets = useCallback(async () => {
     const { bytes } = await openChannel(onChannelBudgets)
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
+    showResult('#channel-budgets-result', JSON.stringify({ bytes: bytes.id }))
   }, [])
 
   const testAtLimit = useCallback(async () => {
@@ -1298,7 +1316,7 @@ function ChannelDemo() {
     )
     const next = await channel.send('next', { ack: true })
     const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify(result)
+    showResult('#channel-offline-budgets-result', JSON.stringify(result))
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1308,7 +1326,7 @@ function ChannelDemo() {
     const results = await Promise.allSettled(sends)
     document.querySelector('#channel-credit-result')!.textContent = JSON.stringify({
       id: channel.id,
-      rejected: results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
+      resolved: results.every((r) => r.status === 'fulfilled'),
     })
   }, [])
 
@@ -1468,9 +1486,8 @@ function ChannelDemo() {
       received.push(body.length)
       setChannelState((s) => ({ ...s, acrossFlip: { received: [...received] } }))
     })
-    const page = window as unknown as AcrossFlipPage
-    page.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
-    page.sendAcrossFlip = () => control.send('after-flip')
+    window.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
+    window.sendAcrossFlip = () => control.send('after-flip')
     setChannelState((s) => ({ ...s, acrossFlip: { received } }))
   }, [])
 
@@ -1963,7 +1980,9 @@ function ChannelDemo() {
             id="channel-test-config-checks"
             onClick={async () => {
               const checks = await onChannelConfigChecks()
-              document.querySelector('#channel-config-checks-result')!.textContent = JSON.stringify(checks)
+              const result = document.querySelector('#channel-config-checks-result')
+              if (!result) throw new Error('no #channel-config-checks-result')
+              result.textContent = JSON.stringify(checks)
             }}
           >
             Test what config.channel refuses

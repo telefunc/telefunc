@@ -34,12 +34,12 @@ function pageEnd(sent: string[]) {
     },
     listen(callback) {
       listener = callback
-      return Object.assign(() => {}, { ready: Promise.resolve() })
+      return Object.assign(() => {}, { opened: Promise.resolve() })
     },
     onClose: () => () => {},
     onDisconnect() {},
     onReconnect() {},
-    close: async () => 0,
+    close: async () => null,
   }
   return {
     end,

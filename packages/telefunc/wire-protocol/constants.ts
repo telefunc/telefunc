@@ -69,6 +69,12 @@ export const CHANNEL_TRANSPORT = {
 /** Transport for streamed values returned by telefunctions. */
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
 
+const STREAM_TRANSPORTS: readonly unknown[] = Object.values(STREAM_TRANSPORT)
+/** Whether `value` names a stream transport. */
+export function isStreamTransport(value: unknown): value is StreamTransport {
+  return STREAM_TRANSPORTS.includes(value)
+}
+
 /** `config.stream` as the user set it, validated. */
 export function parseStreamConfig(val: unknown): { transport?: StreamTransport } {
   assertUsage(isObject(val), 'config.stream should be an object')
@@ -76,7 +82,7 @@ export function parseStreamConfig(val: unknown): { transport?: StreamTransport }
   for (const [key, value] of Object.entries(val)) {
     assertUsage(key === 'transport', `Unknown config.stream.${key}`)
     assertUsage(
-      value === 'binary-inline' || value === 'sse-inline' || value === 'channel',
+      isStreamTransport(value),
       "`config.stream.transport` should be 'binary-inline', 'sse-inline', or 'channel'",
     )
     next.transport = value
@@ -101,8 +107,15 @@ export function validateChannelTransports(val: unknown, configPath: string, exam
 
 /** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
 export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
-/** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
-export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
+/** Default transports the server allows. A page is offered `'ws'` only where its server takes upgrades. */
+export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
+
+/** An attempt not open within 3 × the last open R is cut: TCP's first timeout from R (RFC 6298 §2.2)… */
+export const ATTEMPT_ALLOWANCE_OPENS = 3
+/** …and never sooner than 3 s, with no open measured too: a TLS open over Slow 3G takes 1.3 s. */
+export const ATTEMPT_ALLOWANCE_MIN_MS = 3_000
+/** Each attempt cut since the last open is given this many times as long as the one before it. */
+export const ATTEMPT_ALLOWANCE_GROWTH = 2
 
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
@@ -114,17 +127,17 @@ export const WS_CLOSE_PAGE_LEFT = 4000
 /** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
  *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
  *  reload: those two never change. */
-export const WIRE_VERSION = 2
+export const WIRE_VERSION = 5
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
+
+/** The close code of a WebSocket the server ended with a refusal, which its reason carries (`refusal.ts`'s `wireEnd`):
+ *  the channel it names ends with its cause, or every channel of the page's session where it names none. */
+export const WS_CLOSE_REFUSED = 4002
 
 /** A response header naming where the page's session lives (Cloudflare: its Durable Object's region). The page then
  *  names it in its session URL, so its requests reach that session from wherever they come. */
 export const SESSION_HOME_HEADER = 'x-telefunc-home'
-
-/** How long to wait for the stream-request POST handshake ack on the SSE downstream
- *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
-export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
@@ -144,11 +157,8 @@ export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 /** How long a staged, uncommitted upgrade may hold its session before the probe is dropped. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Longest channel id the wire will carry. */
+/** Longest channel id the wire will carry, as JSON writes it (`isChannelId`, wire/payloads.ts). */
 export const UPGRADE_MAX_ID_BYTES = 256
-
-/** Worst case for one open entry beyond its id: its other keys at their largest values, and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -160,30 +170,29 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
 /** The single channels-per-connection limit: the client refuses to open past it, a RECONCILE or barrier may
- *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
+ *  list no more, and the control-frame byte cap is derived from it (`WIRE_MAX_CTRL_FRAME_BYTES`, wire/payloads.ts). (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
-
-/** Largest wire control frame the server will decode, checked on the raw bytes. Derived, never picked:
- *  the biggest legitimate one lists every channel at the id cap, and a cap that refuses a legal
- *  frame is worse than no cap. */
-export const WIRE_MAX_CTRL_FRAME_BYTES =
-  MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
-/** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
-export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
-
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
+/** Largest metadata of a binary call the server will read: the most a V8 server can decode into one string, which holds
+ *  at most 536,870,888 UTF-16 code units, each at most 3 bytes of UTF-8. A V8 client (Chrome, Node, Deno) can't encode
+ *  more either; a JSC one (Safari, Bun), whose strings hold 2,147,483,647, can, but no real call carries that much
+ *  metadata: its files go in the body's binary frames. */
+export const CALL_METADATA_MAX_BYTES = 536_870_888 * 3
 /** An event is encoded and goes to its stream a slice of its frame at a time, so nothing holds it whole. A multiple of 3,
  *  as base64 of such a slice joins the next one's. */
 export const SSE_EVENT_SLICE_BYTES = 48 * 1024
 
 /** How long a RECONCILE waits for RECONCILED, and the wire for any frame where tracked, before the page reconnects. */
 export const RECONCILE_TIMEOUT_MS = 10_000
+
+/** The slowest link a page's reconnect is kept working on, Slow 3G's 400 kbit/s, in bytes per ms. */
+export const RECONCILE_FLOOR_BYTES_PER_MS = 50
 
 // An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
 assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
@@ -254,9 +263,13 @@ export const WIRE_SEND_ACK_MS = 25
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 /** The least data the sender on a WebSocket, page or server, hands its socket ahead of its peer's acknowledgements. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
-/** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
+/** A server hands its socket data while its path holds less than the page takes in this many least round trips, and
+ *  at least `WIRE_SEND_AHEAD_MIN_BYTES` (`ServerHeadroom.window()`). */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
-/** How long a data frame may wait in its wire's queues, as acknowledgements measure it, before its sender holds back. */
+/** How many milliseconds of its uplink's measured rate a page hands its socket ahead of acknowledgements (the allowance
+ *  in `ClientHeadroom`). It caps only that part: a page hands at least `WIRE_SEND_AHEAD_MIN_BYTES`, so on a link that
+ *  drains less than that in 300 ms, a frame waits in the socket longer. A lossy send's confirmation is late past this,
+ *  its slack and a round trip (`behindAfter()` in `WireSender` for a WebSocket page, and in `WsTransport`). */
 export const WIRE_QUEUE_DELAY_MS = 300
 /** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
 export const LOSSY_CONFIRM_SLACK_MS = 300

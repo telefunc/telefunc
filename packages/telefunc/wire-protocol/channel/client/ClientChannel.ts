@@ -12,10 +12,16 @@ import type {
   ChannelBinaryListener,
   Unsubscribe,
 } from '../channel.js'
-import { LOSSY_WITH_ACK_TEXT, neverInEffect, stringifyMessage, withReady } from '../channel.js'
+import {
+  LOSSY_WITH_ACK_TEXT,
+  neverOpened,
+  serializeBoundedAbortReason,
+  stringifyValue,
+  unsubscribeOf,
+  type AbortReason,
+} from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../../client/clientConfig.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import {
@@ -39,6 +45,7 @@ import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
+import type { EndingFrame } from '../ChannelEnding.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import { ChannelAttach } from './ChannelAttach.js'
 import type { CreditOwner } from '../../flowControl/credit.js'
@@ -87,8 +94,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
-  protected stopped = false
-  protected readonly lifecycle = new ChannelLifecycle({ owner: this, reportError: reportChannelError })
+  protected readonly lifecycle = new ChannelLifecycle({
+    owner: this,
+    side: 'page',
+    reconnectWindowMs: () => this.connection.reconnectWindow(),
+    reportError: reportChannelError,
+  })
   /** The ack requests sent and not yet answered, by seq. Each takes `any`: text, binary and publish sends resolve with
    *  different types, each with `parse(text)` of the answer. */
   protected pendingAcks = new Map<number, Deferred<any>>()
@@ -142,7 +153,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this.lifecycle.opened
   }
 
-  get closed(): Promise<void> {
+  get closed(): Promise<ChannelCloseResult> {
     return this.lifecycle.closed
   }
 
@@ -156,6 +167,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isConnected(): boolean {
     return this.lifecycle.connected
+  }
+
+  /** It takes no more sends: it began or follows a close, or ended. `ChannelEnding` owns it. */
+  protected get stopped(): boolean {
+    return this.lifecycle.stopped
   }
 
   /** @internal The connection its frames go through. */
@@ -185,11 +201,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     data: ChannelData<ClientToServer>,
     opts?: { ack?: boolean; lossy?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
-    if (this.stopped) throw new ChannelClosedError()
-    const serialized = stringifyMessage(data, 'send')
+    if (this.stopped) throw this.lifecycle.sendRefusal()
+    const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.text, serialized)
+      return this.sendNewest(encode.text, serialized, keepText)
     }
     this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
@@ -217,10 +233,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean; lossy?: boolean }): void | Promise<unknown> | Promise<void> {
-    if (this.stopped) throw new ChannelClosedError()
+    if (this.stopped) throw this.lifecycle.sendRefusal()
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.binary, data)
+      return this.sendNewest(encode.binary, data, copyBytes)
     }
     this.flushLossy()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
@@ -232,13 +248,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** In effect at once: the server sends whether the page listens or not. One added once the channel ended never is. */
   listen(callback: ChannelListener<ServerToClient>, options?: { signal?: AbortSignal }): Unsubscribe {
-    if (this.lifecycle.ended) return neverInEffect(this.endError())
-    return withReady(this.listeners.add(callback, options))
+    if (this.lifecycle.ended) return neverOpened(this.endError())
+    return unsubscribeOf(this.listeners.add(callback, options))
   }
 
   listenBinary(callback: ChannelBinaryListener, options?: { signal?: AbortSignal }): Unsubscribe {
-    if (this.lifecycle.ended) return neverInEffect(this.endError())
-    return withReady(this.binaryListeners.add(callback, options))
+    if (this.lifecycle.ended) return neverOpened(this.endError())
+    return unsubscribeOf(this.binaryListeners.add(callback, options))
   }
 
   /** What it ended with, as its `closed` rejects. */
@@ -263,28 +279,47 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this.lifecycle.closing) return this.lifecycle.closing
-    if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
-    const timeout = normalizeCloseTimeout(opts?.timeout)
-    return this.lifecycle.localCloseRequested({
-      timeout,
-      peer: 'expected',
-      send: () => {
-        this.flushLossy()
-        this.stopped = true
-        this.connection.sendCloseRequest(this, timeout)
-      },
-    })
+    return this.lifecycle.close(normalizeCloseTimeout(opts?.timeout))
+  }
+
+  /** @internal */
+  _sendEnding(frame: EndingFrame): void {
+    switch (frame.kind) {
+      case 'close':
+        this.connection.sendCloseRequest(this, frame.timeoutMs)
+        return
+      case 'closeAck':
+        this.connection.sendCloseAck(this)
+        return
+      case 'closeDone':
+        this.connection.sendCloseDone(this)
+        return
+      case 'timedOut':
+        this.connection.sendCloseTimedOut(this)
+    }
+  }
+
+  /** @internal */
+  _stopSending(): void {
+    this.flushLossy()
   }
 
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this.stopped) return
-    this.stopped = true
-    const abortError = createAbortError(abortValue, message)
-    this.connection.sendAbort(this, stringify(abortValue))
-    this._end(abortError)
+    if (this.lifecycle.ended) return
+    const reason = serializeBoundedAbortReason(abortValue, this.connection.abortReasonLimit(this))
+    this.abortWith(reason, message)
+    if (reason.refusal) throw reason.refusal.error
+  }
+
+  /** Ends the channel with `reason`, sent to the server, unless serializing it, which runs the app's getters and
+   *  `toJSON`, ended it already. */
+  private abortWith(reason: AbortReason, message?: string): void {
+    this.lifecycle.endWith(createAbortError(reason.value, message), () => {
+      // The newest lossy send, where it hasn't gone, is dropped.
+      this.connection.sendAbort(this, reason.serialized)
+    })
   }
 
   // ── Called by transport connection ──
@@ -407,10 +442,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
       case TAG.CLOSE:
-        this.onPeerCloseRequest(frame.timeoutMs)
+        this.lifecycle.peerClose(normalizeCloseTimeout(frame.timeoutMs))
         return
       case TAG.CLOSE_ACK:
-        this.onPeerCloseAck()
+        this.lifecycle.peerCloseAck()
+        return
+      case TAG.CLOSE_DONE:
+        this.lifecycle.peerCloseDone()
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
@@ -463,22 +501,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  protected onPeerCloseRequest(timeoutMs: number): void {
-    this.lifecycle.peerCloseReceived(normalizeCloseTimeout(timeoutMs), () => {
-      this.stopped = true
-      this.connection.sendCloseAck(this)
-    })
-  }
-
-  protected onPeerCloseAck(): void {
-    if (this.lifecycle.ended) return
-    this.lifecycle.closeAckReceived()
-  }
-
   _onEnded(err?: Error): void {
-    this.stopped = true
-    // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
-    this._end(this.lifecycle.closeAcked ? undefined : err)
+    this._end(err)
+  }
+
+  /** @internal Its connection is gone for good, with `err`. */
+  _onConnectionLost(err: Error): void {
+    this.lifecycle.connectionLost(err)
   }
 
   // ── Private ──
@@ -510,17 +539,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** A send of which only the newest matters. It goes, or takes the place of the newest that still waits for a link
    *  that is behind; while the server grants no more credit, it waits as the newest. */
-  private sendNewest<D extends string | Uint8Array>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
+  private sendNewest<D>(encodeFrame: SequencedEncoder<D>, data: D, keep: (data: D) => D): void {
     if (this.sendCredit.isOutOfCredit()) {
       // Too large, it throws here, and the one held stays.
       this.connection.assertFits(this, encodeFrame, data)
-      // The caller may write into its bytes once `sendBinary` returned.
-      const copy = (typeof data === 'string' ? data : new Uint8Array(data)) as D
-      this.heldLossy = () => void this.handLossy(encodeFrame, copy)
-      return Promise.resolve()
+      const kept = keep(data)
+      this.heldLossy = () => this.handLossy(encodeFrame, kept)
+      return
     }
     this.heldLossy = null
-    return this.handLossy(encodeFrame, data)
+    this.handLossy(encodeFrame, data)
   }
 
   /** Counts a lossy send against the server's credit, and nothing waits on that. Once the uplink is behind, it takes
@@ -562,26 +590,45 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _end(err?: Error): void {
-    if (this.lifecycle.ended) return
-    this.lifecycle.forcedTermination(err, () => {
-      this.heldLossy = null
-      this.listeners.clear()
-      this.binaryListeners.clear()
-      this.sendCredit.shutdown(err)
-      this.receiveCredit.detach()
-      const ackErr = err ?? new ChannelClosedError()
-      for (const { reject } of this.pendingAcks.values()) reject(ackErr)
-      this.pendingAcks.clear()
-      this.connection.unregister(this)
-    })
+    this.lifecycle.endWith(err)
+  }
+
+  /** @internal */
+  _otherEnded(): void {
+    this.connection.serverEnded(this)
+  }
+
+  /** @internal */
+  _finalize(err: Error | undefined): void {
+    this.heldLossy = null
+    this.listeners.clear()
+    this.binaryListeners.clear()
+    this.sendCredit.shutdown(this.lifecycle.waitingSendOutcome)
+    this.receiveCredit.detach()
+    const ackErr = err ?? new ChannelClosedError()
+    for (const { reject } of this.pendingAcks.values()) reject(ackErr)
+    this.pendingAcks.clear()
+    this.connection.unregister(this)
   }
 
   /** @internal */
   _abortFromCallback(err: AbortError): void {
-    this.abort(err.abortValue, err.message)
+    const reason = serializeBoundedAbortReason(err.abortValue, this.connection.abortReasonLimit(this))
+    this.abortWith(reason, err.message)
+    if (reason.refusal) reportChannelError(reason.refusal.error)
   }
 }
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
+}
+
+/** What a held lossy send keeps of its text: the string itself. */
+function keepText(text: string): string {
+  return text
+}
+
+/** What a held lossy send keeps of its bytes: a copy, as the caller may write into them once `sendBinary` returned. */
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
 }

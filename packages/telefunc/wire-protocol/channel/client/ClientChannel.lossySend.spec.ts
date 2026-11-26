@@ -1,20 +1,28 @@
 // A page's `send(data, { lossy: true })`: the REAL ClientChannel on the REAL ClientConnection and SendGate, over an SSE
-// wire that never reconciles, so the gate holds every frame the page sends and the test reads them in order. The clock
-// is faked, and the wire measured a 50 ms round trip: a frame held past its `behindAfter`, 650 ms, is behind, and a newer
-// lossy send may take its place. Its channel is open, as after its first attach, unless a test says otherwise. The
-// reconnect, with what the server then reads, is in ClientConnection.reconnectOrdering.spec.ts.
+// wire whose stream's head came and that never reconciles, so the gate holds every frame the page sends and the test
+// reads them in order. The clock is faked, and the wire measured a 50 ms round trip: a frame held past its
+// `behindAfter`, 650 ms, is behind, and a newer lossy send may take its place. Its channel is open, as after its first
+// attach, unless a test says otherwise. The reconnect, with what the server then reads, is in
+// ClientConnection.reconnectOrdering.spec.ts.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientChannel } from './ClientChannel.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
-import type { ClientChannel as ClientChannelType } from '../channel.js'
-import { decode } from '../../wire/frame.js'
+import type { ClientConnection } from './ClientConnection.js'
+import { decode, encode } from '../../wire/frame.js'
+import { decodeChannelFrame, parseString } from '../../wire/decode.fixture.js'
 import { TAG } from '../../wire/tags.js'
+import { defined } from '../../../utils/defined.fixture.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { CHANNEL_TRANSPORT, CREDIT_MSG_WINDOW_INITIAL, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
-const stalledFetch = (async () => new Response(new ReadableStream({ start() {} }), { status: 200 })) as typeof fetch
+const stalledFetch: typeof fetch = async () =>
+  new Response(new ReadableStream({ start() {} }), {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] })
@@ -26,23 +34,32 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-/** A channel whose wire opened and measured its round trip, and which a RECONCILED opened: what it sends from then on
- *  waits in the gate for the next RECONCILED. */
-function newChannel(ack = false) {
+/** A channel whose wire opened, was answered and measured its round trip, and which a RECONCILED opened: what it sends
+ *  from then on waits in the gate for the next RECONCILED. */
+async function newChannel(ack = false) {
   const channel = unopenedChannel(ack)
-  // The wire opens one reconcile window after the first channel, carrying what the gate held till then.
-  vi.advanceTimersByTime(200)
+  // The wire opens one reconcile window after the first channel, carrying what the gate held till then, and its
+  // stream's head answers it.
+  await vi.advanceTimersByTimeAsync(200)
+  const connection = connectionOf(channel)
   // As a BDP probe's answer does: until a round trip is measured, the page is never behind.
-  ;(channel as any).connection.transport.uplink.roundTrips.measured(50)
+  connection['transport'].uplink.roundTrips.measured(50)
   // As a RECONCILED that lists it does.
-  const { channels } = (channel as any).connection
-  channels.open(channels.of(channel))
+  const { channels } = connection['lifecycle']
+  channels.open(defined(channels.of(channel), "the channel's record"))
   return channel
+}
+
+/** Each channel's connection, as it was when the channel was made: an ended channel leaves its connection's table. */
+const connections = new WeakMap<ClientChannel<unknown, never>, ClientConnection>()
+
+function connectionOf(channel: ClientChannel<unknown, never>): ClientConnection {
+  return defined(connections.get(channel), "the channel's connection")
 }
 
 /** A channel no RECONCILED opened yet, as it is before its first attach. */
 function unopenedChannel(ack = false) {
-  return new ClientChannel<string, never>({
+  const channel = new ClientChannel<unknown, never>({
     channelId: crypto.randomUUID(),
     ack,
     connection: {
@@ -51,18 +68,28 @@ function unopenedChannel(ack = false) {
       connectionKey: crypto.randomUUID(),
     },
   })
+  const kept = getGlobalObject<{ connections: Map<string, ClientConnection> }>(
+    'channel/client/ClientConnection.ts',
+    () => {
+      throw new Error('The page keeps no connections yet')
+    },
+  )
+  const connection = [...kept.connections.values()].find((each) => each['lifecycle'].channels.of(channel) !== undefined)
+  connections.set(channel, defined(connection, "the channel's connection"))
+  return channel
 }
 
 /** The frames the gate holds of the page's sends, in order. */
-function heldFrames(channel: ClientChannel<string, never>): Uint8Array[] {
-  return (channel as any).connection.gate.settleQueue().map(({ frame }: { frame: Uint8Array }) => frame)
+function heldFrames(channel: ClientChannel<unknown, never>): Uint8Array[] {
+  const { gate } = connectionOf(channel)['lifecycle']
+  return gate['settleQueue']().map(({ frame }) => frame)
 }
 
 /** What the gate holds of the page's sends, in order: a text its value, a binary `[bytes]`, a close `CLOSE`. */
-function held(channel: ClientChannel<string, never>): string[] {
+function held(channel: ClientChannel<unknown, never>): string[] {
   return heldFrames(channel).map((frame) => {
-    const decoded = decode(frame as Uint8Array<ArrayBuffer>)
-    if (decoded.tag === TAG.TEXT) return JSON.parse(decoded.text) as string
+    const decoded = decode(frame)
+    if (decoded.tag === TAG.TEXT) return parseString(decoded.text)
     if (decoded.tag === TAG.BINARY) return `[${[...decoded.data]}]`
     if (decoded.tag === TAG.CLOSE) return 'CLOSE'
     return `tag ${decoded.tag}`
@@ -71,25 +98,32 @@ function held(channel: ClientChannel<string, never>): string[] {
 
 /** The bytes the page counted against the server's credit, less those of its frames the gate holds: 0 when it counted
  *  each frame as it is. */
-function miscounted(channel: ClientChannel<string, never>): number {
+function miscounted(channel: ClientChannel<unknown, never>): number {
   const sent = heldFrames(channel).reduce((sum, frame) => sum + frame.byteLength, 0)
-  return (channel as any).sendCredit.sentBytes - sent
+  return channel['sendCredit']['sentBytes'] - sent
 }
 
-function send(channel: ClientChannel<string, never>, sends: string) {
+function send(channel: ClientChannel<unknown, never>, sends: string) {
   for (const s of sends.split(' ')) void (s.startsWith('L') ? channel.send(s, { lossy: true }) : channel.send(s))
 }
 
 /** Plain sends, never awaited, until the server's message credit is used up. */
-function useUpCredit(channel: ClientChannel<string, never>) {
+function useUpCredit(channel: ClientChannel<unknown, never>) {
   for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) void channel.send('-')
-  expect((channel as any).sendCredit.isOutOfCredit()).toBe(true)
+  expect(channel['sendCredit'].isOutOfCredit()).toBe(true)
+}
+
+/** The channel's index on its wire. */
+function indexOf(channel: ClientChannel<unknown, never>): number {
+  return defined(connectionOf(channel)['lifecycle'].channels.of(channel), "the channel's record").ix
 }
 
 /** The server's `MSG_WINDOW` or `WINDOW` for the channel. */
-function grant(channel: ClientChannel<string, never>, limit: { count: number } | { bytes: number }) {
-  const index = (channel as any).connection.channels.of(channel).ix
-  channel._dispatchFrame({ tag: 'count' in limit ? TAG.MSG_WINDOW : TAG.WINDOW, index, ...limit } as any)
+function grant(channel: ClientChannel<unknown, never>, limit: { count: number } | { bytes: number }) {
+  const index = indexOf(channel)
+  channel._dispatchFrame(
+    decodeChannelFrame('count' in limit ? encode.msgWindow(index, limit.count) : encode.window(index, limit.bytes, 0)),
+  )
 }
 
 /** Past the wire's `behindAfter`, short of its reconcile timeout. */
@@ -104,14 +138,14 @@ describe('a lossy send from the page, while the gate holds it', () => {
     expect(miscounted(channel)).toBe(0)
   })
 
-  test('on a link that is not behind, each one waits to go', () => {
-    const channel = newChannel()
+  test('on a link that is not behind, each one waits to go', async () => {
+    const channel = await newChannel()
     send(channel, 'L1 L2')
     expect(held(channel)).toEqual(['L1', 'L2'])
   })
 
-  test('once the link is behind, a newer one takes its place, and the page counts the bytes that adds', () => {
-    const channel = newChannel()
+  test('once the link is behind, a newer one takes its place, and the page counts the bytes that adds', async () => {
+    const channel = await newChannel()
     send(channel, 'L1')
     behind()
     void channel.send('L2, longer', { lossy: true })
@@ -123,8 +157,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
     ['L1 R1 L2', 'L1 R1 L2'],
     ['L1 L2 R1 L3 L4', 'L2 R1 L4'],
   ] as const) {
-    test(`${sends}, the link behind before each: a plain send keeps the one before it, ${read} go`, () => {
-      const channel = newChannel()
+    test(`${sends}, the link behind before each: a plain send keeps the one before it, ${read} go`, async () => {
+      const channel = await newChannel()
       for (const s of sends.split(' ')) {
         send(channel, s)
         behind()
@@ -134,8 +168,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
     })
   }
 
-  test('a replacement larger than the server accepts throws, and leaves the one that waits', () => {
-    const channel = newChannel()
+  test('a replacement larger than the server accepts throws, and leaves the one that waits', async () => {
+    const channel = await newChannel()
     void channel.sendBinary(new Uint8Array([1]), { lossy: true })
     behind()
     expect(() => channel.sendBinary(new Uint8Array(WIRE_MAX_RAW_FRAME_BYTES), { lossy: true })).toThrow(
@@ -147,8 +181,8 @@ describe('a lossy send from the page, while the gate holds it', () => {
 })
 
 describe('a lossy send from the page out of credit', () => {
-  test('waits as the newest, and goes once the server grants more messages', () => {
-    const channel = newChannel()
+  test('waits as the newest, and goes once the server grants more messages', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1 L2')
     expect(held(channel).at(-1)).toBe('-')
@@ -158,34 +192,34 @@ describe('a lossy send from the page out of credit', () => {
     expect(miscounted(channel)).toBe(0)
   })
 
-  test('waits as the newest, and goes once the server grants more bytes', () => {
-    const channel = newChannel()
+  test('waits as the newest, and goes once the server grants more bytes', async () => {
+    const channel = await newChannel()
     for (let i = 0; i < 3; i++) void channel.sendBinary(new Uint8Array(1024 * 1024))
-    expect((channel as any).sendCredit.isOutOfCredit()).toBe(true)
+    expect(channel['sendCredit'].isOutOfCredit()).toBe(true)
     send(channel, 'L1')
     expect(held(channel)).toHaveLength(3)
     grant(channel, { bytes: 16 * 1024 * 1024 })
     expect(held(channel).at(-1)).toBe('L1')
   })
 
-  test('a limit that grants nothing leaves it waiting', () => {
-    const channel = newChannel()
+  test('a limit that grants nothing leaves it waiting', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     grant(channel, { count: CREDIT_MSG_WINDOW_INITIAL })
     expect(held(channel).at(-1)).toBe('-')
   })
 
-  test('goes ahead of a plain send, and of the close', () => {
-    const channel = newChannel()
+  test('goes ahead of a plain send, and of the close', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1 R1 L2')
     void channel.close()
     expect(held(channel).slice(-4)).toEqual(['L1', 'R1', 'L2', 'CLOSE'])
   })
 
-  test('one larger than the server accepts throws at its call, and leaves the one held and the next plain send', () => {
-    const channel = newChannel()
+  test('one larger than the server accepts throws at its call, and leaves the one held and the next plain send', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     expect(() => channel.sendBinary(new Uint8Array(WIRE_MAX_RAW_FRAME_BYTES), { lossy: true })).toThrow(
@@ -195,8 +229,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).slice(-2)).toEqual(['L1', 'R'])
   })
 
-  test('is dropped by a newer one sent once a reconnect raised the credit, so it never goes after it', () => {
-    const channel = newChannel()
+  test('is dropped by a newer one sent once a reconnect raised the credit, so it never goes after it', async () => {
+    const channel = await newChannel()
     channel._attach.capWindows(1024)
     void channel.sendBinary(new Uint8Array(1024))
     send(channel, 'L1')
@@ -206,8 +240,8 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).slice(1)).toEqual(['L2', 'R1'])
   })
 
-  test("the caller's bytes are its own once `sendBinary` returned", () => {
-    const channel = newChannel()
+  test("the caller's bytes are its own once `sendBinary` returned", async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     const bytes = new Uint8Array([1, 2])
     void channel.sendBinary(bytes, { lossy: true })
@@ -216,18 +250,18 @@ describe('a lossy send from the page out of credit', () => {
     expect(held(channel).at(-1)).toBe('[1,2]')
   })
 
-  test('is let go when the channel aborts', () => {
-    const channel = newChannel()
+  test('is let go when the channel aborts', async () => {
+    const channel = await newChannel()
     useUpCredit(channel)
     send(channel, 'L1')
     channel.abort()
-    expect((channel as any).heldLossy).toBe(null)
+    expect(channel['heldLossy']).toBe(null)
   })
 })
 
 describe('`lossy` on the page', () => {
   test('resolves at once, on a channel made with `ack: true` too; with `ack: true` it is a usage error', async () => {
-    const channel = newChannel(true)
+    const channel = await newChannel(true)
     await expect(channel.send('L', { lossy: true })).resolves.toBe(undefined)
     // A text that asks for no acknowledgement.
     expect(held(channel)).toEqual(['L'])
@@ -237,13 +271,36 @@ describe('`lossy` on the page', () => {
 })
 
 describe('bytes given to `send()` and `publish()` on the page', () => {
-  test('are a usage error naming `sendBinary()`, and nothing goes', () => {
-    const channel = newChannel()
-    const page = channel as unknown as ClientChannelType
+  test('are a usage error naming `sendBinary()`, and nothing goes', async () => {
+    const page = await newChannel()
     expect(() => page.send(new Uint8Array([1, 2, 255]))).toThrow('Bytes go through `sendBinary()`')
     expect(() => page.send(new ArrayBuffer(4), { lossy: true })).toThrow('turns this `ArrayBuffer` into a plain object')
     void page.send('R')
-    expect(held(channel)).toEqual(['R'])
+    expect(held(page)).toEqual(['R'])
+  })
+
+  test('a `Blob` or a `File`, alone or nested, is a usage error naming `sendBinary()`', () => {
+    const page = new ClientChannel<unknown, never>({
+      channelId: crypto.randomUUID(),
+      connection: {
+        transports: [CHANNEL_TRANSPORT.SSE],
+        telefuncUrl: 'http://test.local/_telefunc',
+        connectionKey: crypto.randomUUID(),
+      },
+    })
+    expect(() => page.send(new File(['x'], 'a.txt'))).toThrow('turns this `File` into a plain object. Bytes go through')
+    expect(() => page.send({ b: [new Blob(['x'])] }, { lossy: true })).toThrow('the `Blob` at `b[0]`')
+  })
+
+  test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', async () => {
+    const page = await newChannel()
+    expect(() => page.send({ b: new Uint8Array(1) })).toThrow('turns the `Uint8Array` at `b` into')
+    expect(() => page.send({ a: { b: { c: new ArrayBuffer(1) } } }, { lossy: true })).toThrow(
+      'the `ArrayBuffer` at `a.b.c`',
+    )
+    expect(() => page.send([0, [new Uint8Array(1)]])).toThrow('the `Uint8Array` at `[1][0]`')
+    void page.send('R')
+    expect(held(page)).toEqual(['R'])
   })
 
   test('`publish()` is a usage error naming `publishBinary()`', () => {
@@ -256,5 +313,25 @@ describe('bytes given to `send()` and `publish()` on the page', () => {
       },
     })
     expect(() => room.publish(new Uint8Array(1))).toThrow('Bytes go through `publishBinary()`')
+    expect(() => room.publish({ a: { b: { c: new Uint8Array(1) } } })).toThrow('the `Uint8Array` at `a.b.c`')
   })
+})
+
+test("a lossy send out of credit when the server's close comes doesn't go after the page acknowledged that close", async () => {
+  const channel = await newChannel()
+  // A close callback still working keeps the channel on the wire after it acknowledged the close.
+  channel.onClose(() => new Promise<void>(() => {}))
+  useUpCredit(channel)
+  send(channel, 'L1')
+  channel._dispatchFrame(decodeChannelFrame(encode.close(indexOf(channel), 5_000, 1)))
+  grant(channel, { count: 2 * CREDIT_MSG_WINDOW_INITIAL })
+  const sent = held(channel)
+  expect(sent.slice(sent.indexOf(`tag ${TAG.CLOSE_ACK}`))).toEqual([`tag ${TAG.CLOSE_ACK}`])
+})
+
+test("a page's abort drops its lossy send that waits after its last plain send, and keeps the plain send", async () => {
+  const channel = await newChannel()
+  send(channel, 'R1 L1')
+  channel.abort()
+  expect(held(channel)).toEqual(['R1', `tag ${TAG.ABORT}`])
 })

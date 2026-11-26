@@ -5,12 +5,11 @@ import { UPGRADE_MAX_STAGED_BYTES, UPGRADE_MAX_STAGED_RECORDS, UPGRADE_STAGE_TTL
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { PreparePayload } from '../../wire/payloads.js'
-import type { Wire } from './ChannelMux.js'
+import type { Fault, Wire } from './ChannelMux.js'
 
 /** The mux, which ends a probe whose stage is abandoned. */
 interface UpgradeStagesOwner {
-  /** Ends the wire for good. */
-  terminateWire(wire: Wire): void
+  endFault(wire: Wire, fault: Fault): void
 }
 
 type UpgradeStagesOptions = {
@@ -22,6 +21,8 @@ type StagedUpgrade = {
   upgradeId: string
   /** The session the upgrade moves off, which its barrier retires. */
   prevSessionId: string
+  /** The page's number for the probe, from its PREPARE. */
+  attempt: number
   /** The PREPARE's bytes, which count in the staged byte budget. */
   bytes: number
   timer: ReturnType<typeof setTimeout>
@@ -49,27 +50,35 @@ class UpgradeStages {
     return this.byPrevSession.get(sessionId)
   }
 
-  /** Stages `probe` for the PREPARE's session. A page stages one attempt at a time, so a newer PREPARE replaces what
-   *  an earlier attempt left staged. */
-  stage(probe: Wire, payload: PreparePayload, bytes: number): void {
+  /** Stages `probe` for the PREPARE's session; false, staging nothing, where the session's stage is a newer attempt's.
+   *  A page stages one attempt at a time, so a newer PREPARE replaces what an earlier attempt left staged. */
+  stage(probe: Wire, payload: PreparePayload, bytes: number): boolean {
     const staged = this.byPrevSession.get(payload.sessionId)
+    const replaced = staged === undefined ? undefined : this.byProbe.get(staged)
     if (staged !== undefined) {
-      assertProtocol(this.byProbe.get(staged)?.phase === 'staged', 'session already committing')
-      this.abandon(staged)
+      assertProtocol(replaced?.phase === 'staged', 'session already committing')
+      if (payload.attempt <= replaced.attempt) return false
     }
-    assertProtocol(this.byProbe.size < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
-    assertProtocol(this.stagedBytes + bytes <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
+    // The budgets count the stage this one replaces as gone, and are checked before it goes: a PREPARE they refuse
+    // leaves it staged.
+    const replacedRecords = replaced === undefined ? 0 : 1
+    assertProtocol(this.byProbe.size - replacedRecords < UPGRADE_MAX_STAGED_RECORDS, 'staged record budget')
+    const replacedBytes = replaced?.bytes ?? 0
+    assertProtocol(this.stagedBytes - replacedBytes + bytes <= UPGRADE_MAX_STAGED_BYTES, 'staged byte budget')
+    if (staged !== undefined) this.abandon(staged)
 
     const timer = unrefTimer(setTimeout(() => this.abandon(probe), UPGRADE_STAGE_TTL_MS))
     this.byProbe.set(probe, {
       upgradeId: payload.upgradeId,
       prevSessionId: payload.sessionId,
+      attempt: payload.attempt,
       bytes,
       timer,
       phase: 'staged',
     })
     this.byPrevSession.set(payload.sessionId, probe)
     this.stagedBytes += bytes
+    return true
   }
 
   /** Marks the probe's stage committing: from now on a claim of its session is refused and `abandon` is a no-op. */
@@ -86,11 +95,12 @@ class UpgradeStages {
     this.abandon(staleProbe)
   }
 
-  /** Forgets the stage and ends the probe holding it. No-op once the stage is committing. */
+  /** Forgets the stage and ends the probe holding it, as a loss: it holds no session. No-op once the stage is
+   *  committing. */
   abandon(probe: Wire): void {
     if (this.byProbe.get(probe)?.phase !== 'staged') return
     this.clear(probe)
-    this.owner.terminateWire(probe)
+    this.owner.endFault(probe, { scope: 'loss' })
   }
 
   /** Forgets the stage and leaves the probe wire alone. */

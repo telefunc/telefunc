@@ -107,7 +107,7 @@ async function delivered(channel: string): Promise<unknown[]> {
     messages.push(message)
     got.resolve()
   })
-  await subscription.ready
+  await subscription.opened
   await Broadcast.publish(channel, 'one')
   await got.promise
   subscription()

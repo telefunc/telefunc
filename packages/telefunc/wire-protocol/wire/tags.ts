@@ -16,7 +16,8 @@ import { assert } from '../../utils/assert.js'
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  wire-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x2f  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
+//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames), and past the full wire-level
+//              range, PIECES_ACK_REQ (no ix)
 
 const DATA_TAG_MIN = 0x10
 
@@ -35,9 +36,8 @@ const TAG = {
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
   /** Server → client wire-probe ack. Sent over the SSE downstream after the long-lived
-   *  client→server stream-request POST's metadata has been parsed. The client awaits this
-   *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
-   *  confirms the half-duplex streaming wire round-trips end-to-end. */
+   *  client→server stream-request POST's metadata has been parsed: what the page writes on that POST from then on
+   *  reaches the server as it is sent. Until it comes, the page sends in batch POSTs. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
   PREPARE: 0x07 as const,
   READY: 0x08 as const,
@@ -53,6 +53,11 @@ const TAG = {
   /** Goes ahead of a frame of no fixed size that another follows in its message. Its seq: that frame's bytes (see
    *  `messageFrames`). */
   LENGTH: 0x0d as const,
+  /** Server → page, the event stream's last event: the end the server decided for the wire (`refusal.ts`'s `wireEnd`),
+   *  as a WebSocket's close reason carries it. Payload: that value, in UTF-8. */
+  END: 0x0e as const,
+  /** Server → client on a WebSocket: the wire's RECONCILE arrived whole, and its RECONCILED follows. */
+  RECONCILE_TAKEN: 0x0f as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -76,7 +81,9 @@ const TAG = {
   // ─── Per-channel control (carries ix) ───
   /** A close request. Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
-  /** Sequenced, as CLOSE is. */
+  /** The end that follows a close sends nothing more. Sent the moment the CLOSE arrives, so a CLOSE after it from the
+   *  same end asks for a shorter deadline. Sequenced, as CLOSE is. Payload: u32 lastSeq, the last seq its sender read on
+   *  the channel. */
   CLOSE_ACK: 0x31 as const,
   /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
@@ -96,9 +103,15 @@ const TAG = {
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
+  /** "My side of the close is done": its acknowledged sends are answered and its `onClose()` cleanup settled. The end
+   *  that decides the close sends its own only once it has the other's, so from it, it means the channel closed.
+   *  Sequenced, as CLOSE is. Payload: u32 lastSeq, as CLOSE_ACK. */
+  CLOSE_DONE: 0x3a as const,
   /** Server → client: an initial channel a RECONCILED left out, attached at `lastSeq` or not within
    *  `CHANNEL_CONNECT_TTL_MS`. */
   ATTACH_RESULT: 0x3b as const,
+  /** Server → client: say at once, in a PIECES_ACK, what you took. No ix: wire-level, past its full range. */
+  PIECES_ACK_REQ: 0x3c as const,
 }
 
 function isWireCtrlTag(tag: number): boolean {
@@ -109,12 +122,13 @@ function isChannelCtrlTag(tag: number): boolean {
   return tag >= CHANNEL_CTRL_TAG_MIN
 }
 
-function isSequencedTag(tag: number): boolean {
-  return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
+/** `tag` may be read straight off a frame: an empty one has none, and isn't sequenced. */
+function isSequencedTag(tag: number | undefined): boolean {
+  return tag !== undefined && ((tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag))
 }
 
 /** A publish's body, which follows its head and names no channel. */
-function isPublishBody(tag: number): boolean {
+function isPublishBody(tag: number | undefined): boolean {
   return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 
@@ -124,7 +138,7 @@ function passesData(tag: number): boolean {
 }
 
 function isClosingTag(tag: number): boolean {
-  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.CLOSE_DONE || tag === TAG.ABORT || tag === TAG.ERROR
 }
 
 /** The replay queue of a sequenced frame; `closing` holds the frame that ends a channel, which no byte budget drops. */

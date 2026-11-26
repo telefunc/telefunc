@@ -17,6 +17,12 @@ class RegistrationWaits {
     }, ttlMs)
   }
 
+  /** Whether a wait for channel `id` ends it as it registers. */
+  refuses(id: string): boolean {
+    for (const awaited of this.byId.get(id) ?? NONE) if (awaited.refused !== null) return true
+    return false
+  }
+
   /** Those that wait for channel `id`, in the order they began: each still waits until `stop`. */
   take(id: string): Iterable<AwaitedChannel> {
     const waiting = this.byId.get(id)

@@ -29,11 +29,7 @@ class SeqQueue<T extends {}> {
   indexAfter(seq: number): number {
     const seqs = this.seqs
     let i = this.head
-    for (; i < seqs.length; i++) {
-      const at = seqs[i]
-      if (at === undefined) throw outOfRange(i - this.head, this.length)
-      if (at > seq) break
-    }
+    for (let each = seqs[i]; each !== undefined && each <= seq; each = seqs[++i]);
     return i - this.head
   }
 

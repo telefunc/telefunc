@@ -30,7 +30,7 @@
   "peerDependencies": {
     "@telefunc/room": "0.1.0",
     "ioredis": "^5.10.1 || ^6",
-    "telefunc": ">=0.3.2"
+    "telefunc": ">0.4.0"
   },
   "peerDependenciesMeta": {
     "@telefunc/room": {

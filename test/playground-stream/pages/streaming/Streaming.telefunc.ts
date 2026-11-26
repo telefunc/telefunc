@@ -1,6 +1,7 @@
 export {
   onReturnReadableStream,
   onReturnAsyncGenerator,
+  onReadRequestUser,
   onReturnGeneratorWithMeta,
   onReturnEmptyGenerator,
   onReturnDelayedStream,
@@ -40,6 +41,19 @@ import { sleep } from '../../sleep'
 
 async function* onReturnAsyncGenerator(): AsyncGenerator<number> {
   for (const n of [1, 2, 3, 4, 5]) yield n
+}
+
+async function* onReadRequestUser(): AsyncGenerator<string | null> {
+  for (let i = 0; i < 3; i++) {
+    let user: string | null
+    try {
+      user = getContext<{ user: string | null }>().user
+    } catch {
+      user = null
+    }
+    await sleep(25)
+    yield user
+  }
 }
 
 async function* onReturnEmptyGenerator(): AsyncGenerator<number> {}
@@ -474,6 +488,7 @@ const onReturnFailingStream = async (chunksBeforeFailure: number) => {
   })
 }
 
+/** cleanupState: generatorFinallyThrowsRan = 'true' once its `finally` ran, as the page's cancel returns it. */
 async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
   try {
     while (true) {
@@ -481,6 +496,7 @@ async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
       await sleep(50)
     }
   } finally {
+    cleanupState.generatorFinallyThrowsRan = 'true'
     throw Abort({ reason: 'generator-finally-failure' })
   }
 }

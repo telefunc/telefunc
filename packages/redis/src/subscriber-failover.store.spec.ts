@@ -35,7 +35,7 @@ describe.runIf(runs)('a subscription while its store is a replica for a moment',
       const key = `k-${i}`
       const received: unknown[] = []
       const subscription = Broadcast.subscribe(key, (message) => void received.push(message))
-      await subscription.ready
+      await subscription.opened
 
       await admin.call('REPLICAOF', '127.0.0.1', '1')
       await admin.call('CLIENT', 'KILL', 'TYPE', 'pubsub')

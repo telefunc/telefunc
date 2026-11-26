@@ -11,7 +11,7 @@ import type { ChannelPublishInfo } from './channel.js'
 interface MessageSource<T> {
   listen(callback: (data: T) => any, options: { signal: AbortSignal }): () => void
   listenBinary(callback: (data: Uint8Array) => any, options: { signal: AbortSignal }): () => void
-  readonly closed: Promise<void>
+  readonly closed: Promise<Error | null>
 }
 
 interface BroadcastSource<T> {
@@ -20,7 +20,7 @@ interface BroadcastSource<T> {
     callback: (data: Uint8Array, info: ChannelPublishInfo) => any,
     options: { signal: AbortSignal },
   ): () => void
-  readonly closed: Promise<void>
+  readonly closed: Promise<Error | null>
 }
 
 type Message<T> = { type: 'text'; data: T } | { type: 'binary'; data: Uint8Array }
@@ -70,7 +70,7 @@ function broadcastMessages<T>(broadcast: BroadcastSource<T>, options?: { signal?
 /** Without a `budget`, what the loop holds is bounded by its source: a channel holds each message until its listener's
  *  promise settles, within the most it may hold. */
 async function* iterateMessages<M extends Message<unknown>>(
-  source: { readonly closed: Promise<void> },
+  source: { readonly closed: Promise<Error | null> },
   subscribe: (
     receive: (message: M, bytes?: number) => Promise<void> | undefined,
     options: { signal: AbortSignal },
@@ -90,7 +90,14 @@ async function* iterateMessages<M extends Message<unknown>>(
     held -= size
     memory?.letGo(size)
   }
+  // The message the loop is at: its listener's promise settles once the loop takes the next step or ends.
+  let current: { message: M; consumed: () => void; size: number } | undefined
+  const consumeCurrent = () => {
+    current?.consumed()
+    current = undefined
+  }
   const release = () => {
+    consumeCurrent()
     for (let item = queue.shift(); item; item = queue.shift()) {
       letGo(item.size)
       item.consumed()
@@ -109,7 +116,8 @@ async function* iterateMessages<M extends Message<unknown>>(
   }
   const abort = () => finish(signal!.reason)
   // The next message waits only for the loop's current one to finish, so what counts is what waits beyond it.
-  const isBehind = () => held - (queue.peek()?.size ?? 0) > budget!
+  const limit = budget ?? Number.POSITIVE_INFINITY
+  const isBehind = () => held - (queue.peek()?.size ?? 0) > limit
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
@@ -138,19 +146,20 @@ async function* iterateMessages<M extends Message<unknown>>(
     subscribe(receive, { signal: registrations.signal })
     while (true) {
       if (error !== undefined) throw error
-      const next = queue.shift()
-      if (!next) {
+      current = queue.shift()
+      if (current === undefined) {
         if (ended) return
         await new Promise<void>((resolve) => {
           wake = resolve
         })
         continue
       }
-      letGo(next.size)
+      letGo(current.size)
       try {
-        yield next.message
+        // Read through `current`, which an abort lets go of: a local would keep the message while the loop waits here.
+        yield current.message
       } finally {
-        next.consumed()
+        consumeCurrent()
       }
     }
   } finally {
@@ -163,12 +172,14 @@ async function* iterateMessages<M extends Message<unknown>>(
 }
 
 // A pending close promise keeps its callbacks; their scope must release the iterator when it returns.
-function observeClose(closed: Promise<void>, callback?: (err?: unknown) => void): () => void {
-  void closed.then(
-    () => callback?.(),
-    (err) => callback?.(err),
-  )
+function observeClose(closed: Promise<Error | null>, callback?: (err?: unknown) => void): () => void {
+  void callOnClose()
   return () => {
     callback = undefined
+  }
+
+  async function callOnClose(): Promise<void> {
+    const outcome = await closed
+    callback?.(outcome ?? undefined)
   }
 }

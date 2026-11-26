@@ -33,7 +33,6 @@ export { isChannelOverflowError } from '../../wire-protocol/channel/channelError
 export {
   ProtocolViolationError,
   assertProtocol,
-  isProtocolViolationError,
   parsePeerText,
 } from '../../wire-protocol/wire/protocolViolation.js'
 
@@ -155,3 +154,4 @@ type ClientBroadcast<T = unknown, Publish = T> = Pick<
   | 'onReconnect'
   | 'close'
 >
+export { isPeerGone } from './runTelefunc/isPeerGone.js'

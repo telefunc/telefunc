@@ -70,7 +70,7 @@ export {
 import { prepareIteratorAck, sendIteratorAck, type IteratorAckOptions } from './iteratorAckProbe'
 import { sendOwnBytes, listenOwnBytesAlone, listenOwnBytesBeside } from './ownBytesProbe'
 
-import { Channel, Abort, Broadcast, BroadcastChannel, config } from 'telefunc'
+import { Channel, Abort, Broadcast, BroadcastChannel, NetworkError, config } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 
@@ -106,8 +106,10 @@ function formatCloseError(err: CloseError): string {
 
 async function onChannelInit() {
   const ch = new Channel<ClientToServer, ServerToClient>({ ack: true })
+  // A send the channel's end rejects: closed, aborted, or its connection gone (its page left, or lost).
   const swallowClosedChannel = (err: any) => {
-    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort)) return
+    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort || err instanceof NetworkError))
+      return
     throw err
   }
 
@@ -248,12 +250,18 @@ async function onChannelAckListenerAbort() {
   return { channel: ch.client }
 }
 
-type HeldBytesState = { channel: { heldBytes: number } | undefined; lateAnswer: Promise<void> }
-/** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
-const heldBytesState = ((globalThis as Record<symbol, unknown>)[Symbol.for('telefunc__heldBytesState')] ??= {
-  channel: undefined,
-  lateAnswer: Promise.resolve(),
-}) as HeldBytesState
+type HeldBytesState = { heldBytes: (() => number) | undefined; lateAnswer: Promise<void> }
+declare global {
+  /** What `onChannelHeldBytes` reads of the channel a row made, once a listener's late answer went. */
+  var telefuncHeldBytesState: HeldBytesState | undefined
+}
+const heldBytesState = (globalThis.telefuncHeldBytesState ??= { heldBytes: undefined, lateAnswer: Promise.resolve() })
+
+/** What `ch` holds, by the server channel's own count, which `Channel`'s type doesn't show. */
+function heldBytesOf(ch: object): number {
+  if (!('heldBytes' in ch) || typeof ch.heldBytes !== 'number') throw new Error('Expected a server channel')
+  return ch.heldBytes
+}
 
 /** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
 async function onChannelListenerAbortHolds() {
@@ -261,7 +269,7 @@ async function onChannelListenerAbortHolds() {
   ch.listen(() => {
     throw Abort('stop')
   })
-  heldBytesState.channel = ch as unknown as { heldBytes: number }
+  heldBytesState.heldBytes = () => heldBytesOf(ch)
   return { channel: ch.client }
 }
 
@@ -269,23 +277,23 @@ async function onChannelListenerAbortHolds() {
 async function onChannelLateAnswerHolds() {
   const ch = new Channel<(msg: string) => string, never>()
   const closed = new Promise<void>((resolve) => ch.onClose(() => resolve()))
-  let markAnswered!: () => void
-  heldBytesState.lateAnswer = new Promise((resolve) => {
-    markAnswered = resolve
-  })
+  const { promise: lateAnswer, resolve: markAnswered } = Promise.withResolvers<void>()
+  heldBytesState.lateAnswer = lateAnswer
   ch.listen(async (msg) => {
     if (msg !== 'late') return msg
     await closed
     setTimeout(markAnswered)
     return msg
   })
-  heldBytesState.channel = ch as unknown as { heldBytes: number }
+  heldBytesState.heldBytes = () => heldBytesOf(ch)
   return { channel: ch.client }
 }
 
 async function onChannelHeldBytes() {
   await heldBytesState.lateAnswer
-  return heldBytesState.channel!.heldBytes
+  const { heldBytes } = heldBytesState
+  if (heldBytes === undefined) throw new Error('No channel held bytes yet')
+  return heldBytes()
 }
 
 async function onChannelAckListenerBug() {
@@ -791,7 +799,7 @@ async function onChannelBinaryBurst() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-async function sendFitted(ch: Channel<any, string>, message: string): Promise<boolean> {
+async function sendFitted<ClientToServer>(ch: Channel<ClientToServer, string>, message: string): Promise<boolean> {
   try {
     await ch.send(message)
     return true
@@ -852,11 +860,11 @@ async function onChannelTextBurst() {
   return { channel: ch.client, channelId: id }
 }
 
-/** As it opens, sends 500 small messages without awaiting them. */
+/** As it opens, sends 2,000 small messages without awaiting them. */
 async function onChannelOpenBurst() {
   const ch = new Channel<never, number>()
   ch.onOpen(() => {
-    for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
+    for (let seq = 0; seq < 2000; seq++) void ch.send(seq).catch(() => {})
   })
   return { channel: ch.client }
 }
@@ -897,7 +905,7 @@ async function onChannelLinkShare() {
 /** A broadcast that publishes `count` bodies of `bytes`, `lossy` or not, closes or aborts, as a channel beside it asks,
  *  and answers its pings.
  *  After `'away'`, the page's next publish drops its connections: one body follows on the cut wire, ahead of that
- *  publish's receipt, and 16 more while the page is away (it retries after 500 ms). `'last'` answers the ordinal of the
+ *  publish's receipt, and 16 more while the page is away (the card has it wait its whole first delay, 500 ms). `'last'` answers the ordinal of the
  *  newest `<ordinal>:…` text its server subscription got. `'past memory'` publishes three bodies, then one of 3 MiB. */
 async function onChannelPublishesBehind(
   bytes = 4 * 1024 * 1024,
@@ -923,7 +931,7 @@ async function onChannelPublishesBehind(
       setTimeout(cutWireSockets, 50)
       return 'cut'
     }
-    if (msg === 'close') return String(await broadcast.close({ timeout: 20_000 }))
+    if (msg === 'close') return (await broadcast.close({ timeout: 20_000 }))?.name ?? 'clean'
     if (msg === 'abort') {
       // In the same turn, so the abort comes while all but the first still wait for the wire.
       publish(3)
@@ -1016,7 +1024,7 @@ async function onChannelsQueuedBeforeReturn() {
         await channel.sendBinary(new Uint8Array(1024 * 1024))
         return 'delivered'
       } catch (err) {
-        return (err as Error).name
+        return err instanceof Error ? err.name : String(err)
       }
     }
     const queued = queuedOutcome()
@@ -1160,7 +1168,7 @@ async function onChannelConfigChecks() {
       config.channel = { pingInterval: 1000, ...channel }
       return null
     } catch (err) {
-      return (err as Error).message
+      return err instanceof Error ? err.message : String(err)
     }
   }
   return {
@@ -1202,7 +1210,7 @@ async function onChannelAwaitedFromOffline() {
         await ch.sendBinary(new Uint8Array(bytes))
         sends.push('sent')
       } catch (err) {
-        sends.push((err as Error).message)
+        sends.push(err instanceof Error ? err.message : String(err))
       }
     }
     cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
@@ -1211,15 +1219,16 @@ async function onChannelAwaitedFromOffline() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-// 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+// A channel's limit, 2 MiB less the eighth kept for sends waiting for room, is these 1,834,487 UTF-8 bytes, the two
+// quotes around them, a frame's 7 bytes and a held send's 512.
 const atLimitTexts = {
-  twoBytes: `${'é'.repeat(1_048_315)}x`,
-  threeBytes: '€'.repeat(698_877),
-  fourBytes: `${'😀'.repeat(524_157)}xxx`,
+  twoBytes: `${'é'.repeat(917_243)}x`,
+  threeBytes: `${'€'.repeat(611_495)}xx`,
+  fourBytes: `${'😀'.repeat(458_621)}xxx`,
 }
 
-/** A channel sending, as its first send, the text of `kind` that fits `maxMemory` to the byte, or one byte more. Told, it
- *  closes: `maxMemory` is the server's, and the next channel needs all of it.
+/** A channel sending, as its first send, the text of `kind` that fits its limit to the byte, or one byte more. Told, it
+ *  closes: `maxMemory` is the server's, and the next channel needs all it may hold.
  *  cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) {
   const ch = new Channel<never, string>()
@@ -1230,7 +1239,7 @@ async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) 
       await ch.send(over ? `${atLimitTexts[kind]}x` : atLimitTexts[kind], { ack: true })
     } catch (err) {
       // The page has no listener to answer the send that went.
-      if ((err as Error).name === 'ChannelOverflowError') cleanupState[name] = (err as Error).message
+      if (err instanceof Error && err.name === 'ChannelOverflowError') cleanupState[name] = err.message
     }
     ch.close()
   })
@@ -1270,9 +1279,7 @@ async function onChannelCreditFailure() {
     const sends = Array.from({ length: 300 }, () => ch.send('x'))
     ch.abort('capacity-failure')
     void Promise.allSettled(sends).then((results) => {
-      cleanupState[`credit_${ch.id}`] = String(
-        results.some((r) => r.status === 'rejected' && r.reason.abortValue === 'capacity-failure'),
-      )
+      cleanupState[`credit_${ch.id}`] = String(results.every((r) => r.status === 'fulfilled'))
     })
   })
   return { channel: ch.client }

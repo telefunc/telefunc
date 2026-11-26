@@ -77,17 +77,18 @@ vi.mock('crossws/adapters/cloudflare', () => ({
 }))
 
 vi.mock('../../channel/server/ws.js', () => ({
-  getTelefuncChannelHooks: vi.fn(() => ({})),
+  getTelefuncChannelOptions: vi.fn(() => ({ hooks: {} })),
 }))
 
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
+  getTelefuncUrl: () => '/_telefunc',
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
   setAdapterMaxMemory: mocks.setAdapterMaxMemory,
 }))
 
 vi.mock('../../../node/server/telefunc.js', () => ({
-  serve: mocks.telefuncMock,
+  serveRuntimeRequest: mocks.telefuncMock,
 }))
 
 vi.mock('../../../node/server/runTelefunc/loadTelefuncFilesUsingVite.js', () => ({
@@ -106,6 +107,7 @@ import type { BroadcastPublishRequest } from './broadcast.js'
 import type { BroadcastDelivery } from './extensions.js'
 import { assert } from '../../../utils/assert.js'
 import { durableObjectState, webSocket } from '../../test/cloudflareRuntime.js'
+import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
@@ -205,6 +207,23 @@ describe('cloudflare adapter entrypoint', () => {
     expect(response?.status).toBe(400)
   })
 
+  it.each([
+    ['an SSE request of another wire version', { 'x-telefunc-request': 'sse' }, 409, 'reload'],
+    ['a request that names no kind', {}, 400, 'route'],
+  ])('refuses %s as Telefunc, which says so in its media type', async (_request, headers, status, kind) => {
+    const { binding } = createBinding()
+    const env = { TelefuncDurableObject: binding }
+    const tf = new Telefunc()
+    const request = new Request('https://telefunc.test/_telefunc', { method: 'POST', headers, body: 'x' })
+
+    const response = await tf.serve({ request, env })
+
+    expect(response?.status).toBe(status)
+    expect(response?.headers.get('content-type')).toMatch(
+      new RegExp(`^text/vnd\\.telefunc\\.refusal; kind=${kind}; reason="[^"]+"$`),
+    )
+  })
+
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { env, jurisdiction } = createBinding()
     const tf = new Telefunc({ jurisdiction: 'eu' })
@@ -255,7 +274,11 @@ describe('cloudflare adapter entrypoint', () => {
         headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
       }),
     )
-    expect(mocks.telefuncMock).toHaveBeenCalled()
+    // The Durable Object answers the upgrade itself, so its pages are offered WebSocket.
+    expect(mocks.telefuncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ clientGone: expect.any(AbortSignal), takesUpgrades: upgradesTakenHere }),
+    )
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
     const [transport] = mocks.transportInstances
     const [member] = transport?.members ?? []

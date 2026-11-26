@@ -12,25 +12,10 @@ import { SendGate } from './SendGate.js'
 import { decode, encode } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { TAG } from '../../wire/tags.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
-
-function createChannel() {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onEnded() {},
-    _attach: {
-      state: () => ({}),
-      receiveCredit: { onProbeAnswered() {}, acknowledge() {}, answered() {} },
-      capWindows() {},
-      onBatched() {},
-      onUpgradeJoined() {},
-    },
-  }
-}
+import { CHANNEL_TRANSPORT, DEFAULT_SERVER_CHANNEL_TRANSPORTS, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { Downlink } from '../../flowControl/client/Downlink.js'
+import { Uplink } from '../../flowControl/client/Uplink.js'
+import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 
 /** A text frame is its value, a RECONCILE `RECONCILE <the channels it names>`. */
 function label({ frame }: OutboundFrame): string {
@@ -44,14 +29,32 @@ function label({ frame }: OutboundFrame): string {
  *  held behind it; else a WebSocket's, whose held frames wait for its RECONCILED. */
 function connect(carriesReconcileInOpen: boolean) {
   const wire: string[] = []
-  const transport = {
+  const uplink = new Uplink()
+  const transport: ClientChannelTransport = {
+    type: carriesReconcileInOpen ? CHANNEL_TRANSPORT.SSE : CHANNEL_TRANSPORT.WS,
     carriesReconcileInOpen,
-    uplink: {},
-    heartbeat: null,
-    behindAfter: Infinity,
+    batched: carriesReconcileInOpen,
+    uplink,
+    downlink: new Downlink(uplink),
+    start() {},
+    cancelAttempt() {},
+    hasWire: () => true,
+    isConnecting: () => false,
+    sendPing() {},
+    sendFrame: (frame) => void wire.push(label(frame)),
     headroom: () => Infinity,
-    sendFrame: (frame: OutboundFrame) => void wire.push(label(frame)),
-  } as unknown as ClientChannelTransport
+    behindAfter: Infinity,
+    bufferedAmount: () => 0,
+    abandonActiveTransport() {},
+    dropQueued() {},
+    closeAbandonedTransport() {},
+    applyReconciledSettings() {},
+    heartbeat: null,
+    attachHeartbeat() {},
+    detachHeartbeat() {},
+    drained: () => Promise.resolve(),
+    dispose() {},
+  }
   const channels = new ChannelTable()
   const owner = {
     transport,
@@ -61,7 +64,14 @@ function connect(carriesReconcileInOpen: boolean) {
     get sendsOpen() {
       return !exchange.reconciling && !exchange.reconcileOwed
     },
+    get liveWire() {
+      return exchange.liveWire
+    },
+    takesLive(record: ChannelRecord) {
+      return exchange.takesLive(record)
+    },
     reconnecting: false,
+    maxFrameBytesOf: () => WIRE_MAX_RAW_FRAME_BYTES,
   }
   const gate = new SendGate({ owner, channels })
   const exchange = new AttachExchange({ owner, channels, gate })
@@ -69,7 +79,7 @@ function connect(carriesReconcileInOpen: boolean) {
   return {
     wire,
     register(ix: number): ChannelRecord {
-      const record = channels.add(ix, createChannel() as never, new ReplayBuffer(1_000_000))
+      const record = channels.add(ix, fakeMuxChannel(), new ReplayBuffer(1_000_000))
       exchange.scheduleRegisterReconcile()
       return record
     },
@@ -87,9 +97,21 @@ function connect(carriesReconcileInOpen: boolean) {
     },
     /** The server's RECONCILED, attaching `ixes`; what it releases goes on the wire, as `handleReconciled` sends it. */
     reconciled(ixes: number[]) {
-      const ctrl = { sessionId: 'session', open: ixes.map((ix) => ({ ix, lastSeq: 0 })) } as ReconciledPayload
-      const { frames } = exchange.applyReconciled(ctrl, { deferOmitted: false, upgradeReady: false })
+      const ctrl: ReconciledPayload = {
+        sessionId: 'session',
+        open: ixes.map((ix) => ({ ix, lastSeq: 0 })),
+        reconnectTimeout: 60_000,
+        idleTimeout: 60_000,
+        pingInterval: 60_000,
+        maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+        creditWindow: 1024 * 1024,
+        sseFlushThrottle: 300,
+        ssePostIdleFlushDelay: 100,
+        transports: DEFAULT_SERVER_CHANNEL_TRANSPORTS,
+      }
+      const { frames } = exchange.applyReconciled(ctrl, { deferOmitted: false, holdsReconcile: false })
       for (const frame of frames) wire.push(label(frame))
+      exchange.batchHanded()
     },
   }
 }

@@ -20,7 +20,7 @@ describe.runIf(runs)("a store that lost the backend's scripts", () => {
       const subscription = Broadcast.subscribe(channel, (message) => {
         if (got.push(message) === 2) both.resolve()
       })
-      await subscription.ready
+      await subscription.opened
       // The socket runs the publish's script once, so its next publish goes as EVALSHA.
       await Broadcast.publish(channel, 'one')
       const refusedBefore = sent(command, 'toClient', 'NOSCRIPT')

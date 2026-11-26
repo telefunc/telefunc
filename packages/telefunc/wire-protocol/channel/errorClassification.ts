@@ -1,6 +1,6 @@
 export { classifyTelefuncError }
 
-import { isAbort, type AbortError } from '../../shared/Abort.js'
+import { Abort, type AbortError } from '../../shared/Abort.js'
 import { isShieldValidationError, type ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 type TelefuncErrorClassification =
@@ -14,7 +14,7 @@ function classifyTelefuncError(
   error: unknown,
   isExpected: (error: unknown) => error is Error,
 ): TelefuncErrorClassification {
-  if (isAbort(error)) return { kind: 'abort', error }
+  if (error instanceof Abort) return { kind: 'abort', error }
   if (isExpected(error)) return { kind: 'expected', error }
   if (isShieldValidationError(error)) return { kind: 'shield', error }
   return { kind: 'bug', error }

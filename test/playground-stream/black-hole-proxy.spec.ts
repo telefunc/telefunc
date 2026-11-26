@@ -3,7 +3,7 @@
 // by hand, so a late tick is one the clock moved past without a tick in between.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import * as net from 'node:net'
+import { Socket } from 'node:net'
 
 import { PacedDirection } from './black-hole-proxy'
 
@@ -22,17 +22,17 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-/** A direction of a 1 Mbit/s link and the bytes its receiver got, between sockets that connect nowhere. */
+/** A direction of a 1 Mbit/s link and the bytes its receiver got; `tick` runs its timer. */
 function link() {
   const direction = new PacedDirection(RATE, 64 * 1024, BURST_MS, 0)
   let received = 0
-  const to = Object.assign(new net.Socket(), {
-    write: (chunk: Buffer) => {
-      received += chunk.length
-      return true
-    },
+  // Sockets that connect nowhere: the receiver counts what it is written.
+  const to = new Socket()
+  vi.spyOn(to, 'write').mockImplementation((chunk) => {
+    received += chunk.length
+    return true
   })
-  const from = new net.Socket()
+  const from = new Socket()
   return {
     send: (bytes: number) => direction.enqueue(from, to, Buffer.alloc(bytes)),
     /** The clock moves `ms`, then the direction's timer fires once. */

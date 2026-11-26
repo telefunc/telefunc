@@ -24,7 +24,6 @@ type BroadcastBackpressureState = {
     closeErr: string
     abortReceived: number
     abortErr: string
-    abortMs: number
   } | null
   broadcastOverflow: { received: number; closeErr: string } | null
   broadcastBehind: {
@@ -63,9 +62,9 @@ type Show = (state: Partial<BroadcastBackpressureState>) => void
 function PublishesBehind({ show }: { show: Show }) {
   async function testPublishesBehind() {
     show({ publishesBehind: null })
-    /** A broadcast of 4 MiB bodies, how many of them the page got, and once it closed, why. */
-    const openBehind = async () => {
-      const { broadcast, control } = await openChannel(onChannelPublishesBehind)
+    /** A broadcast of bodies of `bytes`, 4 MiB unless given, how many of them the page got, and once it closed, why. */
+    const openBehind = async (bytes?: number) => {
+      const { broadcast, control } = await openChannel(() => onChannelPublishesBehind(bytes))
       const got = { firstSeq: 0, received: 0 }
       const waiting: { count: number; resolve: () => void }[] = []
       broadcast.subscribeBinary((_, info) => {
@@ -92,11 +91,10 @@ function PublishesBehind({ show }: { show: Show }) {
     const { received, firstSeq } = closing.got
     closing.control.close()
 
-    const aborting = await openBehind()
-    const abortAt = performance.now()
+    // At 1 MiB the second and third body still wait for the wire at the abort, and they take seconds to arrive.
+    const aborting = await openBehind(1024 * 1024)
     await aborting.control.send('abort', { ack: true })
     const abortErr = await aborting.ended
-    const abortMs = Math.round(performance.now() - abortAt)
     const abortReceived = aborting.got.received
     aborting.control.close()
 
@@ -108,7 +106,6 @@ function PublishesBehind({ show }: { show: Show }) {
       closeErr,
       abortReceived,
       abortErr,
-      abortMs,
     }
     show({ publishesBehind })
   }
@@ -359,7 +356,7 @@ function BroadcastBehindCloses({ show }: { show: Show }) {
     // Three publishes, then one the server can't hold: its page gets the three, then the close.
     const behindMemory = await opened()
     const { seq: start } = await behindMemory.broadcast.publish('before the four')
-    const pastMemory = { seqsAhead: [] as number[], closeErr: '' }
+    const pastMemory: { seqsAhead: number[]; closeErr: string } = { seqsAhead: [], closeErr: '' }
     behindMemory.broadcast.subscribeBinary((_, info) => pastMemory.seqsAhead.push(info.seq - start))
     const memoryClosed = new Promise<string>((resolve) =>
       behindMemory.broadcast.onClose((err) => resolve(err?.name ?? 'none')),
@@ -400,28 +397,29 @@ function BroadcastAwayShared({ show }: { show: Show }) {
     show({ broadcastAwayShared: null })
     // Two broadcasts on one key, with lossy bodies of 1200 KiB: one fits the lane's 2 MiB, two don't.
     const key = `away-shared:${crypto.randomUUID()}`
-    const pages = await Promise.all(
-      [0, 1].map(() => openChannel(() => onChannelPublishesBehind(1200 * 1024, true, key))),
-    )
-    const { broadcast, control } = pages[0]!
+    const opened = () => openChannel(() => onChannelPublishesBehind(1200 * 1024, true, key))
+    const pages = await Promise.all([opened(), opened()])
+    const [{ broadcast, control }] = pages
     const { seq: before } = await broadcast.publish('before the disconnect')
-    const received: number[][] = [[], []]
     const closed = ['open', 'open']
     // Its publish (1) is outstanding as its connection drops, and 17 bodies follow while it is away: each receives the
     // newest (18), or closes.
-    const newest = pages.map(
-      ({ broadcast }, i) =>
-        new Promise<void>((resolve) => {
-          broadcast.subscribeBinary((_, info) => {
-            received[i]!.push(info.seq - before)
-            if (info.seq === before + 18) resolve()
-          })
-          broadcast.onClose((err) => {
-            closed[i] = err?.name ?? 'none'
-            resolve()
-          })
-        }),
-    )
+    const watched = pages.map(({ broadcast }, i) => {
+      const got: number[] = []
+      const newest = new Promise<void>((resolve) => {
+        broadcast.subscribeBinary((_, info) => {
+          got.push(info.seq - before)
+          if (info.seq === before + 18) resolve()
+        })
+        broadcast.onClose((err) => {
+          closed[i] = err?.name ?? 'none'
+          resolve()
+        })
+      })
+      return { got, newest }
+    })
+    const received = watched.map(({ got }) => got)
+    const newest = watched.map(({ newest }) => newest)
     await control.send('away', { ack: true })
     void broadcast.publish('across the disconnect').catch(() => {})
     await Promise.all(newest)

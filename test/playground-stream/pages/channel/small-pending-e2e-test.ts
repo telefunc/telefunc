@@ -1,18 +1,71 @@
 export { testSmallPending }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, reconnectAtFullDelay, defined } from '../../e2e-utils'
 import { sendRefusedWarning } from '../../../utils'
+import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
+
+/** What the channel page shows of the rows here. */
+type SmallPendingState = {
+  channelsQueued: { queued: string[]; received: string[][]; closed: boolean[] } | null
+  acksWaiting: {
+    error?: string
+    ended: string
+    started: number
+    settled: Record<string, number>
+    next: string | null
+  } | null
+  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
+  awaitedFromOffline: { channelId: string; received: number; closeErr: string | null } | null
+  broadcastOverflow: { received: number; closeErr: string } | null
+  broadcastBehind: {
+    seqsAhead: number[]
+    isClosed: boolean
+    receiptAhead: number
+    opening: { receipts: number; last: string }
+    attached: { receipts: number; last: string }
+    reconnected: { receipts: number; last: string }
+  } | null
+  broadcastAwayShared: { received: number[][]; closed: string[] } | null
+  broadcastBehindCloses: {
+    seqsAhead: number[]
+    closeErr: string | null
+    pastMemory: { seqsAhead: number[]; closeErr: string }
+    across: { publish: string; received: number; closeErr: string }
+  } | null
+}
+
+/** The channel page's state. */
+const stateOf = () => getResult<SmallPendingState>('#channel-state')
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
 function testSmallPending() {
+  // 1,200 KiB held, 700 KiB waiting for the page to confirm it, and 200 KiB that would carry both past 2 MiB.
+  for (const kind of ['text', 'binary'] as const) {
+    test(`channel: a ${kind} send nobody awaits that would carry what the server holds and what waits for room past maxMemory is refused, the one waiting arrives, and the channel stays open`, async () => {
+      const channelId = await burstWhileOffline(`${kind}-past-memory`)
+      await autoRetry(
+        async () => {
+          expect(await burstOf()).deep.include({ received: [0, 1], onClose: null })
+        },
+        { timeout: 30_000 },
+      )
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
+      expectLog(sendRefusedWarning)
+      const { held, heldWithWaiting, maxMemory } = await memoryPeakOf(channelId)
+      expect(held).greaterThanOrEqual(1200 * 1024)
+      expect(heldWithWaiting).greaterThanOrEqual(1900 * 1024)
+      expect(heldWithWaiting).lessThanOrEqual(maxMemory)
+    })
+  }
+
   // 1 MiB queued on each of eight channels before their telefunction returns: on 2 MiB, one fits and a second doesn't.
   test('channel: sends queued before a telefunction returns count against maxMemory together: those past it are refused with ChannelOverflowError, and every channel stays open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-channels-queued')
     await autoRetry(
       async () => {
-        const { queued, received, closed } = (await getResult<any>('#channel-state')).channelsQueued
+        const { queued, received, closed } = defined((await stateOf()).channelsQueued, 'channelsQueued')
         expect(received).deep.equal([['queued'], ...Array(7).fill([])])
         expect(queued).deep.equal(['delivered', ...Array(7).fill('ChannelOverflowError')])
         expect(closed).deep.equal(Array(8).fill(false))
@@ -29,13 +82,13 @@ function testSmallPending() {
     await page.click('#channel-test-acks-waiting')
     await autoRetry(
       async () => {
-        const { error, ended, started, settled, next } = (await getResult<any>('#channel-state')).acksWaiting
+        const { error, ended, started, settled, next } = defined((await stateOf()).acksWaiting, 'acksWaiting')
         expect(error).toBe(undefined)
         expect(ended).toBe('open')
         expect(started).toBe(500)
         expect(settled.answered).greaterThan(0)
         expect(settled.ChannelOverflowError).greaterThan(0)
-        expect(settled.answered + settled.ChannelOverflowError).toBe(500)
+        expect((settled.answered ?? 0) + (settled.ChannelOverflowError ?? 0)).toBe(500)
         expect(next).toBe('answered next')
       },
       { timeout: 30_000 },
@@ -48,7 +101,7 @@ function testSmallPending() {
     await page.click('#channel-test-acks-flood')
     await autoRetry(
       async () => {
-        const { error, ended, started, settled } = (await getResult<any>('#channel-state')).acksWaiting
+        const { error, ended, started, settled } = defined((await stateOf()).acksWaiting, 'acksWaiting')
         expect(error).toBe(undefined)
         expect(ended).toBe('ChannelOverflowError')
         expect(started).lessThan(10_000)
@@ -63,7 +116,7 @@ function testSmallPending() {
     await page.click('#channel-test-unattached-flood')
 
     await autoRetry(async () => {
-      const state = await getResult<any>('#channel-state')
+      const state = await stateOf()
       expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
       expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
     })
@@ -74,7 +127,7 @@ function testSmallPending() {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-budgets')
     await autoRetry(async () => {
-      const ids = JSON.parse((await page.textContent('#channel-budgets-result'))!)
+      const ids = JSON.parse(defined(await page.textContent('#channel-budgets-result'), '#channel-budgets-result'))
       const state = await getCleanupState()
       expect(state[`budget_${ids.bytes}_credit`]).toBe('accepted')
       expect(state[`budget_${ids.bytes}`]).toContain('maxMemory')
@@ -82,7 +135,7 @@ function testSmallPending() {
     expectLog(sendRefusedWarning)
   })
 
-  test('channel: multi-byte text that fits maxMemory to the byte is accepted, and one byte more is refused', async () => {
+  test("channel: multi-byte text that fits a channel's limit to the byte is accepted, and one byte more is refused", async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-at-limit')
     await autoRetry(async () => {
@@ -99,7 +152,9 @@ function testSmallPending() {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-offline-budgets')
     await autoRetry(async () => {
-      const { id, refused, next, isClosed } = JSON.parse((await page.textContent('#channel-offline-budgets-result'))!)
+      const { id, refused, next, isClosed } = JSON.parse(
+        defined(await page.textContent('#channel-offline-budgets-result'), '#channel-offline-budgets-result'),
+      )
       expect(refused).toBe('ChannelOverflowError')
       expect(next).toBe('answered next')
       expect(isClosed).toBe(false)
@@ -117,7 +172,7 @@ function testSmallPending() {
     await page.click('#channel-test-awaited-from-offline')
     await autoRetry(
       async () => {
-        const result = (await getResult<any>('#channel-state')).awaitedFromOffline!
+        const result = defined((await stateOf()).awaitedFromOffline, 'awaitedFromOffline')
         expect(result.closeErr).toBe(null)
         expect(result.received).toBe(2)
         const sends: string[] = JSON.parse((await getCleanupState())[`awaitedFromOffline_${result.channelId}`] ?? '[]')
@@ -136,7 +191,7 @@ function testSmallPending() {
     await page.click('#channel-test-broadcast-overflow')
     await autoRetry(
       async () => {
-        const { received, closeErr } = (await getResult<any>('#channel-state')).broadcastOverflow
+        const { received, closeErr } = defined((await stateOf()).broadcastOverflow, 'broadcastOverflow')
         expect(closeErr).toBe('ChannelOverflowError')
         expect(received).lessThan(3)
       },
@@ -152,12 +207,15 @@ function testSmallPending() {
   // own 20 again, while it reconnects.
   test('channel: a client that falls behind a lossy broadcast skips to the newest, with a jump in info.seq, and stays open, and so does its own uplink', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-behind')
     await autoRetry(
       async () => {
-        const { seqsAhead, isClosed, receiptAhead, opening, attached, reconnected } = (
-          await getResult<any>('#channel-state')
-        ).broadcastBehind
+        const { seqsAhead, isClosed, receiptAhead, opening, attached, reconnected } = defined(
+          (await stateOf()).broadcastBehind,
+          'broadcastBehind',
+        )
         const [burst, away] = [seqsAhead.filter((a: number) => a <= 16), seqsAhead.filter((a: number) => a > 17)]
         expect(burst.at(-1)).toBe(16)
         expect(burst.length).lessThan(16)
@@ -177,10 +235,12 @@ function testSmallPending() {
   // Each newer body replaces the one waiting before the server decides what it can hold, so neither closes.
   test("channel: a lossy broadcast whose client is away keeps its newest where it and the one before don't both fit the server's memory, for two subscribers sharing them", async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-away-shared')
     await autoRetry(
       async () => {
-        const { received, closed } = (await getResult<any>('#channel-state')).broadcastAwayShared
+        const { received, closed } = defined((await stateOf()).broadcastAwayShared, 'broadcastAwayShared')
         expect(closed).deep.equal(['open', 'open'])
         expect(received).deep.equal([[18], [18]])
       },
@@ -193,11 +253,15 @@ function testSmallPending() {
   // server's memory in the same turn: the gap is the fourth, so the page gets all three first.
   test('channel: a client that falls behind a broadcast gets every message up to the gap, then closes with ChannelOverflowError', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    // The page is away while the server publishes: its reconnect waits its whole first delay.
+    await reconnectAtFullDelay()
     await page.click('#channel-test-broadcast-behind-closes')
     await autoRetry(
       async () => {
-        const { seqsAhead, closeErr, pastMemory, across } = (await getResult<any>('#channel-state'))
-          .broadcastBehindCloses
+        const { seqsAhead, closeErr, pastMemory, across } = defined(
+          (await stateOf()).broadcastBehindCloses,
+          'broadcastBehindCloses',
+        )
         expect(closeErr).toBe('ChannelOverflowError')
         expect(seqsAhead.length).lessThan(16)
         expect(seqsAhead).deep.equal(seqsAhead.map((_: number, i: number) => i + 1))

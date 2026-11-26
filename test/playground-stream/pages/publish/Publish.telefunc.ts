@@ -52,7 +52,7 @@ import { prepareBroadcastApi } from './broadcastApiProbe'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import { dropRedisSubscribers, redis } from '../../redis'
-import { refuseChannels } from './refuseChannels'
+import { allowEveryChannel, refuseChannels } from './refuseChannels'
 
 type TextMsg = { text: string; from: string }
 
@@ -233,7 +233,7 @@ async function onSubscribeRefused() {
       () => 'resolved',
       () => 'rejected',
     )
-  return { ready: await outcome(subscribed.ready), closed: await outcome(channel.closed) }
+  return { ready: await outcome(subscribed.opened), closed: await outcome(channel.closed) }
 }
 
 /** The store delivers the first message on this key before it acknowledges the subscription (a test asks it to, see
@@ -445,8 +445,8 @@ async function onBroadcastSubscriberAborts() {
 /** A loop that read one message and stopped, with the next one queued for it, when its channel closes. */
 async function onBroadcastLoopLeftBehind() {
   const room = new BroadcastChannel<string>({ key: `room:left-behind:${crypto.randomUUID()}` })
-  const { _telefunc } = globalThis as unknown as Ledger
-  const { holders } = _telefunc['channelMemory.ts']
+  const holders = globalThis._telefunc?.['channelMemory.ts']?.holders
+  if (holders === undefined) throw new Error("Expected the server's channel memory")
   const before = new Set(holders)
   const first = room.messages().next()
   const queued = Promise.withResolvers<void>()
@@ -462,7 +462,10 @@ async function onBroadcastLoopLeftBehind() {
   await room.close()
   return { held, heldOnceClosed: loop?.heldBytes }
 }
-type Ledger = { _telefunc: { 'channelMemory.ts': { holders: Set<{ heldBytes: number }> } } }
+declare global {
+  /** Telefunc's state on the server: here, what its channels' memory holds, by holder. */
+  var _telefunc: { 'channelMemory.ts'?: { holders: Set<{ heldBytes: number }> } } | undefined
+}
 
 /** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */
 async function onBroadcastAnswerOrder() {
@@ -911,7 +914,7 @@ async function readSlowly(room: BroadcastChannel<string>, kind: 'slow' | 'held')
     for await (const _ of room.messages()) {
       received++
       if (kind === 'slow') await new Promise((resolve) => setTimeout(resolve, 20))
-      else if (received === 1) await room.closed.catch(() => {})
+      else if (received === 1) await room.closed
     }
     return { received, error: null }
   } catch (err) {
@@ -956,5 +959,5 @@ async function onRefuseRenewals() {
 }
 
 async function onRedisAllowsEveryKey() {
-  await redis?.call('ACL', 'SETUSER', 'default', 'allchannels')
+  await allowEveryChannel()
 }

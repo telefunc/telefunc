@@ -5,11 +5,14 @@ import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
+import type { SequencedFrame } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
+import { isLossy } from '../broadcastPayload.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
 type ChannelState =
-  | { tag: 'pending'; initial: boolean }
+  | { tag: 'pending' }
   | { tag: 'open' }
   | {
       tag: 'closed'
@@ -34,8 +37,12 @@ type ChannelRecord = {
   /** Each stream's lossy frame that a newer one may take the place of while it waits to go, by its seq: made at the
    *  channel's first lossy frame. */
   replaceable: Map<string, number> | null
+  /** When the newest seq arrived, if it is a lossy value. */
+  receivedAt: number | undefined
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
+  /** The last time a request carrying what it sent was refused: on `wire`, through `throughSeq`. */
+  refused: { wire: number; throughSeq: number } | null
 }
 
 /** The channels a page's connection carries, one record per wire index. */
@@ -59,6 +66,12 @@ class ChannelTable {
     return this.byChannel.size === 0
   }
 
+  /** Every closed channel kept has at the server all the page sent on it, or the server ended it. */
+  get delivered(): boolean {
+    for (const { state } of this.closed) if (state.tag === 'closed' && !state.delivered) return false
+    return true
+  }
+
   get hasUndeclared(): boolean {
     return this.undeclared.size > 0
   }
@@ -76,9 +89,10 @@ class ChannelTable {
     return this.records.values()
   }
 
-  /** The channels a RECONCILE on the wire that has the session names: the undeclared and the closed. */
+  /** The channels a RECONCILE on the wire that has the session names: the closed, then the undeclared, so the server
+   *  lets go of what the closed kept before a new one's `onOpen()` may need it. */
   changed(): Set<ChannelRecord> {
-    return new Set([...this.undeclared, ...this.closed])
+    return new Set([...this.closed, ...this.undeclared])
   }
 
   isUndeclared(ix: number): boolean {
@@ -104,16 +118,18 @@ class ChannelTable {
   }
 
   /** The full seq of a frame the server sent on a channel, or null for a frame to drop. */
-  receivedSeq({ index, seq: bits }: { index: number; seq: number }): number | null {
-    const record = this.records.get(index)
+  receivedSeq(frame: SequencedFrame): number | null {
+    const record = this.records.get(frame.index)
     // A channel this page let go.
     if (record === undefined) return null
     const prev = record.lastSeq
     // The header holds a seq's low 32 bits: the full seq is the one nearest the next, as no wire holds 2^31 frames.
-    const seq = seqNear(bits, prev + 1)
+    const seq = seqNear(frame.seq, prev + 1)
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
+    const lossy = isLossyFrame(frame)
+    record.receivedAt = lossy ? performance.now() : undefined
     return seq
   }
 
@@ -123,17 +139,24 @@ class ChannelTable {
     if (record !== undefined) this.acknowledged(record, lastSeq)
   }
 
+  /** Whether a RECONCILE lists it as `initial`: the server hasn't attached it yet. */
+  isInitial({ state }: ChannelRecord): boolean {
+    return state.tag === 'pending' || (state.tag === 'closed' && state.initial)
+  }
+
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
   add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
     const record: ChannelRecord = {
       ix,
       channel,
-      state: { tag: 'pending', initial: true },
+      state: { tag: 'pending' },
       replay,
       lastSeq: 0,
+      receivedAt: undefined,
       awaited: false,
       replaceable: null,
+      refused: null,
     }
     this.records.set(ix, record)
     this.byChannel.set(channel, record)
@@ -149,8 +172,7 @@ class ChannelTable {
   close(record: ChannelRecord): void {
     assert(record.state.tag !== 'closed')
     this.byChannel.delete(record.channel)
-    const initial = record.state.tag === 'pending' && record.state.initial
-    record.state = { tag: 'closed', initial, delivered: false, reported: false }
+    record.state = { tag: 'closed', initial: record.state.tag === 'pending', delivered: false, reported: false }
     this.closed.add(record)
   }
 
@@ -169,9 +191,10 @@ class ChannelTable {
     for (const [stream, seq] of replaceable) if (seq <= lastSeq) replaceable.delete(stream)
   }
 
-  /** The server ended the closed channel. */
-  serverEnded(state: ClosedState): void {
+  /** The server ended the closed channel: none of what the page sent on it goes again. */
+  serverEnded({ replay }: ChannelRecord, state: ClosedState): void {
     state.delivered = true
+    replay.dispose()
   }
 
   /** A PING named the closed channel. */
@@ -201,4 +224,12 @@ class ChannelTable {
     this.closed.clear()
     this.released = []
   }
+}
+
+/** A send a newer one may have replaced, or a publish its publisher made lossy. */
+function isLossyFrame(frame: SequencedFrame): boolean {
+  if (frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) return frame.lossy === true
+  if (frame.tag === TAG.PUBLISH) return isLossy(frame.text)
+  if (frame.tag === TAG.PUBLISH_BINARY) return isLossy(frame.data)
+  return false
 }

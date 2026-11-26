@@ -46,3 +46,11 @@ it("new Telefunc() serves the build's telefuncUrl when the production entry load
     expect(await response?.text()).toBe('{"ret":"hi"}')
   }
 })
+
+it("`serve({ request })` leaves a request for another path than the build's telefuncUrl to the app", async () => {
+  const telefunc = new Telefunc()
+  for (const path of ['/other', '//api/tf', '/api/tf/x'])
+    expect(
+      await telefunc.serve({ request: new Request(`http://localhost${path}`, { method: 'POST', body: '{}' }) }),
+    ).toBe(undefined)
+})

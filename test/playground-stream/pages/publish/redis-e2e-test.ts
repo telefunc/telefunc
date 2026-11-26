@@ -12,7 +12,7 @@ function testRedisReconnect() {
       async () => {
         const result = await getResult('#redis-beside-refused-result')
         refuses = result.refusesChannels !== false
-        if (refuses) expect(result).deep.equal({ refusedReady: 'rejected', published: 'sent', received: ['beside'] })
+        if (refuses) expect(result).deep.equal({ refusedOpened: 'rejected', published: 'sent', received: ['beside'] })
       },
       { timeout: 20_000 },
     )
@@ -27,7 +27,7 @@ function testRedisReconnect() {
       async () => {
         const result = await getResult('#redis-renewal-refused-result')
         refuses = result.refusesChannels !== false
-        if (refuses) expect(result).deep.equal({ ready: 'resolved', reports: 1, heard: ['before'], fresh: ['after'] })
+        if (refuses) expect(result).deep.equal({ opened: 'resolved', reports: 1, heard: ['before'], fresh: ['after'] })
       },
       { timeout: 30_000 },
     )
@@ -57,6 +57,21 @@ function testRedisReconnect() {
         deniedPublishTold: true,
         upChanges: [],
         received: ['allowed-fresh: next to it', 'allowed-up: after', 'allowed-up: first'],
+      })
+    })
+  })
+
+  test("broadcast: publishes across a key's 2^32nd sequence number in Redis reach its subscriber with the seq each publish returned", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-redis-seq-boundary')
+    await autoRetry(async () => {
+      expect(await getResult('#redis-seq-boundary-result')).deep.equal({
+        published: [2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1],
+        received: [
+          { text: 'a', seq: 2 ** 32 - 1 },
+          { text: 'b', seq: 2 ** 32 },
+          { text: 'c', seq: 2 ** 32 + 1 },
+        ],
       })
     })
   })

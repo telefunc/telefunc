@@ -13,7 +13,8 @@ class ClientPieceReceiver extends PieceReceiver {
   private reportedTook = 0
 
   protected tookFrame({ bytes, data, at }: FrameArrival): void {
-    this.date(data, at)
+    // The server measures the link by the frames it tracks: a small frame after them would date their arrival late.
+    if (acknowledges(bytes)) this.date(data, at)
     const unreported = this.took - Math.max(this.acknowledgedTook, this.reportedTook)
     if (acknowledges(bytes) || unreported > WIRE_UNREPORTED_MAX_BYTES) this.acknowledgeWithNextSoon()
   }
@@ -33,7 +34,8 @@ class ClientPieceReceiver extends PieceReceiver {
 
   /** `frame`, saying what the page took if it is a frame that can (`tookOf`): the server frees its copies of that. */
   report(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-    if (!TOOK_TAGS.has(frame[0]!)) return frame
+    const tag = frame[0]
+    if (tag === undefined || !TOOK_TAGS.has(tag)) return frame
     this.reportedTook = this.took
     return withTook(frame, this.took)
   }

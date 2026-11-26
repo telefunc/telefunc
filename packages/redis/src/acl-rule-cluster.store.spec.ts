@@ -141,7 +141,7 @@ describe.runIf(runs)("the Redis page's ACL rule on a Cluster", () => {
       // A subscription held across the end of every connection, live once its first message arrived.
       const held: unknown[] = []
       const holding = Broadcast.subscribe('acl-held', (message) => held.push(message))
-      await holding.ready
+      await holding.opened
       await Broadcast.publish('acl-held', 'before')
       if (!(await arrived(held))) throw new Error('the held subscription got no message')
       const before = await userConnections(nodes)

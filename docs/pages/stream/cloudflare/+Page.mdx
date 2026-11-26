@@ -1,4 +1,4 @@
-import { Link, Warning, Advanced } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../../components'
 
 **Environment**: server.
@@ -102,13 +102,9 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
-
-That Durable Object names its region in its responses' `x-telefunc-home` header, and the client then sends it as the `home` query parameter, so its requests reach the same Durable Object from any region.
-
 <Warning>
 
-**CDN / reverse proxy** — make sure the `session` and `home` query parameters aren't stripped from requests, nor the `x-telefunc-home` header from responses (a cross-origin server exposes it with `Access-Control-Expose-Headers`). Without the token, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — keep the `session` and `home` query parameters and the `x-telefunc-home` response header, so that requests reach the Durable Object that holds the client's channels. For a cross-origin client, expose `x-telefunc-home` with `Access-Control-Expose-Headers`.
 
 </Warning>
 
@@ -197,8 +193,8 @@ A Durable Object registers with the authority on its first subscription to a key
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server holds messages while the client is disconnected, up to <Link href="/channel-config">`config.channel.maxMemory`</Link> (default on Cloudflare: 64 MiB, as a Durable Object's memory is limited to 128 MB). A message clears once the client confirms it. |
-| Replay | On reconnect, missing messages are resent and duplicates are ignored. |
+| Buffering | The server holds messages while the client is disconnected, within <Link href="/channel-config">`config.channel.maxMemory`</Link>, which all its channels share (default on Cloudflare: 64 MiB). |
+| Replay | On reconnect, the kept reliable messages are resent and duplicates are ignored (see <Link href="/channel#errors" />). |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
 | Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
@@ -208,11 +204,11 @@ A Durable Object registers with the authority on its first subscription to a key
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order, which is call order for the publishes of one Durable Object's telefunctions and channel handlers. |
 | Delivery | `publish()` resolves once the message has reached every Durable Object <Link href="#presence">registered</Link> for the key. If a Durable Object can't take it, `publish()` rejects. That Durable Object's subscribers miss the message, while every other subscriber still gets it, so publishing it again delivers it twice to them. Delivery to clients then happens over the channel connection. |
-| Failed registration | A subscription takes effect once its Durable Object is <Link href="#presence">registered</Link> for the key. When that first registration fails with an error Cloudflare marks `.retryable` and not `.overloaded`, the errors Cloudflare's [error handling](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/) says to retry, Telefunc makes it again, up to 3 times in all, within 10 s of the first. The server-side `ready` waits meanwhile. If the registration fails with another error, or its last attempt fails, the subscription fails with that error. |
+| Failed registration | A subscription takes effect once its Durable Object is <Link href="#presence">registered</Link> for the key. When that first registration fails with an error Cloudflare marks `.retryable` and not `.overloaded`, the errors Cloudflare's [error handling](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/) says to retry, Telefunc makes it again, up to 3 times in all, within 10 s of the first. The server-side `opened` waits meanwhile. If the registration fails with another error, or its last attempt fails, the subscription fails with that error. |
 
 > A broadcast message handed to a client's `BroadcastChannel` has the channel's buffering and replay, as a regular channel message does. A server-side `Broadcast.subscribe()` callback is called with each message as it arrives, with no buffer or replay.
 
-When a registration fails, at once or after its last attempt, the server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. Each `BroadcastChannel` that waited on it closes. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `ready` rejects with one. Call its telefunction again and subscribe to the broadcast it returns. Each `Broadcast.subscribe()` that waited on it is removed, and its `ready` rejects with an error whose `cause` is the error the registration failed with: call `Broadcast.subscribe()` again. A failed registration doesn't fail publishes to the key. A refresh that fails ends no subscription (see <Link href="#presence">Presence</Link>).
+When a registration fails, at once or after its last attempt, the server reports the failure through <Link href="/onBug">`onBug()`</Link> and its log. Each `BroadcastChannel` that waited on it closes. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `opened` rejects with one. Call its telefunction again and subscribe to the broadcast it returns. Each `Broadcast.subscribe()` that waited on it is removed, and its `opened` rejects with an error whose `cause` is the error the registration failed with: call `Broadcast.subscribe()` again. A failed registration doesn't fail publishes to the key. A refresh that fails ends no subscription (see <Link href="#presence">Presence</Link>).
 
 
 ## Configuration

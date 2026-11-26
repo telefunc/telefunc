@@ -1,8 +1,8 @@
 export { listenerAnswer, forListener, soleAnswer, TWO_ANSWERS }
 
-import { stringify } from '@brillout/json-serializer/stringify'
 import { HEADER } from '../wire/header.js'
 import type { Registration } from '../../utils/Listeners.js'
+import { stringifyValue } from './channel.js'
 
 /** What `listeners[i]` gets of `value`: bytes of its own, which it may keep or transfer without touching another
  *  listener's. The last takes `value` itself where its buffer holds only it and the `ahead` bytes its frame has before
@@ -35,11 +35,12 @@ async function soleAnswer<T, A extends unknown[]>(
   return answer
 }
 
-/** `soleAnswer`, serialized: null once two listeners answered. What `stringify` throws propagates. */
+/** `soleAnswer`, serialized: null once two listeners answered. The refusal of an answer JSON can't hold propagates: bytes
+ *  in it, which it would turn into an object. */
 async function listenerAnswer<T>(
   listeners: readonly Registration<(data: T) => unknown>[],
   data: T,
 ): Promise<string | null> {
   const answer = await soleAnswer(listeners, data)
-  return answer === TWO_ANSWERS ? null : stringify(answer)
+  return answer === TWO_ANSWERS ? null : stringifyValue(answer, 'answer')
 }

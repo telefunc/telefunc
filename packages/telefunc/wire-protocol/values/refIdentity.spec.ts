@@ -10,6 +10,7 @@ import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
+import { noUpgrades } from '../../node/server/runTelefunc/takesUpgrades.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
 import { STREAM_TRANSPORT } from '../constants.js'
@@ -655,6 +656,9 @@ describe('extension wire types registered while a telefunc module loads', () => 
 
     const parsed = await parseHttpRequest({
       request,
+      clientLeft: () => false,
+      clientGone: request.signal,
+      takesUpgrades: noUpgrades,
       requestContext,
       logMalformedRequests: false,
       serverConfig: getServerConfig(),

@@ -48,7 +48,7 @@ class Liveness {
     else this.installProvisional(transport)
   }
 
-  /** Idempotent once a RECONCILED set the interval; replaces a provisional heartbeat. Its first PING goes at once. */
+  /** Idempotent once a RECONCILED set the interval; replaces a provisional heartbeat. Queues its first PING. */
   install(transport: ClientChannelTransport, intervalMs: number): void {
     if (this.beatsAt(transport, intervalMs)) return
     this.pingIntervalMs = intervalMs
@@ -73,7 +73,7 @@ class Liveness {
     transport.detachHeartbeat()
     const heartbeat = new Heartbeat({
       intervalMs,
-      pongTimeoutMs: pingDeadline(intervalMs),
+      pongTimeoutMs: pingDeadline(intervalMs, transport.type),
       send: () => this.beat(transport),
       onDead: () => this.owner.onWireLate(transport),
     })
@@ -89,6 +89,13 @@ class Liveness {
       if (lastSeq === null) this.gate.release(record)
       else this.channels.serverHas(record, record.state, this.channels.sentThrough(ix, lastSeq))
     }
+    // What the frames of one let go held back may go.
+    this.gate.sendRunnable()
+  }
+
+  /** A PING at once, outside the heartbeat, naming the closed channels: its PONG tells how far the server has them. */
+  pingNow(transport: ClientChannelTransport): void {
+    transport.sendPing(this.buildPing(), true)
   }
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */

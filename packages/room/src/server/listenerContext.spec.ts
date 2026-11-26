@@ -16,13 +16,11 @@ describe("a server-side room's callbacks", () => {
     const id = `context-${crypto.randomUUID()}`
     const room = await Room.create(id)
     const read: string[] = []
-    provideTelefuncContext({ user: 'alice' })
-    room.subscribe(() => read.push(whoseContext()))
-    provideTelefuncContext({ user: 'bob' })
+    provideTelefuncContext({ user: 'alice' }, () => room.subscribe(() => read.push(whoseContext())))
+    await provideTelefuncContext({ user: 'bob' }, () => Room.publish(id, 'hello'))
     await Room.publish(id, 'hello')
-    // A context provided without AsyncLocalStorage lasts until the next macrotask.
+    // The callbacks of a server-side subscription run after the publish resolves.
     await new Promise((resolve) => setTimeout(resolve, 0))
-    await Room.publish(id, 'hello')
     expect(read).toEqual(['throws', 'throws'])
   })
 
@@ -30,9 +28,9 @@ describe("a server-side room's callbacks", () => {
     const room = await Room.create(`context-${crypto.randomUUID()}`)
     const alice = await room.join({ meta: { name: 'alice' } })
     const bob = await room.join({ meta: { name: 'bob' } })
-    provideTelefuncContext({ user: 'alice' })
-    alice.listen(() => whoseContext())
-    provideTelefuncContext({ user: 'bob' })
-    await expect(bob.send(alice.id, 'hello', { ack: true })).resolves.toBe('throws')
+    provideTelefuncContext({ user: 'alice' }, () => alice.listen(() => whoseContext()))
+    await expect(
+      provideTelefuncContext({ user: 'bob' }, () => bob.send(alice.id, 'hello', { ack: true })),
+    ).resolves.toBe('throws')
   })
 })

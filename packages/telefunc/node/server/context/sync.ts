@@ -1,14 +1,9 @@
 export { getContext_sync }
-export { provideTelefuncContext_sync }
 export { restoreContext_sync }
 export { withoutContext_sync }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { assertUsage } from '../../../utils/assert.js'
-import { isObject } from '../../../utils/isObject.js'
-import { PROVIDED_CONTEXT } from './getContext.js'
 import type { Context } from './context.js'
-import type { Telefunc } from './TelefuncNamespace.js'
 
 const syncState = getGlobalObject<{ context: Context | null }>('context/sync.ts', {
   context: null,
@@ -28,19 +23,15 @@ function withoutContext_sync<Args extends unknown[], R>(fn: (...args: Args) => R
   }
 }
 
-function provideTelefuncContext_sync(context: Telefunc.Context) {
-  assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
-  syncState.context = { [PROVIDED_CONTEXT]: context }
-  setTimeout(() => {
-    syncState.context = null
-  }, 0)
-}
-
+// We provide `context` only while `fn()` runs synchronously
+// - The code that runs afterwards may belong to another HTTP request => using a queue (e.g. `process.nextTick()`) means potentially leaking `context` to another HTTP request and is a security issue, see https://github.com/telefunc/telefunc/pull/520#issuecomment-7134162671
 function restoreContext_sync<T>(context: Context, fn: () => T): T {
+  const previous = syncState.context
   syncState.context = context
-  // We don't use process.nextTick() to avoid dependency on Node.js
-  setTimeout(() => {
-    syncState.context = null
-  }, 0)
-  return fn()
+  try {
+    return fn()
+  } finally {
+    // We restore the previous value because calls can be nested: a `getContext().onClose()` callback runs inside the telefunction when the request is already aborted
+    syncState.context = previous
+  }
 }

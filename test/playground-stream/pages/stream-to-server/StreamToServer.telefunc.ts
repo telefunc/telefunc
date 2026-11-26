@@ -130,7 +130,7 @@ async function* onLiveLoopback(stream: ReadableStream<Uint8Array>): AsyncGenerat
 }
 
 /** Records how the upload ends under `ingest_<key>`: 'completed:<bytes>' or 'errored:<error name>', 'reading:<bytes>' meanwhile.
- *  Drops the page's connections once `cutWireAtBytes` arrived. */
+ *  Drops the page's connections once `cutWireAtBytes` arrived, and records how many it cut under `ingest_<key>_cut`. */
 async function onIngest(stream: ReadableStream<Uint8Array>, key: string, cutWireAtBytes = Number.POSITIVE_INFINITY) {
   let bytes = 0
   cleanupState[`ingest_${key}`] = 'reading:0'
@@ -139,7 +139,9 @@ async function onIngest(stream: ReadableStream<Uint8Array>, key: string, cutWire
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      if (bytes < cutWireAtBytes && bytes + value.byteLength >= cutWireAtBytes) cutWireSockets()
+      if (bytes < cutWireAtBytes && bytes + value.byteLength >= cutWireAtBytes) {
+        cleanupState[`ingest_${key}_cut`] = String(cutWireSockets())
+      }
       bytes += value.byteLength
       cleanupState[`ingest_${key}`] = `reading:${bytes}`
     }

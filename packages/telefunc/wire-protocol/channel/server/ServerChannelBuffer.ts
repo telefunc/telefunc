@@ -76,8 +76,9 @@ class ServerChannelBuffer<TAck = never> {
   /** A lossy send of `bytes`, which takes the place of the last entry where that is a lossy send too: between two sends
    *  that must arrive, a page that was away gets only the newest. Holds a copy of binary data, as `pushBinary` does. */
   pushLossy(tag: typeof TAG.TEXT | typeof TAG.BINARY, data: EntryData, bytes: number): void {
-    this.dropReplaced(OWN_STREAM)
+    // Copied first: detached bytes throw before they take the place of the last entry.
     const copy = typeof data === 'string' ? data : new Uint8Array(data)
+    this.dropReplaced(OWN_STREAM)
     this.keep({ tag, data: copy, callback: null, held: heldSendBytes(bytes), lossyOf: OWN_STREAM })
   }
 

@@ -4,7 +4,7 @@ import { Broadcast } from 'telefunc'
 
 const received = new Map<string, string[]>()
 
-/** The key's authority refuses its first presence (see +server.ts): the subscriber's `ready` rejects, and the app
+/** The key's authority refuses its first presence (see +server.ts): the subscriber's `opened` rejects, and the app
  *  subscribes again. */
 async function onSubscribe(key: string) {
   const messages: string[] = []
@@ -12,15 +12,15 @@ async function onSubscribe(key: string) {
   const onMessage = (message: string) => messages.push(message)
   const subscribed = Broadcast.subscribe<string>(key, onMessage)
   await Broadcast.publish(key, 'hello')
-  const ready = await subscribed.ready.then(
+  const opened = await subscribed.opened.then(
     () => 'resolved',
     () => 'rejected',
   )
-  if (ready === 'rejected') await Broadcast.subscribe<string>(key, onMessage).ready
-  return { received: messages, ready }
+  if (opened === 'rejected') await Broadcast.subscribe<string>(key, onMessage).opened
+  return { received: messages, opened }
 }
 
 async function onPublish(key: string, message: string) {
   await Broadcast.publish(key, message)
-  return received.get(key)!
+  return received.get(key) ?? []
 }

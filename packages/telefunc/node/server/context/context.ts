@@ -7,7 +7,8 @@ export { isAsyncMode }
 export type { Context }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { restoreContext_sync, withoutContext_sync, provideTelefuncContext_sync, getContext_sync } from './sync.js'
+import { assert } from '../../../utils/assert.js'
+import { restoreContext_sync, withoutContext_sync, getContext_sync } from './sync.js'
 import type { Telefunc } from './TelefuncNamespace.js'
 
 /** Unified context object. Symbol-keyed — each concern owns its own key. */
@@ -26,14 +27,14 @@ const globalObject = getGlobalObject<{
   getContext: ContextGetter
   restoreContext: RestoreContext
   withoutContext: WithoutContext
-  provideTelefuncContext: ProvideTelefuncContext
+  provideTelefuncContext: ProvideTelefuncContext | null
   neverRestored: boolean
   isAsyncMode: boolean
 }>('context.ts', {
   getContext: getContext_sync,
   restoreContext: restoreContext_sync,
   withoutContext: withoutContext_sync,
-  provideTelefuncContext: provideTelefuncContext_sync,
+  provideTelefuncContext: null,
   neverRestored: true,
   isAsyncMode: false,
 })
@@ -57,6 +58,7 @@ function withoutContext<Args extends unknown[], R>(fn: (...args: Args) => R, ...
 }
 
 function provideContext(context: Telefunc.Context): void {
+  assert(globalObject.provideTelefuncContext)
   globalObject.provideTelefuncContext(context)
 }
 

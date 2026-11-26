@@ -19,9 +19,9 @@ afterEach(() => vi.useRealTimers())
 const EMPTY = 0
 const upToAck = { deliveredBefore: () => Infinity }
 
-// Sample shape: `bytesAtPingSent` is snapshotted *after* the first `onReceive`
-// increments the byte counter, so the sample is the bytes that arrive
-// *between* ping-send and ack-arrival — modelling the real protocol where a
+// Sample shape: the ping's snapshot is taken *before* the first `onReceive`
+// counts its byte, so the sample is that byte plus `sampleBytes`: the bytes that
+// arrive between ping-send and ack-arrival, modelling the real protocol where a
 // sender pushes new data while waiting for the ack to come back. Helper drives
 // the full cycle: kick off, accumulate, settle. Commits whichever axis (or
 // both) the suggestion endorsed so subsequent cycles see the grown windows.
@@ -97,12 +97,20 @@ describe('BdpEstimator', () => {
     expect(bdp.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 
-  // Boundary check: exactly at 2/3 W grows (the predicate is `sample * 3 < W * 2`,
-  // so equality counts as saturation). Catches off-by-one in the comparator.
-  it('grows when sample equals the 2/3 W boundary', () => {
-    const bdp = new BdpEstimator()
-    const boundary = Math.ceil((CREDIT_WINDOW_INITIAL_BYTES * 2) / 3)
-    expect(cycle(bdp, boundary)).toBe(true)
+  // Boundary check: a sample of exactly 2/3 W grows, and one byte less doesn't (the predicate is
+  // `sample * 3 < W * 2`, so equality counts as saturation). W is 2,097,150 bytes, whose 2/3 is a whole number.
+  it('grows when sample equals the 2/3 W boundary, and not one byte below it', () => {
+    const atBoundary = (sample: number) => {
+      const bdp = new BdpEstimator()
+      bdp.capByteWindow(2_097_150)
+      // Growth stays possible: the cap is above the window again.
+      bdp.capByteWindow(CREDIT_WINDOW_MAX_BYTES)
+      expect(bdp.byteWindow).toBe(2_097_150)
+      // The first frame's byte counts in the sample.
+      return cycle(bdp, sample - 1)
+    }
+    expect(atBoundary(1_398_100)).toBe(true)
+    expect(atBoundary(1_398_099)).toBe(false)
   })
 
   // Hard cap. Once window hits CREDIT_WINDOW_MAX_BYTES, growth stops there —

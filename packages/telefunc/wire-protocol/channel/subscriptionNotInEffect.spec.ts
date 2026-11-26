@@ -16,10 +16,12 @@ import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { parseSseRequestMetadata } from '../wire/envelope.js'
 import { BodyReader } from '../wire/BodyReader.js'
+import { queueMemory } from './server/channelMemory.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { collectGarbage } from '../test/collectGarbage.js'
+import { ATTACHABLE_NOW } from './server/ServerChannel.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -29,21 +31,21 @@ afterEach(() => {
 
 const ENDINGS: Record<string, { listen: () => BroadcastUnsubscribe; pastLimit: boolean }> = {
   'its backend refuses it': {
-    listen: () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: no permission for this channel')) }),
+    listen: () => ({ unsubscribe() {}, opened: Promise.reject(new Error('NOPERM: no permission for this channel')) }),
     pastLimit: false,
   },
   'its backend neither confirms nor refuses it within `connectTtl` of a call that carries it': {
-    listen: () => ({ unsubscribe() {}, ready: new Promise<void>(() => {}) }),
+    listen: () => ({ unsubscribe() {}, opened: new Promise<void>(() => {}) }),
     pastLimit: true,
   },
 }
 
 for (const [ending, { listen, pastLimit }] of Object.entries(ENDINGS)) {
-  test(`where ${ending}, the page's \`ready\` and \`onClose()\` get a ChannelClosedError, not the server's error`, async () => {
+  test(`where ${ending}, the page's \`opened\` and \`onClose()\` get a ChannelClosedError, not the server's error`, async () => {
     const page = await subscribedPage()
     page.receive(await errorSentToPage(page.index, listen, pastLimit))
     const given = await page.given()
-    expect(given.ready).toBeInstanceOf(ChannelClosedError)
+    expect(given.opened).toBeInstanceOf(ChannelClosedError)
     expect(given.onClose).toBeInstanceOf(ChannelClosedError)
   })
 }
@@ -68,7 +70,7 @@ for (const kind of ['text', 'binary'] as const) {
           : wanted.broadcast.publishBinary(new TextEncoder().encode('live')))
         await vi.waitFor(() => expect(heard).toEqual(['live']))
       }
-      const refused = () => ({ unsubscribe() {}, ready: Promise.reject(new Error('NOPERM: replacement refused')) })
+      const refused = () => ({ unsubscribe() {}, opened: Promise.reject(new Error('NOPERM: replacement refused')) })
       const sent = () => ({ seq: 1, timestamp: 1 })
       configureBroadcastTransport({ send: sent, sendBinary: sent, listen: refused, listenBinary: refused })
       const given = await page.given()
@@ -86,7 +88,7 @@ for (const kind of ['text', 'binary'] as const) {
     const wanted = await broadcastWantedBy(page, kind)
     relay('at once').configure()
     const settled = await Promise.race([
-      Promise.all([page.ready, wanted.inEffect]).then(() => 'confirmed'),
+      Promise.all([page.opened, wanted.inEffect]).then(() => 'confirmed'),
       new Promise((resolve) => setTimeout(() => resolve('waiting'), 500)),
     ])
     expect(settled).toBe('confirmed')
@@ -103,7 +105,7 @@ for (const kind of ['text', 'binary'] as const) {
     last.configure()
     const settled = () =>
       Promise.race([
-        Promise.all([page.ready, wanted.inEffect]).then(() => 'confirmed'),
+        Promise.all([page.opened, wanted.inEffect]).then(() => 'confirmed'),
         new Promise((resolve) => setTimeout(() => resolve('waiting'), 100)),
       ])
     first.confirm()
@@ -123,7 +125,7 @@ for (const kind of ['text', 'binary'] as const) {
       await wanted.inEffect
       const listener =
         kind === 'text' ? wanted.broadcast.subscribe(() => {}) : wanted.broadcast.subscribeBinary(() => {})
-      await listener.ready
+      await listener.opened
       const replacement = relay('held')
       replacement.configure()
       await wanted.want(2, false)
@@ -177,7 +179,7 @@ function relay(confirms: 'at once' | 'held') {
     if (confirms === 'at once') return unsubscribe
     const ready = createDeferred<void>()
     unconfirmed.push(ready)
-    return { unsubscribe, ready: ready.promise }
+    return { unsubscribe, opened: ready.promise }
   }
   const send = (_key: string, payload: never) => {
     const info = { seq: ++seq, timestamp: 1 }
@@ -202,7 +204,7 @@ async function broadcastWantedBy(page: Awaited<ReturnType<typeof subscribedPage>
   const end = broadcast._end
   const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
   end._callRequest = call
-  getChannelMux().registerChannel(end)
+  getChannelMux().registerChannel(end, ATTACHABLE_NOW)
   const sender: PeerSender = {
     send: (frame) => page.receive(new Uint8Array(frame)),
     carry() {},
@@ -210,7 +212,7 @@ async function broadcastWantedBy(page: Awaited<ReturnType<typeof subscribedPage>
     behindAfter: () => Number.POSITIVE_INFINITY,
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+    queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     terminate() {},
   }
   const replay = end._replayBuffer
@@ -224,7 +226,7 @@ async function broadcastWantedBy(page: Awaited<ReturnType<typeof subscribedPage>
 }
 
 /** A page's broadcast, subscribed, on an SSE wire this test serves once it reconciled: `receive()` hands it a frame the
- *  server sent, and `given()` is what its `ready` rejects with and its `onClose()` callback gets. */
+ *  server sent, and `given()` is what its `opened` rejects with and its `onClose()` callback gets. */
 async function subscribedPage(kind: 'text' | 'binary' = 'text', heard: string[] = []) {
   const reconciled = createDeferred<{ index: number; push: (frame: Uint8Array<ArrayBuffer>) => void }>()
   vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
@@ -264,8 +266,8 @@ async function subscribedPage(kind: 'text' | 'binary' = 'text', heard: string[] 
   return {
     index,
     receive: push,
-    ready: subscription.ready,
-    given: async () => ({ ready: await subscription.ready.catch((err: unknown) => err), onClose: await onClose }),
+    opened: subscription.opened,
+    given: async () => ({ opened: await subscription.opened.catch((err: unknown) => err), onClose: await onClose }),
   }
 }
 
@@ -285,7 +287,7 @@ async function errorSentToPage(
     const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
     // As `carryChannel` stamps the broadcast a call returns.
     end._callRequest = call
-    getChannelMux().registerChannel(end)
+    getChannelMux().registerChannel(end, ATTACHABLE_NOW)
     const frames: Uint8Array<ArrayBuffer>[] = []
     const sender: PeerSender = {
       send: (frame) => frames.push(new Uint8Array(frame)),
@@ -294,7 +296,7 @@ async function errorSentToPage(
       behindAfter: () => Number.POSITIVE_INFINITY,
       deliveredBefore: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-      queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+      queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
       terminate() {},
     }
     const replay = end._replayBuffer
@@ -305,7 +307,7 @@ async function errorSentToPage(
     ])
     if (pastLimit) await vi.advanceTimersByTimeAsync(getChannelMux().connectTtl)
     await waiting
-    await broadcast.closed.catch(() => {})
+    await broadcast.closed
     const error = frames.find((frame) => decode(frame).tag === TAG.ERROR)
     if (!error) throw new Error(`The server sent its page no ERROR, only tags ${frames.map((frame) => frame[0])}`)
     return error
@@ -328,12 +330,12 @@ const SERVER_OPTIONS = {
 /** A page's POST, read as the server's SSE handler reads it: its metadata, then its frames. */
 async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames: DecodedFrame[] }> {
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
-  const reader = new BodyReader(body.stream())
-  const metadata = await reader.readLengthPrefixedBytesOrNull(SSE_METADATA_MAX_BYTES)
+  // A `Blob`'s stream doesn't fail.
+  const reader = new BodyReader(body.stream(), () => false, queueMemory)
+  const metadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
   if (metadata === null) return { streamResponse: false, frames: [] }
   const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))
   const frames: DecodedFrame[] = []
-  for (let frame; (frame = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)); )
-    frames.push(decode(frame))
+  for (let frame; (frame = await reader.readFrame(WIRE_MAX_RAW_FRAME_BYTES)); ) frames.push(decode(frame))
   return { streamResponse: kind === 'streamResponse', frames }
 }

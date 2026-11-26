@@ -24,7 +24,7 @@ config.channel.transports = ['sse', 'ws'] // default
 ```
 
 > These are **client-side** configs — separate from the following **server-side** settings:
-> - <Link href="/channel-config">`config.channel`</Link>: how long a client may be gone, and what a channel may hold for it
+> - <Link href="/channel-config">`config.channel`</Link>: reconnect timeout, memory limit and allowed WebSocket origins
 > - <Link href="/broadcast-config">`config.broadcast.transport`</Link>: cross-instance broadcast for multi-server deployments
 
 <ConfigWhereClient />
@@ -86,6 +86,21 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 - **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
+
+### WebSocket
+
+The server opens a WebSocket for pages of its own origin. A page of another origin uses SSE if enabled, unless you list its origin:
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+// The pages are served from app.example.com, the telefunctions from api.example.com
+config.channel.allowedOrigins = ['https://app.example.com']
+```
+
+> A leading `*.` stands for any one subdomain, as in `'https://*.example.com'`.
 
 
 

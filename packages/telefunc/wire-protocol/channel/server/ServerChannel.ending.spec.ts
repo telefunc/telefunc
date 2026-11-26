@@ -1,40 +1,47 @@
-import { expect, test, vi } from 'vitest'
+import { expect, onTestFinished, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
+import { channelLedger } from './channelMemory.fixture.js'
 
 import { parse } from '@brillout/json-serializer/parse'
+import { decodeChannelFrame, parseString } from '../../wire/decode.fixture.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { Abort } from '../../../shared/Abort.js'
-import { CHANNEL_PUMP_TAG_DATA, CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
+import { CHANNEL_PUMP_TAG_DATA, CHANNEL_TRANSPORT, CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
-import {
-  ERROR_REASON,
-  decode,
-  encode,
-  isOneFrame,
-  isSequencedFrame,
-  messageFrames,
-  type ChannelFrame,
-  type DecodedFrame,
-} from '../../wire/frame.js'
+import { ERROR_REASON, decode, encode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { pairPublishes } from '../client/pairPublishes.js'
-import { SseEvents } from '../client/SseEvents.js'
+import { SseEvents } from '../../wire/SseEvents.js'
 import { restoreContext } from '../../../node/server/context/context.js'
 import { ChannelStreamSource } from '../../values/ChannelStreamSource.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { CHANNEL_MUX, ChannelMux, getChannelMux } from './ChannelMux.js'
-import { admit, hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './channelMemory.js'
+import {
+  addWireCopies,
+  admit,
+  dropWireCopies,
+  hold,
+  letGo,
+  queueMemory,
+  releaseHolder,
+  type MemoryHolder,
+} from './channelMemory.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { binaryData } from '../broadcastPayload.js'
-import { ServerChannel } from './ServerChannel.js'
+import { ServerChannel, ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
+import { noUpgrades, upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
 
 // The least it may be, the credit window a channel starts with: a test can bring one channel to hold the most it may. The
 // server may hold 32 MiB in all, far more than these tests leave held.
 config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m' }
+
+/** More copies than any wire's allowance: the ledger every wire shares has no copy room left. */
+const ALL_COPIES = 2 ** 40
 
 /** Three messages, each larger than what a wire sends before its page says it took some. */
 const MESSAGES = ['p1', 'p2', 'p3'].map((name) => name + 'x'.repeat(100_000))
@@ -47,7 +54,7 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
   const pair = pairPublishes()
   const out: Sent[] = []
   for (const frame of frames) {
-    const decoded = pair(decode(frame) as DecodedFrame)
+    const decoded = pair(decode(frame))
     if (decoded === null || !isSequencedFrame(decoded)) continue
     const { index, seq } = decoded
     if (
@@ -56,12 +63,14 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
       decoded.tag === TAG.TEXT_ACK_REQ ||
       decoded.tag === TAG.ACK_RES
     )
-      out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
+      out.push({ index, seq, label: `${index}:${parseString(decoded.text).slice(0, 2)}` })
     if (decoded.tag === TAG.PUBLISH_BINARY)
       out.push({ index, seq, label: `${index}:${new TextDecoder().decode(binaryData(decoded.data).subarray(0, 2))}` })
     if (decoded.tag === TAG.BINARY)
       out.push({ index, seq, label: `${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}` })
     if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
+    if (decoded.tag === TAG.CLOSE_ACK) out.push({ index, seq, label: `${index}:CLOSE_ACK` })
+    if (decoded.tag === TAG.CLOSE_DONE) out.push({ index, seq, label: `${index}:CLOSE_DONE` })
     if (decoded.tag === TAG.ABORT) out.push({ index, seq, label: `${index}:ABORT` })
     if (decoded.tag === TAG.ERROR) out.push({ index, seq, label: `${index}:ERROR` })
   }
@@ -98,17 +107,34 @@ function onObject<T>(mux: ChannelMux, fn: () => T): T {
   return restoreContext({ [CHANNEL_MUX]: mux }, fn)
 }
 
+/** What waits for the wire, by channel index: each channel's frames wait in a lane of their own, in the order sent, and
+ *  the lanes take turns. */
+function byChannel(frames: Iterable<Uint8Array>): Record<number, string[]> {
+  const lanes: Record<number, string[]> = {}
+  for (const read of reads(frames)) (lanes[Number(read.slice(0, read.indexOf(':')))] ??= []).push(read)
+  return lanes
+}
+
 /** Two subscribers of one key on one page, at channel indexes 0 and 1. */
 function subscribers() {
   const key = crypto.randomUUID()
   return { key, ended: new ServerBroadcast<string>({ key }), other: new ServerBroadcast<string>({ key }) }
 }
 
+/** Once the test ends, what `channels` that ended still hold for their page goes, as their page's confirmation would let it
+ *  go: the next test's budget meets none of it. */
+function releaseWhenDone(channels: ServerChannel[]): void {
+  onTestFinished(() => {
+    for (const channel of channels) if (channel._phase === 'ended') channel._release()
+  })
+}
+
 /** Subscribes the page to `channels`, at indexes 0, 1, …, over its event stream, which it doesn't read yet. */
 async function overSse(subscribers: Subscriber[]) {
   const channels = subscribers.map(channelOf)
+  releaseWhenDone(channels)
   const mux = getChannelMux()
-  for (const channel of channels) mux.registerChannel(channel)
+  for (const channel of channels) mux.registerChannel(channel, ATTACHABLE_NOW)
   const open = subscribers.map((subscriber, ix) => ({
     id: channelOf(subscriber).id,
     ix,
@@ -118,10 +144,19 @@ async function overSse(subscribers: Subscriber[]) {
   }))
   const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
   const connId = crypto.randomUUID()
-  const body = encodeSseRequest({ connId, streamResponse: true }, [encode.reconcile({ open })])
-  const opened = await handleSseChannelRequest(new Request(url, { method: 'POST', body }))
+  const body = encodeSseRequest({ connId, streamResponse: true }, [
+    encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open }),
+  ])
+  const opened = await handleSseChannelRequest(
+    new Request(url, { method: 'POST', body }),
+    undefined,
+    () => false,
+    noUpgrades,
+  )
   await Promise.all(channels.map((channel) => channel.opened))
-  const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
+  const { body: stream } = opened
+  if (!(stream instanceof ReadableStream)) throw new Error('Expected a streamed response body')
+  const reader = stream.getReader()
   const events = new SseEvents()
   const frames: Uint8Array[] = []
   return {
@@ -134,6 +169,15 @@ async function overSse(subscribers: Subscriber[]) {
       }
       return frames
     },
+    /** Reads `bytes` of the event stream, whole events or not. */
+    async readBytes(bytes: number): Promise<void> {
+      for (let read = 0; read < bytes; ) {
+        const chunk = await reader.read()
+        if (chunk.done) return
+        read += chunk.value.byteLength
+        events.push(chunk.value, (frame) => frames.push(frame))
+      }
+    },
     /** Reads the event stream to its end, and returns the frames it carried. */
     async readToEnd(): Promise<Uint8Array[]> {
       for (let read = await reader.read(); !read.done; read = await reader.read())
@@ -142,14 +186,19 @@ async function overSse(subscribers: Subscriber[]) {
     },
     /** The page leaves for good, as a closed tab does. */
     leave: () =>
-      handleSseChannelRequest(new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) })),
+      handleSseChannelRequest(
+        new Request(url, { method: 'POST', body: encodeSseRequest({ connId, close: true }) }),
+        undefined,
+        () => false,
+        noUpgrades,
+      ),
     /** Ends the page's event stream. */
     close: () => reader.cancel(),
   }
 }
 
 /** What this server's channels hold, on the ledger every channel shares. */
-const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+const ledgerTotal = () => channelLedger().total
 
 /** Holds what one-to-one channels would, which no publish can make them let go of, leaving `room` below the shedding
  *  target; returns what lets it go. */
@@ -162,10 +211,31 @@ function leaveRoom(room: number): () => void {
   }
 }
 
+/** The room `maxMemory` keeps for sends waiting to be held: the most one channel may hold, within the top eighth. */
+const WAITING_ROOM = Math.min(getChannelConfig().maxPendingBytes, getChannelConfig().maxMemory / 8)
+/** The most bytes held: `maxMemory` less that room. */
+const HELD_AT_MOST = getChannelConfig().maxMemory - WAITING_ROOM
+
+/** As `leaveRoom`, but `room` below the most bytes held, past the shedding target. */
+function leaveRoomUnderMax(room: number): () => void {
+  const filler: MemoryHolder = { heldBytes: 0 }
+  hold(filler, HELD_AT_MOST - ledgerTotal() - room)
+  return () => {
+    letGo(filler, filler.heldBytes)
+    releaseHolder(filler)
+  }
+}
+
 /** Attaches the page to `channels`, at indexes 0, 1, …, subscribed to the broadcasts, over a WebSocket it doesn't read
  *  yet: past the first frame, what the wire sends waits for headroom. `objects[index]` is the object that channel's
- *  page is on. */
-function overWebSocket(channels: Subscriber[], objects: ChannelMux[] = []) {
+ *  page is on, and `binaryOnly[index]` subscribes it to binary publishes only. A lossy page is behind once its oldest
+ *  unconfirmed frame is older than `behindAfter` ms. */
+function overWebSocket(
+  channels: Subscriber[],
+  objects: ChannelMux[] = [],
+  behindAfter = Number.POSITIVE_INFINITY,
+  binaryOnly: boolean[] = [],
+) {
   const arrived: Uint8Array[] = []
   const receiver = new ClientPieceReceiver({ owner: { sendAck() {}, carryAck() {} } })
   // The frames of each message, as the page's WebSocket puts them back together.
@@ -183,14 +253,16 @@ function overWebSocket(channels: Subscriber[], objects: ChannelMux[] = []) {
     bufferedAmount: 0,
   }
   const headroom = new ServerHeadroom({ socket, pingInterval: 5_000 })
+  // Its copies count on the ledger every wire shares, so they go with the row.
+  onTestFinished(() => headroom.close())
   const sender: PeerSender = {
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
-      headroom.send(frame, performance.now())
+      headroom.send(frame)
     },
     carry() {},
     bufferedAmount: () => 0,
-    behindAfter: () => Number.POSITIVE_INFINITY,
+    behindAfter: () => behindAfter,
     deliveredBefore: () => 0,
     terminate() {},
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -198,19 +270,22 @@ function overWebSocket(channels: Subscriber[], objects: ChannelMux[] = []) {
   /** Attaches `subscriber` at `index` as the mux does: what the page lacks after `lastSeq` goes first. */
   const attach = (subscriber: Subscriber, index: number, lastSeq = 0) => {
     const channel = channelOf(subscriber)
-    const replay = channel._replayBuffer!
+    releaseWhenDone([channel])
+    const replay = defined(channel._replayBuffer)
     channel._onPageAttach(lastSeq)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
-    channel._attachPeer(peer, { want: wantOf(subscriber, { text: true, binary: true }) })
+    channel._attachPeer(peer, { want: wantOf(subscriber, { text: !binaryOnly[index], binary: true }) })
     return peer
   }
   const peers = channels.map((subscriber, index) => {
-    channelOf(subscriber)._registerChannel(objects[index])
+    channelOf(subscriber)._registerChannel(ATTACHABLE_NOW, objects[index])
     return attach(subscriber, index)
   })
   return {
     headroom,
+    /** The wire's socket: a row sets what it reports buffered. */
+    socket,
     peers,
     attach,
     /** Each frame the page got, whole. */
@@ -226,7 +301,7 @@ function overWebSocket(channels: Subscriber[], objects: ChannelMux[] = []) {
   }
 }
 
-test('on SSE, abort() drops its publishes that wait for the wire, and the other channel gets all of its own', async () => {
+test('on SSE, abort() sends its publishes that wait for the wire ahead of its ABORT, and the other channel gets all of its own', async () => {
   const { key, ended, other } = subscribers()
   const page = await overSse([ended, other])
 
@@ -234,9 +309,10 @@ test('on SSE, abort() drops its publishes that wait for the wire, and the other 
   await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
   ended.abort()
 
-  // What the wire carries: the page itself drops what of channel 0 follows its ABORT.
-  const frames = await page.readUntil('1:p3')
-  expect(sent(frames).map(({ label }) => label)).toEqual(['0:ABORT', '1:p1', '1:p2', '1:p3'])
+  // What the wire carries: the page reads nothing of channel 0 that follows its ABORT.
+  const labels = sent(await page.readUntil('0:ABORT')).map(({ label }) => label)
+  expect(labels.filter((label) => label.startsWith('0:'))).toEqual(['0:p1', '0:p2', '0:p3', '0:ABORT'])
+  expect(labels.filter((label) => label.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
   await page.close()
 })
 
@@ -268,15 +344,18 @@ test("on SSE, after the page's abort nothing of that channel waits for the strea
 
 /** The page sends `frame` on channel 0, its first. */
 function fromPage(channel: Subscriber, frame: Uint8Array<ArrayBuffer>): void {
-  channelOf(channel)._dispatchFrame(decode(frame) as ChannelFrame)
+  channelOf(channel)._dispatchFrame(decodeChannelFrame(frame))
 }
 
-/** Each way channel 0 ends while its wire has started p1 and not the rest. Its ABORT and its answer to the page's close
- *  go ahead of p1, the too-many-answers ERROR waits behind it, and after the page's own abort or lost replay the server
- *  sends no frame that ends it. */
+/** The seq of the last frame `channel` sent its page: what a page that read all of it tells in its close's frames. */
+function sentThrough(channel: Subscriber): number {
+  return channelOf(channel)._replayBuffer?.seq ?? 0
+}
+
+/** Each way channel 0 ends, other than its own `abort()` and a close, while its wire has started p1 and not the rest.
+ *  The too-many-answers ERROR waits behind p1, and after the page's own abort or lost replay the server sends no frame
+ *  that ends it. */
 const ENDINGS: Record<string, (channel: Subscriber) => void> = {
-  'abort()': (channel) => channel.abort(),
-  "the page's close": (channel) => fromPage(channel, encode.close(0, 1_000, 1)),
   "the page's abort": (channel) => fromPage(channel, encode.abort(0, stringify(undefined), 1)),
   'the page losing its replay': (channel) => fromPage(channel, encode.error(0, ERROR_REASON.LOST, 1)),
   'too many answers to hold': (channel) => {
@@ -293,7 +372,7 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
 
     await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
     // Of channel 0, p1 started, so only p2 and p3 wait.
-    expect(reads(headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+    expect(byChannel(headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
     end(ended)
     expect(ended.isClosed).toBe(true)
     // Of channel 0, only the too-many-answers ERROR may still wait, behind the p1 its wire started.
@@ -301,6 +380,76 @@ for (const [ending, end] of Object.entries(ENDINGS)) {
     other.abort()
   })
 }
+
+test("on a WebSocket, the page's close keeps the publishes the wire had not started, and the page reads them ahead of the CLOSE_ACK", async () => {
+  const { key, ended, other } = subscribers()
+  const page = overWebSocket([ended, other])
+
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
+  expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
+  fromPage(ended, encode.close(0, 1_000, 1))
+  expect(ended.isClosed).toBe(true)
+  const pageReads = await page.readAll()
+  expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual([
+    '0:p1',
+    '0:p2',
+    '0:p3',
+    '0:CLOSE_ACK',
+    '0:CLOSE_DONE',
+  ])
+  expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
+  fromPage(ended, encode.closeDone(0, sentThrough(ended), 2))
+  await expect(ended.closed).resolves.toBeNull()
+  other.abort()
+})
+
+test("on a WebSocket, the server's abort during the page's close delivers what it accepted first, then the ABORT", async () => {
+  const { key, ended, other } = subscribers()
+  const page = overWebSocket([ended, other])
+
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
+  ended.onClose(() => new Promise<void>(() => {}))
+  fromPage(ended, encode.close(0, 1_000, 1))
+  ended.abort('cancelled')
+  const pageReads = await page.readAll()
+  expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p2', '0:p3', '0:CLOSE_ACK', '0:ABORT'])
+  await expect(ended.closed).resolves.toMatchObject({ abortValue: 'cancelled' })
+  other.abort()
+})
+
+test('on a WebSocket, abort() keeps its publishes the wire had not started, and the page reads them ahead of its ABORT', async () => {
+  const { key, ended, other } = subscribers()
+  const page = overWebSocket([ended, other])
+
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data)))
+  // Of channel 0, p1 started, so only p2 and p3 wait.
+  expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'], 1: ['1:p1', '1:p2', '1:p3'] })
+  ended.abort()
+  expect(ended.isClosed).toBe(true)
+  const pageReads = await page.readAll()
+  expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p2', '0:p3', '0:ABORT'])
+  expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
+  other.abort()
+})
+
+test('on a WebSocket, abort() of a lossy broadcast drops what of it waits for the wire, and the other channel keeps its own', async () => {
+  const key = crypto.randomUUID()
+  const ended = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key })
+  const page = overWebSocket([ended, other])
+
+  await Promise.all(MESSAGES.map((data) => Broadcast.publish(key, data, { lossy: true })))
+  const waiting = reads(page.headroom.sender.waitingFrames).filter((read) => read.startsWith('0:'))
+  expect(waiting.length).toBeGreaterThan(0)
+  ended.abort()
+  const pageReads = await page.readAll()
+  // What had started may finish; nothing that waited goes, and the ABORT comes last.
+  const ofEnded = pageReads.filter((read) => read.startsWith('0:'))
+  expect(ofEnded.at(-1)).toBe('0:ABORT')
+  expect(ofEnded.filter((read) => waiting.includes(read))).toEqual([])
+  expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
+  other.abort()
+})
 
 /** Each way channel 0 starts to close and has not ended: the page's close waits for the channel's own publish. */
 const CLOSING: Record<string, (channel: ServerBroadcast<string>) => void> = {
@@ -326,7 +475,7 @@ for (const [closing, begin] of Object.entries(CLOSING)) {
       held: channel._end.heldBytes,
     })
     const before = left()
-    const publishing = Broadcast.publish(key, MESSAGES[0]!)
+    const publishing = Broadcast.publish(key, defined(MESSAGES[0]))
     expect(left()).toEqual(before)
     await publishing
     other.abort()
@@ -359,36 +508,146 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
       try {
         await publish(key, 'p4' + 'x'.repeat(after), lossy)
         expect(await page.readAll()).toEqual(pageReads)
-        fromPage(channel, encode.closeAck(0, 1))
-        expect(await closing).toBe(0)
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+        expect(await closing).toBeNull()
       } finally {
         release()
       }
     })
   }
 
-  test(`on a WebSocket, a lossy ${kind} publish near the budget for an open subscriber replaces nothing a closing one owes`, async () => {
+  // Near the shedding target, and near `maxMemory` itself, where a closing subscriber that kept all it held would be cut.
+  for (const [near, leave] of [
+    ['the budget', leaveRoom],
+    ['maxMemory', leaveRoomUnderMax],
+  ] as const)
+    test(`on a WebSocket, a ${kind} publish near ${near} for an open lossy subscriber leaves a closing one its newest, and its close ends gracefully`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key })
+      const open = new ServerBroadcast<string>({ key })
+      const page = overWebSocket([channel, open])
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), true)
+      const closing = channel.close()
+      const release = leave(450_000)
+      try {
+        // Its body is admitted for the open one, which lets go of what it replaces there, and the closing one of all but
+        // its newest.
+        await publish(key, 'p4' + 'x'.repeat(900_000), true)
+        const pageReads = await page.readAll()
+        expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
+        expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+        expect(await closing).toBeNull()
+      } finally {
+        release()
+        open.abort()
+      }
+    })
+
+  test(`on a WebSocket, a ${kind} publish near the budget for an open lossy subscriber ${kind === 'text' ? 'leaves a closing binary-only one all that waits' : 'leaves a closing binary-only one its newest'}, and its close ends gracefully`, async () => {
     const key = crypto.randomUUID()
     const channel = new ServerBroadcast<string>({ key })
     const open = new ServerBroadcast<string>({ key })
-    const page = overWebSocket([channel, open])
-    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), true)
+    const page = overWebSocket([channel, open], [], Number.POSITIVE_INFINITY, [true])
+    for (const name of ['p1', 'p2', 'p3'])
+      await Broadcast.publishBinary(key, new TextEncoder().encode(name + 'x'.repeat(600_000)), { lossy: true })
     const closing = channel.close()
     const release = leaveRoom(450_000)
     try {
-      // Its body is admitted for the open one, which lets go of what it replaces there.
+      // A publish of a kind its page didn't subscribe to replaces nothing it holds, as for an open subscriber.
       await publish(key, 'p4' + 'x'.repeat(900_000), true)
       const pageReads = await page.readAll()
-      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p3', '0:CLOSE'])
-      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4'])
-      fromPage(channel, encode.closeAck(0, 1))
-      expect(await closing).toBe(0)
+      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(
+        kind === 'text' ? ['0:p1', '0:p2', '0:p3', '0:CLOSE'] : ['0:p1', '0:p3', '0:CLOSE'],
+      )
+      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+      expect(await closing).toBeNull()
     } finally {
       release()
       open.abort()
     }
   })
+
+  test(`on a WebSocket, with room, a lossy subscriber closing while its page is away keeps all ${kind} publishes its page lacks`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key })
+    const page = overWebSocket([channel])
+    for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), true)
+    const [peer] = page.peers
+    if (peer === undefined) throw new Error('no peer')
+    channel._end._onPeerDisconnect(peer, 60_000)
+    const closing = channel.close()
+    const back = overWebSocket([])
+    // The page has p1.
+    back.attach(channel, 0, 1)
+    expect(await back.readAll()).toEqual(['0:p2', '0:p3', '0:CLOSE'])
+    fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+    fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+    expect(await closing).toBeNull()
+  })
+
+  for (const [near, leave] of [
+    ['the budget', leaveRoom],
+    ['maxMemory', leaveRoomUnderMax],
+  ] as const)
+    test(`on a WebSocket, a ${kind} publish near ${near} for an open lossy subscriber leaves a closing one whose page is away its newest, and its page back reads that and the close`, async () => {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key })
+      const open = new ServerBroadcast<string>({ key })
+      const page = overWebSocket([channel, open])
+      for (const name of ['p1', 'p2', 'p3']) await publish(key, name + 'x'.repeat(600_000), true)
+      const [peer] = page.peers
+      if (peer === undefined) throw new Error('no peer')
+      channel._end._onPeerDisconnect(peer, 60_000)
+      // Its page is away, so the CLOSE waits for it to attach again.
+      const closing = channel.close()
+      const release = leave(450_000)
+      try {
+        await publish(key, 'p4' + 'x'.repeat(900_000), true)
+        const back = overWebSocket([])
+        // The page has p1.
+        back.attach(channel, 0, 1)
+        expect(await back.readAll()).toEqual(['0:p3', '0:CLOSE'])
+        fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+        fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+        expect(await closing).toBeNull()
+      } finally {
+        release()
+        open.abort()
+      }
+    })
 }
+
+// The page's event stream subscribes it to text publishes.
+for (const [near, leave] of [
+  ['the budget', leaveRoom],
+  ['maxMemory', leaveRoomUnderMax],
+] as const)
+  test(`on SSE, a publish near ${near} for an open lossy subscriber leaves a closing one its newest, and its close ends gracefully`, async () => {
+    const key = crypto.randomUUID()
+    const channel = new ServerBroadcast<string>({ key })
+    const open = new ServerBroadcast<string>({ key })
+    const page = await overSse([channel, open])
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000), { lossy: true })
+    const closing = channel.close()
+    const release = leave(450_000)
+    try {
+      await Broadcast.publish(key, 'p4' + 'x'.repeat(900_000), { lossy: true })
+      // An event stream that reads nothing has handed its socket nothing: all of it waits, and the newest stays.
+      const pageReads = reads(await page.readUntil('1:p4'))
+      expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p3', '0:CLOSE'])
+      fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+      fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+      expect(await closing).toBeNull()
+    } finally {
+      release()
+      open.abort()
+      await page.close()
+    }
+  })
 
 for (const [kind, publish] of Object.entries(PUBLISHES)) {
   test(`on a WebSocket, a closing subscriber cut for another object's publish reads the error at the next ${kind} publish of its key`, async () => {
@@ -403,10 +662,10 @@ for (const [kind, publish] of Object.entries(PUBLISHES)) {
     const release = leaveRoom(300_000)
     try {
       // The other object's publish cuts channel 0, which only its own object can end.
-      await onObject(objects[1]!, () => publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+      await onObject(defined(objects[1]), () => publish(otherKey, 'q1' + 'x'.repeat(600_000)))
       await publish(key, 'p4')
       expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
-      expect(await closing).toBe(1)
+      expect(await closing).toBeInstanceOf(Error)
     } finally {
       release()
       other.abort()
@@ -426,9 +685,9 @@ test("on a WebSocket, a closing subscriber cut for another object's publish read
   const release = leaveRoom(300_000)
   try {
     // The other object's publish cuts channel 0, its CLOSE too, so no answer comes before the close runs out.
-    await onObject(objects[1]!, () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+    await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
     await vi.advanceTimersByTimeAsync(1_000)
-    expect(await closing).toBe(1)
+    expect(await closing).toBeInstanceOf(Error)
     vi.useRealTimers()
     expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
   } finally {
@@ -447,17 +706,17 @@ for (const attach of ['before', 'after'] as const) {
     const other = new ServerBroadcast<string>({ key: otherKey })
     const page = overWebSocket([channel, other], objects)
     for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
-    channel._end._onPeerDisconnect(page.peers[0]!, 60_000)
+    channel._end._onPeerDisconnect(defined(page.peers[0]), 60_000)
     // Its page is away, so the CLOSE waits for it to attach again.
     const closing = channel.close({ timeout: 1_000 })
     const release = leaveRoom(300_000)
     try {
-      await onObject(objects[1]!, () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+      await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
       const back = overWebSocket([])
       // The page has p1.
       if (attach === 'before') back.attach(channel, 0, 1)
       await vi.advanceTimersByTimeAsync(1_000)
-      expect(await closing).toBe(1)
+      expect(await closing).toBeInstanceOf(Error)
       vi.useRealTimers()
       if (attach === 'after') back.attach(channel, 0, 1)
       expect(await back.readAll()).toEqual(['0:ERROR'])
@@ -469,10 +728,113 @@ for (const attach of ['before', 'after'] as const) {
   })
 }
 
+test("on a WebSocket, an aborted subscriber cut for another object's publish reads what its wire started, then at its page's next heartbeat the error in its abort's place", async () => {
+  const objects = [getChannelMux(), new ChannelMux()]
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const page = overWebSocket([channel, other], objects)
+  for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+  channel.abort()
+  const release = leaveRoom(300_000)
+  try {
+    // The other object's publish cuts channel 0's p2, p3 and ABORT, which only its own object can replace.
+    await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1'])
+    channel._end._acknowledge()
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
+  } finally {
+    release()
+    other.abort()
+  }
+})
+
+test("on a WebSocket, an aborted subscriber whose wire closed is cut for another object's publish as an open one, and its page back reads the error in its abort's place", async () => {
+  const objects = [getChannelMux(), new ChannelMux()]
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const page = overWebSocket([channel, other], objects)
+  for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+  channel.abort()
+  // Its wire closes, as the mux closes a wire that went: the wire holds nothing more.
+  page.headroom.close()
+  const [peer] = page.peers
+  if (peer === undefined) throw new Error('no peer')
+  channel._end._onPeerDisconnect(peer, 60_000)
+  const release = leaveRoom(300_000)
+  try {
+    await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+    // Cut as an open subscriber whose page is away: no wire has any of its publishes, not the one that closed.
+    expect(channel._end.heldBytes).toBeLessThan(64 * 1024)
+    await new Promise((resolve) => setTimeout(resolve))
+    const back = overWebSocket([])
+    // The page has p1.
+    back.attach(channel, 0, 1)
+    expect(await back.readAll()).toEqual(['0:ERROR'])
+  } finally {
+    release()
+    other.abort()
+  }
+})
+
+/** A WebSocket `mux` runs for one page, on the object `mux` is the channels of, that reads nothing: past the first frame, what it sends
+ *  waits for headroom. */
+async function muxWebSocket(subscribers: Subscriber[], mux = getChannelMux()) {
+  const channels = subscribers.map(channelOf)
+  const wire = {}
+  mux.onWireOpen(
+    wire,
+    {
+      getConnId: () => null,
+      type: CHANNEL_TRANSPORT.WS,
+      wholeMessages: true,
+      sendNow() {},
+      bufferedAmount: () => 0,
+      close() {},
+    },
+    upgradesTakenHere,
+  )
+  for (const channel of channels) mux.registerChannel(channel, ATTACHABLE_NOW)
+  const open = subscribers.map((subscriber, ix) => ({
+    id: channelOf(subscriber).id,
+    ix,
+    lastSeq: 0,
+    initial: true as const,
+    want: wantOf(subscriber, { text: true, binary: true }),
+  }))
+  await mux.onWireMessage(wire, encode.reconcile({ sessionId: crypto.randomUUID(), attempt: 1, open }))
+  await new Promise((resolve) => setTimeout(resolve))
+  return { close: () => mux.onWireClosed(wire, 'transient') }
+}
+
+test("on a WebSocket, an aborted subscriber whose wire the mux saw close is cut for another object's publish as an open one", async () => {
+  const objects = [getChannelMux(), new ChannelMux()]
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const page = await muxWebSocket([channel], objects[0])
+  await muxWebSocket([other], defined(objects[1]))
+  for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+  channel.abort()
+  page.close()
+  const release = leaveRoom(300_000)
+  try {
+    const held = channel._end.heldBytes
+    await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+    // Cut as an open subscriber whose page is away: the wire that closed has none of its publishes.
+    expect(held).toBeGreaterThan(1_000_000)
+    expect(channel._end.heldBytes).toBeLessThan(64 * 1024)
+  } finally {
+    release()
+    other.abort()
+  }
+})
+
 test('on SSE, a subscriber cut to make room ends after the call that cut it, which the room it let go of admits', async () => {
   const subscriber = new ServerBroadcast<string>({ key: crypto.randomUUID() })
   const page = await overSse([subscriber])
-  let closedWith: Error | undefined
+  let closedWith: Error | null | undefined
   subscriber.onClose((err) => {
     closedWith = err
   })
@@ -505,7 +867,7 @@ for (const [ends, end] of Object.entries(APP_ENDS)) {
     const subscriber = new ServerBroadcast<string>({ key })
     const page = overWebSocket([subscriber])
     for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
-    let closedWith: Error | undefined
+    let closedWith: Error | null | undefined
     subscriber.onClose((err) => {
       closedWith = err
     })
@@ -529,8 +891,8 @@ const ENDED_BY_A_CLOSE_CALLBACK: Record<string, { end: (channel: Subscriber) => 
     aborts: { end: (channel) => channel.abort(), last: 'ABORT', drops: true },
   }
 
-for (const [ends, { end, last, drops }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
-  test(`on a WebSocket, a subscriber that another's onClose ${ends} once its publish was admitted reads the ${last} behind it, and the subscriber after it gets the publish`, async () => {
+for (const [ends, { end, last }] of Object.entries(ENDED_BY_A_CLOSE_CALLBACK)) {
+  test(`on a WebSocket, a subscriber that another's onClose ${ends} once its publish was admitted reads the publish and the ${last} behind it, and the subscriber after it gets the publish`, async () => {
     const [cutKey, key] = [crypto.randomUUID(), crypto.randomUUID()]
     const cut = new ServerBroadcast<string>({ key: cutKey })
     const channel = new ServerBroadcast<string>({ key })
@@ -543,7 +905,7 @@ for (const [ends, { end, last, drops }] of Object.entries(ENDED_BY_A_CLOSE_CALLB
       // Admitting it for channel 1 cuts channel 0, whose onClose ends channel 1 once the publish was delivered.
       await Broadcast.publish(key, 'p4' + 'x'.repeat(600_000))
       const pageReads = await page.readAll()
-      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(drops ? [`1:${last}`] : ['1:p4', `1:${last}`])
+      expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p4', `1:${last}`])
       expect(pageReads.filter((read) => read.startsWith('2:'))).toEqual(['2:p4'])
     } finally {
       release()
@@ -622,7 +984,7 @@ test('on SSE, an acknowledged send made before a response carried its channel re
   const release = leaveRoom(0)
   try {
     // Admitted again with all this server's channels, the send cuts the subscriber, whose onClose aborts the channel.
-    getChannelMux().registerChannel(channel)
+    getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
     await new Promise((resolve) => setTimeout(resolve))
     expect(rejectedWith).toBeInstanceOf(Abort)
   } finally {
@@ -686,19 +1048,24 @@ for (const [
     reads: [published, sent],
   },
 ] of Object.entries(AFTER_A_PUBLISH)) {
-  test(`on a WebSocket, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
-    const key = crypto.randomUUID()
-    const channel = create(key)
-    const other = new ServerChannel()
-    const page = overWebSocket([channel, other])
-    publish(channel, key)
-    expect(await page.readAll()).toEqual([published])
-    for (const message of MESSAGES) void other.send(message)
-    small(channel)
-    // Of the other channel, p1 started and its rest waits.
-    expect(await page.readAll()).toEqual([published, sent, '1:p1', '1:p2', '1:p3'])
-    other.abort()
-  })
+  for (const pressed of [false, true])
+    test(`on a WebSocket, once the page read a publish${pressed ? ', while other wires hold all the copies the server allows' : ''}, ${name} goes ahead of what of another channel waits`, async () => {
+      if (pressed) {
+        addWireCopies(ALL_COPIES)
+        onTestFinished(() => dropWireCopies(ALL_COPIES))
+      }
+      const key = crypto.randomUUID()
+      const channel = create(key)
+      const other = new ServerChannel()
+      const page = overWebSocket([channel, other])
+      publish(channel, key)
+      expect(await page.readAll()).toEqual([published])
+      for (const message of MESSAGES) void other.send(message)
+      small(channel)
+      // Of the other channel, p1 started and its rest waits.
+      expect(await page.readAll()).toEqual([published, sent, '1:p1', '1:p2', '1:p3'])
+      other.abort()
+    })
 
   test(`on SSE, once the page read a publish, ${name} goes ahead of what of another channel waits`, async () => {
     const key = crypto.randomUUID()
@@ -800,7 +1167,7 @@ for (const [ending, { create, away, pageReads }] of Object.entries(WHILE_AWAY)) 
     const key = crypto.randomUUID()
     const channel = create(key)
     const [peer] = overWebSocket([channel]).peers
-    channelOf(channel)._onPeerDisconnect(peer!, 60_000)
+    channelOf(channel)._onPeerDisconnect(defined(peer), 60_000)
     await away(channelOf(channel), key)
     const back = overWebSocket([])
     back.attach(channel, 0)
@@ -818,7 +1185,188 @@ test('on a WebSocket, abort() drops each lossy send its wire has not started, al
   expect(await page.readAll()).toEqual(['0:p0', '0:p1', '0:ABORT'])
 })
 
-test("on a WebSocket, a lossy send that waits when the page closes goes unsent while the close's callbacks run", async () => {
+test('on a WebSocket, abort() in the task of a lossy send drops it, which the socket has no byte of before the task ends', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  void channel.send('l1', { lossy: true })
+  channel.abort()
+  // What the task gathered goes to the socket as it ends.
+  await new Promise((resolve) => setTimeout(resolve))
+  expect(reads(page.arrived)).toEqual(['0:ABORT'])
+})
+
+/** A page that reads nothing holds three messages of 600 KB of `stalled`, the first started, then the server needs 1 MB
+ *  for another channel: with `room` left below the shedding target, or with less than that left below `maxMemory`. */
+async function underPressure(stalled: Subscriber, room: number, publish?: (data: string) => unknown) {
+  const other = new ServerChannel()
+  const page = overWebSocket([stalled])
+  overWebSocket([other])
+  await new Promise((resolve) => setTimeout(resolve))
+  for (const name of ['p1', 'p2', 'p3']) {
+    const data = name + 'x'.repeat(600_000)
+    if (publish) await publish(data)
+    else void channelOf(stalled).send(data)
+  }
+  stalled.abort('kicked')
+  const release = leaveRoom(room)
+  try {
+    const sent = other.send('q1' + 'x'.repeat(1_000_000)).then(
+      () => 'accepted',
+      (err: unknown) => (err instanceof ChannelOverflowError ? 'refused' : 'other'),
+    )
+    // A send that waits for room goes once the room the rows hold is let go.
+    const settled = await Promise.race([
+      sent,
+      new Promise<'waits'>((resolve) => setTimeout(() => resolve('waits'), 50)),
+    ])
+    release()
+    const admission = settled === 'waits' ? `waited, ${await sent}` : settled
+    return { admission, read: (await page.readAll()).filter((read) => read.startsWith('0:')) }
+  } finally {
+    release()
+    other.abort()
+  }
+}
+
+// Short of memory, an aborted channel's page reads what an open one's would, then the abort's end.
+// 500 kB below the most bytes held: less than the 1 MB send needs, which waits for room, and less than an aborted
+// subscriber's unstarted publishes free.
+const NO_ROOM = 500_000 - (HELD_AT_MOST - (getChannelConfig().maxMemory * 7) / 8)
+test.each([
+  [300_000, 'accepted'],
+  [NO_ROOM, 'waited, accepted'],
+])(
+  "on a WebSocket, short of memory (%d below the target), an aborted channel's page reads every message it was sent, then the Abort, and another channel's send fares as it would beside it open",
+  async (room, admission) => {
+    expect(await underPressure(new ServerChannel(), room)).toEqual({
+      admission,
+      read: ['0:p1', '0:p2', '0:p3', '0:ABORT'],
+    })
+  },
+)
+
+test.each([[300_000], [NO_ROOM]])(
+  "on a WebSocket, short of memory (%d below the target), an aborted subscriber's page reads what it had started, then the overflow an open one's would",
+  async (room) => {
+    const key = crypto.randomUUID()
+    const stalled = new ServerBroadcast<string>({ key })
+    expect(await underPressure(stalled, room, (data) => Broadcast.publish(key, data))).toEqual({
+      admission: 'accepted',
+      read: ['0:p1', '0:ERROR'],
+    })
+  },
+)
+
+/** What a subscriber on another wire reads of a 1 MB publish, short of memory, beside a page that reads nothing of a
+ *  plain channel's three messages of 600 KB, which the server aborted or left open. */
+async function besideStalled(aborts: boolean, room: number) {
+  const stalled = new ServerChannel()
+  const key = crypto.randomUUID()
+  const healthy = new ServerBroadcast<string>({ key })
+  overWebSocket([stalled])
+  const page = overWebSocket([healthy])
+  await new Promise((resolve) => setTimeout(resolve))
+  for (const name of ['p1', 'p2', 'p3']) void stalled.send(name + 'x'.repeat(600_000))
+  if (aborts) stalled.abort()
+  const release = leaveRoom(room)
+  try {
+    await Broadcast.publish(key, 'q1' + 'x'.repeat(1_000_000))
+    release()
+    return { read: await page.readAll(), held: stalled.heldBytes }
+  } finally {
+    release()
+    healthy.abort()
+    if (!aborts) stalled.abort()
+  }
+}
+
+test.each([[300_000], [NO_ROOM]])(
+  'on a WebSocket, short of memory (%d below the target), a subscriber on another wire reads beside an aborted channel what it reads beside the same channel open',
+  async (room) => {
+    const open = await besideStalled(false, room)
+    const aborted = await besideStalled(true, room)
+    expect(aborted.read).toEqual(open.read)
+    // Beyond what the open one holds, the aborted one holds its ABORT, as a send.
+    expect(aborted.held - open.held).toBeGreaterThan(0)
+    expect(aborted.held - open.held).toBeLessThan(1024)
+  },
+)
+
+test.each([
+  [false, ['0:p1', '0:p2']],
+  [true, ['0:p1', '0:p2', '0:ABORT']],
+])(
+  'on a WebSocket, short of memory, a subscriber one publish behind keeps it, aborted (%s) or not, where the other send fits',
+  async (aborts, read) => {
+    const key = crypto.randomUUID()
+    const subscriber = new ServerBroadcast<string>({ key })
+    const other = new ServerChannel()
+    const page = overWebSocket([subscriber])
+    overWebSocket([other])
+    await new Promise((resolve) => setTimeout(resolve))
+    // The first is on its way, the second waits behind it: the page would miss no publish.
+    for (const name of ['p1', 'p2']) await Broadcast.publish(key, name + 'x'.repeat(900_000))
+    if (aborts) subscriber.abort()
+    const release = leaveRoom(300_000)
+    try {
+      await expect(other.send('q1' + 'x'.repeat(1_000_000))).resolves.toBeUndefined()
+      release()
+      expect((await page.readAll()).filter((r) => r.startsWith('0:'))).toEqual(read)
+    } finally {
+      release()
+      other.abort()
+      if (!aborts) subscriber.abort()
+    }
+  },
+)
+
+test("on a WebSocket, a send that an aborted subscriber's onClose makes on another channel gets the memory of what the subscriber had yet to deliver", async () => {
+  const key = crypto.randomUUID()
+  const aborted = new ServerBroadcast<string>({ key })
+  const other = new ServerChannel()
+  const page = overWebSocket([aborted])
+  overWebSocket([other])
+  await new Promise((resolve) => setTimeout(resolve))
+  for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
+  const release = leaveRoom(NO_ROOM)
+  let sent: Promise<void> | undefined
+  aborted.onClose(() => {
+    sent = other.send('q1' + 'x'.repeat(1_000_000))
+  })
+  try {
+    aborted.abort()
+    await expect(sent).resolves.toBeUndefined()
+    release()
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:ERROR'])
+  } finally {
+    release()
+    other.abort()
+  }
+})
+
+test('on a WebSocket, a send its own channel can never hold is refused before anything an aborted subscriber holds goes', async () => {
+  const key = crypto.randomUUID()
+  const aborted = new ServerBroadcast<string>({ key })
+  const live = new ServerChannel()
+  const page = overWebSocket([aborted])
+  overWebSocket([live])
+  await new Promise((resolve) => setTimeout(resolve))
+  for (const name of ['p1', 'p2']) await Broadcast.publish(key, name + 'x'.repeat(700_000))
+  void live.send('q1' + 'x'.repeat(1_500_000))
+  aborted.abort()
+  // Under the budget, and past the most one channel holds even where it holds nothing.
+  const release = leaveRoom(0)
+  try {
+    await expect(live.send('q2' + 'x'.repeat(CREDIT_WINDOW_INITIAL_BYTES))).rejects.toThrow(ChannelOverflowError)
+    release()
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:p1', '0:p2', '0:ABORT'])
+  } finally {
+    release()
+    live.abort()
+  }
+})
+
+test("on a WebSocket, a lossy send that waits when the page closes goes ahead of the CLOSE_ACK, as before the server's own close", async () => {
   const channel = new ServerChannel()
   const page = overWebSocket([channel])
   let onCloseDone = () => {}
@@ -827,12 +1375,86 @@ test("on a WebSocket, a lossy send that waits when the page closes goes unsent w
   for (let i = 0; i < 100; i++) void channel.send(`p${i}`)
   void channel.send('l1', { lossy: true })
   fromPage(channel, encode.close(0, 1_000, 1))
-  // More credit, while the close waits for its callback.
-  fromPage(channel, encode.msgWindow(0, 200))
-  expect(await page.readAll()).not.toContain('0:l1')
+  const pageReads = await page.readAll()
+  expect(pageReads.slice(-2)).toEqual(['0:l1', '0:CLOSE_ACK'])
   onCloseDone()
+  fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
   await channel.closed
 })
+
+test("on a WebSocket, what the page says it read in a close's frames that arrive after the server's close timed out goes", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const page = overWebSocket([channel])
+    void channel.send('p1' + 'x'.repeat(100_000))
+    const closing = channel.close({ timeout: 1_000 })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await closing).toHaveProperty('message', expect.stringContaining('Channel close timed out'))
+    vi.useRealTimers()
+    expect(await page.readAll()).toEqual(['0:p1', '0:CLOSE', '0:ERROR'])
+    expect(channel.heldBytes).toBeGreaterThan(100_000)
+    // The page read it all, and its answers to the CLOSE come only now.
+    fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+    fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+    expect(channel.heldBytes).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test("on a WebSocket, what the page says in its CLOSE_ACK it read goes while its close's cleanup still runs", async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  void channel.send('p1' + 'x'.repeat(100_000))
+  const closing = channel.close()
+  expect(await page.readAll()).toEqual(['0:p1', '0:CLOSE'])
+  expect(channel.heldBytes).toBeGreaterThan(100_000)
+  fromPage(channel, encode.closeAck(0, sentThrough(channel), 1))
+  expect(channel.heldBytes).toBe(0)
+  fromPage(channel, encode.closeDone(0, sentThrough(channel), 2))
+  expect(await closing).toBeNull()
+})
+
+/** The server's frames of a close each end begins: those it sends before the page's answer, and after it; and that
+ *  answer, from a page that read all the server sent it, through `lastSeq`. */
+const LOSSY_CLOSES = {
+  server: {
+    before: ['0:CLOSE'],
+    after: ['0:CLOSE_DONE'],
+    pageAnswers: (lastSeq: number) => [encode.closeAck(0, lastSeq, 1), encode.closeDone(0, lastSeq, 2)],
+  },
+  page: {
+    before: ['0:CLOSE_ACK', '0:CLOSE_DONE'],
+    after: [],
+    pageAnswers: (lastSeq: number) => [encode.closeDone(0, lastSeq, 2)],
+  },
+}
+
+for (const [closer, { before, after, pageAnswers }] of Object.entries(LOSSY_CLOSES)) {
+  test(`on a WebSocket, a lossy subscriber's newest publish that waits for its page goes ahead of the close the ${closer} begins, and none after it`, async () => {
+    vi.useFakeTimers({ toFake: ['performance'] })
+    try {
+      const key = crypto.randomUUID()
+      const channel = new ServerBroadcast<string>({ key })
+      // Its page confirms nothing, so it is behind as soon as p1 went: p2 waits, and p3 takes its place.
+      const page = overWebSocket([channel], [], 0)
+      for (const name of ['p1', 'p2', 'p3']) {
+        await Broadcast.publish(key, name, { lossy: true })
+        vi.advanceTimersByTime(1)
+      }
+      if (closer === 'server') void channel.close()
+      else fromPage(channel, encode.close(0, 1_000, 1))
+      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...before])
+      // The page confirms all it read, which would hand on whatever still waited.
+      for (const frame of pageAnswers(sentThrough(channel))) fromPage(channel, frame)
+      expect(await channel.closed).toBeNull()
+      expect(await page.readAll()).toEqual(['0:p1', '0:p3', ...before, ...after])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+}
 
 /** Each way a subscriber that may miss no publish falls behind, by what it publishes and what its page then reads. */
 const OVERFLOWS: Record<string, { publishes: string[]; pageReads: string[] }> = {
@@ -853,9 +1475,10 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
     const key = crypto.randomUUID()
     const channel = new ServerBroadcast<string>({ key })
     const page = await overSse([channel])
-    // The page starts reading: p1 leaves the server's queue, as it does on a WebSocket.
-    await Broadcast.publish(key, publishes[0]!)
-    await page.readUntil('0:p1')
+    // The page starts reading: p1 leaves the server's queue, as it does on a WebSocket. The others come while its event
+    // is under way, so they wait: once it ended, the stream would ask for the next.
+    await Broadcast.publish(key, defined(publishes[0]))
+    await page.readBytes(100_000)
     await Promise.all(publishes.slice(1).map((data) => Broadcast.publish(key, data)))
     expect(channel.isClosed).toBe(true)
     expect(reads(await page.readUntil('0:ERROR'))).toEqual(pageReads)
@@ -876,8 +1499,8 @@ test('on a WebSocket, a reliable subscriber that fell behind lets go of each mes
   const key = crypto.randomUUID()
   const channel = new ServerBroadcast<string>({ key })
   overWebSocket([channel])
-  const [first, ...rest] = OVERFLOWS['a publish is larger than all the server may hold']!.publishes
-  await Broadcast.publish(key, first!)
+  const [first, ...rest] = defined(OVERFLOWS['a publish is larger than all the server may hold']).publishes
+  await Broadcast.publish(key, defined(first))
   const oneMessage = channel._end.heldBytes
   await Promise.all(rest.map((data) => Broadcast.publish(key, data)))
   expect(channel.isClosed).toBe(true)
@@ -889,8 +1512,8 @@ test('on a WebSocket, a reliable subscriber that fell behind lets go of each mes
 
 /** Each way the page leaves channel 0, which then reads nothing more of it. */
 const PAGE_GONE: Record<string, (channel: ServerChannel) => void> = {
-  "the page's abort": ENDINGS["the page's abort"]!,
-  'the page losing its replay': ENDINGS['the page losing its replay']!,
+  "the page's abort": defined(ENDINGS["the page's abort"]),
+  'the page losing its replay': defined(ENDINGS['the page losing its replay']),
 }
 
 for (const [ending, end] of Object.entries(PAGE_GONE)) {
@@ -902,15 +1525,53 @@ for (const [ending, end] of Object.entries(PAGE_GONE)) {
       void ended.send(message)
       void other.send(message)
     }
-    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '0:p2', '1:p2', '0:p3', '1:p3'])
+    // Of channel 0, p1 started, so p2 and p3 wait behind it; channel 1's went to the socket.
+    expect(byChannel(page.headroom.sender.waitingFrames)).toEqual({ 0: ['0:p2', '0:p3'] })
     end(ended)
     expect(ended.isClosed).toBe(true)
-    expect(reads(page.headroom.sender.waitingFrames)).toEqual(['1:p1', '1:p2', '1:p3'])
-    // Channel 0's p1 had started.
-    expect(await page.readAll()).toEqual(['0:p1', '1:p1', '1:p2', '1:p3'])
+    expect(reads(page.headroom.sender.waitingFrames)).toEqual([])
+    // Channel 0's p1 had started; the lanes take turns, so it and channel 1's may arrive in either order.
+    const pageReads = await page.readAll()
+    expect(pageReads.filter((read) => read.startsWith('0:'))).toEqual(['0:p1'])
+    expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
     other.abort()
   })
 }
+
+test('on a WebSocket, a send still waiting for credit at abort() resolves: its message reaches the page ahead of the Abort', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  await new Promise((resolve) => setTimeout(resolve))
+  const sends = ['p1', 'p2', 'p3'].map((name) => channel.send(name + 'x'.repeat(600_000)))
+  let settled = false
+  void sends[2]?.then(
+    () => (settled = true),
+    () => (settled = true),
+  )
+  await new Promise((resolve) => setTimeout(resolve))
+  // The page grants no more than its first window of credit, half of what the channel may hold: the third waits.
+  expect(settled).toBe(false)
+  channel.abort()
+  await expect(Promise.all(sends)).resolves.toEqual([undefined, undefined, undefined])
+  expect(await page.readAll()).toEqual(['0:p1', '0:p2', '0:p3', '0:ABORT'])
+})
+
+test('on a WebSocket, abort() with a value more than one channel may hold ends the channel on both ends without it, and throws', async () => {
+  const channel = new ServerChannel()
+  const page = overWebSocket([channel])
+  await new Promise((resolve) => setTimeout(resolve))
+  let closedWith: unknown
+  channel.onClose((err) => {
+    closedWith = err
+  })
+  expect(() => channel.abort('x'.repeat(CREDIT_WINDOW_INITIAL_BYTES))).toThrow(ChannelOverflowError)
+  expect(channel._phase).toBe('ended')
+  expect(closedWith).toMatchObject({ isAbort: true, abortValue: undefined })
+  expect(channel.heldBytes).toBeLessThan(64 * 1024)
+  expect(await page.readAll()).toEqual(['0:ABORT'])
+  const abort = page.arrived.map((frame) => decode(frame)).find((frame) => frame.tag === TAG.ABORT)
+  expect(abort?.tag === TAG.ABORT ? parse(abort.abortValue) : 'no ABORT').toBe(undefined)
+})
 
 test('on a WebSocket, abort() comes behind the sends made before it', async () => {
   const channel = new ServerChannel()
@@ -974,3 +1635,218 @@ test("on a WebSocket, a stream argument's reader reads the chunks queued before 
   fromPage(channel, encode.window(0, CREDIT_WINDOW_INITIAL_BYTES, 1))
   expect(ledgerTotal()).toBe(held)
 })
+
+// A channel whose data its page never confirms while the page keeps coming back: dated at a detach, judged at the next
+// detach once the page attached after the date, as the page judges its own (decisions/516-sse-carrier.md, msg41 D1).
+
+/** The cause a channel ends with once its page hasn't confirmed its data for `reconnectTimeout`. */
+const unconfirmedFor = (reconnectTimeout: number) =>
+  `Channel closed: the page hasn't confirmed what the server sent on it for over ${reconnectTimeout / 1_000} s of reconnects`
+
+/** A channel of `create`'s over a WebSocket whose page took `sent()` and never confirms it: its wire goes at 0, its page
+ *  comes back at 5 s having nothing, and that wire goes at `secondLossAt`. Returns how it ended, and what a page that
+ *  comes back after that reads. */
+async function overdue(
+  create: (key: string) => Subscriber,
+  sent: (channel: Subscriber, key: string) => Promise<unknown>,
+  secondLossAt: number,
+) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const key = crypto.randomUUID()
+  const channel = create(key)
+  const ended: (Error | null)[] = []
+  channel.onClose((err) => void ended.push(err))
+  const [peer] = overWebSocket([channel]).peers
+  await sent(channel, key)
+  channelOf(channel)._onPeerDisconnect(defined(peer), 10_000)
+  await vi.advanceTimersByTimeAsync(5_000)
+  const again = overWebSocket([]).attach(channel, 0)
+  await vi.advanceTimersByTimeAsync(secondLossAt - 5_000)
+  channelOf(channel)._onPeerDisconnect(again, 10_000)
+  vi.useRealTimers()
+  const back = overWebSocket([])
+  back.attach(channel, 0)
+  return { ended, reads: await back.readAll() }
+}
+
+const OVERDUE: Record<
+  string,
+  { create: (key: string) => Subscriber; sent: (channel: Subscriber, key: string) => Promise<unknown> }
+> = {
+  'a channel': { create: () => new ServerChannel(), sent: async (channel) => void channelOf(channel).send('p1') },
+  'a broadcast subscriber': {
+    create: (key) => new ServerBroadcast<string>({ key }),
+    sent: async (_, key) => void (await Broadcast.publish(key, 'p1')),
+  },
+  'a lossy broadcast subscriber': {
+    create: (key) => new ServerBroadcast<string>({ key }),
+    sent: async (_, key) => void (await Broadcast.publish(key, 'p1', { lossy: true })),
+  },
+}
+
+for (const [what, { create, sent }] of Object.entries(OVERDUE)) {
+  test(`${what} whose page never confirms what it sent ends at the first detach past reconnectTimeout after the page came back: both ends read the cause, the page nothing else`, async () => {
+    const { ended, reads } = await overdue(create, sent, 11_000)
+    expect(ended).toHaveLength(1)
+    expect(ended[0]?.message).toBe(unconfirmedFor(10_000))
+    expect(reads).toEqual(['0:ERROR'])
+  })
+}
+
+test('a channel whose page lost its wire again inside reconnectTimeout goes on: its data goes again', async () => {
+  const { create, sent } = defined(OVERDUE['a channel'])
+  const { ended, reads } = await overdue(create, sent, 9_000)
+  expect(ended).toEqual([])
+  expect(reads).toEqual(['0:p1'])
+})
+
+test("a channel whose page confirmed something between its losses isn't judged on the date before: its data gets through between resets", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | null)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    void channel.send('p2')
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(5_000)
+    // The page has p1 now: what it hasn't confirmed is dated from its next loss.
+    const again = overWebSocket([]).attach(channel, 0, 1)
+    await vi.advanceTimersByTimeAsync(6_000)
+    channel._onPeerDisconnect(again, 10_000)
+    await vi.advanceTimersByTimeAsync(5_000)
+    const third = overWebSocket([]).attach(channel, 0, 1)
+    await vi.advanceTimersByTimeAsync(4_000)
+    channel._onPeerDisconnect(third, 10_000)
+    expect(ended).toEqual([])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('a channel is judged from its first loss without a confirmation since, not from its newest', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | null)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    // Losses at 0, 6 and 11 s, the page back between them having nothing: only the last is past 10 s from the first.
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const second = overWebSocket([]).attach(channel, 0)
+    await vi.advanceTimersByTimeAsync(5_000)
+    channel._onPeerDisconnect(second, 10_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const third = overWebSocket([]).attach(channel, 0)
+    await vi.advanceTimersByTimeAsync(4_000)
+    channel._onPeerDisconnect(third, 10_000)
+    expect(ended.map((err) => err?.message)).toEqual([unconfirmedFor(10_000)])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test("a page simply away isn't judged by the date: the grace period ends it, as before", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  try {
+    const channel = new ServerChannel()
+    const ended: (Error | null)[] = []
+    channel.onClose((err) => void ended.push(err))
+    const [peer] = overWebSocket([channel]).peers
+    void channel.send('p1')
+    channel._onPeerDisconnect(defined(peer), 10_000)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(ended.map((err) => err?.message)).toEqual([
+      'Channel timed out: client did not reconnect within grace period',
+    ])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+for (const ending of ['close', 'abort'] as const) {
+  test(`a channel the app ends with ${ending}() while its unconfirmed data holds a date leaves nothing pending`, async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      const channel = new ServerChannel()
+      const [peer] = overWebSocket([channel]).peers
+      void channel.send('p1')
+      channel._onPeerDisconnect(defined(peer), 10_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      const again = overWebSocket([]).attach(channel, 0)
+      if (ending === 'close') void channel.close({ timeout: 1_000 })
+      else channel.abort()
+      channel._onPeerDisconnect(again, 10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+}
+
+test("a lossy subscriber whose page never confirms a publish isn't kept on by newer ones: it ends when one publish would", async () => {
+  // Lossy publishes keep coming while every wire is lost before one is whole: each newer one takes the place of the one
+  // waiting, and none renews the date.
+  const { create } = defined(OVERDUE['a lossy broadcast subscriber'])
+  const publishes = async (_: Subscriber, key: string) => {
+    for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name)
+  }
+  const { ended, reads } = await overdue(create, publishes, 11_000)
+  expect(ended.map((err) => err?.message)).toEqual([unconfirmedFor(10_000)])
+  expect(reads).toEqual(['0:ERROR'])
+})
+
+test("a subscriber its server shed to nothing for another object's publish, its page lost again past reconnectTimeout, ends with the shedding's cause: nothing of it is unconfirmed", async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+  const objects = [getChannelMux(), new ChannelMux()]
+  const [key, otherKey] = [crypto.randomUUID(), crypto.randomUUID()]
+  const channel = new ServerBroadcast<string>({ key })
+  const other = new ServerBroadcast<string>({ key: otherKey })
+  const ended: (Error | null)[] = []
+  channel.onClose((err) => void ended.push(err))
+  const page = overWebSocket([channel, other], objects)
+  await Broadcast.publish(key, 'p1' + 'x'.repeat(600_000))
+  channel._end._onPeerDisconnect(defined(page.peers[0]), 10_000)
+  await vi.advanceTimersByTimeAsync(5_000)
+  // The page comes back behind another channel's large frame, on a link its page's acknowledgements measured slow: the
+  // replay of p1 waits for the wire.
+  const blocker = new ServerChannel()
+  const back = overWebSocket([])
+  // Its kernel holds what the socket took, so what the wire hands queues and its acknowledgements measure the link.
+  back.socket.bufferedAmount = 1024 * 1024
+  blocker._registerChannel(ATTACHABLE_NOW)
+  back.attach(blocker, 1)
+  void blocker.send('b1' + 'x'.repeat(600_000))
+  await vi.advanceTimersByTimeAsync(10)
+  back.headroom.acknowledged({ bytes: back.headroom.sender.transmittedBytes, heldMs: 0, spanUs: 1_000 })
+  await vi.advanceTimersByTimeAsync(100)
+  back.headroom.acknowledged({ bytes: 100_000, heldMs: 0, spanUs: 10_000_000 })
+  const again = back.attach(channel, 0, 0)
+  // Room for less than one more publish under the most the server holds, so making room for one sheds to nothing.
+  const filler: MemoryHolder = { heldBytes: 0 }
+  hold(filler, HELD_AT_MOST - ledgerTotal() - 300_000)
+  const release = () => releaseHolder(filler)
+  try {
+    // The other object's publish sheds p1, which no wire has: the channel holds nothing for its page.
+    await onObject(defined(objects[1]), () => Broadcast.publish(otherKey, 'q1' + 'x'.repeat(600_000)))
+    await vi.advanceTimersByTimeAsync(6_000)
+    channel._end._onPeerDisconnect(again, 10_000)
+    expect(ended).toEqual([])
+    // Its next event, the page's attach, ends it with its own cause.
+    overWebSocket([]).attach(channel, 0, 0)
+    expect(ended.map((err) => err?.message)).toEqual([
+      'Broadcast closed: the server could not hold even the newest message for its client',
+    ])
+  } finally {
+    vi.useRealTimers()
+    release()
+    other.abort()
+    blocker.abort()
+  }
+})
+// A page that answers its heartbeat and never reads holds an ended channel no longer than `reconnectTimeout` past the
+// last time it received more of it, attached or not.

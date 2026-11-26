@@ -1,5 +1,6 @@
-export { GcRegistry }
+export { GcRegistry, getGcRegistry }
 
+import { getGlobalObject } from './getGlobalObject.js'
 import { unrefTimer } from './unrefTimer.js'
 
 type CloseFn = () => void | Promise<void>
@@ -82,4 +83,10 @@ class GcRegistry {
       this.scanTimer = null
     }
   }
+}
+
+/** The process's one registry, which every copy of Telefunc of this version shares. It is kept under this file's key, as
+ *  this file says what `register()` returns: an older version's registry, under its own file's key, returns nothing. */
+function getGcRegistry(): GcRegistry {
+  return getGlobalObject('utils/GcRegistry.ts', () => ({ gcRegistry: new GcRegistry() })).gcRegistry
 }

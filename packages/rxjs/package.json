@@ -42,7 +42,7 @@
     "dev": "tsc --watch"
   },
   "peerDependencies": {
-    "telefunc": ">=0.2.24",
+    "telefunc": ">0.4.0",
     "rxjs": ">=7.0.0"
   },
   "devDependencies": {

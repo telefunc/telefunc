@@ -17,6 +17,7 @@ interface PeerSender {
    *  takes at least `roundTrip` ms: `Infinity` before one was measured. */
   behindAfter(roundTrip: number): number
   send(frame: Uint8Array): void
+  sendPublish?(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
@@ -78,16 +79,21 @@ class IndexedPeer {
     this.commit(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
-  /** Returns its seq. */
-  sendCloseRequest(timeoutMs: number): number {
+  sendCloseRequest(timeoutMs: number): void {
     const seq = this.replay.nextSeq()
     this.commit(seq, encode.close(this.index, timeoutMs, seq))
-    return seq
   }
 
-  sendCloseAck(): void {
+  /** `lastSeq`: the last seq the server read from the page on this channel. */
+  sendCloseAck(lastSeq: number): void {
     const seq = this.replay.nextSeq()
-    this.commit(seq, encode.closeAck(this.index, seq))
+    this.commit(seq, encode.closeAck(this.index, lastSeq, seq))
+  }
+
+  /** `lastSeq`: as `sendCloseAck`'s. */
+  sendCloseDone(lastSeq: number): void {
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.closeDone(this.index, lastSeq, seq))
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
@@ -115,6 +121,12 @@ class IndexedPeer {
    *  newest. */
   unhanded(): number {
     return this.sender.queue.waitingPublishes(this.index)
+  }
+
+  /** For an aborted channel: takes its messages of which the socket has no byte back from the wire's queue and the
+   *  replay, whose newest they are: its lossy ones (`WireQueue.dropUngiven`). */
+  dropUngivenLossy(): void {
+    this.replay.dropUnhanded(this.sender.queue.dropUngiven(this.index))
   }
 
   /** What those of them hold that a newer send of the channel's own takes the place of: the ones sent after the
@@ -154,9 +166,9 @@ class IndexedPeer {
   }
 
   private sendBehindHead(seq: number, body: PublishBody): void {
-    const head = encode.publishTo(this.index, seq)
-    this.replay.pushPublish(seq, head, body)
-    this.sender.send(head)
+    this.replay.pushPublish(seq, this.index, body)
+    if (this.sender.sendPublish) return this.sender.sendPublish(this.index, seq, body.frame)
+    this.sender.send(encode.publishTo(this.index, seq))
     this.sender.send(body.frame)
   }
 

@@ -36,7 +36,7 @@ describe.runIf(runs)('a subscriber whose login the store refuses', () => {
 
       const subscription = Broadcast.subscribe(`k-${i}`, () => {})
       const ready = await Promise.race([
-        subscription.ready.then(
+        subscription.opened.then(
           () => 'resolved',
           (error: unknown) => error,
         ),

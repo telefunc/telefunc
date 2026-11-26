@@ -10,6 +10,10 @@ type BlackHoleProxy = {
   blackHoleWebSockets(): number
   /** The page's next WebSocket gets the server's upgrade answer and nothing after it, while what the page sends still reaches the server, but its close doesn't. */
   muteNextWebSocket(): void
+  /** The page's next WebSocket gets no answer, and the server never sees it: a peer that took the connection and stays silent. */
+  holdNextWebSocket(): void
+  /** How many of the page's WebSockets `holdNextWebSocket()` held. */
+  heldWebSockets(): number
   /** Null until the server closes the muted WebSocket, then how many WebSockets the page opened after it meanwhile. */
   openedBeforeMutedClosed(): number | null
   /** From now on each direction carries `bytesPerSecond` (download, upload) through its own queue of `queueBytes`, as a slow link does, each byte `delayMs` late; a direction whose queue is full stops reading its senders. */
@@ -37,12 +41,17 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   const { hostname, port: targetPort } = new URL(target)
   const links = new Set<Link>()
   let muteNext = false
+  let holdNext = false
+  let held = 0
   let webSockets = 0
   let openedBeforeMutedClosed: number | null = null
   let down: PacedDirection | null = null
   let up: PacedDirection | null = null
   const proxy = net.createServer((page) => {
     const server = net.connect(Number(targetPort), hostname)
+    // A link forwards bytes as they come: with Nagle, a small write here would wait for the other end's delayed ACK.
+    page.setNoDelay(true)
+    server.setNoDelay(true)
     const link: Link = { page, server, webSocket: false, dead: false, muted: null }
     links.add(link)
     page.on('data', (chunk: Buffer) => {
@@ -52,6 +61,12 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
       if (head.startsWith('GET /_telefunc') && /^upgrade: websocket/im.test(head)) {
         link.webSocket = true
         webSockets++
+        if (holdNext) {
+          holdNext = false
+          held++
+          link.dead = true
+          return
+        }
         if (muteNext) {
           muteNext = false
           link.muted = { uplink: Buffer.alloc(0), opened: webSockets }
@@ -100,6 +115,10 @@ async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
     muteNextWebSocket() {
       muteNext = true
     },
+    holdNextWebSocket() {
+      holdNext = true
+    },
+    heldWebSockets: () => held,
     openedBeforeMutedClosed: () => openedBeforeMutedClosed,
     pace({ downBytesPerSecond, upBytesPerSecond, queueBytes, burstMs = 5, delayMs = 0 }) {
       down = new PacedDirection(downBytesPerSecond, queueBytes, burstMs, delayMs)
@@ -188,8 +207,9 @@ class PacedDirection {
       (this.bytesPerSecond * mostMs) / 1000,
     )
     this.last = now
-    while (this.allowance >= 1 && this.head < this.queue.length && this.queue[this.head]!.at <= now) {
-      const entry = this.queue[this.head]!
+    while (this.allowance >= 1) {
+      const entry = this.queue[this.head]
+      if (entry === undefined || entry.at > now) break
       const bytes = Math.min(entry.chunk.length, Math.floor(this.allowance))
       if (!entry.to.destroyed) entry.to.write(entry.chunk.subarray(0, bytes))
       this.allowance -= bytes
@@ -197,7 +217,8 @@ class PacedDirection {
       if (bytes === entry.chunk.length) this.head++
       else entry.chunk = entry.chunk.subarray(bytes)
     }
-    this.backlogged = this.head < this.queue.length && this.queue[this.head]!.at <= now
+    const next = this.queue[this.head]
+    this.backlogged = next !== undefined && next.at <= now
     if (this.head > 1024 && this.head * 2 > this.queue.length) {
       this.queue = this.queue.slice(this.head)
       this.head = 0

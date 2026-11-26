@@ -1,11 +1,25 @@
-export { testStreaming }
+export { testStreaming, testStreamingRequestContext }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, forceServerGc, serverHeapUsed, navigate, getResult } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 const stallWarning = 'read all of the streams a call returned concurrently'
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
+
+function testStreamingRequestContext() {
+  test('streaming: concurrent generators read their own request context after yielding', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-request-context')
+    await autoRetry(async () => {
+      expect(await getResult('#streaming-result')).deep.equal([
+        ['alice', 'alice', 'alice'],
+        ['bob', 'bob', 'bob'],
+      ])
+    })
+  })
+}
 
 function testStreaming() {
   test('streaming: ReadableStream return', async () => {
@@ -472,6 +486,7 @@ function testStreaming() {
 
   test('streaming: cancelling a returned stream that failed, or a generator whose finally throws, leaves the server answering', async () => {
     await navigate(`${getServerUrl()}/streaming`)
+    await resetCleanupState()
     await page.click('#test-cancel-failed-streams')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')
@@ -479,17 +494,9 @@ function testStreaming() {
       expect(result.errors).not.to.include('none')
       expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
     })
+    // The page's cancel returned the generator: its `finally` ran.
+    await autoRetry(async () => {
+      expect((await getCleanupState()).generatorFinallyThrowsRan).toBe('true')
+    })
   })
-}
-
-function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
-  const parsed: unknown = JSON.parse(value ?? '["sse"]')
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length === 0 ||
-    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
-  ) {
-    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
-  }
-  return parsed
 }

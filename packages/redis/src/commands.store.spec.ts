@@ -127,7 +127,7 @@ async function record(store: Store): Promise<void> {
   })
   installRedis(app)
   const listening = Broadcast.subscribe('s', () => {})
-  await listening.ready
+  await listening.opened
   await Broadcast.publish('s', 'to a subscriber')
   listening()
   await Broadcast.publish('TFNOTRUN WRONGTYPE k', 'TFNOTRUN ERR one')

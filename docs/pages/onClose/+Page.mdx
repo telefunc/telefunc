@@ -86,6 +86,8 @@ channel.onClose((err) => {
 
 > The `channel.onClose()` hook can be used on both the server- and client-side.
 
+> The hook runs its cleanup while the channel closes, and `channel.closed` resolves with the final outcome once the close completes (or its timeout expires): async cleanup shouldn't await `channel.closed`.
+
 
 ## `context.signal`
 
@@ -114,18 +116,7 @@ export async function onLoad() {
 }
 ```
 
-On Cloudflare Workers, a client that disconnects before the telefunction answers aborts `signal` only with the `enable_request_signal` [compatibility flag](https://developers.cloudflare.com/workers/configuration/compatibility-flags/):
-
-```jsonc
-// wrangler.jsonc
-{
-  "compatibility_flags": ["enable_request_signal"]
-}
-```
-
-> Without the flag, `signal` doesn't abort and `onClose()` doesn't run: your Worker's code just stops, and Telefunc logs a warning about it. The flag is on by default from the `compatibility_date` `2026-11-17`.
-
-> Under `wrangler dev`, `signal` aborts only for a client that disconnects while the response streams, not for one that disconnects before the telefunction answers.
+> On Cloudflare Workers, add `enable_request_signal` to the `compatibility_flags` of your Wrangler configuration, so that `signal` also aborts when the client disconnects before the telefunction answers.
 
 
 ## See also

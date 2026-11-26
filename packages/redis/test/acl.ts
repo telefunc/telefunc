@@ -97,7 +97,7 @@ async function calls(tag = ''): Promise<Record<string, string>> {
   const channel = `acl${tag}`
   const received: unknown[] = []
   const listening = Broadcast.subscribe(channel, (message) => received.push(message))
-  await call('Broadcast.subscribe', () => listening.ready)
+  await call('Broadcast.subscribe', () => listening.opened)
   await call('Broadcast.publish', async () => {
     await Broadcast.publish(channel, 'hello')
     if (!(await arrived(received))) throw new Error('the message never arrived')
@@ -105,7 +105,7 @@ async function calls(tag = ''): Promise<Record<string, string>> {
   listening()
   const frames: Uint8Array[] = []
   const listeningBinary = Broadcast.subscribeBinary(channel, (frame) => frames.push(frame))
-  await call('Broadcast.subscribeBinary', () => listeningBinary.ready)
+  await call('Broadcast.subscribeBinary', () => listeningBinary.opened)
   await call('Broadcast.publishBinary', async () => {
     await Broadcast.publishBinary(channel, new Uint8Array([1]))
     if (!(await arrived(frames))) throw new Error('the frame never arrived')

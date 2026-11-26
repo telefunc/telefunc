@@ -64,7 +64,7 @@ function itGivesNoContext() {
       const key = `context:${crypto.randomUUID()}`
       const read: string[] = []
       const unsubscribe = asUser('alice', () => subscribe(key, () => read.push(whoseContext())))
-      await unsubscribe.ready
+      await unsubscribe.opened
       await asUser('bob', () => publish(key))
       // Without AsyncLocalStorage, a context lasts until the next macrotask.
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -78,7 +78,7 @@ function itGivesNoContext() {
       const unsubscribe = subscribe(key, () => {
         throw new Error('listener bug')
       })
-      await unsubscribe.ready
+      await unsubscribe.opened
       bugContexts = []
       await asUser('bob', () => publish(key))
       expect(bugContexts).toEqual(['throws'])
@@ -110,7 +110,7 @@ describe('with AsyncLocalStorage', () => {
         if (raw) raw[MARK] = `written ${readByFirst.length}`
       })
       const second = subscribe(() => readBySecond.push(getRawContext()?.[MARK]))
-      await Promise.all([first.ready, second.ready])
+      await Promise.all([first.opened, second.opened])
       const readByPublisher = await asUser('bob', async () => {
         for (const n of [1, 2])
           if (kind === 'text') await Broadcast.publish(key, `publish ${n}`)

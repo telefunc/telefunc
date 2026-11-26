@@ -9,6 +9,8 @@ import {
   onUploadArrayBuffer,
   onReadTwice,
   onUploadOutOfOrder,
+  onUploadCancelSecond,
+  onUploadAfterFailedStart,
   onUploadBackpressure,
   onUploadSlice,
   onUploadEmpty,
@@ -22,7 +24,11 @@ import {
   onUploadConcurrent,
   onUploadProps,
   onUploadIgnored,
+  onReturnChannelIgnoringFile,
 } from './FileUpload.telefunc'
+
+/** The channel `#test-channel-unread-file` got: held, so that it isn't collected while the row reads it. */
+let heldChannel: Awaited<ReturnType<typeof onReturnChannelIgnoringFile>> | undefined
 
 function FileUpload() {
   const [result, setResult] = useState<string>('')
@@ -138,6 +144,35 @@ function FileUpload() {
         }}
       >
         Out of order
+      </button>
+
+      <button
+        id="test-cancel-second"
+        onClick={async () => {
+          // The first file large enough that its bytes still arrive as the server cancels the second
+          const res = await onUploadCancelSecond(
+            file('first.txt', 'A'.repeat(16 * 1024 * 1024)),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        Cancel the second file
+      </button>
+
+      <button
+        id="test-after-failed-start"
+        onClick={async () => {
+          const res = await onUploadAfterFailedStart(
+            file('first.txt', 'AAA'),
+            file('second.txt', 'BBB'),
+            file('third.txt', 'CCC'),
+          )
+          setResult(JSON.stringify(res))
+        }}
+      >
+        After a failed start
       </button>
 
       <button
@@ -264,6 +299,22 @@ function FileUpload() {
         }}
       >
         Ignored files
+      </button>
+
+      <button
+        id="test-channel-unread-file"
+        onClick={async () => {
+          // A browser delivers the answer only once it has sent the whole File, past what the connection buffers.
+          const big = new File([new Uint8Array(32 * 1024 * 1024)], 'big.bin', { type: 'application/octet-stream' })
+          try {
+            heldChannel = await onReturnChannelIgnoringFile(big)
+            heldChannel.listen((message) => setResult(JSON.stringify({ received: message })))
+          } catch (err) {
+            setResult(JSON.stringify({ failed: String(err) }))
+          }
+        }}
+      >
+        Channel returned, its File unread
       </button>
 
       <pre id="upload-result">{result}</pre>

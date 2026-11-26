@@ -2,7 +2,7 @@ export { PendingDmReplies, roomResult, receiveFromPage, assertPublishShield, clo
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
-import { isProtocolViolationError, reconnectWindow, type ServerBroadcastEnd } from 'telefunc/__internal'
+import { ProtocolViolationError, reconnectWindow, type ServerBroadcastEnd } from 'telefunc/__internal'
 import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import { reportRoomError } from './reportRoomError.js'
 import { DM_FAILURE, ROOM_BUG_MESSAGE, toRoomFailure } from '../shared/errors.js'
@@ -52,7 +52,7 @@ function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promi
   try {
     return handle()
   } catch (err) {
-    if (!isProtocolViolationError(err)) throw err
+    if (!(err instanceof ProtocolViolationError)) throw err
     end.terminateWire()
     return Promise.resolve({ ok: false, kind: 'error', code: 'MALFORMED', message: err.message })
   }

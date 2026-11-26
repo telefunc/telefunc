@@ -14,6 +14,7 @@ import { TAG } from '../../wire/tags.js'
 import type { Want } from '../../wire/payloads.js'
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 import { config } from '../../../node/server/serverConfig.js'
+import { ATTACHABLE_NOW } from './ServerChannel.js'
 
 config.channel = { maxMemory: '2m' }
 
@@ -39,7 +40,7 @@ function returnedBroadcast(session: string) {
   const end = broadcast._end
   // As `carryChannel` stamps it.
   end._callRequest = callOf(session)
-  getChannelMux().registerChannel(end)
+  getChannelMux().registerChannel(end, ATTACHABLE_NOW)
   const frames: Uint8Array[] = []
   const sender: PeerSender = {
     send: (frame) => frames.push(frame),
@@ -48,7 +49,7 @@ function returnedBroadcast(session: string) {
     behindAfter: () => Number.POSITIVE_INFINITY,
     deliveredBefore: () => 0,
     sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-    queue: { waitingPublishes: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
+    queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     terminate() {},
   }
   const count = (tag: number) => frames.filter((frame) => frame[0] === tag).length
@@ -187,13 +188,13 @@ test('before the first attach of a page that has not subscribed, nothing publish
 })
 
 // As a plain channel sends what it held across a close that ran out before its page attached.
-test("a close that runs out before the page's first attach keeps what the page subscribed to by a call, ahead of the CLOSE", async () => {
+test("a close that runs out before the page's first attach keeps what the page subscribed to by a call, ahead of the CLOSE and its timeout", async () => {
   const page = returnedBroadcast('session-a')
   await page.call(on(1))
   await Broadcast.publish(page.key, 'after-subscribe')
   await page.broadcast.close({ timeout: 1 })
   page.attach(on(1))
-  expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE])
+  expect(page.tags()).toEqual([TAG.PUBLISH_TO, TAG.PUBLISH, TAG.CLOSE, TAG.ERROR])
   page.end._release()
 })
 
@@ -234,7 +235,7 @@ for (const kind of KINDS) {
       const want = { version: 1, text: kind === 'text', binary: kind === 'binary' }
       if (arrival === 'call') await page.call(want)
       else page.wire(want)
-      await expect(page.broadcast.closed).rejects.toMatchObject({ cause: { message: 'broker connection closed' } })
+      await expect(page.broadcast.closed).resolves.toMatchObject({ cause: { message: 'broker connection closed' } })
       expect(page.tags()).toContain(TAG.ERROR)
     })
   }
@@ -245,15 +246,15 @@ function confirmingLater(run: (listening: (key: string) => Deferred<void>) => Pr
   return async () => {
     const waits = new Map<string, Deferred<void>>()
     const listen = (key: string) => {
-      const ready = createDeferred()
-      waits.set(key, ready)
-      return { unsubscribe() {}, ready: ready.promise }
+      const opened = createDeferred()
+      waits.set(key, opened)
+      return { unsubscribe() {}, opened: opened.promise }
     }
     useTransport(listen)
     await run((key) => {
-      const ready = waits.get(key)
-      if (ready === undefined) throw new Error(`Nothing listens to ${key}`)
-      return ready
+      const opened = waits.get(key)
+      if (opened === undefined) throw new Error(`Nothing listens to ${key}`)
+      return opened
     })
   }
 }
@@ -274,7 +275,7 @@ test(
     const wants = [refused, healthy].map((page) => ({ channel: page.broadcast.id, ...on(1) }))
     const call = getChannelMux().applyCallWants(callOf('session-a'), wants)
     listening(refused.key).reject(new Error('NOPERM'))
-    await expect(refused.broadcast.closed).rejects.toMatchObject({ cause: { message: 'NOPERM' } })
+    await expect(refused.broadcast.closed).resolves.toMatchObject({ cause: { message: 'NOPERM' } })
     expect(await settled(call)).toBe(false)
     listening(healthy.key).resolve()
     expect(await settled(call)).toBe(true)
@@ -293,7 +294,10 @@ test(
     request.abort()
     await call
     expect(page.broadcast.isClosed).toBe(true)
-    await expect(page.broadcast.closed).rejects.toThrow('before the subscription took effect')
+    await expect(page.broadcast.closed).resolves.toHaveProperty(
+      'message',
+      expect.stringContaining('before the subscription took effect'),
+    )
     expect(page.tags()).toContain(TAG.ERROR)
     expect(page.wanted()).toEqual([])
   }),
@@ -316,7 +320,10 @@ test(
       expect(done).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
       expect(done).toBe(true)
-      await expect(silent.broadcast.closed).rejects.toThrow('did not take effect within')
+      await expect(silent.broadcast.closed).resolves.toHaveProperty(
+        'message',
+        expect.stringContaining('did not take effect within'),
+      )
       expect(silent.tags()).toContain(TAG.ERROR)
       expect({ closed: healthy.broadcast.isClosed, wanted: healthy.wanted() }).toEqual({
         closed: false,
@@ -332,10 +339,10 @@ test(
 // Each way a call's wait ends leaves no timer of its own behind, so none ends the broadcast later.
 const WAIT_ENDS: Record<
   string,
-  (end: { ready: Deferred<void>; request: AbortController; page: ReturnType<typeof attachedBroadcast> }) => void
+  (end: { opened: Deferred<void>; request: AbortController; page: ReturnType<typeof attachedBroadcast> }) => void
 > = {
-  'the subscription takes effect': ({ ready }) => ready.resolve(),
-  'its backend refuses it': ({ ready }) => ready.reject(new Error('NOPERM')),
+  'the subscription takes effect': ({ opened }) => opened.resolve(),
+  'its backend refuses it': ({ opened }) => opened.reject(new Error('NOPERM')),
   "the call's request goes": ({ request }) => request.abort(),
   'the broadcast is closed': ({ page }) => page.broadcast.abort(),
 }
@@ -349,7 +356,7 @@ for (const [end, endWait] of Object.entries(WAIT_ENDS)) {
         const before = vi.getTimerCount()
         const request = new AbortController()
         const call = page.call(on(1), 'session-a', request.signal)
-        endWait({ ready: listening(page.key), request, page })
+        endWait({ opened: listening(page.key), request, page })
         await call
         await vi.advanceTimersByTimeAsync(0)
         const left = vi.getTimerCount() - before
@@ -365,3 +372,20 @@ for (const [end, endWait] of Object.entries(WAIT_ENDS)) {
     }),
   )
 }
+
+test("a call whose new subscription reaches a broadcast the server is closing waits for its end, and the page isn't told it's in effect", async () => {
+  const page = attachedBroadcast('session-a')
+  // The page hasn't answered the server's CLOSE: the broadcast is closing.
+  const closing = page.broadcast.close({ timeout: 50 })
+  let ran = false
+  const call = page.call(on(1))
+  void Promise.resolve(call).then(() => {
+    ran = true
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  expect({ ran, wanted: page.wanted(), hears: await page.hears() }).toEqual({ ran: false, wanted: [], hears: false })
+  await closing
+  await call
+  expect(ran).toBe(true)
+  page.broadcast._end._release()
+})

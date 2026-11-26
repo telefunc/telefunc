@@ -4,11 +4,13 @@ export type { ChannelPumpRunContext }
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../../wire/envelope.js'
 import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
-import { ChannelClosedError, ServerChannel } from '../../../channel/server/ServerChannel.js'
+import { ServerChannel } from '../../../channel/server/ServerChannel.js'
+import { ChannelClosedError } from '../../../channel/channelErrors.js'
 import { reconnectWindow } from '../../../../node/server/serverConfig.js'
 import { getChannelMux } from '../../../channel/server/ChannelMux.js'
-import { isAbort } from '../../../../node/server/Abort.js'
+import { Abort } from '../../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
+import { serializeAbortReason } from '../../../channel/channel.js'
 import { restoreContext } from '../../../../node/server/context/context.js'
 import type { Context } from '../../../../node/server/context/context.js'
 import type { RequestContext } from '../../../../node/server/context/requestContext.js'
@@ -50,7 +52,7 @@ function pumpProducerToChannel(
   runContext: ChannelPumpRunContext,
   onComplete: () => void,
 ): void {
-  getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
+  getChannelMux().registerChannel(channel, runContext.requestContext.page)
 
   const telefuncId = {
     telefunctionName: runContext.telefunctionName,
@@ -75,7 +77,9 @@ function pumpProducerToChannel(
       await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
     } catch (err) {
       if (err instanceof ChannelClosedError) return
-      if (isAbort(err)) runContext.requestContext.responseAbort.abort(err.abortValue)
+      // A reason JSON can't hold goes to none of the response's values: the error frame reports it.
+      if (err instanceof Abort)
+        runContext.requestContext.responseAbort.abort(serializeAbortReason(err.abortValue).value)
       if (channel.isClosed) return
       try {
         await Promise.race([channel._sendBinary(concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))), stop])

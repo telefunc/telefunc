@@ -8,14 +8,17 @@ import { encodeSseRequest } from '../../wire/envelope.js'
 import { decode, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { pairPublishes } from '../client/pairPublishes.js'
-import { SseEvents } from '../client/SseEvents.js'
+import { SseEvents } from '../../wire/SseEvents.js'
+import { noUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import { getChannelMux } from './ChannelMux.js'
 import { publishBody } from './PublishBody.js'
 import { ServerBroadcast } from './ServerBroadcast.js'
+import { ATTACHABLE_NOW } from './ServerChannel.js'
 import { handleSseChannelRequest } from './sse.js'
 
 const url = `http://test.local/_telefunc?wire=${WIRE_VERSION}`
-const post = (body: BodyInit) => handleSseChannelRequest(new Request(url, { method: 'POST', body }))
+const post = (body: BodyInit) =>
+  handleSseChannelRequest(new Request(url, { method: 'POST', body }), undefined, () => false, noUpgrades)
 
 /** What the page reads of `frames`: each publish and answer, as `publish:<text>` and `answer:<text>`, with its seq,
  *  less each one at or below the newest seq it read, which the page drops. */
@@ -37,7 +40,11 @@ async function attach(broadcast: ServerBroadcast<string>, { initial }: { initial
   const entry = { id: broadcast._end.id, ix: 0, lastSeq: 0, want: { version: 1, text: true, binary: false } }
   const opened = await post(
     encodeSseRequest({ connId, streamResponse: true }, [
-      encode.reconcile({ open: [initial ? { ...entry, initial: true } : entry] }),
+      encode.reconcile({
+        sessionId: crypto.randomUUID(),
+        attempt: 1,
+        open: [initial ? { ...entry, initial: true } : entry],
+      }),
     ]),
   )
   if (!(opened.body instanceof ReadableStream)) throw new Error('The attach was answered without an event stream')
@@ -66,7 +73,7 @@ async function attach(broadcast: ServerBroadcast<string>, { initial }: { initial
  *  a join's `joined` before its answer (`room/src/server/RoomHandle.ts`). */
 function joiningBroadcast(answer: Promise<void>) {
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
-  getChannelMux().registerChannel(broadcast._end)
+  getChannelMux().registerChannel(broadcast._end, ATTACHABLE_NOW)
   const asked = createDeferred<void>()
   broadcast._end.listen(async () => {
     broadcast._end.deliver(publishBody(stringify('joined'), { seq: 0, timestamp: 0 }, null, false))

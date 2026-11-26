@@ -9,6 +9,7 @@ export {
   onPublishBesideRefusedSubscribe,
   onRedisChannelDenied,
   onRedisSubscribeFailure,
+  onPublishAcrossSeqBoundary,
 }
 
 import type { Socket } from 'node:net'
@@ -22,7 +23,7 @@ import { RedisBackend } from '../../../../packages/redis/dist/RedisBackend.js'
 import { RedisConnection } from '../../../../packages/redis/dist/RedisConnection.js'
 import { dropRedisSubscribers, redis, whileRedisSubscribersDown } from '../../redis'
 import { sleep } from '../../sleep'
-import { refuseChannels } from './refuseChannels'
+import { allowEveryChannel, refuseChannels } from './refuseChannels'
 
 /** On the page's `start`, the server's Redis connection drops, and it publishes 3 binary frames from one reused buffer
  *  while ioredis reconnects. */
@@ -292,6 +293,30 @@ async function onRedisChannelDenied() {
   }
 }
 
+/** Starts a key's sequence in Redis 2 short of 2^32, then publishes 3 texts on it: the seq each publish returned, and
+ *  what this server's subscriber received. */
+async function onPublishAcrossSeqBoundary() {
+  if (!redis) throw new Error('The playground runs without Redis')
+  const key = `room:seq-boundary:${crypto.randomUUID()}`
+  // The transport's counter for the key, under its default prefix.
+  const seqKey = `tf:seq:{${key}}`
+  await redis.set(seqKey, 2 ** 32 - 2)
+  const received: { text: string; seq: number }[] = []
+  const unsubscribe = Broadcast.subscribe<string>(key, (text, { seq }) => {
+    received.push({ text, seq })
+  })
+  try {
+    await unsubscribe.opened
+    const published: number[] = []
+    for (const text of ['a', 'b', 'c']) published.push((await Broadcast.publish(key, text)).seq)
+    for (let i = 0; i < 25 && received.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 100))
+    return { published, received }
+  } finally {
+    unsubscribe()
+    await redis.del(seqKey)
+  }
+}
+
 /** Settles once Redis refuses a SUBSCRIBE on `client`, as Dragonfly's answer to an ACL change can come before the
  *  change reaches an open connection. */
 async function subscribeRefused(client: Redis, channel: string) {
@@ -326,7 +351,7 @@ async function onBroadcastRenewalRefused() {
   try {
     const subscribed = Broadcast.subscribe<string>(key, (text) => heard.push(text))
     unsubscribe.push(subscribed)
-    await subscribed.ready
+    await subscribed.opened
     await Broadcast.publish(key, 'before')
     await receivedCount(heard, 1)
     if (!(await refuseChannels())) return { refusesChannels: false }
@@ -342,7 +367,7 @@ async function onBroadcastRenewalRefused() {
       const again = Broadcast.subscribe<string>(key, (text) => fresh.push(text))
       unsubscribe.push(again)
       if (
-        await again.ready.then(
+        await again.opened.then(
           () => true,
           () => tries === 50,
         )
@@ -352,11 +377,11 @@ async function onBroadcastRenewalRefused() {
     }
     await Broadcast.publish(key, 'after')
     await receivedCount(fresh, 1)
-    const ready = await subscribed.ready.then(
+    const opened = await subscribed.opened.then(
       () => 'resolved',
       () => 'rejected',
     )
-    return { ready, reports: reportsWhileRefused, heard, fresh }
+    return { opened, reports: reportsWhileRefused, heard, fresh }
   } finally {
     for (const stop of unsubscribe) stop()
     await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
@@ -376,19 +401,19 @@ async function onPublishBesideRefusedSubscribe() {
     const received: string[] = []
     const subscribed = Broadcast.subscribe<string>(key, (text) => received.push(text))
     unsubscribe.push(subscribed)
-    const refusedReady = await refused.ready.then(
+    const refusedOpened = await refused.opened.then(
       () => 'resolved',
       () => 'rejected',
     )
-    await subscribed.ready
+    await subscribed.opened
     const published = await Promise.resolve(Broadcast.publish(key, 'beside')).then(
       () => 'sent',
       (err: unknown) => String(err),
     )
     for (let i = 0; i < 25 && received.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 100))
-    return { refusedReady, published, received }
+    return { refusedOpened, published, received }
   } finally {
     for (const stop of unsubscribe) stop()
-    await redis.call('ACL', 'SETUSER', 'default', 'allchannels')
+    await allowEveryChannel()
   }
 }

@@ -3,6 +3,9 @@ export { testRunClassic }
 export { withNetworkConditions }
 export { newCDPSession }
 export { sendRefusedWarning }
+export { upgradeStatus }
+export { rawRequestStatus }
+export { exposeSendUnreadable, sessionEndedByUnreadable }
 
 import {
   page,
@@ -16,8 +19,103 @@ import {
   editFile,
   editFileRevert,
 } from '@brillout/test-e2e'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { randomBytes } from 'node:crypto'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 
 const sendRefusedWarning = 'A channel refused a `send()`'
+
+/** What each channel of a page's connection reads as the server ends the page's session for a frame it can't read
+ *  (packages/telefunc/wire-protocol/channel/endCause.ts, `unreadable`). */
+const sessionEndedByUnreadable =
+  "Channel closed: the page's connection ended: The server can't read what the page sent on its connection."
+
+declare global {
+  interface Window {
+    /** Sends a frame the server can't read on the page's newest open WebSocket; false where it has none. */
+    sendUnreadable?: () => boolean
+    /** Each of the page's WebSockets that closed, in order: the code and reason the browser handed the page. */
+    socketCloses?: { code: number; reason: string }[]
+  }
+}
+
+/** For `addInitScript`: `window.sendUnreadable()`, as a page that breaks the protocol would send it: a frame of a tag no
+ *  version has (packages/telefunc/wire-protocol/wire/tags.ts), which names no channel; and `window.socketCloses`. */
+function exposeSendUnreadable() {
+  const sockets: WebSocket[] = []
+  const closes: { code: number; reason: string }[] = []
+  window.socketCloses = closes
+  const PageWebSocket = window.WebSocket
+  window.WebSocket = class extends PageWebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols)
+      sockets.push(this)
+      this.addEventListener('close', ({ code, reason }) => void closes.push({ code, reason }))
+    }
+  }
+  window.sendUnreadable = () => {
+    const socket = sockets.findLast(({ readyState }) => readyState === PageWebSocket.OPEN)
+    socket?.send(new Uint8Array([0x0f, 0, 0]))
+    return socket !== undefined
+  }
+}
+
+/**
+ * The status the server answers a WebSocket handshake to its Telefunc URL with, from a page of `origin`, or `'no answer'`
+ * where it ends the connection without one.
+ */
+function upgradeStatus(origin: string): Promise<number | undefined | 'no answer'> {
+  const url = new URL('/_telefunc', getServerUrl())
+  return new Promise((resolve, reject) => {
+    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': randomBytes(16).toString('base64'),
+        Origin: origin,
+      },
+    })
+    req.on('upgrade', (res, socket) => {
+      socket.destroy()
+      resolve(res.statusCode)
+    })
+    req.on('response', (res) => {
+      res.resume()
+      resolve(res.statusCode)
+    })
+    req.on('error', (err) => {
+      // Node's client names a connection that ended before any answer this way.
+      if (err.message === 'socket hang up') resolve('no answer')
+      else reject(err)
+    })
+    req.end()
+  })
+}
+
+/**
+ * The status the server answers a request written byte for byte with, for a request line or a `Host` no HTTP client
+ * sends (`GET //_telefunc`, `Host: a b`); `head` holds the request line and the headers, without the blank line.
+ * `'no answer'` where the server closes the connection without an answer, or sends nothing within 10 seconds.
+ */
+async function rawRequestStatus(head: string[]): Promise<number | 'no answer'> {
+  const { hostname, port } = new URL(getServerUrl())
+  const socket = connect(Number(port), hostname)
+  try {
+    await once(socket, 'connect')
+    socket.write(`${head.join('\r\n')}\r\nConnection: close\r\n\r\n`)
+    const first = await new Promise<Buffer | null>((resolve) => {
+      socket.once('data', resolve)
+      socket.once('close', () => resolve(null))
+      socket.setTimeout(10_000, () => resolve(null))
+    })
+    return first ? Number(first.toString('latin1').split(' ')[1]) : 'no answer'
+  } finally {
+    socket.destroy()
+  }
+}
 
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
@@ -37,8 +135,12 @@ async function withNetworkConditions<T>(conditions: NetworkConditions, run: () =
     await emulate(conditions)
     return await run()
   } finally {
-    await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
-    await cdp.detach()
+    // Detached even where lifting the throttle fails, as on a page that closed meanwhile.
+    try {
+      await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
+    } finally {
+      await cdp.detach()
+    }
   }
 }
 

@@ -95,7 +95,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       let ready: unknown
       let published: unknown
       try {
-        ready = await settled(subscription.ready, 10_000)
+        ready = await settled(subscription.opened, 10_000)
         published = await settled(Promise.resolve(Broadcast.publish(`every-${i}`, 'x')), 10_000)
       } finally {
         subscription()
@@ -132,7 +132,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       let ready: unknown
       let published: unknown
       try {
-        ready = await settled(subscription.ready, 10_000)
+        ready = await settled(subscription.opened, 10_000)
         published = await settled(Promise.resolve(Broadcast.publish(`eager-${i}`, 'x')), 10_000)
       } finally {
         subscription()
@@ -161,7 +161,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       let ready: unknown
       const drops: Record<string, boolean> = {}
       try {
-        ready = await settled(subscription.ready, 10_000)
+        ready = await settled(subscription.opened, 10_000)
         drops.before = await delivered(key, 'before', received)
         await login(nodes.replica.admin, false)
         // Each drop moves the subscriber to the next node, so two drops take it to the refusing node whichever it began
@@ -196,10 +196,10 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       try {
         // Longer than the subscriber's longest wait between two attempts, 2 s, and than a Cluster's attempt on the
         // stopped node, 1 s.
-        whileUnreachable = await settled(subscription.ready, 3_000)
+        whileUnreachable = await settled(subscription.opened, 3_000)
         docker('unpause', nodes.primary.name)
         paused = false
-        ready = await settled(subscription.ready, 20_000)
+        ready = await settled(subscription.opened, 20_000)
         after = await delivered(key, 'after', received)
       } finally {
         subscription()
@@ -223,7 +223,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       let ready: unknown
       const drops: Record<string, boolean> = {}
       try {
-        ready = await settled(subscription.ready, 10_000)
+        ready = await settled(subscription.opened, 10_000)
         drops.before = await delivered(key, 'before', received)
         await nodes.replica.admin.call('CONFIG', 'SET', 'requirepass', 'another-password')
         // Each drop moves the subscriber to the next node, so two drops take it to the replica whichever it began on.
@@ -255,7 +255,7 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       const subscription = Broadcast.subscribe(key, () => {})
       let ready: unknown
       try {
-        ready = await settled(subscription.ready, 10_000)
+        ready = await settled(subscription.opened, 10_000)
       } finally {
         subscription()
       }
@@ -278,8 +278,8 @@ describe.runIf(runs)('a Cluster whose nodes refuse the login', () => {
       let results: Record<string, unknown> = {}
       try {
         results = {
-          refused: await settled(refused.ready, 10_000),
-          allowed: await settled(allowed.ready, 10_000),
+          refused: await settled(refused.opened, 10_000),
+          allowed: await settled(allowed.opened, 10_000),
           delivered: await delivered(`allowed-${i}`, 'x', received),
         }
       } finally {

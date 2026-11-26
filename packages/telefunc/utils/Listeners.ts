@@ -47,8 +47,14 @@ class Listeners<T> {
     this.snapshot = NO_LISTENERS
   }
 
+  /** The registrations as a dispatch walking them meets them: it reaches the ones added meanwhile too, as a `Set`'s
+   *  iteration does, and skips a removed one by its null `listener`. */
+  live(): Iterable<Registration<T>> {
+    return this.registrations ?? NO_LISTENERS
+  }
+
   list(): readonly Registration<T>[] {
-    return (this.snapshot ??= [...this.registrations!.values()])
+    return (this.snapshot ??= [...(this.registrations?.values() ?? NO_LISTENERS)])
   }
 }
 

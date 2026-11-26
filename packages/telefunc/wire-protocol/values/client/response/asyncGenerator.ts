@@ -9,10 +9,14 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
   prefix: SERIALIZER_PREFIX_GENERATOR,
   revive: (metadata, context) => {
     const { readNextChunk, cancel, abort } = context.receiveStream(metadata)
-    let onEnd = () => {}
+    let onEnd: (() => void) | null = () => {}
+    // An explicit `return()` ends it, then its `finally` would again.
     const end = () => {
+      const ended = onEnd
+      if (ended === null) return
+      onEnd = null
       cancel()
-      onEnd()
+      ended()
     }
     const gen = (async function* () {
       try {
@@ -37,7 +41,7 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
       },
       abort,
       onEnd(callback) {
-        onEnd = callback
+        if (onEnd !== null) onEnd = callback
       },
     }
   },

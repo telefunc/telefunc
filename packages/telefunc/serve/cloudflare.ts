@@ -6,10 +6,12 @@ export type { CloudflareOptions }
 import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 import { installAsyncContext } from '../node/server/context/async.js'
 import crossws from 'crossws/adapters/cloudflare'
-import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { ChannelMux } from '../wire-protocol/channel/server/ChannelMux.js'
 import { getServerConfig, setAdapterMaxFrameBytes, setAdapterMaxMemory } from '../node/server/serverConfig.js'
-import { serve as serveTelefunc } from '../node/server/telefunc.js'
+import { serveRuntimeRequest } from '../node/server/telefunc.js'
+import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
+import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
@@ -49,9 +51,10 @@ import {
   type CloudflareSession,
 } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
-import { isTelefuncRequest, toResponse } from './shared.js'
+import { getTelefuncRequestUrl, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind, getSessionToken, namesWireVersion } from '../wire-protocol/wire/requestKind.js'
-import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+import { STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+import { REQUEST_KIND_REFUSAL, WIRE_VERSION_REFUSAL, refusalContentType } from '../wire-protocol/refusal.js'
 
 // A subscription finds its session through AsyncLocalStorage, which a compatibility flag enables. A Worker without it
 // still serves telefunctions and channels; Broadcast and Room ask for the flag (session.ts). The specifier is a
@@ -112,8 +115,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  const hooks = getTelefuncChannelHooks({ copiesOnSend: true })
-  const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
+  const crosswsAdapter = crossws({
+    bindingName,
+    instanceName: baseInstanceName,
+    ...getTelefuncChannelOptions({ copiesOnSend: true }),
+  })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
@@ -156,7 +162,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     // App code runs in every entry but the constructor and `telefuncBroadcastPublish`: each runs it as this object's.
     async fetch(request: Request) {
       servesRequest(this.session, request)
-      return this.#runInSession(async () => {
+      return withCloudflareSession(this.session, async () => {
         const target = readForwardedTarget(request)
         if (target) this.session.broadcast.locate(target.locationBucket)
         if (request.headers.get('upgrade') === 'websocket') {
@@ -165,7 +171,13 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
         const context = getContext ? await getContext(request, this.env) : undefined
-        const response = toResponse(await serveTelefunc(context ? { request, context } : { request }))
+        const response = toResponse(
+          await serveRuntimeRequest(context ? { request, context } : { request }, {
+            clientLeft: noTransportEvidence,
+            clientGone: request.signal,
+            takesUpgrades: upgradesTakenHere,
+          }),
+        )
         // The page names it from then on, so it reaches this Durable Object from any region.
         if (target) response.headers.set(SESSION_HOME_HEADER, target.locationBucket)
         return response
@@ -173,20 +185,23 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return this.#runInSession(() => crosswsAdapter.handleDurableMessage(this, ws, message))
+      return withCloudflareSession(this.session, () => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
       // Before compatibility date 2026-04-07 a client's close waits for this answer; close() refuses 1005 and 1006.
       if (code === 1005) ws.close()
       else if (wasClean) ws.close(code, reason)
-      return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
+      return withCloudflareSession(this.session, () =>
+        crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean),
+      )
     }
 
-    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
     /** crossws has no handler for a socket's error, so its wire ends here. */
     webSocketError(ws: WebSocket) {
-      return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))
+      return withCloudflareSession(this.session, () =>
+        crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false),
+      )
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
@@ -198,7 +213,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastDeliver(delivery: BroadcastDelivery) {
-      return this.#runInSession(() => this.session.broadcast.deliver(delivery))
+      return withCloudflareSession(this.session, () => this.session.broadcast.deliver(delivery))
     }
 
     telefuncBroadcastGrant(member: string) {
@@ -240,7 +255,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       await this.#durableObject(name).alarm?.()
     }
 
-    // These two are `#`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's
+    // This one is `#`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's
     // prototype, a TypeScript `private` one too, but reaches no `#` method and no own instance field.
 
     /** Built once, synchronously, so that concurrent first calls share it. */
@@ -259,15 +274,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       this.durableObjects.set(name, durableObject)
       return durableObject
     }
-
-    #runInSession<T>(fn: () => T): T {
-      return withCloudflareSession(this.session, fn)
-    }
   }
 
   return {
     async serve({ request, env }: ServeInput): Promise<Response | undefined> {
-      if (!isTelefuncRequest(request)) return undefined
+      const url = getTelefuncRequestUrl(request)
+      if (url === null) return undefined
       const config = getServerConfig()
 
       const binding = telefuncNamespace(env)
@@ -279,13 +291,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
       const requestKind = isWebSocketRequest ? null : getRequestKind(request, config.telefuncUrl)
       if (requestKind === REQUEST_KIND.INVALID) {
-        return new Response(STATUS_BODY_MALFORMED_REQUEST, {
+        return new Response(REQUEST_KIND_REFUSAL.reason, {
           status: STATUS_CODE_MALFORMED_REQUEST,
-          headers: { 'Content-Type': 'text/plain' },
+          headers: { 'Content-Type': refusalContentType(REQUEST_KIND_REFUSAL) },
         })
       }
       if (requestKind === REQUEST_KIND.SSE && !namesWireVersion(request)) {
-        return new Response('reload the page', { status: STATUS_CODE_WIRE_VERSION })
+        return new Response(WIRE_VERSION_REFUSAL.reason, {
+          status: STATUS_CODE_WIRE_VERSION,
+          headers: { 'Content-Type': refusalContentType(WIRE_VERSION_REFUSAL) },
+        })
       }
 
       // No lookup and nothing shared: each request names the home its session's responses gave its page.
@@ -295,7 +310,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         request,
         locationFallback,
         getSessionToken(request) || crypto.randomUUID(),
-        new URL(request.url).searchParams.get('home'),
+        url.searchParams.get('home'),
       )
 
       const forwardedHeaders = new Headers(request.headers as Headers)

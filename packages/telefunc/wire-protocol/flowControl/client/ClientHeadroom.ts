@@ -11,6 +11,7 @@ import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type Pie
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
 import type { PiecesAck } from '../../wire/frame.js'
+import { readTag } from '../../wire/header.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
@@ -33,12 +34,6 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
   private readonly uplink: Uplink
   private readonly downlink: Downlink
   private readonly owner: ClientHeadroomOwner
-  /** When the newest acknowledged data arrived, in ms on the server's clock, counted from the first data an
-   *  acknowledgement covered. */
-  private arrivedAt = 0
-  /** The shortest time an acknowledgement took to come back, up to that clock's offset: one that waited behind no
-   *  uplink queue. */
-  private leastBack = Number.POSITIVE_INFINITY
   private lateMs = 0
   private lateAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
@@ -59,7 +54,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (isSequencedTag(frame[0]!)) {
+    if (isSequencedTag(readTag(frame))) {
       this.sender.send(frame, this.sender.dataWaits ? 0 : this.headroom())
       return this.pace()
     }
@@ -122,11 +117,9 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
     const spanMs = ack.spanUs / 1000
-    this.arrivedAt += spanMs
     const now = performance.now()
-    const back = now - this.arrivedAt - ack.heldMs
-    if (back < this.leastBack) this.leastBack = back
-    this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
+    const { lastBack, leastBack } = this.sender
+    this.lateMs = Math.max(lastBack - leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
     this.uplink.arrived(newly, spanMs)
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
@@ -141,7 +134,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
     // Unarrived: what neither an ack nor the newest heartbeat says the server took, less what crosses while late.
     const late = Math.max(this.lateMs, this.downlink.peerQueueWait())
-    const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
+    const untaken = sent - this.sender.confirmedBytes
     const unarrived = untaken - this.uplink.uplinkRate() * late
     return this.allowance - Math.max(waiting, unarrived)
   }

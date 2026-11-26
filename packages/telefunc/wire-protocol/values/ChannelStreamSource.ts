@@ -18,12 +18,15 @@ import type { StreamSource } from './types.js'
 type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'>
 
 type StreamSourceOptions = {
-  /** Throws an error frame's payload as its caller's error (telefunc's abort or bug error); a generic Error without it. */
+  /** Throws an error frame's payload as its caller's error (telefunc's abort or bug error). Without it, as on a server
+   *  reading a client's upload, an error frame throws `UPLOAD_FAILED_TEXT`. */
   throwError?: (errorPayload: Record<string, unknown>) => never
   /** Where the parts of an unfinished chunk count: on a server, the ledger; a page counts nothing. */
   memory?: QueueMemory
 }
 
+/** The client's pump sends no detail of its source's error. */
+const UPLOAD_FAILED_TEXT = "Stream ended: the client's ReadableStream failed before its end"
 const CHUNK_OVERFLOW_TEXT =
   'Stream ended: a chunk of it passed the most for one channel, or config.channel.maxMemory is held; send smaller chunks'
 
@@ -142,7 +145,8 @@ class ChannelStreamSource {
         this.wake = r
       })
     }
-    const entry = this.queue.shift()!
+    const entry = this.queue.shift()
+    assert(entry)
     // Signal the channel that this frame has been consumed — drives window updates.
     entry.onConsumed()
     // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end, 0x03 = a part with more to follow.
@@ -155,7 +159,7 @@ class ChannelStreamSource {
       const errorPayload: unknown = parse(textDecoder.decode(entry.frame.subarray(1)))
       assert(isObject(errorPayload))
       if (this.throwError) this.throwError(errorPayload)
-      throw new Error('Streaming error frame received')
+      throw new Error(UPLOAD_FAILED_TEXT)
     }
     return entry.frame
   }

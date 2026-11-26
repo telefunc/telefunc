@@ -15,8 +15,9 @@ export {
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
-import { onServerAction } from '../../server-actions'
+import { forgetServerAction, onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
+import { watchChannelMemory } from '../../channel-memory'
 
 /**
  * Each end sends `count` numbered messages as text and as binary, awaiting each send; the server drops the page's
@@ -26,7 +27,7 @@ import { Tally, textMessage, binaryMessage } from './wire-messages'
  */
 async function onWireResume(count: number) {
   const ch = new Channel<(message: string) => void, (message: string) => void>()
-  const tally = new Tally()
+  const tally = new Tally({ alternating: true })
   const report = () => {
     cleanupState[`wireResume_${ch.id}`] = JSON.stringify(tally.state)
   }
@@ -55,12 +56,14 @@ async function onWireResume(count: number) {
 }
 
 /**
- * At server action wireBurst_<id>, `sends` messages without awaiting them, each starting with its index: nearly all of the
- * page's first credit, then nearly 64 MiB each. The server drops the page's connections right after.
+ * At server action wireBurst_<id>, a message of each of `sizes` bytes without awaiting them, each starting with its
+ * index. The server drops the page's connections right after. At wireBurst_<id>_peak, it reports the most its channel
+ * memory held since the burst.
  *
- * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was
+ * cleanupState: wireBurst_<id>_onOpen = 'true' once it opens; wireBurst_<id> = why a send was refused, if one was;
+ * wireBurst_<id>_peak = the memory's peak (`ChannelMemoryPeak`), as JSON
  */
-async function onWireBurst(sends: number, kind: 'text' | 'binary') {
+async function onWireBurst(sizes: number[], kind: 'text' | 'binary') {
   const ch = new Channel<never, string>()
   ch.onOpen(() => {
     cleanupState[`wireBurst_${ch.id}_onOpen`] = 'true'
@@ -69,8 +72,11 @@ async function onWireBurst(sends: number, kind: 'text' | 'binary') {
     const refused = (err: Error) => {
       cleanupState[`wireBurst_${ch.id}`] = err.message
     }
-    for (let n = 0; n < sends; n++) {
-      const bytes = (n === 0 ? 2 : 64) * 1024 * 1024 - 1024
+    const peak = watchChannelMemory()
+    onServerAction(`wireBurst_${ch.id}_peak`, () => {
+      cleanupState[`wireBurst_${ch.id}_peak`] = JSON.stringify(peak())
+    })
+    for (const [n, bytes] of sizes.entries()) {
       if (kind === 'text') void ch.send(String(n).padEnd(bytes)).catch(refused)
       else {
         const message = new Uint8Array(bytes)
@@ -99,10 +105,13 @@ async function onWireEnd(before: number) {
   })
   ch.onClose((err) => {
     cleanupState[`wireEnd_${ch.id}_onClose`] = describeEnd(err)
+    // The one of the two a test didn't run.
+    forgetServerAction(`wireEnd_${ch.id}_close`)
+    forgetServerAction(`wireEnd_${ch.id}_abort`)
   })
   onServerAction(`wireEnd_${ch.id}_close`, async () => {
     sendBefore()
-    cleanupState[`wireEnd_${ch.id}_close`] = String(await ch.close())
+    cleanupState[`wireEnd_${ch.id}_close`] = (await ch.close())?.name ?? 'clean'
   })
   onServerAction(`wireEnd_${ch.id}_abort`, () => {
     sendBefore()
@@ -111,7 +120,7 @@ async function onWireEnd(before: number) {
   return { channel: ch.client, channelId: ch.id }
 }
 
-function describeEnd(err: Error | undefined): string {
+function describeEnd(err: Error | null): string {
   if (!err) return 'none'
   if (err instanceof Abort) return `abort:${JSON.stringify(err.abortValue)}`
   return err.name
@@ -162,9 +171,14 @@ async function onWireRelease(count: number) {
 
 // Apart from onWireRelease: a closure made there would share the scope that holds the channel.
 function reportRelease(id: string, channel: WeakRef<object>) {
-  onServerAction(`wireRelease_${id}`, () => {
-    cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
-  })
+  // A test polls it.
+  onServerAction(
+    `wireRelease_${id}`,
+    () => {
+      cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
+    },
+    { once: false },
+  )
 }
 
 /** A channel the page sends numbered text on. cleanupState: wireUpload_<id> = the server's tally. */

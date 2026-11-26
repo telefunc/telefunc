@@ -1,8 +1,11 @@
-export { testWire, testWireSlowPing, testWireShortReconnect }
+export { testWire, testWireSlowPing, testWireShortReconnect, testUploadSessionEnd, testUploadAfterNetworkLoss }
 
 import { page, test, expect, autoRetry, getServerUrl, expectLog } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
+import { WIRE_VERSION } from '../../../../packages/telefunc/wire-protocol/constants'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 import {
   navigate,
   getResult,
@@ -11,6 +14,7 @@ import {
   runServerAction,
   cutWire,
   canCutWire,
+  countConnections,
   dropNextWebSocket,
   forceServerGc,
   sleep,
@@ -20,13 +24,16 @@ import {
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
+  defined,
 } from '../../e2e-utils'
-import { sendRefusedWarning, withNetworkConditions } from '../../../utils'
+import { cardOf } from './upload-refusal-e2e-test'
+import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
+import { sendRefusedWarning, sessionEndedByUnreadable, withNetworkConditions } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
-  burst: { channelId: string; received: number[]; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
   many: { closed: number; next: string } | null
@@ -114,7 +121,13 @@ function testWire(isDev: boolean) {
       })
       await page.context().setOffline(false)
       await autoRetry(async () => {
-        expect(await seen()).deep.equal({ open: true, disconnected: true, reconnects: 0, close: 0, closed: true })
+        expect(await seen()).deep.equal({
+          open: true,
+          disconnected: true,
+          reconnects: 0,
+          close: 'closed',
+          closed: true,
+        })
       })
     })
 
@@ -265,47 +278,32 @@ function testWire(isDev: boolean) {
     })
 
   for (const kind of canCutWire() ? (['text', 'binary'] as const) : []) {
-    const burstWhileOffline = async (sends: number) => {
-      await navigate(`${getServerUrl()}/channel`)
-      await page.click(`#wire-burst-open-${kind}-${sends}`)
-      let channelId = ''
-      await autoRetry(async () => {
-        const { burst } = await getResult<WireState>('#wire-state')
-        expect(burst).not.toBe(null)
-        channelId = burst!.channelId
-        expect((await getCleanupState())[`wireBurst_${channelId}_onOpen`]).toBe('true')
-      })
-      await page.context().setOffline(true)
-      await runServerAction(`wireBurst_${channelId}`)
-      await page.context().setOffline(false)
-      return channelId
-    }
-
     test(`channel: all that maxMemory lets through of a ${kind} burst nobody awaits, 5 messages of up to 64 MiB, arrives once the page is back from being offline`, async () => {
-      const channelId = await burstWhileOffline(5)
+      const channelId = await burstWhileOffline(`${kind}-5`)
       await autoRetry(
         async () => {
-          const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
-          expect(burst!.onClose).toBe(null)
+          expect(await burstOf()).deep.include({ received: [0, 1, 2, 3, 4], onClose: null })
         },
         { timeout: 60_000 },
       )
       expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
     })
 
-    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits passes maxMemory: it is refused, and the channel stays open`, async () => {
-      const channelId = await burstWhileOffline(6)
+    // 2 MiB and five of 64 MiB: the 6th is past the 320 MiB one channel holds till the page confirms the first.
+    test(`channel: a 6th ${kind} message of up to 64 MiB nobody awaits, past what its channel holds, waits for the page to confirm the ones before it and arrives, the channel open and the server within maxMemory`, async () => {
+      const channelId = await burstWhileOffline(`${kind}-6`)
       await autoRetry(
         async () => {
-          const { burst } = await getResult<WireState>('#wire-state')
-          expect(burst!.onClose).toBe(null)
-          expect(burst!.received).deep.equal([0, 1, 2, 3, 4])
+          expect(await burstOf()).deep.include({ received: [0, 1, 2, 3, 4, 5], onClose: null })
         },
         { timeout: 60_000 },
       )
-      expect((await getCleanupState())[`wireBurst_${channelId}`]).toContain('config.channel.maxMemory')
-      expectLog(sendRefusedWarning)
+      expect((await getCleanupState())[`wireBurst_${channelId}`]).toBe(undefined)
+      const { held, heldWithWaiting, maxMemory } = await memoryPeakOf(channelId)
+      // Five held, the 6th waiting with them.
+      expect(held).greaterThanOrEqual((2 + 4 * 64) * 1024 * 1024 - 5 * 1024)
+      expect(heldWithWaiting).greaterThanOrEqual((2 + 5 * 64) * 1024 * 1024 - 6 * 1024)
+      expect(heldWithWaiting).lessThanOrEqual(maxMemory)
     })
   }
 
@@ -331,10 +329,10 @@ function testWire(isDev: boolean) {
       await end(channelId, 'close')
       await autoRetry(async () => {
         const state = await getResult<WireState>('#wire-state')
-        expect(state.end!.received).deep.equal(received('onClose:none'))
+        expect(state.end?.received).deep.equal(received('onClose:none'))
         const ss = await getCleanupState()
         expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
-        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('0')
+        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end?.close).toBe('clean')
       })
     })
 
@@ -358,7 +356,7 @@ function testWire(isDev: boolean) {
       await page.click('#wire-end-close-timeout')
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
-        expect(end!.close).toBe('1')
+        expect(end?.close).toBe('ChannelClosedError')
       })
       await cutWire()
       await page.context().setOffline(false)
@@ -377,17 +375,19 @@ function testWire(isDev: boolean) {
     })
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') {
     // MAX_CHANNELS_PER_CONNECTION
     const maxChannels = 4_096
     const connect = async () => {
       // The wire's version, as the page's `getWireUrl` names it.
-      const url = new URL('/_telefunc?wire=2', getServerUrl())
+      const url = new URL(`/_telefunc?wire=${WIRE_VERSION}`, getServerUrl())
       url.protocol = 'ws:'
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
       await new Promise((resolve) => (ws.onopen = resolve))
-      let sessionId: string | undefined
+      // The page makes its session's id and names it from its first RECONCILE on; the server's RECONCILED names it back.
+      let sessionId: string = crypto.randomUUID()
+      let reconciledOnce = false
       // Takes the first answer to the RECONCILE in flight.
       let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
       const answered = (answer: 'reconciled' | 'closed') => {
@@ -395,11 +395,13 @@ function testWire(isDev: boolean) {
         settle = undefined
       }
       ws.onclose = () => answered('closed')
-      ws.onmessage = (event) => {
-        const frame = new Uint8Array(event.data as ArrayBuffer)
-        // RECONCILED, its JSON after the 7-byte header.
-        if (frame[0] !== 0x05) return
-        sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
+      ws.onmessage = ({ data }: MessageEvent<ArrayBuffer>) => {
+        // RECONCILED, alone or among the frames of a message of several; its JSON after the 7-byte header.
+        const frames = Array.from(messageFrames(new Uint8Array(data)))
+        const reconciled = frames.find((frame) => frame[0] === TAG.RECONCILED)
+        if (reconciled === undefined) return
+        sessionId = JSON.parse(new TextDecoder().decode(reconciled.subarray(7))).sessionId
+        reconciledOnce = true
         answered('reconciled')
       }
       // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
@@ -408,10 +410,12 @@ function testWire(isDev: boolean) {
           // CLOSING from the server's close frame on, ahead of the close event.
           if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
           settle = resolve
-          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
-          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          // The first, on a wire that holds no session yet, numbers its attempt, as the page's does.
+          const attempt = reconciledOnce ? {} : { attempt: 1 }
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...attempt, ...reconcile }))
+          // A RECONCILE: its tag, then index 0 and seq 0 in the 7-byte header.
           const frame = new Uint8Array(7 + payload.byteLength)
-          frame[0] = 0x04
+          frame[0] = TAG.RECONCILE
           frame.set(payload, 7)
           ws.send(frame)
         })
@@ -540,9 +544,37 @@ function testWire(isDev: boolean) {
         expect(end!.received).deep.equal([])
       })
     })
+
+    if (canCutWire())
+      test('channel: a channel whose reconnect the network takes and never answers gets what the server sends on another WebSocket', async () => {
+        const proxy = await startBlackHoleProxy(getServerUrl())
+        try {
+          await navigate(`${proxy.url}/channel`)
+          await page.click('#wire-end-open')
+          let channelId = ''
+          await autoRetry(async () => {
+            const { end } = await getResult<WireState>('#wire-state')
+            if (!end) throw new Error('no end card yet')
+            expect((await getCleanupState())[`wireEnd_${end.channelId}_onOpen`]).toBe('true')
+            channelId = end.channelId
+          })
+          // Chrome holds a WebSocket whose upgrade gets no answer for 240 s before it gives up.
+          proxy.holdNextWebSocket()
+          await cutWire()
+          await runServerAction(`wireEnd_${channelId}_close`)
+          await autoRetry(async () => {
+            const { end } = await getResult<WireState>('#wire-state')
+            expect(end?.received).deep.equal([...sentBefore, 'onClose:none'])
+          })
+          // The reconnect it held was the page's: an upgrade the proxy didn't read in one piece would pass it by.
+          expect(proxy.heldWebSockets()).toBe(1)
+        } finally {
+          await proxy.close()
+        }
+      })
   }
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {
     test('channel: a 1 MB message the server sends at 1 Mbit/s as the page upgrades from SSE to WebSocket arrives, and the page moves to the WebSocket without opening another SSE stream', async () => {
       await navigate(`${getServerUrl()}/channel`)
       let sseStreams = 0
@@ -583,11 +615,10 @@ function testWire(isDev: boolean) {
     test(`channel: the server lets go of a channel the page closed ${when}`, async () => {
       await navigate(`${getServerUrl()}/channel`)
       await page.click(`#${button}`)
-      let channelId = ''
-      await autoRetry(async () => {
+      const channelId = await autoRetry(async () => {
         const { release } = await getResult<WireState>('#wire-state')
-        expect(release!.close).toBe('0')
-        channelId = release!.channelId
+        expect(release?.close).toBe('clean')
+        return defined(release, 'the release row').channelId
       })
       // Well within reconnectTimeout (60 s), which the server waits for a page that is away.
       await autoRetry(
@@ -601,13 +632,19 @@ function testWire(isDev: boolean) {
     })
   }
 
-  test('channel: a page that opened and closed 4,200 channels on one connection opens the next', async () => {
+  test('channel: a page that opened and closed 4,200 channels on one connection, each close acknowledged, opens the next', async () => {
     await navigate(`${getServerUrl()}/channel`)
+    const connections = countConnections()
     await page.click('#wire-many')
     await autoRetry(async () => {
       const { many } = await getResult<WireState>('#wire-state')
       expect(many).deep.equal({ closed: 4_200, next: 'open' })
     })
+    // At most the one it opened for them: a page that upgrades opens its WebSocket beside its first SSE stream.
+    const opened = connections.stop()
+    if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).length === 1) {
+      expect(opened).lessThanOrEqual(1)
+    }
   })
 
   test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, every close is acknowledged on both ends, and what the page sends on a kept one as each opens arrives', async () => {
@@ -625,7 +662,7 @@ function testWire(isDev: boolean) {
     )
   })
 
-  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
     test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
       await navigate(`${getServerUrl()}/channel`)
       await holdNextSseWire()
@@ -760,7 +797,7 @@ function testWireSlowPing() {
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
         expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
-        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('0')
+        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('clean')
       })
     } finally {
       await proxy.close()
@@ -825,5 +862,184 @@ function testWireShortReconnect() {
     // Past the 2 s the server waits for the page.
     await new Promise((resolve) => setTimeout(resolve, 3_000))
     await expectServerRuns()
+  })
+}
+
+/** What the page's upload and event stream did once the frame went: when each settled, and how, in ms from the frame. */
+type UploadEnd = {
+  sentAt: number | null
+  upload: { at: number; how: string } | null
+  stream: { at: number; how: string } | null
+}
+declare global {
+  interface Window {
+    uploadEnd?: UploadEnd
+    sendUnreadableOnUpload?: () => boolean
+    /** The kind of each request the page made, in order. */
+    requestKinds?: RequestKind[]
+    /** Resolves once the browser may send the upload the page is about to make. */
+    beforeUpload?: () => Promise<void>
+  }
+}
+
+type RequestKind = 'open' | 'upload' | 'post'
+
+/** For `addInitScript`: `window.requestKinds` gets the kind of each request the page makes, its SSE opens, streaming
+ *  uploads and batch POSTs; each upload waits for `window.beforeUpload()` where the test exposes it. */
+function watchRequestKinds() {
+  const kinds: RequestKind[] = []
+  window.requestKinds = kinds
+  const fetchPage = window.fetch
+  window.fetch = (input, init) => {
+    const upload = init?.body instanceof ReadableStream
+    kinds.push(upload ? 'upload' : new Headers(init?.headers).get('accept') === 'text/event-stream' ? 'open' : 'post')
+    const ready = upload && window.beforeUpload ? window.beforeUpload() : Promise.resolve()
+    return ready.then(() => fetchPage(input, init))
+  }
+}
+
+/** For `addInitScript`: `window.sendUnreadableOnUpload()` writes a frame of a tag no version has on the page's newest
+ *  streaming upload (packages/telefunc/wire-protocol/wire/tags.ts), after its u32 length; `window.uploadEnd` says how
+ *  the upload and the event stream ended after it. */
+function watchUploadEnd() {
+  const seen: UploadEnd = { sentAt: null, upload: null, stream: null }
+  window.uploadEnd = seen
+  const at = () => Math.round(performance.now() - (seen.sentAt ?? performance.now()))
+  let upload: TransformStreamDefaultController<Uint8Array> | null = null
+  const fetchPage = window.fetch
+  window.fetch = (input, init) => {
+    const body = init?.body
+    if (body instanceof ReadableStream) {
+      const tap = new TransformStream<Uint8Array, Uint8Array>({ start: (controller) => void (upload = controller) })
+      return fetchPage(input, { ...init, body: body.pipeThrough(tap) }).then(
+        (response) => {
+          if (seen.sentAt !== null) seen.upload = { at: at(), how: `answered ${response.status}` }
+          return response
+        },
+        (err: unknown) => {
+          if (seen.sentAt !== null) seen.upload = { at: at(), how: `failed ${String(err)}` }
+          throw err
+        },
+      )
+    }
+    if (new Headers(init?.headers).get('accept') !== 'text/event-stream') return fetchPage(input, init)
+    return fetchPage(input, init).then((response) => {
+      if (response.body === null) return response
+      const reader = response.body.getReader()
+      const tracked = new ReadableStream<Uint8Array>({
+        pull: (controller) =>
+          reader.read().then(
+            ({ done, value }) => {
+              if (!done) return controller.enqueue(value)
+              if (seen.sentAt !== null) seen.stream = { at: at(), how: 'ended' }
+              controller.close()
+            },
+            (err: unknown) => {
+              if (seen.sentAt !== null) seen.stream = { at: at(), how: `failed ${String(err)}` }
+              controller.error(err)
+            },
+          ),
+        cancel: (reason) => {
+          if (seen.sentAt !== null) seen.stream = { at: at(), how: 'cancelled by the page' }
+          return reader.cancel(reason)
+        },
+      })
+      return new Response(tracked, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
+    })
+  }
+  window.sendUnreadableOnUpload = () => {
+    if (upload === null) return false
+    seen.sentAt = performance.now()
+    upload.enqueue(new Uint8Array([0, 0, 0, 3, 0x0f, 0, 0]))
+    return true
+  }
+}
+
+/** Docker lanes on SSE only: there the browser reaches the server over HTTP/2, the only way Chromium streams an upload. */
+function testUploadSessionEnd() {
+  test("channel: over HTTP/2, a session the server ends while the page's streaming upload is open and idle reaches every channel with its cause by the event stream's last event; the upload fails no fetch before it, and the page opens nothing more", async () => {
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('no browser')
+    // A page of its own: its fetch stays wrapped for as long as it lives.
+    const context = await browser.newContext({ ignoreHTTPSErrors: true })
+    try {
+      const own = await context.newPage()
+      await own.addInitScript(watchUploadEnd)
+      const requests: string[] = []
+      let counting = false
+      own.on(
+        'request',
+        (request) => void (counting && requests.push(`${request.method()} ${new URL(request.url()).pathname}`)),
+      )
+      await navigate(`${getServerUrl()}/channel`, undefined, own)
+      await own.click('#wire-upload-refused-open')
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.close).toBe('open')
+      })
+      // The upload idle: the page writes nothing on it meanwhile.
+      await sleep(1_000)
+      counting = true
+      expect(await own.evaluate(() => window.sendUnreadableOnUpload?.() ?? false)).toBe(true)
+      await autoRetry(async () => {
+        const card = await cardOf(own)
+        expect([card?.refused.close, card?.kept.close]).deep.equal([sessionEndedByUnreadable, sessionEndedByUnreadable])
+      })
+      await sleep(1_000)
+      const seen = await own.evaluate(() => window.uploadEnd)
+      if (!seen?.stream) throw new Error('the event stream did not end')
+      // The upload settles, where it does, no sooner than the stream's end, and not as a failed fetch.
+      expect(seen.upload === null || (seen.upload.at >= seen.stream.at && !seen.upload.how.includes('TypeError'))).toBe(
+        true,
+      )
+      expect(requests).deep.equal([])
+    } finally {
+      await context.close()
+    }
+  })
+}
+
+function testUploadAfterNetworkLoss() {
+  test('channel: over HTTP/2, a page whose first streaming upload the network fails, and which loses its wire to it, uploads again on the wire it reconnects on: its sends take no batch POST', async () => {
+    const browser = page.context().browser()
+    if (browser === null) throw new Error('no browser')
+    const context = await browser.newContext({ ignoreHTTPSErrors: true })
+    // The network goes as the page's first upload goes out, and comes back half a second later, as a phone leaving
+    // Wi-Fi: the upload fails to fetch, and so does what the page sends meanwhile, which loses it the wire.
+    let networkLost = false
+    await context.exposeBinding('beforeUpload', async () => {
+      if (networkLost) return
+      networkLost = true
+      await context.setOffline(true)
+      setTimeout(() => void context.setOffline(false), 500)
+    })
+    try {
+      const own = await context.newPage()
+      await own.addInitScript(watchRequestKinds)
+      await navigate(`${getServerUrl()}/channel`, undefined, own)
+      await own.click('#wire-upload-refused-open')
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.close).toBe('open')
+      })
+      await sleep(3_000)
+      const before = (await own.evaluate(() => window.requestKinds?.length)) ?? 0
+      for (let i = 0; i < 10; i++) {
+        await own.click('#wire-upload-refused-send-kept')
+        await sleep(300)
+      }
+      await autoRetry(async () => {
+        expect((await cardOf(own))?.kept.sent).toBe(10)
+      })
+      const kinds = (await own.evaluate(() => window.requestKinds)) ?? []
+      // What the page sent from its second open on: the wires it reconnected on.
+      const second = kinds.indexOf('open', kinds.indexOf('open') + 1)
+      const reopened = second === -1 ? [] : kinds.slice(second)
+      expect([networkLost, reopened.includes('upload'), kinds.slice(before)]).deep.equal([true, true, []])
+    } finally {
+      await context.close()
+    }
   })
 }

@@ -15,6 +15,7 @@ export {
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
+  reconnectAtFullDelay,
   withPacedLink,
   expectServerError,
   getResult,
@@ -37,6 +38,7 @@ export {
   setServerRuntime,
   canCutWire,
   REDIS_TOOK_REFUSED_KEY,
+  defined,
 }
 
 import { page, getServerUrl, expectLog, autoRetry } from '@brillout/test-e2e'
@@ -188,7 +190,17 @@ async function serverHeapUsed(): Promise<number> {
 async function serverArrayBuffers(): Promise<number> {
   await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
   const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
-  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
+  const answer: unknown = await resp.json()
+  if (
+    !(
+      typeof answer === 'object' &&
+      answer !== null &&
+      'arrayBuffers' in answer &&
+      typeof answer.arrayBuffers === 'number'
+    )
+  )
+    throw new Error('Expected `{ arrayBuffers }`')
+  return answer.arrayBuffers
 }
 
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {
@@ -300,6 +312,14 @@ function playgroundOutputs(): string[] {
  *
  * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
+/** The page's reconnects wait the whole of each delay their random part is drawn from, 500 ms the first, until it
+ *  navigates: a card that publishes while the page is away keeps it away that long, whatever the draw. */
+async function reconnectAtFullDelay() {
+  await page.evaluate(() => {
+    Math.random = () => 1 - Number.EPSILON
+  })
+}
+
 async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
   for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
     const lastAttempt = attempt === NAVIGATE_ATTEMPTS
@@ -351,16 +371,19 @@ async function retryOnNetworkChange(attempt: (cut: () => boolean) => Promise<voi
 }
 
 /** Loads the channel page through a proxy that paces its connections as `link`, then runs `run`. */
-async function withPacedLink(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<void>) {
+async function withPacedLink<T>(link: Parameters<BlackHoleProxy['pace']>[0], run: () => Promise<T>): Promise<T> {
   const proxy = await startBlackHoleProxy(getServerUrl())
   try {
     await navigate(`${proxy.url}/channel`)
     proxy.pace(link)
-    await run()
+    return await run()
   } finally {
     // The page leaves before the proxy closes, which would cut its connections.
-    await page.goto('about:blank')
-    await proxy.close()
+    try {
+      await page.goto('about:blank')
+    } finally {
+      await proxy.close()
+    }
   }
 }
 
@@ -384,6 +407,12 @@ function isTransientNetworkError(err: unknown): boolean {
   // bounce as transient too, so the navigation still gets retried.
   if (message.includes('chrome-error://chromewebdata')) return true
   return transientNetworkErrors.some((code) => message.includes(code))
+}
+
+/** `value`, once the page has shown it: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
 }
 
 async function getResult<T = any>(selector: string): Promise<T> {

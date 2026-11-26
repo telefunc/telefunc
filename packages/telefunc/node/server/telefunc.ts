@@ -1,4 +1,4 @@
-export { serve, serveNode, telefunc }
+export { serve, serveNode, serveRuntimeRequest, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
@@ -7,15 +7,28 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
+import { noTransportEvidence, socketShowsClientLeft, type ClientLeft } from './runTelefunc/clientLeft.js'
+import { noUpgrades, upgradesOfSocketServer, type TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 
 type HttpRequestResolved = {
   request: Request
   /** Node `Readable` source for the request body, when the entry adapter has one
    *  (currently: `serve/node.ts` passes its `IncomingMessage`). Downstream body
-   *  consumers prefer this over `request.body` to skip Node's webstreams overhead.
+   *  consumers prefer this over `request.body` to skip Node's webstreams overhead,
+   *  and are then its one reader: `request.body` reads it only once something reads it.
    *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
   readable?: Readable
   context?: Telefunc.Context
+  /** Whether a failed read of the body is the client leaving, on the evidence of the server that received the request. */
+  clientLeft: ClientLeft
+  /** Aborts once the client left, and only then, on the same evidence: from the answer on, a read of the body may not end
+   *  by itself where its client leaves. */
+  clientGone: AbortSignal
+  /** Whether the server that received the request takes WebSocket upgrades. */
+  takesUpgrades: TakesUpgrades
+  /** Called once the request's body is read, or, where it streams for as long as the call's channels live, once that
+   *  stream opens: from then on, telefunc alone ends the request. */
+  onBodyRead?: () => void
 }
 
 type HttpRequest =
@@ -86,6 +99,18 @@ async function serveNode(
   return httpResponse
 }
 
+/** `serve()` for the adapters handed a `Request` with what its server shows: how its client left (`Bun.serve`,
+ *  `Deno.serve`), whether it takes WebSocket upgrades (those two, a Durable Object, and on Node the server
+ *  `serve({ request })` runs on), and what it does once the body is read (`Bun.serve`). */
+async function serveRuntimeRequest(
+  httpRequest: Extract<HttpRequest, { request: Request }>,
+  server: Pick<HttpRequestResolved, 'clientLeft' | 'clientGone' | 'takesUpgrades' | 'onBodyRead'>,
+): Promise<HttpResponse> {
+  assertHttpRequest(httpRequest, 1)
+  assertRequestSignalFlag()
+  return runTelefunc({ request: httpRequest.request, context: httpRequest.context, ...server })
+}
+
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   // TO-DO/next-major-release: remove
@@ -100,19 +125,34 @@ async function resolveHttpRequest(
   response?: Writable,
 ): Promise<HttpRequestResolved & { unwatch?: () => void }> {
   if ('request' in httpRequest) {
-    return { request: httpRequest.request, context: httpRequest.context }
+    // A `Request` handed over as it is: its signal says its client left, as the Fetch standard has it.
+    return {
+      request: httpRequest.request,
+      context: httpRequest.context,
+      clientLeft: noTransportEvidence,
+      clientGone: httpRequest.request.signal,
+      takesUpgrades: noUpgrades,
+    }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
-    const { request, unwatch } = await nodeReadableToWebRequest(
+    const { request, unwatch, clientGone } = nodeReadableToWebRequest(
       httpRequest.readable,
       url,
       httpRequest.method,
       httpRequest.headers,
       response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
+    return {
+      request,
+      readable: httpRequest.readable,
+      context: httpRequest.context,
+      clientLeft: socketShowsClientLeft(httpRequest.readable),
+      clientGone,
+      takesUpgrades: upgradesOfSocketServer(httpRequest.readable),
+      unwatch,
+    }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request(url, {
@@ -120,7 +160,13 @@ async function resolveHttpRequest(
     body: httpRequest.body,
     headers: normalizeHeaders(httpRequest.headers),
   })
-  return { request, context: httpRequest.context }
+  return {
+    request,
+    context: httpRequest.context,
+    clientLeft: noTransportEvidence,
+    clientGone: request.signal,
+    takesUpgrades: noUpgrades,
+  }
 }
 
 function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {

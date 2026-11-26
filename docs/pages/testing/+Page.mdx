@@ -18,7 +18,7 @@ test('onHello', async () => {
 
 ## Providing context
 
-If a telefunction reads <Link href="/getContext">`getContext()`</Link> (e.g. to get the logged-in user), provide the context in your test setup with <Link href="/provideTelefuncContext"><code>provideTelefuncContext()</code></Link> before calling it:
+If a telefunction uses <Link href="/getContext">`getContext()`</Link> (e.g. to get the logged-in user), you can provide the `context` object in your test setup using <Link href="/provideTelefuncContext"><code>provideTelefuncContext()</code></Link>:
 
 ```ts
 // Team.telefunc.test.ts
@@ -28,8 +28,9 @@ import { provideTelefuncContext } from 'telefunc'
 import { onJoinTeam } from './Team.telefunc'
 
 test('rejects a non-member of the team', async () => {
-  provideTelefuncContext({ user: { id: 1, teams: [] } })
-  await expect(onJoinTeam('acme')).rejects.toThrow() // throws Abort()
+  const context = { user: { id: 1, teams: [] } }
+  const joining = provideTelefuncContext(context, () => onJoinTeam('acme'))
+  await expect(joining).rejects.toThrow() // throws Abort()
 })
 ```
 

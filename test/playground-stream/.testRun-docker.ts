@@ -17,6 +17,10 @@ import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRedisReconnect } from './pages/publish/redis-e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
+import { testUploadRefusal } from './pages/channel/upload-refusal-e2e-test'
+import { testSessionEnd } from './pages/channel/session-end-e2e-test'
+import { testUploadAfterNetworkLoss, testUploadSessionEnd } from './pages/channel/wire-e2e-test'
+import { parseChannelTransports } from './channelTransports'
 
 // Caddy serves https://localhost:8443 with its own internal CA — skip cert validation.
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
@@ -32,7 +36,8 @@ function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): bo
   }
 
   run(command, {
-    serverUrl: 'https://localhost:8443',
+    // Where the browser reaches Caddy: elsewhere than 8443 where the host port is Docker's to assign (compose.yaml).
+    serverUrl: process.env.TELEFUNC_DOCKER_SERVER_URL ?? 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
     additionalTimeout,
     tolerateExitCode: [130],
@@ -128,6 +133,12 @@ function testRunDocker() {
   testPublish(false, true)
   testRedisReconnect()
   testRefIdentity()
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
+    testUploadRefusal()
+    testUploadSessionEnd()
+    testUploadAfterNetworkLoss()
+  }
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testSessionEnd()
 }
 
 // `docker info` fails both when the CLI is missing and when the daemon is not running;

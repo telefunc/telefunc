@@ -11,6 +11,14 @@ import {
   sleep,
   expectServerError,
 } from '../../e2e-utils'
+import { parseChannelTransports } from '../../channelTransports'
+import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
+
+/** Whether a WebSocket message carries a RECONCILED, alone or among the frames of a message of several. */
+function carriesReconciled(message: Buffer): boolean {
+  return Array.from(messageFrames(new Uint8Array(message)), (frame) => frame[0]).includes(TAG.RECONCILED)
+}
 
 function testClose(inDocker = false) {
   for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
@@ -117,7 +125,7 @@ function testClose(inDocker = false) {
     })
   })
 
-  test('close: a page that reloads ends its open channel on the server at once', async () => {
+  test('close: a page that reloads ends its open channel on the server at once, with ChannelPageLeftError', async () => {
     await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
     await page.click('#test-keep-channel')
@@ -127,14 +135,41 @@ function testClose(inDocker = false) {
     await page.reload()
     await autoRetry(
       async () => {
-        expect((await getCleanupState()).keptChannel).toBe('none')
+        expect((await getCleanupState()).keptChannel).toBe('ChannelPageLeftError')
       },
       { timeout: 3_000 },
     )
   })
 
-  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '[]').join() === 'sse,ws') {
-    test('close: a page that reloads while its connection moves to a WebSocket ends its open channel on the server at once', async () => {
+  test("close: a tab closed while the server's close() waits for its cleanup ends that close() with ChannelPageLeftError", async () => {
+    await resetCleanupState()
+    const browser = page.context().browser()
+    if (!browser) throw new Error('The page runs in no browser to open a tab in')
+    const context = await browser.newContext()
+    try {
+      const tab = await context.newPage()
+      try {
+        await navigate(`${getServerUrl()}/close`, undefined, tab)
+        await tab.click('#test-channel-the-server-closes')
+        await autoRetry(async () => {
+          expect((await getCleanupState()).channelTheServerCloses).toBe('closing')
+        })
+      } finally {
+        await tab.close({ runBeforeUnload: true })
+      }
+      await autoRetry(
+        async () => {
+          expect((await getCleanupState()).channelTheServerCloses).toBe('ChannelPageLeftError')
+        },
+        { timeout: 3_000 },
+      )
+    } finally {
+      await context.close()
+    }
+  })
+
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse,ws') {
+    test('close: a page that reloads while its connection moves to a WebSocket ends its open channel on the server at once, with ChannelPageLeftError', async () => {
       await navigate(`${getServerUrl()}/close`)
       await resetCleanupState()
       // Its POSTs are answered a second late, as on a slow network: the server moves the channel to the WebSocket
@@ -153,7 +188,7 @@ function testClose(inDocker = false) {
       const moved = new Promise<void>((resolve) => (onMoved = resolve))
       const onWebSocket = (ws: WebSocket) => {
         // RECONCILED: the server moved the page's channels to this WebSocket.
-        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && payload[0] === 0x05 && onMoved())
+        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && carriesReconciled(payload) && onMoved())
       }
       page.on('websocket', onWebSocket)
       try {
@@ -166,7 +201,7 @@ function testClose(inDocker = false) {
       await page.reload()
       await autoRetry(
         async () => {
-          expect((await getCleanupState()).keptChannel).toBe('none')
+          expect((await getCleanupState()).keptChannel).toBe('ChannelPageLeftError')
         },
         { timeout: 3_000 },
       )

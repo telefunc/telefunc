@@ -10,6 +10,7 @@ import {
   onCloseStream,
   onCloseChannel,
   onKeptChannel,
+  onChannelTheServerCloses,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -97,7 +98,7 @@ function Close() {
           let channelCloseClean: boolean | null = null
           const channelClosed = new Promise<void>((resolve) => {
             channel.onClose((err) => {
-              channelCloseClean = err === undefined
+              channelCloseClean = err === null
               resolve()
             })
           })
@@ -118,6 +119,19 @@ function Close() {
         }}
       >
         Channel: keep it open
+      </button>
+
+      <button
+        id="test-channel-the-server-closes"
+        onClick={async () => {
+          setResult('')
+          const channel = await onChannelTheServerCloses()
+          // A cleanup that is still running when the user closes the tab.
+          channel.onClose(() => new Promise(() => {}))
+          setResult(JSON.stringify({ method: 'the server closes the channel' }))
+        }}
+      >
+        Channel: the server closes it
       </button>
 
       <button
@@ -303,7 +317,7 @@ function Close() {
           let channelCloseClean: boolean | null = null
           const channelClosed = new Promise<void>((resolve) => {
             channel.onClose((err) => {
-              channelCloseClean = err === undefined
+              channelCloseClean = err === null
               resolve()
             })
           })

@@ -1,3 +1,4 @@
+import { ATTACHABLE_NOW } from './ServerChannel.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { config } from '../../../node/server/serverConfig.js'
 import { ServerBroadcastEnd } from './ServerBroadcastEnd.js'
@@ -34,7 +35,7 @@ it('holds no more than maxPendingBytes for a page that is away, lossy publishes 
 function awayEnd(): ServerBroadcastEnd {
   const end = new ServerBroadcastEnd()
   end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
-  end._registerChannel()
+  end._registerChannel(ATTACHABLE_NOW)
   const peer = new IndexedPeer({
     sender: {
       send() {},
@@ -47,6 +48,7 @@ function awayEnd(): ServerBroadcastEnd {
       queue: {
         waitingPublishes: () => Number.POSITIVE_INFINITY,
         dropWaitingPublishes() {},
+        dropUngiven: () => 0,
         dropWaitingFrom() {},
       },
     },
@@ -115,7 +117,7 @@ describe.each(Object.entries(PAGES))('to a page that %s', (page, { behindAfter, 
 function pageEnd(behindAfter: number, waiting: number) {
   const end = new ServerBroadcastEnd()
   end.setOwner({ _onPagePublish() {}, _onPagePublishBinary() {} })
-  end._registerChannel()
+  end._registerChannel(ATTACHABLE_NOW)
   const peer = new IndexedPeer({
     sender: {
       send() {},
@@ -128,6 +130,7 @@ function pageEnd(behindAfter: number, waiting: number) {
       queue: {
         waitingPublishes: () => waiting,
         dropWaitingPublishes() {},
+        dropUngiven: () => 0,
         dropWaitingFrom() {},
       },
     },

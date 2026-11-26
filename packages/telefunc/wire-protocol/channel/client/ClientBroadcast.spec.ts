@@ -4,17 +4,21 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHook } from 'node:async_hooks'
+import { getEventListeners } from 'node:events'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 import { decode, encode, type ChannelFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientBroadcast } from './ClientBroadcast.js'
+import { ChannelClosedError } from '../channelErrors.js'
+import { END_CAUSE } from '../endCause.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { BroadcastPublishOptions } from '../channel.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
-const stalledFetch: typeof fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+const stalledFetch: typeof fetch = async () =>
+  new Response(new ReadableStream({ start() {} }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] })
@@ -103,8 +107,8 @@ describe('ClientBroadcast uplink', () => {
     expect(waiting(page)).toEqual([2])
     let closed = false
     void page.close().then(() => (closed = true))
-    const { ix } = (page as any).connection.channels.of(page)
-    page._dispatchFrame(received(encode.closeAck(ix, 1)))
+    const { ix } = (page as any).connection.lifecycle.channels.of(page)
+    page._dispatchFrame(received(encode.closeAck(ix, 0, 1)))
     await vi.advanceTimersByTimeAsync(0)
     expect(closed).toBe(false)
 
@@ -160,41 +164,54 @@ describe('ClientBroadcast delivery', () => {
   })
 })
 
-// One added once its channel ended registers nothing, and its `ready` rejects with what the channel ended with.
+// One added once its channel ended registers nothing, and its `opened` rejects with what the channel ended with.
 describe('a listener added once its channel ended on the page', () => {
   it('of a broadcast whose earlier subscription the server confirmed never takes effect', async () => {
     const page = new ClientBroadcast(channelOptions())
     page.subscribe(() => {})
     page._dispatchFrame(received(encode.wanted(0, 1)))
     page.abort('gone')
-    const closedWith = await page.closed.catch((err: unknown) => err)
-    await expect(page.subscribe(() => {}).ready).rejects.toBe(closedWith)
-    await expect(page.subscribeBinary(() => {}).ready).rejects.toBe(closedWith)
+    const closedWith = await page.closed
+    await expect(page.subscribe(() => {}).opened).rejects.toBe(closedWith)
+    await expect(page.subscribeBinary(() => {}).opened).rejects.toBe(closedWith)
   })
 
   it('of a plain channel never takes effect', async () => {
     const page = new ClientChannel(channelOptions())
     page.abort('gone')
-    const closedWith = await page.closed.catch((err: unknown) => err)
-    await expect(page.listen(() => {}).ready).rejects.toBe(closedWith)
-    await expect(page.listenBinary(() => {}).ready).rejects.toBe(closedWith)
+    const closedWith = await page.closed
+    await expect(page.listen(() => {}).opened).rejects.toBe(closedWith)
+    await expect(page.listenBinary(() => {}).opened).rejects.toBe(closedWith)
+  })
+
+  it('an `onOpen()` callback added to a channel that ended unopened registers nothing on its signal and never runs', async () => {
+    const page = new ClientChannel(channelOptions())
+    page.abort('gone')
+    await page.closed
+    const signal = new AbortController().signal
+    const opened = vi.fn()
+    page.onOpen(opened, { signal })
+    expect({ listeners: getEventListeners(signal, 'abort').length, opened: opened.mock.calls.length }).toEqual({
+      listeners: 0,
+      opened: 0,
+    })
   })
 })
 
-// An app may clean its listeners up in `onClose()`: a listener whose `ready` was pending when the page's broadcast ended
+// An app may clean its listeners up in `onClose()`: a listener whose `opened` was pending when the page's broadcast ended
 // still gets that end, whatever a close callback does after.
 describe("a page's broadcast that ends while a subscriber waits, its `onClose()` removing that subscriber", () => {
   for (const binary of [false, true]) {
-    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`ready\` rejects with the end`, async () => {
+    it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: \`opened\` rejects with the end`, async () => {
       const page = new ClientBroadcast(channelOptions())
       const stop = binary ? page.subscribeBinary(() => {}) : page.subscribe(() => {})
       page.onClose(() => stop())
       page.abort('gone')
-      const ready = await stop.ready.then(
+      const opened = await stop.opened.then(
         () => 'resolved',
         (err: unknown) => err,
       )
-      expect(ready).toBe(await page.closed.catch((err: unknown) => err))
+      expect(opened).toBe(await page.closed)
     })
   }
 })
@@ -203,7 +220,7 @@ describe("a page's broadcast that ends while a subscriber waits, its `onClose()`
 describe("a page's broadcast whose close, asked by the server, times out on an `onClose()` callback's cleanup while a subscriber waits", () => {
   for (const binary of [false, true])
     for (const removes of [false, true]) {
-      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}${removes ? ', the callback removing that subscriber' : ''}: \`ready\` rejects with the end the close times out with`, async () => {
+      it(`${binary ? 'subscribeBinary()' : 'subscribe()'}: ${removes ? 'removed by the callback, its `opened` rejects at the removal with the close, not the end it times out with' : 'still subscribed, its `opened` rejects with the end the close times out with'}`, async () => {
         const page = new ClientBroadcast(channelOptions())
         const stop = binary ? page.subscribeBinary(() => {}) : page.subscribe(() => {})
         page.onClose(() => {
@@ -211,16 +228,19 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
           return new Promise<void>(() => {})
         })
         page._dispatchFrame(received(encode.close(0, 10, 1)))
-        // This file's timers are fake: the close runs out once 10 ms pass.
+        // The server decides: its deadline passes, and its ERROR ends the page's end. This file's timers are fake.
+        setTimeout(() => page._onEnded(END_CAUSE.closeTimedOut.error()), 10)
         await vi.advanceTimersByTimeAsync(10)
-        const ended = await page.closed.catch((err: unknown) => err)
+        const ended = await page.closed
         expect(ended).toMatchObject({ message: 'Channel close timed out' })
-        expect(
-          await stop.ready.then(
-            () => 'resolved',
-            (err: unknown) => err,
-          ),
-        ).toBe(ended)
+        const opened = await stop.opened.then(
+          () => 'resolved',
+          (err: unknown) => err,
+        )
+        if (removes) {
+          expect(opened).toBeInstanceOf(ChannelClosedError)
+          expect(opened).not.toBe(ended)
+        } else expect(opened).toBe(ended)
       })
     }
 })
@@ -286,7 +306,7 @@ it('a call made while the page closes its broadcast before the server confirmed 
   page.abort()
 })
 
-// A `ready` nobody reads makes no promise: subscribers that come and go while the server hasn't confirmed leave nothing.
+// An `opened` nobody reads makes no promise: subscribers that come and go while the server hasn't confirmed leave nothing.
 it("1,000 page subscribers added and removed while the server hasn't confirmed make no promise", () => {
   const page = new ClientBroadcast(channelOptions())
   page.subscribe(() => {})
@@ -359,7 +379,7 @@ function behindUplink() {
   })
   vi.advanceTimersByTime(200)
   ;(page as any).connection.transport.uplink.roundTrips.measured(50)
-  const { channels } = (page as any).connection
+  const { channels } = (page as any).connection.lifecycle
   channels.open(channels.of(page))
   return page
 }
@@ -389,3 +409,83 @@ function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
 function waiting(page: ClientBroadcast): (number | undefined)[] {
   return waitingPublishes(page).flatMap((publish) => (typeof publish === 'string' ? [] : [publish[0]]))
 }
+describe("a page's subscriber a close callback removes before the server confirmed it", () => {
+  for (const method of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${method}(): a callback that awaits its \`opened\` lets the close end gracefully`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const stop = page[method](() => {})
+      page.onClose(async () => {
+        stop()
+        await stop.opened.catch(() => {})
+      })
+      const closed = page.closed
+      page._dispatchFrame(received(encode.close(0, 50, 1)))
+      // The server's verdict once the page said it is done.
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      page._dispatchFrame(received(encode.closeDone(0, 0, 2)))
+      await expect(closed).resolves.toBeNull()
+    })
+  }
+})
+
+// When a waiting `opened` settles around its broadcast's close on the page: at the moment its subscription can no longer
+// take effect, with what is known of the end then.
+describe("a page subscriber's `opened` around its broadcast's close", () => {
+  const outcome = (opened: Promise<void> | undefined) =>
+    Promise.resolve(opened).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    )
+
+  for (const kind of ['subscribe', 'subscribeBinary'] as const) {
+    it(`${kind}(): one removed before the close resolves`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      subscriber()
+      page.abort('gone')
+      expect(await outcome(subscriber.opened)).toBe('resolved')
+    })
+
+    it(`${kind}(): the server's confirmation during the callbacks' cleanup resolves one still subscribed, not one they removed`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const removed = page[kind](() => {})
+      const subscribed = page[kind](() => {})
+      const cleanup = Promise.withResolvers<void>()
+      page.onClose(() => {
+        removed()
+        return cleanup.promise
+      })
+      const removedOutcome = outcome(removed.opened)
+      page._dispatchFrame(received(encode.close(0, 500, 1)))
+      await Promise.resolve()
+      page._dispatchFrame(received(encode.wanted(0, 2)))
+      const subscribedOutcome = await outcome(subscribed.opened)
+      cleanup.resolve()
+      page._dispatchFrame(received(encode.closeDone(0, 0, 2)))
+      await page.closed
+      expect({ removed: await removedOutcome, subscribed: subscribedOutcome }).toEqual({
+        removed: 'Channel is closed',
+        subscribed: 'resolved',
+      })
+    })
+
+    it(`${kind}(): one still subscribed at a forced end rejects with its error`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      page.abort('gone')
+      const ended = await page.closed
+      expect(await subscriber.opened.catch((err: unknown) => err)).toBe(ended)
+    })
+
+    it(`${kind}(): one that resolved stays resolved when its callback removes it`, async () => {
+      const page = new ClientBroadcast(channelOptions())
+      const subscriber = page[kind](() => {})
+      page._dispatchFrame(received(encode.wanted(0, 1)))
+      await subscriber.opened
+      page.onClose(() => subscriber())
+      page.abort('gone')
+      await page.closed
+      expect(await outcome(subscriber.opened)).toBe('resolved')
+    })
+  }
+})

@@ -5,7 +5,7 @@ import { navigate, setServerRuntime } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
-import { testStreaming } from './pages/streaming/e2e-test'
+import { testStreaming, testStreamingRequestContext } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
 import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
@@ -19,6 +19,8 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
 import { testSlowLink } from './pages/channel/slow-link-e2e-test'
+import { testSessionEnd } from './pages/channel/session-end-e2e-test'
+import { parseChannelTransports } from './channelTransports'
 
 /** `additionalTimeout`: how much longer than test-e2e's default a test of the lane may take. */
 function runPlayground(
@@ -71,9 +73,16 @@ function runPlayground(
         // A test dropped an SSE stream's connection (wire-sockets.ts).
         log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+        // upgrade-e2e-test.ts's upgrade from another site's page.
+        log.logText.includes('A WebSocket upgrade from https://another-site.example was refused') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
-        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
+        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed')) ||
+        // function/e2e-test.ts's `GET //` with Upgrade, on Node: Vike 0.4.259 logs a bug of its own for it (vikejs/vike#3357, fixed in Vike 0.4.260).
+        ((cmd === 'pnpm dev' || cmd === 'pnpm preview') &&
+          log.logSource === 'stderr' &&
+          log.logText.includes('[Bug] You stumbled upon a Vike bug') &&
+          log.logText.includes('at logHttpResponse'))
       )
     },
   })
@@ -99,6 +108,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testFileDownload()
 
   testStreaming()
+  testStreamingRequestContext()
 
   testAbort()
 
@@ -110,9 +120,11 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testSlowLink(isDev)
 
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testSessionEnd()
+
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
-  testUpgrade()
+  testUpgrade(isDev)
 
   testFunction(isDev)
 

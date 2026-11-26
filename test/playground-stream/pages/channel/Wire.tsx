@@ -38,13 +38,19 @@ type WireState = {
   /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
   presence: { channelId: string; online: boolean; closed?: string } | null
   /** A channel whose onDisconnect aborts a signal that closes it: the onReconnect callbacks that signal removed and
-   *  that ran anyway, what close() resolved to, and whether `closed` settled. */
+   *  that ran anyway, what close() resolved to ('closed', or the error's name), and whether `closed` settled. */
   closeOnDisconnect: {
     open: boolean
     disconnected: boolean
     reconnects: number
-    close: number | null
+    close: string | null
     closed: boolean
+  } | null
+  /** Two channels on the page's connection, as the server refuses a frame of `refused`'s: how each ended, if it did
+   *  ('open' while it hasn't), and what `kept` sent. */
+  uploadRefused: {
+    refused: { channelId: string; close: string }
+    kept: { channelId: string; sent: number; close: string }
   } | null
 }
 
@@ -52,6 +58,12 @@ const RESUME_COUNT = 256
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
+const KiB = 1024
+/** Nearly all of the page's first credit, then nearly 64 MiB each: from the 6th on, past what one channel holds. */
+const burstSizes = (sends: number) => [2048 * KiB - KiB, ...Array.from({ length: sends - 1 }, () => 65536 * KiB - KiB)]
+/** On a server whose `maxMemory` is 2 MiB: one held, one that waits for the page to confirm it, and one that would carry
+ *  what is held and what waits past `maxMemory`. */
+const PAST_MEMORY_SIZES = [1200 * KiB, 700 * KiB, 200 * KiB]
 const SLOW_LINK_LARGE_BYTES = 4_000_000
 /** Past the 4,096 channels a connection holds at once. */
 const MANY_CHANNELS = 4_200
@@ -73,6 +85,7 @@ function WireDemo() {
     chat: null,
     presence: null,
     closeOnDisconnect: null,
+    uploadRefused: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const burstChannel = useRef<Awaited<ReturnType<typeof onWireBurst>>['channel'] | null>(null)
@@ -103,7 +116,7 @@ function WireDemo() {
   const closeOnDisconnect = useCallback(async () => {
     const { channel } = await onWireConnection()
     closeOnDisconnectChannel.current = channel
-    const seen = { open: false, disconnected: false, reconnects: 0, close: null as number | null, closed: false }
+    const seen = { open: false, disconnected: false, reconnects: 0, close: null as string | null, closed: false }
     const show = () => setState((s) => ({ ...s, closeOnDisconnect: { ...seen } }))
     const controller = new AbortController()
     channel.onReconnect(
@@ -115,7 +128,7 @@ function WireDemo() {
     )
     controller.signal.addEventListener('abort', () => {
       void channel.close().then((close) => {
-        seen.close = close
+        seen.close = close === null ? 'closed' : close.name
         show()
       })
       void channel.closed.then(() => {
@@ -176,7 +189,7 @@ function WireDemo() {
   const resume = useCallback(async () => {
     const { channel, channelId } = await onWireResume(RESUME_COUNT)
     resumeChannel.current = channel
-    const tally = new Tally()
+    const tally = new Tally({ alternating: true })
     const show = () => setState((s) => ({ ...s, resume: { channelId, received: { ...tally.state } } }))
     show()
     channel.listen((message) => {
@@ -193,8 +206,8 @@ function WireDemo() {
     }
   }, [])
 
-  const burstOpen = useCallback(async (sends: number, kind: 'text' | 'binary') => {
-    const { channel, channelId } = await onWireBurst(sends, kind)
+  const burstOpen = useCallback(async (sizes: number[], kind: 'text' | 'binary') => {
+    const { channel, channelId } = await onWireBurst(sizes, kind)
     const received: number[] = []
     let onClose: string | null = null
     const show = () => setState((s) => ({ ...s, burst: { channelId, received: [...received], onClose } }))
@@ -228,7 +241,8 @@ function WireDemo() {
     })
   }, [])
   const endClose = useCallback(async (opts?: { timeout: number }) => {
-    const close = String(await endChannel.current!.close(opts))
+    if (!endChannel.current) throw new Error("Open the end card's channel first")
+    const close = (await endChannel.current.close(opts))?.name ?? 'clean'
     setState((s) => ({ ...s, end: { ...s.end!, close } }))
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
@@ -242,17 +256,19 @@ function WireDemo() {
   // One channel stays open throughout, so the page keeps its connection.
   const many = useCallback(async () => {
     const kept = await onWireOpen()
+    let closed = 0
     for (let opened = 0; opened < MANY_CHANNELS; opened += 100) {
-      await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
+      const closes = await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
+      for (const close of closes) if (close === null) closed++
     }
     const next = await onWireOpen()
     const opens = new Promise<string>((resolve) => {
       next.onOpen(() => resolve('open'))
       next.onClose((err) => resolve(err?.name ?? 'closed'))
     })
-    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: '' } }))
+    setState((s) => ({ ...s, many: { closed, next: '' } }))
     const outcome = await opens
-    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: outcome } }))
+    setState((s) => ({ ...s, many: { closed, next: outcome } }))
     next.close()
     kept.close()
   }, [])
@@ -278,9 +294,9 @@ function WireDemo() {
     for (let n = HELD_OPEN; n < HELD_OPEN + HELD_NEXT; n++) {
       const next = await open(n, () => void kept[0]!.channel.send(`kept ${n}`))
       if (next.first) first++
-      if ((await next.channel.close()) === 0) closed++
+      if ((await next.channel.close()) === null) closed++
     }
-    for (const close of await Promise.all(kept.map(({ channel }) => channel.close()))) if (close === 0) closed++
+    for (const close of await Promise.all(kept.map(({ channel }) => channel.close()))) if (close === null) closed++
     setState((s) => ({ ...s, held: { run, first, closed } }))
   }, [])
 
@@ -300,6 +316,43 @@ function WireDemo() {
     setState((s) => ({ ...s, upload: { ...s.upload!, sent } }))
   }, [])
 
+  const refusedChannels = useRef<{
+    refused: Awaited<ReturnType<typeof onWireUpload>>['channel']
+    kept: Awaited<ReturnType<typeof onWireUpload>>['channel']
+  } | null>(null)
+  const keptSent = useRef(0)
+  // Both open before either sends, so what they send goes on the wire's streaming upload where the page has one.
+  const uploadRefusedOpen = useCallback(async () => {
+    const [refused, kept] = await Promise.all([onWireUpload(), onWireUpload()])
+    await Promise.all([refused.channel.opened, kept.channel.opened])
+    refusedChannels.current = { refused: refused.channel, kept: kept.channel }
+    const ended = (which: 'refused' | 'kept') => (err: unknown) =>
+      setState((s) => {
+        if (!s.uploadRefused) return s
+        const close = err instanceof Error ? err.message : String(err)
+        return { ...s, uploadRefused: { ...s.uploadRefused, [which]: { ...s.uploadRefused[which], close } } }
+      })
+    refused.channel.onClose(ended('refused'))
+    kept.channel.onClose(ended('kept'))
+    setState((s) => ({
+      ...s,
+      uploadRefused: {
+        refused: { channelId: refused.channelId, close: 'open' },
+        kept: { channelId: kept.channelId, sent: 0, close: 'open' },
+      },
+    }))
+  }, [])
+  const uploadRefusedSend = useCallback((which: 'refused' | 'kept') => {
+    const channels = refusedChannels.current
+    if (!channels) return
+    if (which === 'refused') return void channels.refused.send('refused').catch(() => {})
+    void channels.kept.send(textMessage(keptSent.current++)).catch(() => {})
+    const sent = keptSent.current
+    setState((s) =>
+      s.uploadRefused ? { ...s, uploadRefused: { ...s.uploadRefused, kept: { ...s.uploadRefused.kept, sent } } } : s,
+    )
+  }, [])
+
   const release = useCallback(async (when: 'arrived' | 'opened') => {
     const { channel, channelId } = await onWireRelease(RELEASE_COUNT)
     let received = 0
@@ -309,7 +362,7 @@ function WireDemo() {
       }),
     )
     await (when === 'arrived' ? arrived : channel.opened)
-    const close = String(await channel.close())
+    const close = (await channel.close())?.name ?? 'clean'
     setState((s) => ({ ...s, release: { channelId, close } }))
   }, [])
 
@@ -331,13 +384,24 @@ function WireDemo() {
               key={`${kind}-${sends}`}
               id={`wire-burst-open-${kind}-${sends}`}
               type="button"
-              onClick={() => burstOpen(sends, kind)}
+              onClick={() => burstOpen(burstSizes(sends), kind)}
               className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
             >
               Open {kind} burst channel, {sends} large messages
             </button>
           )),
         )}
+        {(['text', 'binary'] as const).map((kind) => (
+          <button
+            key={`${kind}-past-memory`}
+            id={`wire-burst-open-${kind}-past-memory`}
+            type="button"
+            onClick={() => burstOpen(PAST_MEMORY_SIZES, kind)}
+            className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+          >
+            Open {kind} burst channel past a 2 MiB maxMemory
+          </button>
+        ))}
         <button
           id="wire-large"
           type="button"
@@ -449,6 +513,30 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Go online
+        </button>
+        <button
+          id="wire-upload-refused-open"
+          type="button"
+          onClick={uploadRefusedOpen}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open two channels on the page's connection
+        </button>
+        <button
+          id="wire-upload-refused-send-refused"
+          type="button"
+          onClick={() => uploadRefusedSend('refused')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Send on the first
+        </button>
+        <button
+          id="wire-upload-refused-send-kept"
+          type="button"
+          onClick={() => uploadRefusedSend('kept')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Send the second's next message
         </button>
         <button
           id="wire-end-open"

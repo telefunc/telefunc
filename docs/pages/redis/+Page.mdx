@@ -102,15 +102,27 @@ It is `'may-have-run'` when the call may have taken effect, for example when the
 | `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join, at once or at its next heartbeat |
 | `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: a read is safe to call again whatever its `outcome` says. It says `'may-have-run'` only when it found a participant or a room that had lapsed, and the cleanup it started may have taken effect |
 
-While Redis is unreachable, a new subscription's `ready` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
+While Redis is unreachable, a new subscription's `opened` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 
 When a replica takes over as the primary, the rooms on every server catch up to what the new primary holds. Redis replicates asynchronously, so a write the old primary acknowledged can be lost, such as a `Room.updateMeta()` that resolved just before the failover.
 
 A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, it refuses the login (a wrong username or password), or it doesn't run a command the subscription needs, as its operator disabled or renamed it. That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access. While the server is a replica (`READONLY`), as during a failover, a subscription waits until a primary serves it again.
 
-> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error is a `BackendError`, whose message says what Redis refused, with Redis's error code, such as `NOPERM`. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `ready` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
+> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error is a `BackendError`, whose message says what Redis refused, with Redis's error code, such as `NOPERM`. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `opened` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
 
-> A `Broadcast.subscribe()` is removed, and its callback receives nothing more. If its `ready` hadn't resolved, it rejects with a `BackendError`, whose message says what Redis refused. Call `Broadcast.subscribe()` again.
+> A `Broadcast.subscribe()` is removed, and its callback receives nothing more. If its `opened` hadn't resolved, it rejects with a `BackendError`, whose message says what Redis refused. Call `Broadcast.subscribe()` again.
+
+When a publish must wait for a subscription to be active, await its `opened`:
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Broadcast } from 'telefunc'
+
+const subscription = Broadcast.subscribe(key, listener)
+await subscription.opened
+```
 
 > A `publish()` the server makes to a key while its subscription to that key's text messages is new waits for it, and fails with the subscription's refusal where Redis refuses it: the server's own subscribers would miss it. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. A publish made once the failed subscription is over goes out, and so do publishes of the key's other kind and to other keys.
 

@@ -27,6 +27,7 @@ import { disposeBackend, installBackend } from '../../backend/install.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { Broadcast, ServerBroadcast } from '../../channel/server/ServerBroadcast.js'
 import { getChannelMux } from '../../channel/server/ChannelMux.js'
+import { ATTACHABLE_NOW } from '../../channel/server/ServerChannel.js'
 import { installAsyncContext } from '../../../node/server/context/async.js'
 import { onBug } from '../../../node/server/runTelefunc/onBug.js'
 
@@ -499,7 +500,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       const broadcast = new ServerBroadcast<string>({ key: 'room:test' })
       // As `carryChannel` stamps the broadcast a call returns.
       broadcast._end._callRequest = returning
-      getChannelMux().registerChannel(broadcast._end)
+      getChannelMux().registerChannel(broadcast._end, ATTACHABLE_NOW)
       const inEffect = getChannelMux().applyCallWants(call, [
         { channel: broadcast.id, version: 1, text: true, binary: false },
       ])
@@ -536,7 +537,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       w.state.refuse = true
       const { broadcast, inEffect } = brought(w)
       await inEffect
-      expect(await outcome(broadcast.closed)).toBe(REFUSAL)
+      expect((await broadcast.closed)?.cause).toMatchObject({ message: REFUSAL })
     })
   })
 
@@ -560,7 +561,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       state.held = stored.promise
       const remove = inObject(() => Broadcast.subscribe('room:test', () => {}))
       let ready = false
-      void remove.ready.then(() => (ready = true))
+      void remove.opened.then(() => (ready = true))
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(ready).toBe(false)
       stored.resolve()
@@ -609,7 +610,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         void Broadcast.publish('room:test', 'joined')
         return subscriber
       })
-      await subscriber.ready
+      await subscriber.opened
       await vi.waitFor(() => expect(heard).toEqual(['joined']))
       subscriber()
     })
@@ -620,19 +621,19 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, presences, inObject } = worker()
         state.refuse = true
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(first.ready)).toBe(REFUSAL)
+        expect(await outcome(first.opened)).toBe(REFUSAL)
         await new Promise((resolve) => setTimeout(resolve, 0))
         // Each refused first write is released after, which the authority refuses too until it takes it.
         const holds = () => presences.filter(({ op }) => op === 'hold')
         expect(holds()).toHaveLength(1)
         const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(second.ready)).toBe(REFUSAL)
+        expect(await outcome(second.opened)).toBe(REFUSAL)
         expect(holds()).toHaveLength(2)
         first()
         second()
         state.refuse = false
         const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(third.ready)).toBe('resolved')
+        expect(await outcome(third.opened)).toBe('resolved')
         third()
       })
 
@@ -666,7 +667,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await vi.advanceTimersByTimeAsync(0)
         written()
         let ready: unknown = 'pending'
-        subscriber.ready.then(
+        subscriber.opened.then(
           () => (ready = 'resolved'),
           (err: unknown) => (ready = err instanceof Error ? err.cause : err),
         )
@@ -726,7 +727,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         state.fail = failed
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         let ready: unknown = 'pending'
-        subscriber.ready.catch((err: unknown) => (ready = err instanceof Error ? err.cause : err))
+        subscriber.opened.catch((err: unknown) => (ready = err instanceof Error ? err.cause : err))
         // Its first write goes once the authority granted its Durable Object.
         await vi.advanceTimersByTimeAsync(0)
         state.held = undefined
@@ -750,7 +751,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const heard: string[] = []
         const subscriber = inObject(() => Broadcast.subscribe<string>('room:test', (text) => heard.push(text)))
         await vi.advanceTimersByTimeAsync(0)
-        await subscriber.ready
+        await subscriber.opened
         state.refuse = true
         await vi.advanceTimersByTimeAsync(30_000)
         state.refuse = false
@@ -776,7 +777,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const renewals = () => presences.filter((call) => call.op === 'renew').length
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await subscriber.ready
+        await subscriber.opened
         await vi.advanceTimersByTimeAsync(29_000)
         await overloadedPublish(inObject)
         const before = tried.mock.calls.length
@@ -803,7 +804,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { inObject, present, presences } = worker()
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await subscriber.ready
+        await subscriber.opened
         // A publish answered overloaded every 9 s keeps the authority paused from 25 s to 107 s.
         await vi.advanceTimersByTimeAsync(25_000)
         for (let at = 25_000; at < 100_000; at += 9_000) {
@@ -827,7 +828,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         state.held = new Promise((resolve) => setTimeout(resolve, 8_000))
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(8_000)
-        await subscriber.ready
+        await subscriber.opened
         // A publish answered overloaded every 9 s keeps the authority paused from 21 s to 103 s, and the refresh due at
         // 38 s is tried at each pause's end: 40 s, 49 s, and so on to 94 s.
         await vi.advanceTimersByTimeAsync(13_000)
@@ -848,7 +849,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { inObject, presences } = worker()
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await subscriber.ready
+        await subscriber.opened
         await vi.advanceTimersByTimeAsync(29_000)
         await overloadedPublish(inObject)
         await vi.advanceTimersByTimeAsync(2_000)
@@ -867,7 +868,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         state.held = new Promise<void>(() => {})
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         let ready = 'pending'
-        subscriber.ready.then(
+        subscriber.opened.then(
           () => (ready = 'resolved'),
           () => (ready = 'rejected'),
         )
@@ -886,7 +887,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, inObject, present } = worker()
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await subscriber.ready
+        await subscriber.opened
         // Its refreshes fail past the presence's 90 s.
         state.fail = new Error('reset')
         await vi.advanceTimersByTimeAsync(90_000)
@@ -905,7 +906,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, inObject } = worker()
         state.throwAtOnce = new Error('RPC invocation failed')
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(subscriber.ready)).toBe('RPC invocation failed')
+        expect(await outcome(subscriber.opened)).toBe('RPC invocation failed')
         const published = await Promise.race([
           Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).then(() => 'published'),
           new Promise((resolve) => setTimeout(() => resolve('held'), 1_000)),
@@ -919,7 +920,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         const { state, inObject } = worker()
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        await subscriber.ready
+        await subscriber.opened
         state.throwAtOnce = new Error('RPC invocation failed')
         subscriber()
         await vi.waitFor(() =>
@@ -936,7 +937,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           const { state, inObject, present } = worker()
           const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
           await vi.advanceTimersByTimeAsync(0)
-          await left.ready
+          await left.opened
           const written = present('room:test').map(({ member }) => member)
           const acknowledge = Promise.withResolvers<void>()
           state.held = acknowledge.promise
@@ -946,7 +947,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           const back = comesBack ? inObject(() => Broadcast.subscribe('room:test', () => {})) : undefined
           acknowledge.resolve()
           await vi.advanceTimersByTimeAsync(0)
-          await back?.ready
+          await back?.opened
           expect(present('room:test').map(({ member }) => member)).toEqual(comesBack ? written : [])
           back?.()
         })
@@ -958,13 +959,13 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { inObject, sessions } = worker()
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await first.ready
+        await first.opened
         first()
         await vi.advanceTimersByTimeAsync(100_000)
         // Another Durable Object subscribes: its grant drops the first one's.
         const other = inObject(() => Broadcast.subscribe('room:test', () => {}), sessions.second)
         await vi.advanceTimersByTimeAsync(0)
-        await other.ready
+        await other.opened
         const heard: string[] = []
         const back = inObject(() => {
           const back = Broadcast.subscribe<string>('room:test', (text) => heard.push(text))
@@ -972,7 +973,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           return back
         })
         for (let turn = 0; turn < 5; turn++) await vi.advanceTimersByTimeAsync(0)
-        await back.ready
+        await back.opened
         for (let turn = 0; turn < 5; turn++) await vi.advanceTimersByTimeAsync(0)
         expect(heard).toEqual(['joined'])
         back()
@@ -985,7 +986,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         const { state, inObject, present } = worker()
         const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
-        await left.ready
+        await left.opened
         // Its refreshes fail past the presence's 90 s.
         state.fail = new Error('reset')
         await vi.advanceTimersByTimeAsync(90_000)
@@ -1012,7 +1013,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           const { state, inObject, present, presences } = worker()
           const left = inObject(() => Broadcast.subscribe('room:test', () => {}))
           await vi.advanceTimersByTimeAsync(0)
-          await left.ready
+          await left.opened
           const written = present('room:test').map(({ member }) => member)
           const answer = Promise.withResolvers<void>()
           state.held = answer.promise
@@ -1023,7 +1024,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           const back = inObject(() => Broadcast.subscribe('room:test', () => {}))
           answer.resolve()
           await vi.advanceTimersByTimeAsync(0)
-          await back.ready
+          await back.opened
           expect({
             asked: presences.map(({ op }) => (op === 'release' ? 'withdraw' : 'record')).slice(-2),
             present: present('room:test').map(({ member }) => member),
@@ -1040,7 +1041,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
           broadcast.subscribe(() => {})
           return broadcast
         })
-        expect(await outcome(room.closed)).toBe(REFUSAL)
+        expect((await room.closed)?.cause).toMatchObject({ message: REFUSAL })
       })
 
       // A removed subscriber's `ready` keeps what its subscription's start came to.
@@ -1051,7 +1052,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await new Promise((resolve) => setTimeout(resolve, 0))
         remove()
         state.refuse = false
-        expect(await outcome(remove.ready)).toBe(REFUSAL)
+        expect(await outcome(remove.opened)).toBe(REFUSAL)
       })
     })
 
@@ -1062,7 +1063,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await resumeAfter
         const channel = new ServerBroadcast<string>({ key: 'room:test:call' })
         const subscribed = channel.subscribe(() => deliveredIn.push(`${name}'s listener in ${w.delivering.in}`))
-        await subscribed.ready
+        await subscribed.opened
         return channel
       }
       const secondCallStart = Promise.withResolvers<void>()
@@ -1096,11 +1097,11 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       const join = w.inObject(
         () =>
           new ServerBroadcast<string>({ key: 'room:test:join' }).subscribe(() =>
-            joining.resolve(joined.subscribe(() => deliveredIn.push(w.delivering.in)).ready),
+            joining.resolve(joined.subscribe(() => deliveredIn.push(w.delivering.in)).opened),
           ),
         w.session('telefunc-shard-weur-1'),
       )
-      await join.ready
+      await join.opened
       await Broadcast.publish('room:test:join', 'join')
       await await joining.promise
       await joined.publish('hello')

@@ -1,7 +1,7 @@
 export { BackendError }
 export type { BackendErrorCode, BackendCallOutcome }
 
-const backendErrorMark = Symbol.for('telefunc.BackendError')
+import { markErrorClass } from '../../shared/markErrorClass.js'
 
 /** What went wrong with the store, the same for every backend:
  *  - `'unreachable'`: the connection to it failed or closed; it works again once the store is reachable.
@@ -27,9 +27,5 @@ class BackendError extends Error {
     this.code = code
     this.outcome = outcome
   }
-
-  static [Symbol.hasInstance](thing: unknown): thing is BackendError {
-    return typeof thing === 'object' && thing !== null && backendErrorMark in thing
-  }
 }
-Object.defineProperty(BackendError.prototype, backendErrorMark, { value: true })
+markErrorClass(BackendError, 'BackendError')

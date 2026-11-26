@@ -11,25 +11,22 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,  // How long a client may be gone and get its channels back (ms)
-  pingInterval: 5_000,       // How often a client pings; it counts as gone after twice this (ms)
-  maxMemory: '4g',           // The most this server's channels hold for clients, all together (bytes, or a size)
-  connectTtl: 15_000,        // How long a new channel waits for its client, and a call for a subscription it carries (ms)
+  reconnectTimeout: 60_000,  // Hold channels open after disconnect (ms)
+  pingInterval: 5_000,       // Client ping interval (ms)
+  connectTtl: 15_000,        // Wait for client to connect to new channel (ms)
+  allowedOrigins: [],        // Origins of other sites' pages that may open a WebSocket
 }
 ```
 
-> **You rarely need any of these.** A channel that awaits each `send()` before the next builds no backlog, whatever the client does. A publish waits for no subscriber, so a `BroadcastChannel` has <Link href="/channel#backpressure">limits of its own</Link>.
+> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
 
-> - `reconnectTimeout`: a client that comes back within it finds its channels open, and gets the messages held for it. It never gets a `send()` refused past `maxMemory` or the default per-channel limit of 320 MiB, or the `lossy` publishes a `BroadcastChannel` skipped. Past `reconnectTimeout`, its channels close with `NetworkError`. Raise it for clients on bad networks. Lower it to free a gone client's channels sooner.
-> - `pingInterval`: how fast a client that stopped answering counts as gone, which starts its `reconnectTimeout`. Raise it to save a phone's battery. Lower it to notice sooner.
-> - `connectTtl`: a channel your telefunction returns closes if its client doesn't connect to it within this time. A telefunction call that carries a <Link href="/channel#chat-example">broadcast subscription</Link> its client made just before also waits at most this long for it to take effect: past it, that broadcast closes with an error, and the telefunction runs. Raise it for clients on slow networks. Lower it to free unclaimed channels sooner.
-> - `maxMemory`: a number of bytes, or a size such as `'4g'` or `'512m'`. It defaults to a quarter of the memory the process may use, so `'4g'` above is the default of a 16 GB machine. It counts what the server holds, not what clients hold, including what a client sent while your `listen()` callbacks work on it, and a stream's chunks until your telefunction reads them: a client that sends more than fits has that channel closed, or that stream ended, with `ChannelOverflowError`. A channel counts toward it from when its telefunction returns it: what was sent on it before is admitted then, and a `send()` that doesn't fit is refused. Near it, the clients furthest behind a <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> are closed first, with `ChannelOverflowError`. Between two publishes without `lossy`, a `BroadcastChannel` holds only the newest `lossy` one waiting for each client. At it, a `send()` <Link href="/channel#backpressure">is refused</Link>. Lower it to use less memory. Below 128 MiB, it also slows large transfers to and from a distant client.
+> `config.channel.maxMemory` is what all channels together may hold for their clients, in bytes or as a size such as `'512m'`. It defaults to a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare). Channels share this budget as they need it; as it fills, channels holding more than their share are limited first. Each channel also has its own limit, 320 MiB by default. See <Link href="/channel#errors" /> for what a channel past it gets.
 
-> On Cloudflare, `maxMemory` defaults to 64 MiB, as <Link href="/stream/cloudflare">a Durable Object's memory</Link> is limited to 128 MB.
-
-> Telefunc refuses a value that can't work when you assign it: `reconnectTimeout` or `pingInterval` under 1 second, or `maxMemory` under 2 MiB. Assign `config.channel` before your server handles its first request: once a channel exists, a change is refused, as open channels would keep the old values.
-
-> This is the **server-side** `config.channel`, a separate object from the **client-side** <Link href="/transport"><code>config.channel.transports</code></Link> (`telefunc/client`).
+> **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
+> - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
+> - `ChannelOverflowError` → apply backpressure by `await`-ing your `send()`s: the refused send didn't go, and the channel stays open.
+> - Want to use less memory → lower `maxMemory`.
+> - WebSocket for pages on another origin than your server → see <Link href="/transport#websocket" />.
 
 <ConfigWhereServer />
 

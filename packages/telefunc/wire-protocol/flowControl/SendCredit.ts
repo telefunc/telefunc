@@ -122,6 +122,11 @@ class SendCredit {
     this.leastBacklog = Math.min(this.leastBacklog, this.owner.backlogBytes() ?? 0)
   }
 
+  /** Whether credit is left once a frame of `bytes` is counted. */
+  leavesCredit(bytes: number): boolean {
+    return this.limitBytes - this.sentBytes > bytes && this.limitMessages - this.sentMessages > 1
+  }
+
   /** The peer granted no more: of bytes, or of messages. */
   isOutOfCredit(): boolean {
     return this.limitBytes - this.sentBytes <= 0 || this.limitMessages - this.sentMessages <= 0

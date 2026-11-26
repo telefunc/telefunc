@@ -53,7 +53,7 @@ function loneMember(answers: Answers = {}) {
  *  and sends nothing else. `answers` puts a value of its own in the place of a join's or a meta write's answer, and
  *  answers a publish with one. */
 function stubChannel<Notice>(answers: Answers) {
-  const closes: Array<() => void> = []
+  const closes: Array<(err: Error | null) => void> = []
   let onText: ((notice: Notice, info: ChannelPublishInfo) => void) | null = null
   let seq = 0
   const requests: PageRequest[] = []
@@ -85,18 +85,18 @@ function stubChannel<Notice>(answers: Answers) {
     _setSubscribed: () => {},
     _setWantParts: () => {},
     onOpen: () => () => {},
-    onClose: (callback: () => void) => {
+    onClose: (callback: (err: Error | null) => void) => {
       closes.push(callback)
       return () => {}
     },
     onDisconnect: () => () => {},
     onReconnect: () => () => {},
-    close: async (): Promise<1> => 1,
+    close: async () => null,
   }
   async function publish() {
     if (!('publish' in answers)) throw new Error('Unexpected publish')
     return { ok: true, value: answers.publish }
   }
   const deliver = (notice: Notice) => onText?.(notice, { key: 'room', seq: ++seq, timestamp: 0 })
-  return { end, requests, endWire: () => closes.forEach((close) => close()), deliver }
+  return { end, requests, endWire: () => closes.forEach((close) => close(null)), deliver }
 }

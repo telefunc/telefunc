@@ -20,10 +20,12 @@ import {
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
   WIRE_SEND_AHEAD_MIN_BYTES,
+  CHANNEL_TRANSPORT,
 } from '../constants.js'
 import type { PieceRate } from './PieceRate.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, lengthBytes, type PiecesAck } from '../wire/frame.js'
 import { TAG, isPublishBody, isSequencedTag, passesData } from '../wire/tags.js'
+import { HEADER, readTag, readU16 } from '../wire/header.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { assert } from '../../utils/assert.js'
@@ -41,16 +43,29 @@ function announcedNext(last: number, floor: number): number {
   return last === 0 && floor === 0 ? WIRE_PROBE_FIRST_BYTES : Math.max(2 * last, WIRE_ANNOUNCED_MIN_BYTES)
 }
 
+/** The lanes of what isn't a channel's: the frame that ends a wire's data, which goes once nothing else waits, and the
+ *  other wire frames too large to pass what waits. */
+const FIN_LANE = -1
+const CONTROL_LANE = -2
+
 /** The bytes a PIECE and an ANNOUNCE add to what they carry. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 
+/** The rest of a data frame, waiting for headroom: `frame`, from `offset` on. */
+type FrameRest = { frame: Uint8Array<ArrayBuffer>; offset: number }
+
 /** Tracks what a piece sender hands its socket: a page's `ClientHeadroom` or a server's `ServerHeadroom`. */
 interface PieceSenderOwner {
-  /** The sender handed the socket `bytes`, or carried them into its next message; `data` says whether they are data. */
-  handed(bytes: number, data: boolean, copied: boolean): void
+  /** The sender handed or carried `bytes`. A burst's `firstBytes` includes its first piece's header. */
+  handed(bytes: number, data: boolean, copied: boolean, firstBytes?: number): void
   /** The bytes of data the socket may copy now. What goes past them waits, and the owner has it sent. */
   copyRoom?(): number
+  /** The most data the path may hold: a frame past it goes in pieces, one within it waits whole for its room. */
+  window?(): number
+  /** The most copies the socket may hold once the receiver took all it was handed: a frame that copies past it goes in
+   *  pieces, as one past the window does. */
+  copyAllowance?(): number
 }
 
 /** The socket a piece sender hands its messages to: a page's `WebSocket`, a server wire's `TransportSocket`. */
@@ -68,11 +83,13 @@ type PieceSenderOptions = {
   pingInterval: number
   /** The wire's rate record, where the rates this sender measures go. */
   pieceRate: PieceRate
-  /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval goes whole while headroom is
-   *  left, and waits whole if none, so that the socket holds the frame itself and not a copy per piece. */
+  /** `cut`: data is cut to the headroom; `whole`: a frame that crosses within a ping interval and fits the window goes
+   *  whole while headroom is left, and waits whole if none, so that the socket holds the frame itself and not a copy per
+   *  piece; any other goes in pieces. */
   cuts: 'cut' | 'whole'
-  /** Whether a data frame may go ahead of the frames `ahead` of it; without it, data keeps its line. */
-  overtakes?: (frame: Uint8Array, ahead: Iterable<Uint8Array>) => boolean
+  /** Whether what waits for headroom waits in a lane per channel, the lanes taking turns, so that one channel's backlog
+   *  holds up no other's; without it, all of it waits in one line. */
+  lanes?: boolean
   owner: PieceSenderOwner
 }
 
@@ -80,8 +97,9 @@ type PieceSenderOptions = {
  *  page; a frame that could take longer than a ping interval to cross goes in pieces.
  *
  *  Its counters agree between calls:
- *  - `transmittedBytes` counts each byte once, as it joins a message (`countHanded`): handed, gathered or carried,
- *    headers, LENGTH frames and announcements included. It includes `messages.bytes`, and not `waitingBytes`.
+ *  - `transmittedBytes` counts each byte once, as the socket is handed the message holding it (`countHanded`):
+ *    headers, LENGTH frames and announcements included. A frame gathered or carried for the next message is counted only
+ *    once that message goes (`gave`), and a carried one a message handed at once takes along just before it.
  *  - `waitingBytes` is what `rest` has left from its offset, plus every frame in `waiting`.
  *  - `acknowledgedBytes` and `heartbeatBytes` never pass `transmittedBytes`.
  *  - `unacknowledged`, `announcedEnds` and `announcements` are in order of `end`, and each `end` is past
@@ -93,7 +111,7 @@ class PieceSender {
   private readonly pieceRate: PieceRate
   private readonly cutsData: boolean
   private readonly copiesOnSend: boolean
-  private readonly overtakes: PieceSenderOptions['overtakes']
+  private readonly laned: boolean
   private readonly owner: PieceSenderOwner
   /** The bytes of data the socket accepts now: the headroom the current call was given, less what it handed since. */
   private headroom = 0
@@ -106,21 +124,36 @@ class PieceSender {
   private firstAt = 0
   /** The bytes the receiver reported taking in its newest heartbeat. */
   heartbeatBytes = 0
+  /** When the newest acknowledged data arrived, in ms on the receiver's clock, counted from the first data an
+   *  acknowledgement covered. */
+  private peerArrivedAt = 0
+  /** How long the newest acknowledgement took to come back, in ms, up to the clocks' offset. */
+  lastBack = 0
+  /** The shortest time, in ms, an acknowledgement took to come back, up to the clocks' offset: one that waited behind
+   *  no queue on the path. */
+  leastBack = Number.POSITIVE_INFINITY
   /** The bytes handed to the socket, headers and announcements included, counted as the receiver counts them. */
   transmittedBytes = 0
   /** The probe in flight. `end` is the count of bytes handed to the socket when the probe ended; `second` is where
    *  its second piece starts, or null for a non-data frame, which the receiver does not date. */
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for headroom. */
-  private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The frames sent while the rest of a data frame waits, in order; one that may pass it (`passesRest`, `goesAhead`)
-   *  isn't here. */
-  private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
+  private rest: FrameRest | null = null
+  /** The frames that wait for headroom, by lane (`laneOf`), each lane in order; the first lane has the turn. One that
+   *  passes what waits (`passesRest`) isn't here. The rest's lane stays while it waits, empty or not. */
+  private readonly lanes = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
+  /** The lane of the rest, and of the frame being sent. */
+  private restLane = 0
+  /** Whether the frame in pieces handed bytes since its lane's last turn. */
+  private restHanded = false
+  private servingLane = 0
+  /** The lane of the newest publish head: its body, which names no channel, follows it there. */
+  private bodyLane = 0
   /** The bytes waiting for headroom. */
   waitingBytes = 0
-  /** The head that left of a publish whose body, which names no channel, may be the rest or at the front of what waits.
-   *  A frame after that body starts only once the body has left. */
-  private headStarted: Uint8Array<ArrayBuffer> | null = null
+  /** The least headroom that lets a frame waiting for headroom go, as the sender last looked at what waits: `Infinity`
+   *  where none waits for it. The owner looks again once that much is free, not as soon as any is. */
+  headroomNeeded = Number.POSITIVE_INFINITY
   /** The open announcement the current task's frames go behind; a microtask closes it when the task ends. */
   private open: { start: number; at: number; bytes: number } | null = null
   /** The bytes of the newest message it announced. */
@@ -146,21 +179,26 @@ class PieceSender {
   /** Whether `endTask` is queued for this task. */
   private endQueued = false
 
-  constructor({ socket, pingInterval, pieceRate, cuts, overtakes, owner }: PieceSenderOptions) {
+  constructor({ socket, pingInterval, pieceRate, cuts, lanes = false, owner }: PieceSenderOptions) {
     this.socket = socket
     this.pingInterval = pingInterval
     this.pieceRate = pieceRate
     this.cutsData = cuts === 'cut'
     this.copiesOnSend = socket.copiesOnSend === true
-    this.overtakes = overtakes
+    this.laned = lanes
     this.owner = owner
-    this.messages = new SocketMessages(socket)
+    this.messages = new SocketMessages(socket, this.gave)
     this.setWholeUpTo()
   }
 
   /** The bytes of the messages handed to the socket, and of the frames still waiting here. */
   get sentBytes(): number {
-    return this.transmittedBytes + this.waitingBytes
+    return this.transmittedBytes + this.messages.ungivenBytes + this.waitingBytes
+  }
+
+  /** The bytes of the frames this task gathered, and those carried, that go with its next message. */
+  get ungivenBytes(): number {
+    return this.messages.ungivenBytes
   }
 
   /** The bytes of the frames sent that have not reached the socket yet. */
@@ -168,23 +206,49 @@ class PieceSender {
     return this.waitingBytes + this.messages.bytes
   }
 
-  /** The frames waiting behind the rest of a data frame, in order. */
+  /** The frames waiting for headroom, in order: in each lane, a rest none of which went, then those behind it. */
   get waitingFrames(): Iterable<Uint8Array<ArrayBuffer>> {
-    return this.waiting
+    return this.queued()
   }
 
-  /** Removes the frames waiting behind the rest of a data frame that `drops` says go, called on each in order. */
+  private *queued(): Generator<Uint8Array<ArrayBuffer>> {
+    for (const [key, lane] of this.lanes) {
+      const rest = this.ungivenRestOf(key)
+      if (rest !== null) yield rest
+      yield* lane
+    }
+  }
+
+  /** The rest waiting in lane `key`, where the socket has been given no byte of it. */
+  private ungivenRestOf(key: number): Uint8Array<ArrayBuffer> | null {
+    return this.rest !== null && this.restLane === key && this.rest.offset === 0 ? this.rest.frame : null
+  }
+
+  /** Removes the frames waiting for headroom that `drops` says go, called on each in order as `waitingFrames` names them. */
   dropWaiting(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
-    this.waiting.remove((frame) => {
+    const goes = (frame: Uint8Array<ArrayBuffer>) => {
       if (!drops(frame)) return false
       this.waitingBytes -= frame.byteLength
       return true
-    })
+    }
+    for (const [key, lane] of this.lanes) {
+      const rest = this.ungivenRestOf(key)
+      if (rest !== null && goes(rest)) this.rest = null
+      lane.remove(goes)
+      if (lane.length === 0 && !(this.rest !== null && this.restLane === key)) this.lanes.delete(key)
+    }
+  }
+
+  /** Removes the frames of which the socket has been given no byte that `drops` says go, called on each in order: those
+   *  gathered for the next message, a rest none of which went, then those waiting behind it. */
+  dropUngiven(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
+    this.messages.remove(drops)
+    this.dropWaiting(drops)
   }
 
   /** Whether the rest of a data frame waits for headroom. */
   get dataWaits(): boolean {
-    return this.rest !== null
+    return this.rest !== null || this.lanes.size > 0
   }
 
   /** Whether what waits waits for the probe's rate, which comes after its first acknowledgement. */
@@ -211,42 +275,235 @@ class PieceSender {
       this.firstAt = performance.now()
     }
     this.takeCarried()
-    const tag = frame[0]!
+    const tag = readTag(frame)
     // While no announcement is open, a PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
-    if (this.rest === null) return this.start(frame)
-    if (this.passesRest(frame)) return this.pass(frame)
-    if (this.goesAhead(frame)) return this.sendWhole(frame)
-    this.waiting.push(frame)
+    const lane = this.laneOf(frame, tag)
+    // A publish's head goes only with its body, which follows it at once, so that both are admitted as one.
+    if (this.rest === null && this.lanes.size === 0 && !(this.laned && tag === TAG.PUBLISH_TO)) {
+      this.servingLane = lane
+      return this.start(frame)
+    }
+    // A probe's answer waits in its channel's lane (see `laneOf`).
+    if (!(this.laned && tag === TAG.BDP_PING_ACK) && this.passesRest(frame)) return this.pass(frame)
+    this.enqueue(lane, frame)
+    // A sender that cuts data lets go of what waits only as its owner frees headroom.
+    if (!this.cutsData && tag !== TAG.PUBLISH_TO) this.release()
+  }
+
+  /** Whether both frames of a publish fit the next message and the wire has room for them. */
+  canGatherPublish(bytes: number, headroom: number): boolean {
+    const messages = this.messages
+    return (
+      !this.dataWaits &&
+      this.open === null &&
+      this.probe === null &&
+      this.carried.length === 0 &&
+      !messages.atOnce &&
+      messages.bytes + messages.lengthAhead + bytes <= this.gatherUpTo &&
+      messages.ungivenBytes + messages.lengthAhead + bytes <= headroom &&
+      (!this.copiesOnSend || bytes + messages.lengthAhead <= this.copyRoom())
+    )
+  }
+
+  /** Gathers a publish that fits (`canGatherPublish`), in one message with its head. */
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>, headroom: number): void {
+    this.headroom = headroom
+    if (this.sentBytes === 0) {
+      this.firstBytes = HEADER
+      this.firstAt = performance.now()
+    }
+    this.messages.gatherPublish(index, seq, body)
+    this.queueFlush()
+  }
+
+  /** The lane `frame` waits in: its channel's on a sender with lanes, a publish body its head's, anything else last. */
+  private laneOf(frame: Uint8Array<ArrayBuffer>, tag: number): number {
+    if (!this.laned) return 0
+    if (isPublishBody(tag)) return this.bodyLane
+    // A probe's answer goes behind what its channel has waiting, so the probe counts what its window let out.
+    if (tag === TAG.BDP_PING_ACK) return readU16(frame, 1)
+    if (!isSequencedTag(tag)) return tag === TAG.FIN ? FIN_LANE : CONTROL_LANE
+    const ix = readU16(frame, 1)
+    if (tag === TAG.PUBLISH_TO) this.bodyLane = ix
+    return ix
+  }
+
+  private enqueue(key: number, frame: Uint8Array<ArrayBuffer>): void {
+    let lane = this.lanes.get(key)
+    if (lane === undefined) this.lanes.set(key, (lane = new Fifo()))
+    lane.push(frame)
     this.waitingBytes += frame.byteLength
+  }
+
+  /** Lets what waits go as far as the headroom goes, the lanes taking turns: on its turn each hands its oldest frames, a
+   *  publish's head with its body, or the next pieces of the frame it has in pieces, up to one message of the least
+   *  send-ahead, so a lane of small messages moves as fast in bytes as one of large ones. A frame within the window and
+   *  past the headroom keeps the turn till its room frees, so no lane's frame waits forever behind others' smaller ones. */
+  private release(): void {
+    this.passControl()
+    let idle = 0
+    for (const key of this.lanes.keys()) {
+      const lane = this.lanes.get(key)
+      assert(lane !== undefined)
+      const served = this.serveTurn(key, lane)
+      if (served === 'held') return
+      this.lanes.delete(key)
+      if (served === 'went' && key === this.restLane) this.restHanded = false
+      if (lane.length > 0 || (this.rest !== null && this.restLane === key)) this.lanes.set(key, lane)
+      idle = served === 'went' ? 0 : idle + 1
+      // A round where no lane could go: what goes next waits for headroom.
+      if (idle >= this.lanes.size) return
+    }
+  }
+
+  /** The wire's control frames go ahead of the channels' turns as soon as they may pass the data frame in pieces: on its
+   *  turn among the channels, one would wait behind every channel that waits for headroom. */
+  private passControl(): void {
+    const lane = this.lanes.get(CONTROL_LANE)
+    if (lane === undefined) return
+    for (let frame = lane.peek(); frame !== undefined; frame = lane.peek()) {
+      const passes = this.passesRest(frame)
+      const rest = this.rest
+      const left = rest === null ? 0 : rest.frame.byteLength - rest.offset
+      // Past what may go whole, one that crosses within a ping interval at the fastest rate still goes whole ahead of a
+      // frame in pieces with more left than it: behind it, it would wait out all of that.
+      if (!passes && (frame.byteLength >= left || frame.byteLength > this.wholeUpTo * WIRE_PIECE_RATE_MARGIN)) break
+      lane.shift()
+      this.waitingBytes -= frame.byteLength
+      if (passes) this.pass(frame)
+      else this.sendWhole(frame, false)
+    }
+    if (lane.length === 0 && !(this.rest !== null && this.restLane === CONTROL_LANE)) this.lanes.delete(CONTROL_LANE)
+  }
+
+  /** Lane `key`'s turn: units while what it handed is under one message of the least send-ahead. Finishing a frame in
+   *  pieces ends it, so the next lane with a large frame starts that one, instead of this lane its next. */
+  private serveTurn(key: number, lane: Fifo<Uint8Array<ArrayBuffer>>): 'went' | 'passed' | 'held' {
+    const before = this.transmittedBytes + this.messages.ungivenBytes
+    let inPieces = this.rest !== null && this.restLane === key
+    const served = this.serve(key, lane)
+    if (served !== 'went') return served
+    while (lane.length > 0 && this.transmittedBytes + this.messages.ungivenBytes - before < WIRE_SEND_AHEAD_MIN_BYTES) {
+      if (inPieces && this.rest === null) break
+      inPieces = this.rest !== null && this.restLane === key
+      if (this.serve(key, lane) !== 'went') break
+    }
+    return 'went'
+  }
+
+  /** Lane `key`'s unit: what it hands, or whether it passes the turn on or keeps it. */
+  private serve(key: number, lane: Fifo<Uint8Array<ArrayBuffer>>): 'went' | 'passed' | 'held' {
+    this.servingLane = key
+    const rest = this.rest
+    if (rest !== null && this.restLane === key) return this.serveRest(key, rest, lane)
+    const frame = lane.peek()
+    if (frame === undefined) return 'passed'
+    const tag = frame[0]
+    // The frame that ends the wire's data goes last; a frame in pieces keeps the receiver putting it together.
+    if (key === FIN_LANE && (rest !== null || this.lanes.size > 1)) return 'passed'
+    if (rest !== null && (this.cutsData || !isSequencedTag(tag))) return this.cutsData ? 'held' : 'passed'
+    const body = tag === TAG.PUBLISH_TO ? lane.at(1) : undefined
+    const waits = this.unitWaits(frame, body, rest)
+    if (waits !== null) return waits
+    this.handUnit(lane, frame, body, rest)
+    return 'went'
+  }
+
+  /** Lane `key`'s frame in pieces goes on, taking along the body of a publish's head: whether it went, or, blocked,
+   *  whether the lane passes the turn on or keeps it. */
+  private serveRest(key: number, rest: FrameRest, lane: Fifo<Uint8Array<ArrayBuffer>>): 'went' | 'passed' | 'held' {
+    // A wire's control frame keeps the turn while its probe's answer is awaited: the page reads it before any data.
+    if (this.awaitsProbe) return key === CONTROL_LANE ? 'held' : 'passed'
+    const before = this.transmittedBytes + this.messages.ungivenBytes
+    this.rest = null
+    this.waitingBytes -= rest.frame.byteLength - rest.offset
+    if (this.cutsData || rest.offset > 0) this.cut(rest.frame, rest.offset)
+    else this.start(rest.frame)
+    // A publish's head that went takes its body along, so that no other publish goes between them.
+    const body = lane.peek()
+    if (rest.frame[0] === TAG.PUBLISH_TO && this.rest === null && body !== undefined && isPublishBody(body[0])) {
+      this.dequeue(lane, body)
+      this.start(body)
+    }
+    if (this.transmittedBytes + this.messages.ungivenBytes > before) return 'went'
+    // Blocked, it keeps the turn only if it handed nothing since its lane's last turn.
+    return this.restHanded ? 'passed' : 'held'
+  }
+
+  /** Whether the unit of `frame` and the body of its publish waits for room, passing the turn on or keeping it: one that
+   *  will fit keeps it. Past a frame in pieces, `rest`, only what fits goes, and a publish only where that frame is no
+   *  publish's own: else the frame in pieces would take every room that frees ahead of it. */
+  private unitWaits(
+    frame: Uint8Array<ArrayBuffer>,
+    body: Uint8Array<ArrayBuffer> | undefined,
+    rest: FrameRest | null,
+  ): 'passed' | 'held' | null {
+    const sequenced = isSequencedTag(frame[0])
+    const bytes = frame.byteLength + (body?.byteLength ?? 0)
+    const room = this.roomFor(frame)
+    if (rest === null) {
+      return !this.cutsData && sequenced && bytes > room && bytes <= this.mostFor(frame)
+        ? this.holds(bytes, room)
+        : null
+    }
+    const publishes = isPublishBody(rest.frame[0]) || rest.frame[0] === TAG.PUBLISH_TO
+    if (this.open !== null || (body !== undefined && publishes)) return 'passed'
+    if (bytes <= room) return null
+    return sequenced && bytes <= this.mostFor(frame) ? this.holds(bytes, room) : 'passed'
+  }
+
+  /** Hands `frame`, the next of `lane`, and the body of its publish after it: whole past a frame in pieces, `rest`. */
+  private handUnit(
+    lane: Fifo<Uint8Array<ArrayBuffer>>,
+    frame: Uint8Array<ArrayBuffer>,
+    body: Uint8Array<ArrayBuffer> | undefined,
+    rest: FrameRest | null,
+  ): void {
+    this.dequeue(lane, frame)
+    if (rest !== null) this.sendWhole(frame)
+    else this.start(frame)
+    // The head went, whole or in part, so its body follows it before any other lane's publish.
+    if (body === undefined || this.rest?.frame === frame) return
+    this.dequeue(lane, body)
+    if (rest !== null) this.sendWhole(body)
+    else this.start(body)
+  }
+
+  /** Takes `frame` off the front of `lane`: it no longer waits. */
+  private dequeue(lane: Fifo<Uint8Array<ArrayBuffer>>, frame: Uint8Array<ArrayBuffer>): void {
+    lane.shift()
+    this.waitingBytes -= frame.byteLength
+  }
+
+  /** The bytes of data `frame` may take now: the headroom, less what waits to go with this task's message, and where the
+   *  socket keeps a copy, the copy room. */
+  private roomFor(frame: Uint8Array<ArrayBuffer>): number {
+    const room = this.headroom - this.messages.ungivenBytes
+    return this.copiesOnSend || frame.byteLength > this.wholeUpTo ? Math.min(room, this.copyRoom()) : room
+  }
+
+  private window(): number {
+    return this.owner.window?.() ?? Number.POSITIVE_INFINITY
+  }
+
+  /** The most of `frame` the socket may ever take whole now: the window, and where it copies, the copy allowance. One
+   *  past it goes in pieces, so a frame that waits whole always fits once what went is taken. */
+  private mostFor(frame: Uint8Array<ArrayBuffer>): number {
+    const copies = this.copiesOnSend || frame.byteLength > this.wholeUpTo
+    return copies ? Math.min(this.window(), this.owner.copyAllowance?.() ?? Number.POSITIVE_INFINITY) : this.window()
   }
 
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
-    const tag = frame[0]!
-    if (tag === TAG.PUBLISH_TO) this.headStarted = frame
-    else if (!isPublishBody(tag)) this.headStarted = null
+    const tag = readTag(frame)
     if (isSequencedTag(tag) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
       // An open announcement names whole frames.
       return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
     }
     if (this.open === null && !this.announces(frame)) return this.pass(frame)
     if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
-    // Before any rate, a frame too small to probe the path goes behind an announcement only within the headroom.
-    if (this.withinNoRate(frame)) return this.wait(frame, 0)
     this.sendBehindAnnouncement(frame)
-  }
-
-  /** Whether data `frame`, too small to probe, waits for headroom while no rate is measured. */
-  private withinNoRate(frame: Uint8Array<ArrayBuffer>): boolean {
-    const bytes = frame.byteLength
-    return (
-      !this.cutsData &&
-      this.pieceRate.fastest === 0 &&
-      isSequencedTag(frame[0]!) &&
-      bytes <= this.wholeUpTo &&
-      bytes > this.headroom
-    )
   }
 
   private copyRoom(): number {
@@ -265,7 +522,7 @@ class PieceSender {
       this.probe !== null ||
       (this.pieceRate.fastest === 0 &&
         bytes > this.unannouncedUpTo &&
-        (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
+        (bytes > this.wholeUpTo || isSequencedTag(readTag(frame))))
     )
   }
 
@@ -275,53 +532,43 @@ class PieceSender {
     return (
       this.pieceRate.fastest === 0 &&
       this.probe === null &&
-      isSequencedTag(frame[0]!) &&
-      frame.byteLength <= Math.min(WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES, this.headroom)
+      isSequencedTag(readTag(frame)) &&
+      frame.byteLength <=
+        Math.min(
+          WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
+          this.headroom - this.messages.ungivenBytes,
+        )
     )
   }
 
-  /** Hands data `frame` to the socket in one message and takes no rate sample from it: TCP's slow start would make
-   *  the rate read low. */
-  private sendWhole(frame: Uint8Array<ArrayBuffer>): void {
-    this.handGathered()
-    this.countHanded(frame.byteLength, true, this.copiesOnSend)
+  /** Hands `frame` to the socket in one message and takes no rate sample from it: TCP's slow start would make the rate
+   *  read low. */
+  private sendWhole(frame: Uint8Array<ArrayBuffer>, data = true): void {
+    this.give()
+    this.countHanded(frame.byteLength, data, this.copiesOnSend)
     this.messages.hand(frame)
   }
 
   /** Whether `frame` may pass the waiting rest of a data frame: it `passesData` and is small enough to go whole. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
-    return passesData(frame[0]!) && frame.byteLength <= this.wholeUpTo
-  }
-
-  /** Whether `frame` goes ahead of what waits: small, past no open announcement, which counts what follows it, and with
-   *  room for a copy where the socket keeps one. */
-  private goesAhead(frame: Uint8Array<ArrayBuffer>): boolean {
-    return (
-      this.overtakes !== undefined &&
-      this.open === null &&
-      frame.byteLength <= this.wholeUpTo &&
-      !(this.copiesOnSend && this.copyRoom() < frame.byteLength) &&
-      this.overtakes(frame, this.framesAhead())
-    )
-  }
-
-  /** The rest of a data frame, then the frames waiting behind it. */
-  private *framesAhead(): Generator<Uint8Array> {
-    if (this.headStarted !== null) yield this.headStarted
-    yield this.rest!.frame
-    yield* this.waiting
+    return passesData(readTag(frame)) && frame.byteLength <= this.wholeUpTo
   }
 
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
-    if (data && !this.cutsData && this.headroom <= 0) return this.wait(frame, 0)
+    const data = isSequencedTag(readTag(frame))
+    // A frame within the window waits whole for its room; one past it goes in pieces of the room.
+    if (data && !this.cutsData && bytes > this.headroom - this.messages.ungivenBytes) {
+      if (bytes > this.mostFor(frame)) return this.cut(frame, 0)
+      this.needs(bytes + this.messages.ungivenBytes)
+      return this.wait(frame, 0)
+    }
     if (bytes > this.wholeUpTo || (this.pieceRate.fastest > 0 && data && this.cutsData && bytes > this.headroom)) {
       return this.cut(frame, 0)
     }
     if (bytes < this.gatherUpTo) return this.gather(frame, data)
-    this.handGathered()
+    this.give()
     this.countHanded(bytes, data, this.copiesOnSend)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.messages.hand(frame)
@@ -339,8 +586,11 @@ class PieceSender {
     ) {
       messages.flush()
     }
-    this.count(frame, data)
     messages.gather(frame)
+    this.queueFlush()
+  }
+
+  private queueFlush(): void {
     if (this.endQueued) return
     this.endQueued = true
     queueMicrotask(this.endTask)
@@ -352,16 +602,18 @@ class PieceSender {
     if (this.messages.gathered) this.messages.flush()
   }
 
-  /** Counts `frame` as it joins the task's message, after the LENGTH the frame before it needs now. */
-  private count(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
-    const length = this.messages.lengthAhead
+  /** Counts a gathered or carried `frame` as handed as its message goes, after the LENGTH `length` the frame before it
+   *  needs there. */
+  private readonly gave = (bytes: number, tag: number | undefined, length: number): void => {
     if (length > 0) this.countHanded(length, false)
-    this.countHanded(frame.byteLength, data, this.copiesOnSend)
+    this.countHanded(bytes, tag !== undefined && isSequencedTag(tag), this.copiesOnSend)
   }
 
-  /** Before a message that gathers nothing: the frames sent before it go ahead, and those only carried ride on it. */
-  private handGathered(): void {
+  /** Before a message that gathers nothing: the frames sent before it go ahead, and those only carried ride on it,
+   *  counted first. */
+  private give(): void {
     if (this.messages.gathered) this.messages.flush()
+    else this.messages.commit()
   }
 
   /** Hands the socket what it gathered and carries, in one message. */
@@ -376,28 +628,36 @@ class PieceSender {
 
   /** Hands the socket `frame` from `offset` in pieces; data goes only as far as the headroom, and the rest waits. */
   private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
-    this.handGathered()
+    this.give()
     const bytes = frame.byteLength
     const now = performance.now()
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     const copyRoom = data ? this.copyRoom() : Number.POSITIVE_INFINITY
     const headroom = Math.max(0, Math.floor(Math.min(this.headroom, copyRoom, this.largestCut())))
     const end = data ? Math.min(bytes, offset + headroom) : bytes
     // A piece smaller than what the receiver acknowledges at once would cost more than the wait for headroom.
-    if (end - offset < Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)) return this.wait(frame, offset)
+    const least = Math.min(bytes - offset, WIRE_PIECES_ACK_BYTES)
+    if (end - offset < least) {
+      this.needs(least)
+      return this.wait(frame, offset)
+    }
     // An empty piece makes the receiver acknowledge the next two at once. A frame not sent whole needs that: its rate and
     // room come back with acknowledgements, and a page sends none of an unfinished frame unasked. A frame cut only for
     // headroom isn't used to measure the rate.
     const awaitsAck = end < bytes
     if (awaitsAck || (offset === 0 && bytes > this.wholeUpTo)) this.sendEmptyPiece(bytes)
     const size = awaitsAck ? Math.ceil((end - offset) / 2) : Math.max(1, Math.floor(this.wholeUpTo))
-    const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
-    this.countHanded(handed, data, true)
+    const count = Math.ceil((end - offset) / size)
+    const handed = end - offset + count * PIECE_HEADER_BYTES
+    const firstBytes = count > 1 ? size + PIECE_HEADER_BYTES : handed
+    this.countHanded(handed, data, true, firstBytes)
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
       this.messages.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
     }
-    if (end < bytes) this.wait(frame, end)
+    if (end === bytes) return
+    this.wait(frame, end)
+    this.restHanded = true
   }
 
   /** The most data a cut hands: two pieces, each crossing within a ping deadline at the rate data has carried. */
@@ -409,10 +669,10 @@ class PieceSender {
   }
 
   /** Counts `bytes` handed to the socket, of data or not, or carried into the next message. */
-  private countHanded(bytes: number, data: boolean, copied = false): void {
+  private countHanded(bytes: number, data: boolean, copied = false, firstBytes = bytes): void {
     this.transmittedBytes += bytes
     this.headroom -= bytes
-    this.owner.handed(bytes, data, copied)
+    this.owner.handed(bytes, data, copied, firstBytes)
   }
 
   /** Hands the socket the empty piece a frame of `total` bytes starts with. */
@@ -421,15 +681,28 @@ class PieceSender {
     this.messages.hand(encode.piece(total, new Uint8Array(0)))
   }
 
+  /** A frame of `bytes` waits whole for its room: it goes once the headroom is `bytes` past what `room` leaves out. */
+  private holds(bytes: number, room: number): 'held' {
+    this.needs(bytes + this.headroom - room)
+    return 'held'
+  }
+
+  /** What waits goes once the headroom is `headroom`. */
+  private needs(headroom: number): void {
+    this.headroomNeeded = Math.min(this.headroomNeeded, headroom)
+  }
+
   /** `frame` from `offset` waits for headroom. */
   private wait(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     this.rest = { frame, offset }
+    this.restLane = this.servingLane
     this.waitingBytes += frame.byteLength - offset
+    if (!this.lanes.has(this.restLane)) this.lanes.set(this.restLane, new Fifo())
   }
 
   /** Sends `frame` at once behind this task's announcement, first opening one with an ANNOUNCE of 0 bytes if needed. */
   private sendBehindAnnouncement(frame: Uint8Array<ArrayBuffer>): void {
-    this.handGathered()
+    this.give()
     const bytes = frame.byteLength
     const now = performance.now()
     if (this.open === null) {
@@ -450,6 +723,7 @@ class PieceSender {
     if (this.open === null) return
     const { start, at, bytes } = this.open
     this.open = null
+    this.give()
     this.countHanded(ANNOUNCE_BYTES, false)
     this.messages.hand(encode.announce(bytes, 0))
     this.announcements.push({ start, end: this.transmittedBytes, at })
@@ -459,7 +733,7 @@ class PieceSender {
    *  the rest. */
   private sendProbe(frame: Uint8Array<ArrayBuffer>, now: number): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     this.sendEmptyPiece(bytes)
     for (const [at, size] of [
       [0, WIRE_PROBE_FIRST_BYTES],
@@ -473,11 +747,13 @@ class PieceSender {
     const second = data ? this.transmittedBytes - PIECE_HEADER_BYTES - WIRE_PROBE_PAIR_BYTES : null
     this.probe = { end: this.transmittedBytes, second }
     const sent = WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES
+    const open = this.open
+    assert(open)
     if (this.cutsData) {
-      this.open!.bytes += bytes
+      open.bytes += bytes
       return this.sendAnnounced(frame, sent, now)
     }
-    this.open!.bytes += sent
+    open.bytes += sent
     // The rest goes by the rate the probe measures, and what passes it goes outside the announcement.
     this.closeAnnouncement()
     this.wait(frame, sent)
@@ -486,7 +762,7 @@ class PieceSender {
   /** Sends `frame` from `offset` as announced messages, none past what `announcedNext` allows after the one before. */
   private sendAnnounced(frame: Uint8Array<ArrayBuffer>, offset: number, now: number): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor)) {
       this.countHanded(bytes, data, this.copiesOnSend)
       if (acknowledges(bytes)) this.track(bytes, now, false)
@@ -505,7 +781,9 @@ class PieceSender {
     }
     let end = this.transmittedBytes
     const handed = bytes - offset + n * PIECE_HEADER_BYTES
-    this.countHanded(handed, data, true)
+    const firstSize = sizes[0]
+    assert(firstSize !== undefined)
+    this.countHanded(handed, data, true, firstSize + PIECE_HEADER_BYTES)
     if (acknowledges(bytes)) this.track(handed, now, false)
     let at = offset
     for (const size of sizes) {
@@ -548,7 +826,8 @@ class PieceSender {
     // or more at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,
-      Math.max(WIRE_PROBE_FIRST_BYTES, this.pieceRate.floor * pingDeadline(this.pingInterval)),
+      // Pieces go only on a WebSocket.
+      Math.max(WIRE_PROBE_FIRST_BYTES, this.pieceRate.floor * pingDeadline(this.pingInterval, CHANNEL_TRANSPORT.WS)),
     )
     this.gatherUpTo = Math.min(WIRE_GATHER_BYTES, this.pieceRate.fastest > 0 ? this.wholeUpTo : this.unannouncedUpTo)
   }
@@ -582,11 +861,25 @@ class PieceSender {
       this.announcedEnds.shift()
     }
     this.acknowledgedAt = performance.now()
+    this.peerArrivedAt += spanMs
+    this.lastBack = this.acknowledgedAt - heldMs - this.peerArrivedAt
+    if (this.lastBack < this.leastBack) this.leastBack = this.lastBack
     const arrived = this.acknowledgedAt - heldMs
     this.sampleAnnouncements(arrived)
     this.sampleSent(arrived)
     if (probe !== null && this.acknowledgedBytes >= probe.end) this.probe = null
     return true
+  }
+
+  /** When the newest acknowledged data arrived, on this clock: its arrival on the receiver's, moved by the least
+   *  time back. */
+  get arrivedAt(): number {
+    return this.peerArrivedAt + this.leastBack
+  }
+
+  /** What the receiver said it took: by its acknowledgements, or its newest heartbeat where that says more. */
+  get confirmedBytes(): number {
+    return Math.max(this.acknowledgedBytes, this.heartbeatBytes)
   }
 
   /** Raises the floor from the announcements an ack that arrived at `arrived` covers, and drops them. */
@@ -638,30 +931,19 @@ class PieceSender {
 
   /** Sends what waits for headroom, as far as `headroom` goes, and the frames waiting behind it. */
   sendWaiting(headroom: number): void {
-    if (this.rest === null || this.awaitsProbe) return
+    if (!this.dataWaits) return
     this.headroom = headroom
+    this.headroomNeeded = Number.POSITIVE_INFINITY
     this.takeCarried()
-    const { frame, offset } = this.rest
-    this.rest = null
-    this.waitingBytes -= frame.byteLength - offset
-    // A sender that doesn't cut data held the whole frame, so it goes as if sent now.
-    if (this.cutsData || offset > 0) this.cut(frame, offset)
-    else this.start(frame)
-    while (this.rest === null && this.waiting.length > 0) {
-      const next = this.waiting.shift()!
-      this.waitingBytes -= next.byteLength
-      this.start(next)
-    }
+    this.release()
   }
 
-  /** Takes and counts the carried frames, which go in the next message ahead of whatever is sent next. */
+  /** Takes the carried frames, which go in the next message ahead of whatever is sent next. */
   private takeCarried(): void {
     if (this.carried.length === 0) return
     for (const take of this.carried.splice(0)) {
       const frame = take()
-      if (frame === null) continue
-      this.count(frame, false)
-      this.messages.add(frame)
+      if (frame !== null) this.messages.add(frame)
     }
   }
 }
@@ -680,45 +962,124 @@ class SocketMessages {
   lengthAhead = 0
   /** The largest message handed: a browser may count a message in full while sending it. */
   largest = 0
-  private readonly frames: Uint8Array<ArrayBuffer>[] = []
+  private readonly frames: (Uint8Array<ArrayBuffer> | null)[] = []
+  private frameCount = 0
+  /** Each null frame has an index and sequence here, written into the outgoing message by the encoder. */
+  private readonly routes: number[] = []
+  private routeLength = 0
+  /** How many of its first frames are counted as handed: carried frames a message handed at once takes along. */
+  private given = 0
+  /** The bytes of those. */
+  private givenBytes = 0
+  /** Counts a frame it holds as handed, after the LENGTH the frame before it needs: as the socket takes it. */
+  private readonly give: (bytes: number, tag: number | undefined, length: number) => void
   private closed = false
 
-  constructor(socket: PieceSocket) {
+  constructor(socket: PieceSocket, give: (bytes: number, tag: number | undefined, length: number) => void) {
     this.socket = socket
+    this.give = give
+  }
+
+  /** Counts the frames it holds as handed, in order: they go to the socket now, or ride on a message that does. */
+  commit(): void {
+    if (this.given === this.frameCount) return
+    // Carried frames counted for a cut that then waited for headroom stay for the next message, and frames carried
+    // after them join it: it counts from the first not counted, after the LENGTH the frame before it needs.
+    let length = 0
+    for (let i = 0; i < this.frameCount; i++) {
+      const frame = this.frames[i]
+      assert(frame !== undefined)
+      const tag = frame === null ? TAG.PUBLISH_TO : frame[0]
+      if (i >= this.given) this.give(frame === null ? HEADER : frame.byteLength, tag, length)
+      length = tag === undefined ? 0 : lengthBytes(tag)
+    }
+    this.given = this.frameCount
+    this.givenBytes = this.bytes
+  }
+
+  /** The bytes of the frames it holds that aren't counted as handed yet. */
+  get ungivenBytes(): number {
+    return this.bytes - this.givenBytes
+  }
+
+  /** Lets go of the frames it holds that `drops` says go, called on each it hasn't counted, in order: their message
+   *  hasn't gone, so the socket has no byte of them. */
+  remove(drops: (frame: Uint8Array<ArrayBuffer>) => boolean): void {
+    const kept: Uint8Array<ArrayBuffer>[] = []
+    let route = 0
+    for (let i = 0; i < this.frameCount; i++) {
+      let frame = this.frames[i]
+      if (frame === null) {
+        const index = this.routes[route++]
+        const seq = this.routes[route++]
+        assert(index !== undefined && seq !== undefined)
+        frame = encode.publishTo(index, seq)
+      }
+      if (frame !== undefined && (i < this.given || !drops(frame))) kept.push(frame)
+    }
+    if (kept.length === this.frameCount) return
+    this.frames.length = this.frameCount = 0
+    this.routeLength = 0
+    this.bytes = 0
+    this.lengthAhead = 0
+    for (const frame of kept) this.add(frame)
+  }
+
+  private clear(): void {
+    // Keep the slots of an ordinary gathered message. A bigger write releases even the slots.
+    if (this.bytes > WIRE_GATHER_BYTES) this.frames.length = 0
+    else for (let i = 0; i < this.frameCount; i++) this.frames[i] = null
+    this.frameCount = this.routeLength = 0
+    this.given = this.givenBytes = 0
+    this.bytes = 0
+    this.lengthAhead = 0
+    this.gathered = this.atOnce = false
   }
 
   /** Adds `frame`, which the task sent. */
   gather(frame: Uint8Array<ArrayBuffer>): void {
     this.gathered = true
-    if (!isSequencedTag(frame[0]!)) this.atOnce = true
+    if (!isSequencedTag(readTag(frame))) this.atOnce = true
     this.add(frame)
+  }
+
+  gatherPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
+    this.frames[this.frameCount++] = null
+    this.routes[this.routeLength++] = index
+    this.routes[this.routeLength++] = seq
+    this.bytes += this.lengthAhead + HEADER
+    this.lengthAhead = 0
+    this.gather(body)
   }
 
   /** Adds a gathered or carried `frame`, after the LENGTH the frame before it now needs. */
   add(frame: Uint8Array<ArrayBuffer>): void {
-    this.frames.push(frame)
+    this.frames[this.frameCount++] = frame
     this.bytes += this.lengthAhead + frame.byteLength
-    this.lengthAhead = lengthBytes(frame[0]!)
+    this.lengthAhead = lengthBytes(readTag(frame))
   }
 
   /** Hands the socket `message`, with the carried frames riding ahead of it in the same message. */
   hand(message: Uint8Array<ArrayBuffer>): void {
+    // Once the socket closed, what it holds stays unhanded, as it does on `flush`.
+    if (this.closed) return
     // Only carried frames ride a handed message, and their tags fix their bytes, so it needs no LENGTH ahead of it.
-    assert(this.lengthAhead === 0)
-    this.frames.push(message)
+    assert(this.lengthAhead === 0 && this.given === this.frameCount)
+    this.frames[this.frameCount++] = message
+    this.given++
     this.bytes += message.byteLength
+    this.givenBytes = this.bytes
     this.flush()
   }
 
   /** Hands the socket what it holds, in one message. */
   flush(): void {
-    const n = this.frames.length
+    const n = this.frameCount
     if (n === 0 || this.closed) return
-    const message = n === 1 ? this.frames[0]! : encode.message(this.frames, this.bytes)
-    this.frames.length = 0
-    this.bytes = 0
-    this.lengthAhead = 0
-    this.gathered = this.atOnce = false
+    this.commit()
+    const first = this.frames[0]
+    const message = n === 1 && first ? first : encode.message(this.frames, this.bytes, this.routes, n)
+    this.clear()
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.socket.send(message)
   }
@@ -792,6 +1153,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
     this.took += arrival === 'riding' ? bytes + lengthBytes(tag) : bytes
     const announced = arrival === 'alone' && this.paced(bytes, at)
     this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
+    if (tag === TAG.PIECES_ACK_REQ) this.acknowledge()
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of 0 bytes opens an announcement; one naming its bytes closes it. */
@@ -834,6 +1196,11 @@ abstract class PieceReceiver implements AckScheduleOwner {
     return this.received
   }
 
+  /** The tag of the frame not yet whole, once its first bytes came. */
+  get heldTag(): number | undefined {
+    return this.received > 0 ? this.frame[0] : undefined
+  }
+
   /** Takes a piece that arrived at `at`, and returns the frame once its last piece arrived. */
   add(total: number, piece: Uint8Array, at: number): Uint8Array<ArrayBuffer> | null {
     const bytes = piece.byteLength
@@ -844,7 +1211,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
       this.probing = 2
       return null
     }
-    if (this.received === 0) this.data = isSequencedTag(piece[0]!)
+    if (this.received === 0) this.data = isSequencedTag(readTag(piece))
     if (this.received + bytes > this.frame.byteLength) {
       const grown = new Uint8Array(Math.min(total, Math.max(2 * this.frame.byteLength, this.received + bytes)))
       grown.set(this.frame.subarray(0, this.received))

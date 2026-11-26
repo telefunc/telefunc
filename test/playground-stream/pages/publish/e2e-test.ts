@@ -18,6 +18,7 @@ import {
   REDIS_TOOK_REFUSED_KEY,
 } from '../../e2e-utils'
 import { newCDPSession } from '../../../utils'
+import { parseChannelTransports } from '../../channelTransports'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -48,7 +49,7 @@ function consecutive(first: number): number[] {
 }
 
 function testPublish(isDev: boolean, inDocker = false) {
-  const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')
+  const transports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const transport = transports.at(-1)
 
   testSubscribeOrder(inDocker)
@@ -98,15 +99,18 @@ function testPublish(isDev: boolean, inDocker = false) {
     )
   })
 
-  test('broadcast: a slow server messages() loop over a burst published and closed in one task ends with ChannelOverflowError', async () => {
-    await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-burst-then-close')
-    await autoRetry(async () => {
-      const result = await getResult<any>('#publish-result')
-      expect(result.error).toBe('ChannelOverflowError')
-      expect(result.received).lessThan(1000)
+  // In memory only: a publish to Redis awaits the broker, so the burst doesn't go in one task there.
+  if (!inDocker && !process.env.REDIS_URL) {
+    test('broadcast: a slow server messages() loop over a burst published and closed in one task ends with ChannelOverflowError', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-burst-then-close')
+      await autoRetry(async () => {
+        const result = await getResult<{ error: string; received: number }>('#publish-result')
+        expect(result.error).toBe('ChannelOverflowError')
+        expect(result.received).lessThan(1000)
+      })
     })
-  })
+  }
 
   test('broadcast: a messages() loop that keeps up gets every one of 600 awaited publishes of 2 KiB, in order', async () => {
     await navigate(`${getServerUrl()}/publish`)
@@ -652,7 +656,7 @@ function testPublishHold() {
 /** When a page's subscription takes effect. */
 function testSubscribeOrder(inDocker = false) {
   // On SSE alone, over HTTP/1.1, the page holds the POST that carries its subscription (Publish.tsx `holdsPosts()`).
-  const sseOnly = JSON.stringify(JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '["sse"]')) === '["sse"]'
+  const sseOnly = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse'
   const holdsPosts = () => sseOnly && getServerUrl().startsWith('http:')
 
   test('broadcast: a page that subscribes, unsubscribes and subscribes again in one task hears the publish of the call it makes next, in the second listener only, once', async () => {
@@ -668,7 +672,7 @@ function testSubscribeOrder(inDocker = false) {
 
   // On Redis: the Docker suite and a lane with REDIS_URL.
   if (inDocker || process.env.REDIS_URL) {
-    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `ready` rejects", async () => {
+    test("broadcast: a subscription Redis refuses ends its broadcast, so the subscriber's `opened` rejects", async () => {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-refused')
       let refuses = true
@@ -676,7 +680,7 @@ function testSubscribeOrder(inDocker = false) {
         async () => {
           const result = await getResult('#publish-result')
           refuses = result.refusesChannels !== false
-          if (refuses) expect(result).deep.equal({ ready: 'rejected', closed: 'with an error', received: [] })
+          if (refuses) expect(result).deep.equal({ opened: 'rejected', closed: 'with an error', received: [] })
         },
         { timeout: 20_000 },
       )
@@ -734,16 +738,16 @@ function testSubscribeOrder(inDocker = false) {
     }
   })
 
-  test("broadcast: a subscriber's `ready` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `ready` rejects with the error its broadcast ends with first", async () => {
+  test("broadcast: a subscriber's `opened` resolves once the server took its subscription, on SSE not while the server holds the page's POST that carries it; then a publish from outside a telefunction call reaches it; and `opened` rejects with the error its broadcast ends with first", async () => {
     await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-ready')
+    await page.click('#test-broadcast-opened')
     await autoRetry(
       async () => {
         expect(await getResult('#publish-result')).deep.equal({
-          readyWhileHeld: holdsPosts() ? 'pending' : null,
+          openedWhileHeld: holdsPosts() ? 'pending' : null,
           held: holdsPosts() ? 1 : null,
           received: ['from a server action'],
-          abortedReady: 'Abort',
+          abortedOpened: 'Abort',
         })
       },
       { timeout: 20_000 },
