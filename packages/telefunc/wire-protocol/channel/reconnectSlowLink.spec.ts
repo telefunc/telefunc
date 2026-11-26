@@ -157,10 +157,11 @@ test('over a WebSocket, a page that handed 600 kB on a fast link that then drops
     }
     const lead = new ServerChannel<string, string>()
     getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
-    pages.push(new ClientChannel<string, string>({ channelId: lead.id, connection }))
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
     register.mockRestore()
-    await Promise.all([lead.opened, pages[0]!.opened])
+    await Promise.all([lead.opened, leadPage.opened])
     let took = 0
     const all = Promise.withResolvers<void>()
     lead.listenBinary((data) => {
@@ -170,7 +171,7 @@ test('over a WebSocket, a page that handed 600 kB on a fast link that then drops
     const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
     try {
       // 12 s at the floor: a server channel waits `CHANNEL_CONNECT_TTL_MS`, 15 s, for its page.
-      void pages[0]!.sendBinary(new Uint8Array(600_000), { ack: false })
+      void leadPage.sendBinary(new Uint8Array(600_000), { ack: false })
       network.slow()
       const joined = Array.from({ length: 100 }, () => {
         const channel = new ServerChannel<string, string>()
@@ -201,10 +202,10 @@ test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 
       connectionKey: crypto.randomUUID(),
     }
     const [lead, neighbour] = [new ServerChannel<string, string>(), new ServerChannel<string, string>()]
-    for (const channel of [lead, neighbour]) {
-      getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
-      pages.push(new ClientChannel<string, string>({ channelId: channel.id, connection }))
-    }
+    getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    getChannelMux().registerChannel(neighbour, ATTACHABLE_NOW)
+    pages.push(leadPage, new ClientChannel<string, string>({ channelId: neighbour.id, connection }))
     const lifecycle = register.mock.contexts.at(-1)
     register.mockRestore()
     await Promise.all([lead.opened, neighbour.opened, ...pages.map((page) => page.opened)])
@@ -212,7 +213,7 @@ test("over a WebSocket on a link that drops to 400 kbit/s, a page's join behind 
     try {
       network.slow()
       // 10 s up at the floor, ahead of the RECONCILE and of the page's confirmations of what the server sends.
-      void pages[0]!.sendBinary(new Uint8Array(500_000), { ack: false })
+      void leadPage.sendBinary(new Uint8Array(500_000), { ack: false })
       void neighbour.sendBinary(new Uint8Array(1_000_000), { ack: false })
       const joined = Array.from({ length: 10 }, () => {
         const channel = new ServerChannel<string, string>()
@@ -244,14 +245,16 @@ test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages
     }
     const lead = new ServerChannel<string, string>()
     getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
-    pages.push(new ClientChannel<string, string>({ channelId: lead.id, connection }))
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
     register.mockRestore()
-    await Promise.all([lead.opened, pages[0]!.opened])
-    const [byServer, byPage] = [[] as string[], [] as string[]]
+    await Promise.all([lead.opened, leadPage.opened])
+    const byServer: string[] = []
+    const byPage: string[] = []
     const pageGotOne = Promise.withResolvers<void>()
     lead.listen((message) => void byServer.push(message))
-    pages[0]!.listen((message) => {
+    leadPage.listen((message) => {
       byPage.push(message)
       pageGotOne.resolve()
     })
@@ -266,7 +269,7 @@ test('over a WebSocket at 400 kbit/s, a channel that exchanges numbered messages
     for (const channel of joined) void channel.opened.then(() => joinedOpen++)
     const numbers = Array.from({ length: 20 }, (_, n) => String(n + 1))
     for (const n of numbers) {
-      void pages[0]!.send(n)
+      void leadPage.send(n)
       void lead.send(n)
     }
     const lost = vi.spyOn(WireLifecycle.prototype, 'onTransportClosed')
@@ -304,14 +307,15 @@ test("over a WebSocket at 400 kbit/s, a page downloading 1 MB joins 1,000 channe
     }
     const lead = new ServerChannel<string, string>()
     getChannelMux().registerChannel(lead, ATTACHABLE_NOW)
-    pages.push(new ClientChannel<string, string>({ channelId: lead.id, connection }))
+    const leadPage = new ClientChannel<string, string>({ channelId: lead.id, connection })
+    pages.push(leadPage)
     const lifecycle = register.mock.contexts.at(-1)
     register.mockRestore()
-    await Promise.all([lead.opened, pages[0]!.opened])
+    await Promise.all([lead.opened, leadPage.opened])
     const LARGE = 1_000_000
     let unread = LARGE
     const downloaded = Promise.withResolvers<void>()
-    pages[0]!.listenBinary((data) => {
+    leadPage.listenBinary((data) => {
       unread -= data.byteLength
       if (unread === 0) downloaded.resolve()
     })

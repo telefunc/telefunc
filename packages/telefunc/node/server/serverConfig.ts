@@ -242,20 +242,30 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const globalObject = getGlobalObject('node/server/serverConfig.ts', {
+type ServerConfigState = {
+  config: ConfigUser
+  manifestConfig: Record<string, unknown>
+  adapterMaxFrameBytes: number | undefined
+  adapterMaxMemory: number | undefined
+  defaultMaxMemory: number | undefined
+  channelConfigInUse: boolean
+  allowedOrigins: readonly AllowedOrigin[]
+}
+
+const globalObject = getGlobalObject<ServerConfigState>('node/server/serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** The Vite plugin's settings, from the production manifest: kept so they fill again what a later assignment of the app's server code leaves unset. */
   manifestConfig: {} as Record<string, unknown>,
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
   adapterMaxFrameBytes: undefined as number | undefined,
   /** The default of `maxMemory` where the adapter's runtime can't tell what the process may use. */
-  adapterMaxMemory: undefined as number | undefined,
+  adapterMaxMemory: undefined,
   /** The default of `maxMemory` elsewhere: a request reads the config, and this process's memory doesn't change. */
-  defaultMaxMemory: undefined as number | undefined,
+  defaultMaxMemory: undefined,
   /** A channel read `config.channel`, whose values each of its parts then relies on staying as they are. */
   channelConfigInUse: false,
   /** The entries of `config.channel.allowedOrigins`, parsed when it was assigned. */
-  allowedOrigins: [] as readonly AllowedOrigin[],
+  allowedOrigins: [],
 })
 const configState = globalObject.config
 
@@ -391,7 +401,7 @@ function resolveChannelConfig(channel: ChannelConfigUser): ChannelConfigResolved
     pingInterval: channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
     connectTtl: channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
     maxMemory:
-      (channel.maxMemory as number | undefined) ??
+      parseMemorySize(channel.maxMemory) ??
       globalObject.adapterMaxMemory ??
       (globalObject.defaultMaxMemory ??= defaultMaxMemory()),
     maxPendingBytes: channel.maxPendingBytes ?? CHANNEL_HOLD_MAX_BYTES,
@@ -646,9 +656,9 @@ function applyChannelConfig(val: unknown): void {
 /** `value` in bytes: a whole number, or a size such as `'4g'`; null where it is neither. */
 function parseMemorySize(value: unknown): number | null {
   if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null
-  const match = typeof value === 'string' ? /^(\d+(?:\.\d+)?)([kmg])$/i.exec(value) : null
-  if (!match) return null
-  return Math.floor(Number(match[1]) * 1024 ** ('kmg'.indexOf(match[2]!.toLowerCase()) + 1))
+  const [, amount, unit] = (typeof value === 'string' ? /^(\d+(?:\.\d+)?)([kmg])$/i.exec(value) : null) ?? []
+  if (amount === undefined || unit === undefined) return null
+  return Math.floor(Number(amount) * 1024 ** ('kmg'.indexOf(unit.toLowerCase()) + 1))
 }
 
 function applyBroadcastConfig(val: unknown): void {

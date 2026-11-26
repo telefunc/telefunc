@@ -804,7 +804,9 @@ function Streaming() {
           let secondBytes = 0
           for (let i = 0; i < 7; i++) {
             await new Promise((resolve) => setTimeout(resolve, 1000))
-            secondBytes += (await reader.read()).value!.byteLength
+            const { value } = await reader.read()
+            if (value === undefined) throw new Error('the second stream ended early')
+            secondBytes += value.byteLength
           }
           reader.releaseLock()
           secondBytes += await byteCount(second)
@@ -841,7 +843,11 @@ function Streaming() {
       </button>
       <button
         id="test-many-tiny-chunks-cancel"
-        onClick={() => (returnedRef.current as ReadableStreamDefaultReader).cancel()}
+        onClick={() => {
+          const reader = returnedRef.current
+          if (!(reader instanceof ReadableStreamDefaultReader)) throw new Error('no reader of tiny chunks')
+          void reader.cancel()
+        }}
       >
         Cancel the stream of tiny chunks
       </button>

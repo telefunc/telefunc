@@ -198,16 +198,15 @@ const madeSince = (lostAt: number) =>
   ScriptedWebSocket.made.filter((ws) => ws.at >= lostAt).map((ws) => Math.round(ws.at - lostAt))
 
 describe("a page's reconnects", () => {
-  const realWebSocket = globalThis.WebSocket
   beforeEach(() => {
     vi.useFakeTimers()
-    globalThis.WebSocket = ScriptedWebSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ScriptedWebSocket)
   })
   afterEach(() => {
     vi.clearAllTimers()
     vi.useRealTimers()
     vi.restoreAllMocks()
-    globalThis.WebSocket = realWebSocket
+    vi.unstubAllGlobals()
     ScriptedWebSocket.made = []
     ScriptedWebSocket.scripts = []
     ScriptedWebSocket.mostConnecting = 0
@@ -238,17 +237,16 @@ describe("a page's reconnects", () => {
 })
 
 describe("a page's recovery", () => {
-  const realWebSocket = globalThis.WebSocket
   beforeEach(() => {
     vi.useFakeTimers()
-    globalThis.WebSocket = ScriptedWebSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ScriptedWebSocket)
     vi.spyOn(Math, 'random').mockReturnValue(0.9)
   })
   afterEach(() => {
     vi.clearAllTimers()
     vi.useRealTimers()
     vi.restoreAllMocks()
-    globalThis.WebSocket = realWebSocket
+    vi.unstubAllGlobals()
     ScriptedWebSocket.made = []
     ScriptedWebSocket.scripts = []
     ScriptedWebSocket.mostConnecting = 0

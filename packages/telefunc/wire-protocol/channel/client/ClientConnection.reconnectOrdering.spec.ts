@@ -117,9 +117,9 @@ const plainSends: Sends<{ conn: ClientConnection; channel: MuxChannel }> = {
  * Connect, send seq 1, sever the wire (optionally losing seq 1 in flight), send seq 2 while
  * reconnecting, then let the reconnect settle. Returns what the server channel actually received.
  */
-async function runScenario<Page = { conn: ClientConnection; channel: MuxChannel }>(
+async function runScenarioWith<Page>(
   loseSeq1: boolean,
-  sends: Sends<Page> = plainSends as unknown as Sends<Page>,
+  sends: Sends<Page>,
 ): Promise<{ received: unknown[]; wire2Upstream: number[] }> {
   const received: unknown[] = []
   const serverCh = new ServerChannel<(value: unknown) => void, never>()
@@ -239,6 +239,9 @@ async function runScenario<Page = { conn: ClientConnection; channel: MuxChannel 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
 
+/** `runScenarioWith` on the connection of a stub channel. */
+const runScenario = (loseSeq1: boolean) => runScenarioWith(loseSeq1, plainSends)
+
 describe('SSE reconnect preserves client→server seq order (exactly-once)', () => {
   test('an earlier send that survived the wire, then a buffered send → both delivered, in order', async () => {
     const { received } = await runScenario(/* loseSeq1 */ false)
@@ -258,7 +261,7 @@ describe('SSE reconnect preserves client→server seq order (exactly-once)', () 
 
 describe('SSE reconnect with lossy sends from the page', () => {
   test('one lost with the wire goes again; while the page reconnects, a newer one takes the place of the one before it, up to a plain send', async () => {
-    const { received } = await runScenario(/* loseSeq1 */ true, {
+    const { received } = await runScenarioWith(/* loseSeq1 */ true, {
       // A real channel: its connection takes the page's `fetch` as it is made.
       open: (fetchImpl) => {
         vi.stubGlobal('fetch', fetchImpl)

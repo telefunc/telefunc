@@ -79,10 +79,16 @@ class ServerReplay {
     hold(this.holder, body)
   }
 
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent with nothing
-   *  unconfirmed ahead of it waited for the path alone, so its confirmation sets it, also where the path got slower; one
-   *  sent behind others, publishes or frames, only lowers it. */
-  leastConfirmMs = Number.POSITIVE_INFINITY
+  /** The quickest confirmation and the bytes it covered: a lone publish's sets them, any other's only lowers them. */
+  private leastConfirmAtMs = Number.POSITIVE_INFINITY
+  private leastConfirmBytes = 0
+
+  /** The least a publish waits for its page's confirmation, its own transfer aside: `Infinity` before the first. */
+  get leastConfirmMs(): number {
+    if (!Number.isFinite(this.leastConfirmAtMs)) return Number.POSITIVE_INFINITY
+    const rate = this.confirms.rate
+    return rate > 0 ? Math.max(0, this.leastConfirmAtMs - this.leastConfirmBytes / rate) : this.leastConfirmAtMs
+  }
 
   /** Since when its page hasn't confirmed what it holds, across the page's losses of its wire; null while the page
    *  confirms something of it after each. */
@@ -127,10 +133,20 @@ class ServerReplay {
     // Sent before the wire its confirmation came on: its page may have had it long before.
     if (sentAt < this.movedAt) return
     const confirmMs = Math.max(1, performance.now() - sentAt - hold)
-    // One that went alone, or before any least, took a round trip that no rate is in.
-    if (!(publishes === 1 && alone) && this.leastConfirmMs !== Number.POSITIVE_INFINITY)
-      this.confirms.measured((this.confirmedBytes - confirmedBefore) / Math.max(1, confirmMs - this.leastConfirmMs))
-    this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
+    const bytes = this.confirmedBytes - confirmedBefore
+    const lone = publishes === 1 && alone
+    // Both hold the round trip: past the quickest by half its bytes or more, what lies between is the rate.
+    if (
+      !lone &&
+      Number.isFinite(this.leastConfirmAtMs) &&
+      bytes - this.leastConfirmBytes >= this.leastConfirmBytes / 2 &&
+      confirmMs > this.leastConfirmAtMs
+    )
+      this.confirms.measured((bytes - this.leastConfirmBytes) / (confirmMs - this.leastConfirmAtMs))
+    if (lone || confirmMs < this.leastConfirmAtMs) {
+      this.leastConfirmAtMs = confirmMs
+      this.leastConfirmBytes = bytes
+    }
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as

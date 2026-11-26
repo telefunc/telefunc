@@ -26,12 +26,12 @@ import { fakeMuxChannel } from './fakeMuxChannel.fixture.js'
 function createStalledTransport() {
   /** Each downstream opened, which delivers what it is handed until the page cancels it. */
   const downstreams: { deliver(chunk: Uint8Array): void }[] = []
-  const fetchImpl = (async (_url: string, init: RequestInit) => {
-    const headers = (init.headers ?? {}) as Record<string, string>
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    const accept = new Headers(init?.headers).get('Accept')
     let cancelled = false
     const body = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        if (headers.Accept !== 'text/event-stream') return
+        if (accept !== 'text/event-stream') return
         downstreams.push({
           deliver: (chunk) => {
             if (!cancelled) controller.enqueue(chunk)
@@ -43,7 +43,7 @@ function createStalledTransport() {
       },
     })
     return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
-  }) as unknown as typeof fetch
+  }
   return { fetchImpl, downstreams, getSseDownstreamOpens: () => downstreams.length }
 }
 
@@ -112,7 +112,7 @@ describe('SSE reconcile watchdog', () => {
 
     // The first wire's stream still delivers a PONG each second, which says nothing of the second wire.
     const pong = new TextEncoder().encode(`data: ${uint8ArrayToBase64url(encode.pong())}\n\n`)
-    const trickle = setInterval(() => downstreams[0]!.deliver(pong), 1000)
+    const trickle = setInterval(() => defined(downstreams[0], 'the first downstream').deliver(pong), 1000)
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + 2 * CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     clearInterval(trickle)
     expect(downstreams).toHaveLength(3)
@@ -225,16 +225,36 @@ function reconciledFor({ open }: ReconcilePayload) {
   })
 }
 
+/** `value`, which the test must have by now: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
+}
+
+/** The `n`th `ServerSocket` the page opened (0, the first; -1, the last). */
+function socketOf(n: number): ServerSocket {
+  return defined(ServerSocket.made.at(n), `the page's socket ${n}`)
+}
+
+/** The `n`th RECONCILE the page sent on `socket` (0, the first). */
+function reconcileOf(socket: ServerSocket, n: number): ReconcilePayload {
+  return defined(socket.reconciles[n], `RECONCILE ${n}`)
+}
+
+/** The index of the channel the `n`th RECONCILE on `socket` opens first. */
+function openedBy(socket: ServerSocket, n: number): number {
+  return defined(reconcileOf(socket, n).open[0], `a channel in RECONCILE ${n}`).ix
+}
+
 /** How long a live server's upload takes before it has the page's RECONCILE whole. */
 const UPLOAD_MS = 30_000
 
 describe("a WebSocket RECONCILE's deadline", () => {
-  const realWebSocket = globalThis.WebSocket
   afterEach(() => {
     vi.clearAllTimers()
     vi.useRealTimers()
     vi.restoreAllMocks()
-    globalThis.WebSocket = realWebSocket
+    vi.unstubAllGlobals()
     SilentWebSocket.opened = []
     ServerSocket.made = []
     ServerSocket.onReconcile = () => {}
@@ -243,7 +263,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
   /** A page on `ServerSocket`s; `add()` registers one more channel on its connection. Returns the channels' ids too. */
   function page() {
     vi.useFakeTimers()
-    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ServerSocket)
     const options = {
       transports: [CHANNEL_TRANSPORT.WS],
       fetchImpl: createStalledTransport().fetchImpl,
@@ -263,7 +283,9 @@ describe("a WebSocket RECONCILE's deadline", () => {
 
   test('drops a wire whose server sends nothing at its heartbeat deadline, while the socket it replaced still delivers', async () => {
     vi.useFakeTimers()
-    globalThis.WebSocket = SilentWebSocket as unknown as typeof WebSocket
+    // Each reconnect waits nine tenths of its backoff: smaller draws fit a fourth socket in the time this row advances.
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+    vi.stubGlobal('WebSocket', SilentWebSocket)
     ClientConnection.getOrCreate('http://test.local/_telefunc', fakeMuxChannel(), {
       transports: [CHANNEL_TRANSPORT.WS],
       fetchImpl: createStalledTransport().fetchImpl,
@@ -275,7 +297,10 @@ describe("a WebSocket RECONCILE's deadline", () => {
     expect(SilentWebSocket.opened).toHaveLength(2)
 
     // The first socket still delivers a PONG every 500 ms, which says nothing of the second wire.
-    const trickle = setInterval(() => SilentWebSocket.opened[0]!.deliver(encode.pong()), 500)
+    const trickle = setInterval(
+      () => defined(SilentWebSocket.opened[0], 'the first socket').deliver(encode.pong()),
+      500,
+    )
     await vi.advanceTimersByTimeAsync(deadline + 2 * CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     clearInterval(trickle)
     expect(SilentWebSocket.opened).toHaveLength(3)
@@ -300,7 +325,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
         setTimeout(() => socket.deliver(encode.reconcileTaken()), UPLOAD_MS)
       }
       await vi.advanceTimersByTimeAsync(1_000)
-      if (exchange === 'resume') ServerSocket.made[0]!.drop()
+      if (exchange === 'resume') socketOf(0).drop()
       if (exchange === 'join') add()
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_INITIAL_DELAY_MS)
       const lostBefore = lost.mock.calls.length
@@ -314,7 +339,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
 
       await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
       expect(ServerSocket.made.length).toBe(socketsBefore + 1)
-      const [next] = ServerSocket.made.at(-1)!.reconciles
+      const [next] = socketOf(-1).reconciles
       expect(next?.open.map(({ id }) => id).sort()).toEqual([...ids].sort())
       // Before the server named a session, the page names the one it made.
       const firstSession = ServerSocket.made[0]?.reconciles[0]?.sessionId
@@ -327,7 +352,7 @@ describe("a WebSocket RECONCILE's deadline", () => {
     "a message that arrives at the heartbeat's deadline, run %s it: the wire stays, or it drops and the next carries the page's unacknowledged send once",
     async (order) => {
       vi.useFakeTimers()
-      globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+      vi.stubGlobal('WebSocket', ServerSocket)
       ServerSocket.onReconcile = (socket, reconcile) => {
         socket.deliver(encode.reconcileTaken())
         socket.deliver(reconciledFor(reconcile))
@@ -344,12 +369,12 @@ describe("a WebSocket RECONCILE's deadline", () => {
       await vi.advanceTimersByTimeAsync(100)
       void page.send('m')
       await vi.advanceTimersByTimeAsync(100)
-      const [first] = ServerSocket.made
-      first!.answers = false
+      const first = socketOf(0)
+      first.answers = false
       // The PONG at T0 sets the deadline at T0 + 10 s; a timer made before it, for the same time, runs first there.
-      const atDeadline = () => first!.deliver(encode.pong([]))
+      const atDeadline = () => first.deliver(encode.pong([]))
       if (order === 'before') setTimeout(atDeadline, pingDeadline(5_000, CHANNEL_TRANSPORT.WS))
-      first!.deliver(encode.pong([]))
+      first.deliver(encode.pong([]))
       if (order === 'after') setTimeout(atDeadline, pingDeadline(5_000, CHANNEL_TRANSPORT.WS))
       await vi.advanceTimersByTimeAsync(pingDeadline(5_000, CHANNEL_TRANSPORT.WS) + 1)
       expect(lost).toHaveBeenCalledTimes(order === 'before' ? 0 : 1)
@@ -380,18 +405,17 @@ describe("a WebSocket RECONCILE's deadline", () => {
 })
 
 describe("a page's channels on a live WebSocket", () => {
-  const realWebSocket = globalThis.WebSocket
   afterEach(() => {
     vi.clearAllTimers()
     vi.useRealTimers()
-    globalThis.WebSocket = realWebSocket
+    vi.unstubAllGlobals()
     ServerSocket.made = []
     ServerSocket.onReconcile = () => {}
   })
 
   test("while another channel's join waits for its RECONCILED, a channel already open sends and receives on the wire", async () => {
     vi.useFakeTimers()
-    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ServerSocket)
     // The server answers the first RECONCILE at once, and takes the join's without answering it.
     ServerSocket.onReconcile = (socket, reconcile) => {
       socket.deliver(encode.reconcileTaken())
@@ -406,16 +430,16 @@ describe("a page's channels on a live WebSocket", () => {
     const received: string[] = []
     open.listen((message) => void received.push(message))
     await vi.advanceTimersByTimeAsync(100)
-    const [socket] = ServerSocket.made
-    const ix = socket!.reconciles[0]!.open[0]?.ix
+    const socket = socketOf(0)
+    const ix = openedBy(socket, 0)
     const joining = new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.reconciles).toHaveLength(2)
+    expect(socket.reconciles).toHaveLength(2)
 
     void open.send('during')
-    socket!.deliver(encode.text(ix!, '"back"', 1))
+    socket.deliver(encode.text(ix, '"back"', 1))
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.texts).toEqual([1])
+    expect(socket.texts).toEqual([1])
     expect(received).toEqual(['back'])
     expect(ServerSocket.made).toHaveLength(1)
     open.abort()
@@ -424,7 +448,7 @@ describe("a page's channels on a live WebSocket", () => {
 
   test("a channel the server awaited sends what it queued, then what it sends next, in order, once its ATTACH_RESULT comes during another channel's join", async () => {
     vi.useFakeTimers()
-    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ServerSocket)
     // The server answers the first two RECONCILEs at once, the second awaiting its channel, and takes the third without
     // answering it.
     ServerSocket.onReconcile = (socket, reconcile) => {
@@ -439,19 +463,20 @@ describe("a page's channels on a live WebSocket", () => {
     }
     const pages = [new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })]
     await vi.advanceTimersByTimeAsync(100)
+    const awaitedPage = new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection })
+    pages.push(awaitedPage)
+    await vi.advanceTimersByTimeAsync(100)
+    const socket = socketOf(0)
+    const awaited = openedBy(socket, 1)
+    void awaitedPage.send('queued')
     pages.push(new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection }))
     await vi.advanceTimersByTimeAsync(100)
-    const [socket] = ServerSocket.made
-    const awaited = socket!.reconciles[1]!.open[0]?.ix
-    void pages[1]!.send('queued')
-    pages.push(new ClientChannel<string, string>({ channelId: crypto.randomUUID(), connection }))
-    await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.reconciles).toHaveLength(3)
+    expect(socket.reconciles).toHaveLength(3)
 
-    socket!.deliver(encode.attachResult(awaited!, 0))
-    void pages[1]!.send('next')
+    socket.deliver(encode.attachResult(awaited, 0))
+    void awaitedPage.send('next')
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textsOf.get(awaited!)).toEqual(['"queued"', '"next"'])
+    expect(socket.textsOf.get(awaited)).toEqual(['"queued"', '"next"'])
     expect(ServerSocket.made).toHaveLength(1)
     for (const page of pages) page.abort()
   })
@@ -460,7 +485,7 @@ describe("a page's channels on a live WebSocket", () => {
    *  while. */
   function pageOf() {
     vi.useFakeTimers()
-    globalThis.WebSocket = ServerSocket as unknown as typeof WebSocket
+    vi.stubGlobal('WebSocket', ServerSocket)
     const connection = {
       telefuncUrl: 'http://test.local/_telefunc',
       transports: ['ws' as const],
@@ -490,18 +515,18 @@ describe("a page's channels on a live WebSocket", () => {
     const a = await open()
     const c = add()
     await vi.advanceTimersByTimeAsync(100)
-    const [socket] = ServerSocket.made
-    expect(socket!.reconciles).toHaveLength(2)
+    const socket = socketOf(0)
+    expect(socket.reconciles).toHaveLength(2)
     void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
+    expect(socket.textOrder).toEqual(['"a1"'])
     void c.send('c1')
     void a.send('a2')
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
-    socket!.deliver(reconciledFor(socket!.reconciles[1]!))
+    expect(socket.textOrder).toEqual(['"a1"'])
+    socket.deliver(reconciledFor(reconcileOf(socket, 1)))
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"', '"c1"', '"a2"'])
+    expect(socket.textOrder).toEqual(['"a1"', '"c1"', '"a2"'])
     for (const page of pages) page.abort()
   })
 
@@ -516,38 +541,38 @@ describe("a page's channels on a live WebSocket", () => {
     }
     /** The RECONCILED of the `n`th RECONCILE, attaching what it names but the closed channel, which the server let go. */
     const answer = async (n: number) => {
-      const reconcile = socket!.reconciles[n]!
-      const closed = n === 4 ? socket!.reconciles[1]!.open[0]!.ix : undefined
-      socket!.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== closed) }))
+      const reconcile = reconcileOf(socket, n)
+      const closed = n === 4 ? openedBy(socket, 1) : undefined
+      socket.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== closed) }))
       await vi.advanceTimersByTimeAsync(100)
     }
     const a = await open()
     const b = await open()
-    const [socket] = ServerSocket.made
+    const socket = socketOf(0)
     void b.send('b1')
     // A join, during which a send passes what the awaited channel queued.
     await open()
     void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
+    expect(socket.textOrder).toEqual(['"a1"'])
     // The awaited channel closes, and a registration's follow-up names it; the server has it.
     b.abort()
     add()
     await vi.advanceTimersByTimeAsync(100)
     await answer(2)
-    expect(socket!.reconciles).toHaveLength(4)
+    expect(socket.reconciles).toHaveLength(4)
     await answer(3)
-    expect(socket!.textOrder).toEqual(['"a1"', '"b1"'])
+    expect(socket.textOrder).toEqual(['"a1"', '"b1"'])
     // A later join's channel sends, then an open one.
     const g = add()
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.reconciles).toHaveLength(5)
+    expect(socket.reconciles).toHaveLength(5)
     void g.send('g1')
     void a.send('a2')
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"', '"b1"'])
+    expect(socket.textOrder).toEqual(['"a1"', '"b1"'])
     await answer(4)
-    expect(socket!.textOrder).toEqual(['"a1"', '"b1"', '"g1"', '"a2"'])
+    expect(socket.textOrder).toEqual(['"a1"', '"b1"', '"g1"', '"a2"'])
     for (const page of pages) page.abort()
   })
 
@@ -557,15 +582,16 @@ describe("a page's channels on a live WebSocket", () => {
       socket.deliver(encode.reconcileTaken())
       socket.deliver(reconciledFor(reconcile))
     }
-    const [a, b] = [await open(), await open()]
-    void b!.send('21')
-    void a!.send('11')
+    const a = await open()
+    const b = await open()
+    void b.send('21')
+    void a.send('11')
     await vi.advanceTimersByTimeAsync(100)
-    expect(ServerSocket.made[0]!.textOrder).toEqual(['"21"', '"11"'])
-    ServerSocket.made[0]!.drop()
+    expect(socketOf(0).textOrder).toEqual(['"21"', '"11"'])
+    socketOf(0).drop()
     await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
     expect(ServerSocket.made).toHaveLength(2)
-    expect(ServerSocket.made[1]!.textOrder).toEqual(['"21"', '"11"'])
+    expect(socketOf(1).textOrder).toEqual(['"21"', '"11"'])
     for (const page of pages) page.abort()
   })
 
@@ -578,14 +604,15 @@ describe("a page's channels on a live WebSocket", () => {
       if (ServerSocket.made.indexOf(socket) > 0 || socket.reconciles.length < 3)
         socket.deliver(reconciledFor(reconcile))
     }
-    const [a, b] = [await open(), await open()]
+    const a = await open()
+    const b = await open()
     await open()
-    void b!.send('21')
-    void a!.send('11')
+    void b.send('21')
+    void a.send('11')
     // A deadline from the receipt, the page gives the join up, and the next wire's RECONCILED takes the replay.
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS)
     expect(ServerSocket.made).toHaveLength(2)
-    expect(ServerSocket.made[1]!.textOrder).toEqual(['"21"', '"11"'])
+    expect(socketOf(1).textOrder).toEqual(['"21"', '"11"'])
     for (const page of pages) page.abort()
   })
 
@@ -594,19 +621,20 @@ describe("a page's channels on a live WebSocket", () => {
     // The next wire's RECONCILED leaves out the channel opened second.
     ServerSocket.onReconcile = (socket, reconcile) => {
       socket.deliver(encode.reconcileTaken())
-      const [first] = ServerSocket.made
-      const leftOut = first!.reconciles[1]?.open[0]?.ix
+      const first = socketOf(0)
+      const leftOut = first.reconciles[1]?.open[0]?.ix
       if (socket === first) socket.deliver(reconciledFor(reconcile))
       else socket.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== leftOut) }))
     }
-    const [a, b] = [await open(), await open()]
-    b!.onClose(() => void a!.send('a2'))
-    void a!.send('a1')
+    const a = await open()
+    const b = await open()
+    b.onClose(() => void a.send('a2'))
+    void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    ServerSocket.made[0]!.drop()
+    socketOf(0).drop()
     await vi.advanceTimersByTimeAsync(CHANNEL_RECONNECT_MAX_DELAY_MS)
     expect(ServerSocket.made).toHaveLength(2)
-    expect(ServerSocket.made[1]!.textOrder).toEqual(['"a1"', '"a2"'])
+    expect(socketOf(1).textOrder).toEqual(['"a1"', '"a2"'])
     for (const page of pages) page.abort()
   })
 
@@ -616,28 +644,28 @@ describe("a page's channels on a live WebSocket", () => {
     // next wire's awaits that channel too, and answers once the first wire delivered its ATTACH_RESULT.
     ServerSocket.onReconcile = (socket, reconcile) => {
       socket.deliver(encode.reconcileTaken())
-      const [first] = ServerSocket.made
-      const awaited = first!.reconciles[1]?.open[0]?.ix
+      const first = socketOf(0)
+      const awaited = first.reconciles[1]?.open[0]?.ix
       if (socket === first) {
         if (socket.reconciles.length === 1) socket.deliver(reconciledFor(reconcile))
         if (socket.reconciles.length === 2) socket.deliver(reconciledFor({ ...reconcile, open: [] }))
         return
       }
-      first!.deliver(encode.attachResult(awaited!, 0))
+      first.deliver(encode.attachResult(defined(awaited, 'the awaited channel'), 0))
       socket.deliver(reconciledFor({ ...reconcile, open: reconcile.open.filter(({ ix }) => ix !== awaited) }))
     }
     await open()
     const b = await open()
-    const awaited = ServerSocket.made[0]!.reconciles[1]!.open[0]?.ix
+    const awaited = openedBy(socketOf(0), 1)
     void b.send('b1')
     await open()
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_MAX_DELAY_MS)
     expect(ServerSocket.made).toHaveLength(2)
-    const next = ServerSocket.made[1]!
-    expect(next.textsOf.get(awaited!)).toBeUndefined()
-    next.deliver(encode.attachResult(awaited!, 0))
+    const next = socketOf(1)
+    expect(next.textsOf.get(awaited)).toBeUndefined()
+    next.deliver(encode.attachResult(awaited, 0))
     await vi.advanceTimersByTimeAsync(100)
-    expect(next.textsOf.get(awaited!)).toEqual(['"b1"'])
+    expect(next.textsOf.get(awaited)).toEqual(['"b1"'])
     for (const page of pages) page.abort()
   })
 
@@ -649,19 +677,21 @@ describe("a page's channels on a live WebSocket", () => {
     }
     const register = vi.spyOn(WireLifecycle.prototype, 'register')
     const a = await open()
-    const lifecycle = register.mock.contexts[0] as WireLifecycle
+    const lifecycle = register.mock.contexts[0]
+    if (!(lifecycle instanceof WireLifecycle)) throw new Error("Expected the page's lifecycle")
     register.mockRestore()
     await open()
-    const [socket] = ServerSocket.made
+    const socket = socketOf(0)
     const headroom = vi.spyOn(WsTransport.prototype, 'headroom').mockReturnValue(0)
     void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    const transport = headroom.mock.contexts[0] as WsTransport
+    const transport = headroom.mock.contexts[0]
+    if (!(transport instanceof WsTransport)) throw new Error("Expected the page's transport")
     headroom.mockRestore()
-    expect(socket!.textOrder).toEqual([])
+    expect(socket.textOrder).toEqual([])
     lifecycle.onTransportHeadroom(transport)
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
+    expect(socket.textOrder).toEqual(['"a1"'])
     for (const page of pages) page.abort()
   })
 
@@ -676,13 +706,13 @@ describe("a page's channels on a live WebSocket", () => {
     void c.send('c1')
     void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    const [socket] = ServerSocket.made
-    expect(socket!.reconciles).toHaveLength(2)
-    expect(socket!.textOrder).toEqual([])
-    const joining = socket!.reconciles[1]!.open[0]?.ix
-    socket!.deliver(encode.abort(joining!, '"gone"', 1))
+    const socket = socketOf(0)
+    expect(socket.reconciles).toHaveLength(2)
+    expect(socket.textOrder).toEqual([])
+    const joining = openedBy(socket, 1)
+    socket.deliver(encode.abort(joining, '"gone"', 1))
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
+    expect(socket.textOrder).toEqual(['"a1"'])
     for (const page of pages) page.abort()
   })
 
@@ -698,8 +728,8 @@ describe("a page's channels on a live WebSocket", () => {
     const x = await open()
     add()
     await vi.advanceTimersByTimeAsync(100)
-    const [socket] = ServerSocket.made
-    expect(socket!.reconciles).toHaveLength(3)
+    const socket = socketOf(0)
+    expect(socket.reconciles).toHaveLength(3)
     // Registered behind the join: its send holds the rest till a RECONCILE names it.
     const u = add()
     void u.send('u1')
@@ -707,21 +737,23 @@ describe("a page's channels on a live WebSocket", () => {
     x.abort()
     void a.send('a1')
     await vi.advanceTimersByTimeAsync(100)
-    socket!.deliver(reconciledFor(socket!.reconciles[2]!))
+    socket.deliver(reconciledFor(reconcileOf(socket, 2)))
     await vi.advanceTimersByTimeAsync(100)
     // The follow-up names the closed channel and the one registered behind the join, which the server then ends.
-    const xEntry = socket!.reconciles[1]!.open[0]
-    const [xIx, xId] = [xEntry?.ix, xEntry?.id]
-    const followUp = socket!.reconciles[3]!.open
+    const { ix: xIx, id: xId } = defined(reconcileOf(socket, 1).open[0], 'the closed channel')
+    const followUp = reconcileOf(socket, 3).open
     expect(followUp.map(({ id }) => id)).toContain(xId)
-    const uIx = followUp.find(({ id }) => id !== xId)!.ix
-    socket!.deliver(encode.abort(uIx, '"gone"', 1))
+    const uIx = defined(
+      followUp.find(({ id }) => id !== xId),
+      'the channel registered behind the join',
+    ).ix
+    socket.deliver(encode.abort(uIx, '"gone"', 1))
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual([])
+    expect(socket.textOrder).toEqual([])
     // The server no longer has the closed channel.
-    socket!.deliver(encode.pong([{ ix: xIx!, lastSeq: null }]))
+    socket.deliver(encode.pong([{ ix: xIx, lastSeq: null }]))
     await vi.advanceTimersByTimeAsync(100)
-    expect(socket!.textOrder).toEqual(['"a1"'])
+    expect(socket.textOrder).toEqual(['"a1"'])
     for (const page of pages) page.abort()
   })
 })

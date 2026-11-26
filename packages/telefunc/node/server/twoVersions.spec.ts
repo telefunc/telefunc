@@ -15,16 +15,24 @@ await import('./telefunc.js')
 await import('../../serve/node.js')
 
 const FILE = '/twoVersions.telefunc.ts'
-const globals = globalThis as { _telefunc?: Record<string, unknown> }
-let before: Record<string, unknown> | undefined
+/** The process's `_telefunc` global, which both versions keep their state in: a fresh object each row. */
+let shared: Record<string, unknown> = {}
+let before: PropertyDescriptor | undefined
 
 beforeEach(() => {
-  before = globals._telefunc
-  globals._telefunc = {}
+  before = Object.getOwnPropertyDescriptor(globalThis, '_telefunc')
+  shared = {}
+  Object.defineProperty(globalThis, '_telefunc', {
+    value: shared,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  })
   vi.resetModules()
 })
 afterEach(() => {
-  globals._telefunc = before
+  if (before === undefined) Reflect.deleteProperty(globalThis, '_telefunc')
+  else Object.defineProperty(globalThis, '_telefunc', before)
 })
 
 /** The head's server, its modules loaded fresh, with one telefunction that takes a function, and its `telefunc/node`. */
@@ -49,9 +57,8 @@ async function loadHead() {
 
 /** 0.3.1's `getGlobalObject()`: it takes whatever its key already holds. */
 function load031() {
-  const all = (globals._telefunc ??= {})
-  for (const [key, shape] of Object.entries(SHAPES_031())) all[key] ||= shape
-  return all
+  for (const [key, shape] of Object.entries(SHAPES_031())) shared[key] ||= shape
+  return shared
 }
 
 type Head = Awaited<ReturnType<typeof loadHead>>
@@ -105,7 +112,7 @@ describe('two versions in one process: each keeps its own state', () => {
       const all = load031()
 
       for (const [key, shape] of Object.entries(SHAPES_031()))
-        expect(Object.keys(all[key] as object)).toEqual(Object.keys(shape))
+        expect(Object.keys(all[key] ?? {})).toEqual(Object.keys(shape))
       expect(config.telefuncUrl).toBe('/rpc')
     })
   })

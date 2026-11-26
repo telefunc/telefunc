@@ -49,7 +49,7 @@ async function link(holdsAll = false) {
   /** Whether the last connection's open was held: an upload beside it is too. */
   let openHeld = false
   const late: Array<{ page: Socket; upstream: Socket; answer: Buffer[] }> = []
-  const requests: Array<{ at: number; take: Take; closedAt: number | null }> = []
+  const requests: Array<{ at: number; take: Take; opens: boolean; closedAt: number | null }> = []
   const forwarder = net.createServer((page) => {
     page.on('error', () => {})
     sockets.add(page)
@@ -64,7 +64,12 @@ async function link(holdsAll = false) {
       const held = holdsAll || at < holdsBefore || next === 'hold' || (!opens && openHeld)
       const take = held ? 'hold' : opens ? next : 'forward'
       if (opens) [next, openHeld] = ['forward', held]
-      const connection: { at: number; take: Take; closedAt: number | null } = { at, take, closedAt: null }
+      const connection: { at: number; take: Take; opens: boolean; closedAt: number | null } = {
+        at,
+        take,
+        opens,
+        closedAt: null,
+      }
       requests.push(connection)
       page.on('close', () => void (connection.closedAt = performance.now()))
       // Read and dropped: a socket left unread would never see the page's end.
@@ -180,6 +185,8 @@ for (const transport of ['sse', 'ws'] as const)
     // A WebSocket reset at accept: the row after this loop.
     if (transport === 'ws' && attempt === 'destroy') continue
     test(`over ${transport === 'ws' ? 'a WebSocket' : 'SSE'}, a page whose next connection after a drop the network ${attempt === 'destroy' ? 'resets as it accepts it' : 'takes and never answers'} sends on another`, async () => {
+      // The first two attempts: 0.1 of 500, then, as the page's send has waited since the drop, 1.05 of 1,000.
+      vi.spyOn(Math, 'random').mockReturnValue(0.1)
       const { network, page, received } = await pair(transport)
       try {
         network.drop(attempt)
@@ -187,9 +194,10 @@ for (const transport of ['sse', 'ws'] as const)
         expect(await received).toBe('after')
         page.abort()
       } finally {
+        vi.restoreAllMocks()
         network.close()
       }
-    })
+    }, 15_000)
   }
 
 // Node 22's WebSocket fires only `error` for a connection reset at accept, Node 26's `error` then `close`.
@@ -273,8 +281,9 @@ test("over SSE, a page whose opens after a drop the network holds cuts the third
     void page.send('after')
     expect(await received).toBe('after')
     const since = network.requests.filter(({ at }) => at >= droppedAt)
-    // The third attempt's connections, its event stream's and its upload's.
-    const third = since.filter(({ at }) => at > droppedAt + 13_300 && at < droppedAt + 15_300)
+    // The third attempt's connections, its event stream's and its upload's: from its open to the fourth's.
+    const [, , thirdOpen, fourthOpen] = since.filter(({ opens }) => opens)
+    const third = since.filter(({ at }) => at >= (thirdOpen?.at ?? Infinity) && at < (fourthOpen?.at ?? Infinity))
     expect(third.length).toBeGreaterThan(0)
     for (const { at, closedAt } of third) {
       expect((closedAt ?? Infinity) - at).toBeGreaterThan(11_500)

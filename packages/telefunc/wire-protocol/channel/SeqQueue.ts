@@ -1,5 +1,7 @@
 export { SeqQueue }
 
+import { assert } from '../../utils/assert.js'
+
 /** Entries in seq order that leave only at the ends: a slot left at the oldest end holds nothing, and the slots go once
  *  they are as many as the live ones, which keeps a drop amortised O(1) per entry. Indices count from the oldest live
  *  entry. */
@@ -14,18 +16,22 @@ class SeqQueue<T> {
   }
 
   seqAt(i: number): number {
-    return this.seqs[this.head + i]!
+    const seq = this.seqs[this.head + i]
+    assert(seq !== undefined)
+    return seq
   }
 
   at(i: number): T {
-    return this.items[this.head + i]!
+    const item = this.items[this.head + i]
+    assert(item !== undefined)
+    return item
   }
 
   /** The index of the oldest entry after `seq`, `length` where none is. */
   indexAfter(seq: number): number {
     const seqs = this.seqs
     let i = this.head
-    while (i < seqs.length && seqs[i]! <= seq) i++
+    for (let each = seqs[i]; each !== undefined && each <= seq; each = seqs[++i]);
     return i - this.head
   }
 
@@ -54,7 +60,8 @@ class SeqQueue<T> {
 
   pop(): T {
     this.seqs.pop()
-    const item = this.items.pop()!
+    const item = this.items.pop()
+    assert(item !== undefined)
     if (this.head >= this.items.length) this.clear()
     return item
   }

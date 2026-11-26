@@ -32,7 +32,11 @@ const settle = async () => {
   for (let i = 0; i < 20; i++) await delay(5)
 }
 
-const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
+/** `value`, which the test must have by now: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
+}
 
 class FakeWebSocket {
   static OPEN = 1
@@ -70,8 +74,8 @@ class FakeWebSocket {
     this.onclose?.({ code: 1006 })
   }
   /** Server→client on this socket. */
-  deliver(frame: Uint8Array): void {
-    this.onmessage?.({ data: bytes(frame).buffer })
+  deliver(frame: Uint8Array<ArrayBuffer>): void {
+    this.onmessage?.({ data: frame.buffer })
   }
   answer(handler: (frame: DecodedFrame) => void): void {
     this.onSent = handler
@@ -96,22 +100,23 @@ function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string; 
 
 /** SSE downstream the client reads (server→client on the old wire). */
 function makeDownstream() {
-  let controller!: ReadableStreamDefaultController<Uint8Array>
   const enc = new TextEncoder()
-  const stream = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) })
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  const stream = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c) })
+  const opened = () => defined(controller, "the downstream's controller")
   return {
     stream,
-    open: () => controller.enqueue(enc.encode(': open\n\n')),
-    push: (frame: Uint8Array) => controller.enqueue(enc.encode(`data: ${uint8ArrayToBase64url(bytes(frame))}\n\n`)),
-    end: () => controller.close(),
+    open: () => opened().enqueue(enc.encode(': open\n\n')),
+    push: (frame: Uint8Array<ArrayBuffer>) => opened().enqueue(enc.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)),
+    end: () => opened().close(),
   }
 }
 
-function parseLengthPrefixed(buf: Uint8Array): Uint8Array[] {
-  const out: Uint8Array[] = []
+function parseLengthPrefixed(buf: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
+  const out: Uint8Array<ArrayBuffer>[] = []
   let off = 0
   while (off + 4 <= buf.length) {
-    const len = decodeU32(bytes(buf.subarray(off, off + 4)))
+    const len = decodeU32(buf.subarray(off, off + 4))
     off += 4
     out.push(buf.subarray(off, off + len))
     off += len
@@ -124,7 +129,7 @@ type Harness = {
   probe: FakeWebSocket
   /** Resolves once the client has emitted its barrier RECONCILE on the old wire. */
   barrierSent: Promise<{ upgradeId: string }>
-  pushOld: (frame: Uint8Array) => void
+  pushOld: (frame: Uint8Array<ArrayBuffer>) => void
   endOld: () => void
   received: { length: number; first: number; last: number }[]
   opens(): number
@@ -132,7 +137,7 @@ type Harness = {
   reconciles: { ix: number; lastSeq: number }[][]
   /** The tags of what the page sent the scripted SSE server, in order. */
   upstream: number[]
-  pushCurrent: (frame: Uint8Array) => void
+  pushCurrent: (frame: Uint8Array<ArrayBuffer>) => void
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
@@ -147,23 +152,20 @@ async function upgradeToBarrier(): Promise<Harness> {
   const reconciles: { ix: number; lastSeq: number }[][] = []
   const upstream: number[] = []
 
-  let resolveBarrier!: (value: { upgradeId: string }) => void
-  const barrierSent = new Promise<{ upgradeId: string }>((resolve) => {
-    resolveBarrier = resolve
-  })
+  const { promise: barrierSent, resolve: resolveBarrier } = Promise.withResolvers<{ upgradeId: string }>()
 
   const onUpstreamFrame = (frame: DecodedFrame) => {
     upstream.push(frame.tag)
     if (frame.tag === TAG.BARRIER) resolveBarrier({ upgradeId: frame.payload.upgradeId })
   }
 
-  const fetchImpl = (async (_url: string, init: RequestInit) => {
-    const body = init.body as unknown
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    const body = init?.body
     if (body instanceof Blob) {
       const frames = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
-      const metadata = JSON.parse(new TextDecoder().decode(frames[0]!))
+      const metadata = JSON.parse(new TextDecoder().decode(defined(frames[0], "the POST's metadata")))
       for (const raw of frames.slice(1)) {
-        const frame = decode(bytes(raw))
+        const frame = decode(raw)
         if (frame.tag === TAG.RECONCILE) {
           ix = frame.payload.open[0]?.ix ?? 0
           reconciles.push(
@@ -176,7 +178,7 @@ async function upgradeToBarrier(): Promise<Harness> {
       if (opens++ > 0) downstream = makeDownstream()
       downstream.open()
       downstream.push(reconciled({ ix, sessionId }))
-      return new Response(downstream.stream as BodyInit, {
+      return new Response(downstream.stream, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
       })
@@ -184,12 +186,13 @@ async function upgradeToBarrier(): Promise<Harness> {
     // Long-lived upstream POST: ack it (that is what keeps the client in duplex mode), then hold
     // the response open and read frames as the client pushes them, as the real server does.
     downstream.push(encode.streamRequestOpenAck())
-    const stream = body as ReadableStream<Uint8Array>
+    if (!(body instanceof ReadableStream)) throw new Error('Expected the streamed upload')
+    const stream = body
     return await new Promise<Response>((resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
       void (async () => {
         const reader = stream.getReader()
-        let buf = new Uint8Array(0)
+        let buf: Uint8Array<ArrayBuffer> = new Uint8Array(0)
         let sawMetadata = false
         while (true) {
           const { value, done } = await reader.read()
@@ -199,7 +202,7 @@ async function upgradeToBarrier(): Promise<Harness> {
           next.set(value, buf.length)
           buf = next
           while (buf.length >= 4) {
-            const len = decodeU32(bytes(buf.subarray(0, 4)))
+            const len = decodeU32(buf.subarray(0, 4))
             if (buf.length < 4 + len) break
             const raw = buf.subarray(4, 4 + len)
             buf = buf.subarray(4 + len)
@@ -207,13 +210,13 @@ async function upgradeToBarrier(): Promise<Harness> {
               sawMetadata = true
               continue
             }
-            onUpstreamFrame(decode(bytes(raw)))
+            onUpstreamFrame(decode(raw))
           }
         }
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
     })
-  }) as unknown as typeof fetch
+  }
 
   const realFetch = globalThis.fetch
   globalThis.fetch = fetchImpl
@@ -258,19 +261,17 @@ async function upgradeToBarrier(): Promise<Harness> {
     opens: () => opens,
     reconciles,
     upstream,
-    pushCurrent: (frame: Uint8Array) => downstream.push(frame),
+    pushCurrent: (frame: Uint8Array<ArrayBuffer>) => downstream.push(frame),
     dispose: () => channel.abort(),
   }
 }
 
-const realWebSocket = globalThis.WebSocket
-
 beforeEach(() => {
   FakeWebSocket.last = null
-  ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
+  vi.stubGlobal('WebSocket', FakeWebSocket)
 })
 afterEach(() => {
-  ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = realWebSocket
+  vi.unstubAllGlobals()
 })
 
 // Case 1: the new WebSocket closes after its RECONCILED, while the old SSE wire's FIN is still outstanding and a

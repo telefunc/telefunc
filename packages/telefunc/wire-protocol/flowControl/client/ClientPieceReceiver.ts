@@ -34,7 +34,8 @@ class ClientPieceReceiver extends PieceReceiver {
 
   /** `frame`, saying what the page took if it is a frame that can (`tookOf`): the server frees its copies of that. */
   report(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-    if (!TOOK_TAGS.has(frame[0]!)) return frame
+    const tag = frame[0]
+    if (tag === undefined || !TOOK_TAGS.has(tag)) return frame
     this.reportedTook = this.took
     return withTook(frame, this.took)
   }

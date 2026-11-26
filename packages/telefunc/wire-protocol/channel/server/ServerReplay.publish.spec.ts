@@ -34,8 +34,10 @@ test('partial confirmation and dropping a queued publish keep the newest route a
     vi.advanceTimersByTime(53)
 
     replay.acknowledge(4, 3)
-    expect(replay.leastConfirmMs).toBe(50)
-    expect(replay.confirmRate).toBeGreaterThan(0)
+    // The extra 24-byte publish and 14-byte text frame took 2 ms beyond the baseline after subtracting the hold.
+    expect(replay.confirmRate).toBe(19)
+    // The 24-byte baseline publish took about 1.26 ms at that rate.
+    expect(replay.leastConfirmMs).toBeCloseTo(48.74)
     replay.dropBeforeNewestPublish(2)
     const [route, body] = replay.getAfter(4)
     if (route === undefined) throw new Error('missing route')

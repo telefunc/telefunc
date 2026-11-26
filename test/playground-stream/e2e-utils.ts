@@ -110,7 +110,17 @@ async function serverHeapUsed(): Promise<number> {
 async function serverArrayBuffers(): Promise<number> {
   await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
   const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
-  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
+  const answer: unknown = await resp.json()
+  if (
+    !(
+      typeof answer === 'object' &&
+      answer !== null &&
+      'arrayBuffers' in answer &&
+      typeof answer.arrayBuffers === 'number'
+    )
+  )
+    throw new Error('Expected `{ arrayBuffers }`')
+  return answer.arrayBuffers
 }
 
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {

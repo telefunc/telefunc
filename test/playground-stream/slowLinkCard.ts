@@ -12,7 +12,17 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { page, getServerUrl } from '@brillout/test-e2e'
 import { withPacedLink } from './e2e-utils'
-import { StallClock, STALL_TICK_MS, isVoid, stoppedFor, formatStalls, type Stall, type Stop } from './stalls'
+import {
+  StallClock,
+  STALL_TICK_MS,
+  isVoid,
+  stoppedFor,
+  formatStalls,
+  stallsOf,
+  stopOf,
+  type Stall,
+  type Stop,
+} from './stalls'
 
 declare global {
   interface Window {
@@ -86,9 +96,7 @@ async function whileClockingStalls<T>(run: () => Promise<T>): Promise<{ result: 
       window.stallClock?.stop()
       return window.stallClock?.stalls ?? []
     })
-    const serverStalls = (await (
-      await fetch(`${getServerUrl()}/api/stalls/stop`, { method: 'POST' })
-    ).json()) as Stall[]
+    const serverStalls = stallsOf(await (await fetch(`${getServerUrl()}/api/stalls/stop`, { method: 'POST' })).json())
     const stalls = [
       ...pageStalls.map((stall) => ({ who: 'page' as const, ...stall })),
       ...serverStalls,
@@ -123,7 +131,7 @@ async function startSleeper() {
     lines.once('line', () => resolve())
     child.once('error', reject)
   })
-  lines.on('line', (line) => stops.push(JSON.parse(line) as Stop))
+  lines.on('line', (line) => stops.push(stopOf(JSON.parse(line))))
   return {
     async stop(): Promise<Stop[]> {
       // Its output is read whole once its pipes close.

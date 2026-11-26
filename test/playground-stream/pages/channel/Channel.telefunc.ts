@@ -250,12 +250,18 @@ async function onChannelAckListenerAbort() {
   return { channel: ch.client }
 }
 
-type HeldBytesState = { channel: { heldBytes: number } | undefined; lateAnswer: Promise<void> }
-/** The channel `onChannelHeldBytes` reads what it holds of, once a listener's late answer went. */
-const heldBytesState = ((globalThis as Record<symbol, unknown>)[Symbol.for('telefunc__heldBytesState')] ??= {
-  channel: undefined,
-  lateAnswer: Promise.resolve(),
-}) as HeldBytesState
+type HeldBytesState = { heldBytes: (() => number) | undefined; lateAnswer: Promise<void> }
+declare global {
+  /** What `onChannelHeldBytes` reads of the channel a row made, once a listener's late answer went. */
+  var telefuncHeldBytesState: HeldBytesState | undefined
+}
+const heldBytesState = (globalThis.telefuncHeldBytesState ??= { heldBytes: undefined, lateAnswer: Promise.resolve() })
+
+/** What `ch` holds, by the server channel's own count, which `Channel`'s type doesn't show. */
+function heldBytesOf(ch: object): number {
+  if (!('heldBytes' in ch) || typeof ch.heldBytes !== 'number') throw new Error('Expected a server channel')
+  return ch.heldBytes
+}
 
 /** A listener's `Abort` ends the channel from inside the delivery of the message it got. */
 async function onChannelListenerAbortHolds() {
@@ -263,7 +269,7 @@ async function onChannelListenerAbortHolds() {
   ch.listen(() => {
     throw Abort('stop')
   })
-  heldBytesState.channel = ch as unknown as { heldBytes: number }
+  heldBytesState.heldBytes = () => heldBytesOf(ch)
   return { channel: ch.client }
 }
 
@@ -271,23 +277,23 @@ async function onChannelListenerAbortHolds() {
 async function onChannelLateAnswerHolds() {
   const ch = new Channel<(msg: string) => string, never>()
   const closed = new Promise<void>((resolve) => ch.onClose(() => resolve()))
-  let markAnswered!: () => void
-  heldBytesState.lateAnswer = new Promise((resolve) => {
-    markAnswered = resolve
-  })
+  const { promise: lateAnswer, resolve: markAnswered } = Promise.withResolvers<void>()
+  heldBytesState.lateAnswer = lateAnswer
   ch.listen(async (msg) => {
     if (msg !== 'late') return msg
     await closed
     setTimeout(markAnswered)
     return msg
   })
-  heldBytesState.channel = ch as unknown as { heldBytes: number }
+  heldBytesState.heldBytes = () => heldBytesOf(ch)
   return { channel: ch.client }
 }
 
 async function onChannelHeldBytes() {
   await heldBytesState.lateAnswer
-  return heldBytesState.channel!.heldBytes
+  const { heldBytes } = heldBytesState
+  if (heldBytes === undefined) throw new Error('No channel held bytes yet')
+  return heldBytes()
 }
 
 async function onChannelAckListenerBug() {
@@ -793,7 +799,7 @@ async function onChannelBinaryBurst() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-async function sendFitted(ch: Channel<any, string>, message: string): Promise<boolean> {
+async function sendFitted<ClientToServer>(ch: Channel<ClientToServer, string>, message: string): Promise<boolean> {
   try {
     await ch.send(message)
     return true
@@ -1213,15 +1219,16 @@ async function onChannelAwaitedFromOffline() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-// 2 MiB is these 2,096,631 UTF-8 bytes, the two quotes around them, a frame's 7 bytes and a held send's 512.
+// A channel's limit, 2 MiB less the eighth kept for sends waiting for room, is these 1,834,487 UTF-8 bytes, the two
+// quotes around them, a frame's 7 bytes and a held send's 512.
 const atLimitTexts = {
-  twoBytes: `${'é'.repeat(1_048_315)}x`,
-  threeBytes: '€'.repeat(698_877),
-  fourBytes: `${'😀'.repeat(524_157)}xxx`,
+  twoBytes: `${'é'.repeat(917_243)}x`,
+  threeBytes: `${'€'.repeat(611_495)}xx`,
+  fourBytes: `${'😀'.repeat(458_621)}xxx`,
 }
 
-/** A channel sending, as its first send, the text of `kind` that fits `maxMemory` to the byte, or one byte more. Told, it
- *  closes: `maxMemory` is the server's, and the next channel needs all of it.
+/** A channel sending, as its first send, the text of `kind` that fits its limit to the byte, or one byte more. Told, it
+ *  closes: `maxMemory` is the server's, and the next channel needs all it may hold.
  *  cleanupState: atLimit_<kind>_<fits|over> = `accepted`, or why the send was refused. */
 async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) {
   const ch = new Channel<never, string>()

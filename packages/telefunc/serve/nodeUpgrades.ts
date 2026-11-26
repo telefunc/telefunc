@@ -13,6 +13,7 @@ import type { IncomingMessage, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 import type { Duplex } from 'node:stream'
 import type { Peer } from 'crossws'
+import { assert } from '../utils/assert.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -177,7 +178,8 @@ function takeUpgrades(httpServer: HttpServer): void {
 /** Sends `frame` in one write with the task's other frames, up to the socket's mark: written alone, each frame costs a
  *  syscall while the socket has room. Past the mark it goes at once, or the page would wait for the whole task. */
 function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
-  const socket = peer.context.socket!
+  const { socket } = peer.context
+  assert(socket)
   if (!socket.writableCorked) {
     socket.cork()
     process.nextTick(() => socket.uncork())

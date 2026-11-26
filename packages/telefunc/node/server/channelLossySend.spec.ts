@@ -451,7 +451,7 @@ describe('the confirmation time a lossy send measures', () => {
     vi.advanceTimersByTime((1024 * 1024 * 8) / 1000 + 50)
     w.deliver()
     w.confirm()
-    expect(channel._replayBuffer!.leastConfirmMs).toBe(50)
+    expect(channel._replayBuffer!.leastConfirmMs).toBeCloseTo(50, 0)
     w.close()
     const handed = channel._replayBuffer!.seq
     for (let i = 0; i < 60; i++) {

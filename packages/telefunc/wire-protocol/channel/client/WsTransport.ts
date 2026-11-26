@@ -138,7 +138,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     try {
       ws = new WebSocket(this.wsUrl())
     } catch {
-      this.owner.onTransportClosed(this)
+      this.owner.onTransportClosed(this, { unopened: true })
       return
     }
     ws.binaryType = 'arraybuffer'
@@ -163,7 +163,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     socket.ws.onclose = socket.ws.onerror = null
     socket.pieces.headroom.close()
     this.connecting = null
-    this.owner.onTransportClosed(this)
+    this.owner.onTransportClosed(this, { unopened: true })
   }
 
   cancelAttempt(): void {

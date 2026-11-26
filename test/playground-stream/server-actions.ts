@@ -1,9 +1,11 @@
 export { onServerAction, forgetServerAction, runServerAction }
 
 // What a telefunction leaves for a test to start while the page can't reach the server (it's offline).
-const actions: Map<string, { action: () => void; once: boolean }> = ((globalThis as Record<symbol, unknown>)[
-  Symbol.for('playground-stream:serverActions')
-] ??= new Map<string, { action: () => void; once: boolean }>()) as Map<string, { action: () => void; once: boolean }>
+declare global {
+  /** The server actions of every copy of this module the server loaded. */
+  var playgroundServerActions: Map<string, { action: () => void; once: boolean }> | undefined
+}
+const actions = (globalThis.playgroundServerActions ??= new Map())
 
 /** `once`, the default: the action is let go as it runs, with what it holds. */
 function onServerAction(key: string, action: () => void, { once = true } = {}) {
