@@ -18,7 +18,15 @@ function frameOf(seq: number, timestamp: number, payload: Uint8Array): Buffer {
   return frame
 }
 
-const route: LaneRoute = { deliver() {}, dropped() {}, reportMissed() {}, waitEnded() {} }
+const route: LaneRoute = {
+  history: null,
+  deliver() {},
+  dropped() {},
+  reportMissed() {},
+  forked() {},
+  replaced() {},
+  waitEnded() {},
+}
 
 describe('Redis live delivery', () => {
   it('decodes the binary header and UTF-8 payload for text subscribers with the same seq/timestamp the publisher saw', () => {

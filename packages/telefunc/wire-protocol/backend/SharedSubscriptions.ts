@@ -33,6 +33,8 @@ type BackendSubscription = {
 type SourceRules<Source> = {
   /** Subscriptions of one key and kind on one host share an attempt. */
   key(source: Source): string
+  /** The consumer its deliveries reach on a host (`SubscriptionDriver.subscribe`). */
+  holder(source: Source): string
 }
 
 /** Whether a payload is what a subscription of each kind delivers: a string for 'text', bytes for 'binary'. */
@@ -72,7 +74,7 @@ class SharedSubscriptions<Source> {
     const slot = getOrCreate(
       this.slots[delivers],
       slotKey,
-      () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers }),
+      () => new SubscriptionSlot({ owner: this, source, key, slotKey, delivers, holder: this.sources.holder(source) }),
     )
     return slot.attach(listener)
   }
@@ -103,6 +105,7 @@ type SubscriptionSlotOptions<Source, Kind extends BroadcastKind> = {
   key: string
   slotKey: string
   delivers: Kind
+  holder: string
 }
 
 /** One driver attempt, shared by the consumers of its source on its host. */
@@ -113,6 +116,7 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   private readonly source: Source
   private readonly key: string
   private readonly carries: (payload: BackendPayload) => payload is BroadcastPayload<Kind>
+  private readonly holder: string
   private readonly attached = new Set<Consumer<Kind>>()
   /** Taken at a delivery or a state change and dropped when a consumer comes or goes, so each reaches the consumers
    *  it started with. */
@@ -128,13 +132,14 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   /** It stopped or closed: what the attempt says from here on is ignored. */
   private finished = false
 
-  constructor({ owner, source, key, slotKey, delivers }: SubscriptionSlotOptions<Source, Kind>) {
+  constructor({ owner, source, key, slotKey, delivers, holder }: SubscriptionSlotOptions<Source, Kind>) {
     this.owner = owner
     this.source = source
     this.key = key
     this.slotKey = slotKey
     this.delivers = delivers
     this.carries = CARRIES[delivers]
+    this.holder = holder
   }
 
   get state(): AttemptState {
@@ -195,7 +200,7 @@ class SubscriptionSlot<Source, Kind extends BroadcastKind> implements BackendRec
   private start(): void {
     let attempt: DriverAttempt
     try {
-      attempt = this.owner.driver.subscribe(this.source, this)
+      attempt = this.owner.driver.subscribe(this.source, this, this.holder)
     } catch (error) {
       return this.close(error)
     }

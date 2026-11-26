@@ -34,13 +34,26 @@ class Node {
 }
 
 /** A subscription on one channel that carries the lane: what it delivers and reports, and the highest place it
- *  brought. */
+ *  brought. A fork makes it read where its key stands: until `read`, what it brings waits, as an attempt's early
+ *  frames do. */
 function route(log: string[]) {
   let passed = 0
-  const route: LaneRoute & { offer(lane: LaneHistory, frame: LaneFrame): void; pass(frame: LaneFrame): number } = {
+  let reading: LaneFrame[] | null = null
+  const route: LaneRoute & {
+    offer(lane: LaneHistory, frame: LaneFrame): void
+    pass(frame: LaneFrame): number
+    read(lane: LaneHistory, start: LaneStart, switched?: boolean): void
+  } = {
+    history: null,
     deliver: (frame, rewound) => void log.push(`${name(frame)}${rewound ? ' rewound' : ''}`),
     dropped: () => {},
     reportMissed: (count) => void log.push(`lost ${count}`),
+    replaced: () => void log.push('lost null'),
+    forked(frame) {
+      log.push(`forked ${name(frame)}`)
+      reading ??= []
+      reading.push(frame)
+    },
     waitEnded: () => {},
     pass(frame) {
       const before = passed
@@ -48,7 +61,13 @@ function route(log: string[]) {
       return before
     },
     offer(lane, frame) {
-      lane.offer(frame, route.pass(frame))
+      if (reading !== null) reading.push(frame)
+      else lane.offer(frame, route.pass(frame))
+    },
+    read(lane, start, switched = false) {
+      const early = reading ?? []
+      reading = null
+      lane.establish(route, start, early, true, route.pass, switched ? 'switched' : undefined)
     },
   }
   return route
@@ -88,7 +107,7 @@ describe('LaneHistory', () => {
     expect(log).toEqual(['x7'])
   })
 
-  it('delivers both sides of a fork once each, under one report, as two routes bring them in either order', () => {
+  it('has each route that brings a fork read, then delivers both sides once each, as two routes bring them in either order', () => {
     for (const order of [
       ['E:x11', 'E:y11', 'M:y11', 'M:x11'],
       ['E:y11', 'E:x11', 'M:x11', 'M:y11'],
@@ -113,15 +132,17 @@ describe('LaneHistory', () => {
         const brought = via === 'E' ? E : M
         brought.offer(history, { ...(which === 'x11' ? x11 : y11), via: brought })
       }
+      // B is the key's master now: each route's read finds its history.
+      for (const brought of [E, M]) brought.read(history, B.start(), true)
       const y12 = B.commit('y12', E)
       E.offer(history, y12)
       M.offer(history, { ...y12, via: M })
       const [first, second] = order[0] === 'E:x11' ? ['x11', 'y11'] : ['y11', 'x11']
-      expect(log.slice(10)).toEqual([first, 'lost null', `${second} rewound`, 'y12'])
+      expect(log.slice(10)).toEqual([first, `forked ${second}`, `forked ${second}`, `${second} rewound`, 'y12'])
     }
   })
 
-  it('reports a rewind deeper than the ring once, and delivers every new frame once, on two routes', () => {
+  it('tells a rewind deeper than the ring once, from its routes’ reads, and delivers every new frame once, on two routes', () => {
     const log: string[] = []
     const E = route(log)
     const M = route(log)
@@ -135,16 +156,20 @@ describe('LaneHistory', () => {
         const frame = node.commit(`${prefix}${i}`, E)
         E.offer(history, frame)
         M.offer(history, { ...frame, via: M })
+        // The record each route's read finds stands at the first frame of the second run.
+        if (prefix === 'b' && i === 1) for (const brought of [E, M]) brought.read(history, node.start())
       }
     }
+    expect(log.filter((entry) => entry.startsWith('forked'))).toEqual(['forked b1', 'forked b1'])
     expect(log.filter((entry) => entry.startsWith('lost'))).toEqual(['lost null'])
-    expect(log.filter((entry) => !entry.startsWith('lost')).map((entry) => entry.split(' ')[0])).toEqual([
+    const delivered = log.filter((entry) => !entry.startsWith('lost') && !entry.startsWith('forked'))
+    expect(delivered.map((entry) => entry.split(' ')[0])).toEqual([
       ...Array.from({ length: 40 }, (_, i) => `a${i + 1}`),
       ...Array.from({ length: 40 }, (_, i) => `b${i + 1}`),
     ])
   })
 
-  it('drops a copy that reaches it after its first copy left the ring, and reports it', () => {
+  it('drops a copy that reaches it after its first copy left the ring, with no report where its route’s read shows the lane current', () => {
     const log: string[] = []
     const E = route(log)
     const M = route(log)
@@ -152,12 +177,11 @@ describe('LaneHistory', () => {
     const history = lane(E, M)
     history.establish(E, fresh, [], false, E.pass)
     history.establish(M, fresh, [], false, M.pass)
-    const frames = Array.from({ length: 34 }, (_, i) => A.commit(`x${i + 1}`, E))
-    for (const frame of frames) E.offer(history, frame)
-    const [first] = frames
-    assert(first !== undefined)
-    M.offer(history, { ...first, via: M })
-    expect(log.slice(34)).toEqual(['lost null'])
+    const x1 = A.commit('x1', E)
+    for (const frame of [x1, ...Array.from({ length: 33 }, (_, i) => A.commit(`x${i + 2}`, E))]) E.offer(history, frame)
+    M.offer(history, { ...x1, via: M })
+    M.read(history, A.start())
+    expect(log.slice(34)).toEqual(['forked x1'])
   })
 
   it('counts a hole once its wait ends, and drops its late original', () => {
@@ -236,7 +260,7 @@ describe('LaneHistory', () => {
         form === 'behind' ? { place: 2, last: idOf('x2') } : { place: 3, last: idOf('x3') },
       )
       if (form === 'ahead') for (const i of [4, 5]) B.commit(`y${i}`, E)
-      history.establish(E, B.start(), [], true, E.pass, true)
+      history.establish(E, B.start(), [], true, E.pass, 'b')
       E.offer(history, B.commit('y6', E))
       expect(log.slice(3)).toEqual(form === 'behind' ? ['y6 rewound'] : ['y6'])
     }
@@ -252,7 +276,7 @@ describe('LaneHistory', () => {
     // Another history whose start the lane never saw.
     const B = new Node()
     const y1 = B.commit('y1', E)
-    history.establish(E, B.start(), [y1], true, E.pass, true)
+    history.establish(E, B.start(), [y1], true, E.pass, 'b')
     E.offer(history, y1)
     E.offer(history, B.commit('y2', E))
     expect(log).toEqual(['x1', 'x2', 'y1 rewound', 'y2'])

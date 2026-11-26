@@ -20,9 +20,9 @@ export {
   isUnsent,
   lastClusterReply,
   slotOf,
-  masterView,
+  formerMaster,
 }
-export type { RedisClient, SubscriberSocket, StoreScript, MasterView }
+export type { RedisClient, SubscriberSocket, StoreScript, FormerMaster }
 
 import { createHash, randomUUID } from 'node:crypto'
 import { Writable } from 'node:stream'
@@ -360,43 +360,73 @@ function slotOf(key: string): number {
   return new Command('exists', [key]).getSlot()
 }
 
-/** What a slot's former master says of itself: the history it is master of, its replication id, and whether it still
- *  serves the slot. */
-type MasterView = { history: string; serves: boolean }
+/** A Cluster node a slot had, over a connection of its own that is READONLY, so that as a replica it answers a start
+ *  read from its own data: its role, its history (its replication id) and the one before it (`master_replid2`), which a
+ *  partial resync to a new master leaves it. */
+type FormerMaster = {
+  readonly client: Redis
+  readonly master: boolean
+  readonly history: string
+  readonly previous: string | null
+  /** Whether, as master, it serves `key`'s slot: a command on the key that it redirects (`MOVED`, or `ASK` while it
+   *  migrates the slot's keys) says it doesn't; null where it answers otherwise. */
+  serves(key: string): Promise<boolean | null>
+  close(): void
+}
 
 /** How long the backend waits on the master a slot had, which a failover may have taken down. */
-const MASTER_VIEW_MS = 2_000
+const FORMER_MASTER_MS = 2_000
 
-/** What `node`, a Cluster node as the slot map names it, says now of `key`'s slot; null where it can't be reached, isn't
- *  a master, or answers otherwise. A command on `key` that it redirects (`MOVED`, or `ASK` while it migrates the
- *  slot's keys) says it no longer serves the slot. */
-async function masterView(cluster: Cluster, node: string, key: string): Promise<MasterView | null> {
+/** `node`, a Cluster node as the slot map named it; null where it can't be reached or answers otherwise. */
+async function formerMaster(cluster: Cluster, node: string): Promise<FormerMaster | null> {
   const at = node.lastIndexOf(':')
   const redis = new Redis({
     ...cluster.options.redisOptions,
     host: node.slice(0, at),
     port: Number(node.slice(at + 1)),
     lazyConnect: true,
-    connectTimeout: MASTER_VIEW_MS,
-    commandTimeout: MASTER_VIEW_MS,
+    connectTimeout: FORMER_MASTER_MS,
+    commandTimeout: FORMER_MASTER_MS,
     maxRetriesPerRequest: 0,
     retryStrategy: () => null,
   })
   redis.on('error', () => {})
+  const info = await readOnlyReplication(redis)
+  const history = info === null ? undefined : /^master_replid:(\w+)/m.exec(info)?.[1]
+  if (info === null || history === undefined) {
+    redis.disconnect()
+    return null
+  }
+  const previous = /^master_replid2:(\w+)/m.exec(info)?.[1]
+  return {
+    client: redis,
+    master: /^role:master\r?$/m.test(info),
+    history,
+    // A replica that never followed another history has an all-zero one.
+    previous: previous === undefined || /^0+$/.test(previous) ? null : previous,
+    async serves(key) {
+      try {
+        await redis.exists(key)
+        return true
+      } catch (error) {
+        return error instanceof Error && /^(?:MOVED|ASK) /.test(error.message) ? false : null
+      }
+    },
+    close: () => redis.disconnect(),
+  }
+}
+
+/** What `redis` says of its replication, once its connection is READONLY; null where it can't be reached or answers
+ *  otherwise. */
+async function readOnlyReplication(redis: Redis): Promise<string | null> {
   try {
     await redis.connect()
-    const replies = await redis.pipeline().info('replication').exists(key).exec()
+    const replies = await redis.pipeline().info('replication').readonly().exec()
     assert(replies !== null)
-    const [[infoError, info], [keyError]] = twoOf(replies)
-    const replication = infoError === null && typeof info === 'string' ? info : ''
-    const history = /^master_replid:(\w+)/m.exec(replication)?.[1]
-    if (history === undefined || !/^role:master\r?$/m.test(replication)) return null
-    if (keyError === null) return { history, serves: true }
-    return /^(?:MOVED|ASK) /.test(keyError.message) ? { history, serves: false } : null
+    const [[infoError, info], [readOnlyError]] = twoOf(replies)
+    return infoError === null && readOnlyError === null && typeof info === 'string' ? info : null
   } catch {
     return null
-  } finally {
-    redis.disconnect()
   }
 }
 

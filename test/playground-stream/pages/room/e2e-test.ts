@@ -9,6 +9,7 @@ export {
   testRoomPublishHold,
   testRoomLongWaits,
   testRoomRedisSubscriberDropped,
+  testRoomRedisOrderStartsOver,
   testRoomRedisPublishLimit,
   testRoomStaleRead,
 }
@@ -511,6 +512,13 @@ function testRoom() {
     (r) => {
       expect(r).deep.equal({ thrower: 2, healthy: 2 })
       expectLog('Test: a listener throws')
+    },
+  )
+  testRoomScenario<TwoRoutes>(
+    'two-routes',
+    "room: a handle that hears a member's track through her every track and every member's track gets each of her frames once on each listener",
+    (r) => {
+      expect(r).deep.equal(twoRoutesHeard(0))
     },
   )
   testRoomScenario<{
@@ -2159,6 +2167,25 @@ function testRoomRedisSubscriberDropped() {
       expect(r.reported.sort()).deep.equal([commits, commits, messages, messages])
       expect(r.arrivedAfter).toBe(3)
       expectLog('Redis subscriber connection closed')
+    },
+  )
+}
+
+type TwoRoutes = { recordsLost: number; everyTrack: string[]; everyMember: string[] }
+
+const twoRoutesHeard = (recordsLost: number): TwoRoutes => {
+  const each = Array.from({ length: 80 }, (_, n) => `m${n + 1}`)
+  return { recordsLost, everyTrack: each, everyMember: each }
+}
+
+function testRoomRedisOrderStartsOver() {
+  testRoomScenario<TwoRoutes>(
+    'two-routes-start-over',
+    "room: a handle that hears a member's track through two subscriptions gets each of her frames once on each listener, also once Redis lost her order record and her frames start over",
+    (r) => {
+      expect(r).deep.equal(twoRoutesHeard(1))
+      // Her lost record replaced the order the room followed.
+      expectLog("An unknown number of commits never reached this server's Redis subscription")
     },
   )
 }

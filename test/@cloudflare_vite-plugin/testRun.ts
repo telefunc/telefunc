@@ -843,6 +843,12 @@ function testRoomStorage() {
     })
   })
 
+  test("Room: a handle that hears a member's track through her every track and every member's track gets each of her frames once on each listener", async () => {
+    await openRoomPage()
+    const each = Array.from({ length: 40 }, (_, n) => `m${n + 1}`)
+    expect(await clickRoomCard(page, 'two-routes')).deep.equal({ everyTrack: each, everyMember: each })
+  })
+
   test('Room: its meta keeps the key order its writes gave it', async () => {
     await openRoomPage()
     expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({

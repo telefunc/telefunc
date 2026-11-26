@@ -5,8 +5,8 @@ import {
   connectsAlike,
   createCommandClient,
   createSubscriberSocket,
+  formerMaster,
   isCluster,
-  masterView,
   nextReady,
   scriptOf,
   sendRequest,
@@ -144,19 +144,25 @@ class RedisConnection {
         masters[slot] = master
       })
       if (moved.size === 0 || commands !== this.commands) return
-      void this.subscriptions.followMoves(moved, (node, key) => masterView(commands, node, key))
+      void this.subscriptions.followMoves(moved, (node) => formerMaster(commands, node))
     })
     return commands
   }
 
-  /** Runs the script `command` for `input` once the command client is ready: its reply, as the command reads it. */
-  async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {
+  /** Runs the script `command` for `input` once the command client is ready, or as a start read on `on`, a former
+   *  master (`formerMaster`): its reply, as the command reads it. */
+  async run<Input, Output>(command: RedisCommand<Input, Output>, input: Input, on?: RedisClient): Promise<Output> {
     const { keys, argv } = command.invoke(this.prefix, input)
     assert(command.numberOfKeys === null || command.numberOfKeys === keys.length)
     // EVAL and EVALSHA take the key count, then the keys, then the arguments.
     const args = [String(keys.length), ...keys, ...argv]
-    const script = scriptOf(command.lua)
-    const request = () => new StoreRequest({ script }, args, command.binaryReply === true)
-    return command.parse(await this.dispatch(command.writes, request), input)
+    const bytes = command.binaryReply === true
+    if (on === undefined) {
+      const script = scriptOf(command.lua)
+      return command.parse(await this.dispatch(command.writes, () => new StoreRequest({ script }, args, bytes)), input)
+    }
+    assert(command.formerLua !== undefined)
+    const former = new StoreRequest({ script: scriptOf(command.formerLua) }, args, bytes)
+    return command.parse(await sendRequest(on, former), input)
   }
 }

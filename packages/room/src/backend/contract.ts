@@ -354,5 +354,5 @@ type RoomDriver = SubscriptionDriver<RoomSubscriptionSource> & {
    *  or deleted. */
   directoryDue(): Promise<DirectoryEntry[]>
   /** As a Broadcast driver's `subscribe`; an incarnation that isn't open is a refusal. */
-  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver, holder: string): DriverAttempt
 }

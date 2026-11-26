@@ -41,8 +41,9 @@ type PublishResult = OrderingInfo
  * was unsubscribed.
  */
 type SubscriptionDriver<Source> = {
-  /** Returns the attempt at once, establishing or ready; throws a refusal it knows now. */
-  subscribe(source: Source, receiver: BackendReceiver): DriverAttempt
+  /** Returns the attempt at once, establishing or ready; throws a refusal it knows now. `holder` names the consumer
+   *  `receiver` reaches on this host: a commit its attempts' sources carry reaches it once, through one of them. */
+  subscribe(source: Source, receiver: BackendReceiver, holder: string): DriverAttempt
   /** This host's key, read at each subscribe: absent, the process; on Cloudflare this session DO's incarnation, and a
    *  usage error outside one. */
   hostKey?(): string

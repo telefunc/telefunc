@@ -15,7 +15,11 @@ import { CallStore, RoomStore, type RoomReads } from './RoomStore.js'
 
 type RoomPlaneOptions = { driver: RoomDriver }
 
-const laneSources: SourceRules<RoomSubscriptionSource> = { key: roomSubscriptionSourceKey }
+const laneSources: SourceRules<RoomSubscriptionSource> = {
+  key: roomSubscriptionSourceKey,
+  // A room's lanes on a host reach its replica there, its demand lane the replica's exchange.
+  holder: ({ roomId, inc, lane }) => JSON.stringify(lane.kind === 'demand' ? [roomId, inc, 'demand'] : [roomId, inc]),
+}
 
 /** What Room's server code reaches the store by: `call(work)` for a public call, whose writes are counted in its
  *  account, and `direct` for work that tells no answer; and the lane subscriptions, shared by source and host. */

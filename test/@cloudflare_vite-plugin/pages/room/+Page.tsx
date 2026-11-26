@@ -19,6 +19,7 @@ import {
   onSubscribeHeld,
   onMetaKeyOrder,
   onThrowingListener,
+  onTwoRoutes,
   onJoinClosing,
   onJoinRefused,
   onReplyOutcome,
@@ -103,6 +104,7 @@ function Page() {
       {card('subscribe-held', () => onSubscribeHeld(query().get('id')!))}
       {card('meta-key-order', () => onMetaKeyOrder())}
       {card('throwing-listener', () => onThrowingListener())}
+      {card('two-routes', () => onTwoRoutes())}
       {card('join-closing', () => onJoinClosing())}
       {card('join-refused', () => onJoinRefused())}
       <input id="room-length" ref={length} type="number" />

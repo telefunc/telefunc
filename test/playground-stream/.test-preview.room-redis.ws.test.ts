@@ -6,6 +6,7 @@ import {
   testRoomPublishHold,
   testRoomRedisPublishLimit,
   testRoomRedisSubscriberDropped,
+  testRoomRedisOrderStartsOver,
   testRoomStaleRead,
 } from './pages/room/e2e-test'
 
@@ -20,6 +21,7 @@ testRoom()
 testPublishHold()
 testRoomPublishHold()
 testRoomRedisSubscriberDropped()
+testRoomRedisOrderStartsOver()
 testBroadcastRedisSubscriberDropped()
 testBroadcastRedisPublishLimit()
 testRoomRedisPublishLimit()

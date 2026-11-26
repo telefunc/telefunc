@@ -3,7 +3,7 @@ import { Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import { assert } from './assert.js'
-import { slotOf, type MasterView, type SubscriberSocket } from './ioredis.js'
+import { slotOf, type FormerMaster, type RedisClient, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait } from './NewSubscriptionWait.js'
 import { RedisSubscriptions } from './RedisSubscriptions.js'
 import type { Starts } from './orderRecord.js'
@@ -14,7 +14,7 @@ const BINARY = 'binary-channel'
  *  has it. */
 const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
 
-type ReadStarts = () => Promise<Starts>
+type ReadStarts = (on?: RedisClient) => Promise<Starts>
 
 /** No lane has a commit yet, on the history `authority`. */
 const none = (authority = 'a'): Starts => ({ authority, starts: new Map() })
@@ -98,6 +98,7 @@ function setup(
     channel: string,
     readStarts: ReadStarts = async () => none(),
     frames = { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
+    holder = channel,
   ): DriverAttempt =>
     subscriptions.subscribe({
       channel,
@@ -113,6 +114,7 @@ function setup(
       reportMissed(count) {
         missed.push(count)
       },
+      holder,
     })
   const missed: Array<number | null> = []
   return {
@@ -133,13 +135,20 @@ function waitingHello(sends: NewSubscriptionWait) {
   return waiting
 }
 
-/** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place, then
- *  `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its predecessor's, and the payload. Its id is
- *  its place, so a lane's frames name the one before them. */
+/** A frame as commands.ts's scripts write it: the lane key on a fan-in channel, the place where the source's kinds
+ *  share one seq (`placed`), then `[seq_hi][seq_lo][ts_hi][ts_lo]`, u32 big-endian, the commit's id and its
+ *  predecessor's, and the payload. Its id is its place unless given, and so is the one before it, so a lane's frames
+ *  name the one before them. */
 function frameOf(
   place: number,
   text: string,
-  { lane, seq = place, id = BigInt(place) }: { lane?: string; seq?: number; id?: bigint } = {},
+  {
+    lane,
+    placed = true,
+    seq = place,
+    id = BigInt(place),
+    prev = BigInt(Math.max(place - 1, 0)),
+  }: { lane?: string; placed?: boolean; seq?: number; id?: bigint; prev?: bigint } = {},
 ): Buffer {
   const header = Buffer.alloc(40)
   header.writeBigUInt64BE(BigInt(place), 0)
@@ -148,10 +157,10 @@ function frameOf(
   header.writeUInt32BE(0, 16)
   header.writeUInt32BE(1_700_000_000, 20)
   header.writeBigUInt64BE(id, 24)
-  header.writeBigUInt64BE(BigInt(Math.max(place - 1, 0)), 32)
+  header.writeBigUInt64BE(prev, 32)
   const laneKey = lane === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.alloc(2), Buffer.from(lane, 'latin1')])
   if (lane !== undefined) laneKey.writeUInt16BE(lane.length, 0)
-  return Buffer.concat([laneKey, header, Buffer.from(text)])
+  return Buffer.concat([laneKey, placed ? header : header.subarray(8), Buffer.from(text)])
 }
 
 describe('a start read Redis answers with an error', () => {
@@ -204,6 +213,51 @@ describe('a resume', () => {
     expect(missed).toEqual([2])
   })
 
+  it('tells once where its read, ahead on the same history, finds the frames that reached it forking below the lane', async () => {
+    const { listen, publish, close, delivered, missed } = setup()
+    let start = lane(4)
+    let reading = createDeferred()
+    reading.resolve()
+    let reads = 0
+    const attempt = listen(TEXT, async () => {
+      reads++
+      await reading.promise
+      return start
+    })
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(5, 'm5'))
+    // The record was replaced from place 4 on and stands at y7; y6 and y7 reach the new connection during its read.
+    reading = createDeferred()
+    close()
+    await expect.poll(() => reads).toBe(2)
+    publish(TEXT, frameOf(6, 'y6', { id: BigInt(106), prev: BigInt(105) }))
+    publish(TEXT, frameOf(7, 'y7', { id: BigInt(107), prev: BigInt(106) }))
+    start = { authority: 'a', starts: new Map([['', { place: 7, id: BigInt(107) }]]) }
+    reading.resolve()
+    await expect.poll(() => attempt.state()).toBe('ready')
+    expect(delivered).toEqual(['m5', 'y6', 'y7'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells once where a lane with no commit at its first start resumes on another history set back below it', async () => {
+    const { listen, publish, close, delivered, missed } = setup()
+    let start: Starts = { authority: 'a', starts: new Map() }
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    for (let i = 1; i <= 7; i++) publish(TEXT, frameOf(i, `x${i}`))
+    // A restart from a snapshot at x4 starts another history there.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+    close()
+    await expect.poll(() => missed.length).toBe(1)
+    // y5 continues the new history from x4, where x5 continued the old one; a read now finds y5.
+    start = { authority: 'b', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(4) }))
+    publish(TEXT, frameOf(6, 'y6', { id: BigInt(106), prev: BigInt(105) }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered.slice(7)).toEqual(['y5', 'y6'])
+    expect(missed).toEqual([null])
+  })
+
   it('reports once, with no count, that it may have missed some, from another history, with lanes or none', async () => {
     for (const form of ['same place', 'ahead', 'none'] as const) {
       const { listen, close, missed } = setup()
@@ -225,9 +279,26 @@ describe('a Cluster slot whose master changed', () => {
     starts: new Map([['', { place, id: BigInt(place) }]]),
   })
   const moved = new Map([[slotOf(TEXT), '127.0.0.1:7001']])
+  /** The connection to the old master, which a start read is sent on to read from its own data. */
+  const OLD = {} as RedisClient
+  const node = (view: Pick<FormerMaster, 'master' | 'history'> & Partial<FormerMaster>): FormerMaster => ({
+    client: OLD as FormerMaster['client'],
+    previous: null,
+    serves: async () => false,
+    close() {},
+    ...view,
+  })
+  /** The old master of history 'a', which gave the slot away. */
+  const resharded = node({ master: true, history: 'a' })
 
-  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, or is of another history', async () => {
-    const views: Array<MasterView | null> = [null, { history: 'a', serves: true }, { history: 'x', serves: false }]
+  it('resumes the attempt, told of a loss, where the old master is gone, serves the slot still, is of another history, or resynced in full', async () => {
+    const views: Array<FormerMaster | null> = [
+      null,
+      node({ master: true, history: 'a', serves: async () => true }),
+      node({ master: true, history: 'x' }),
+      // A replica now that took the new master's history whole: what it had past the new master's copy is gone.
+      node({ master: false, history: 'b' }),
+    ]
     for (const view of views) {
       const { subscriptions, listen, missed } = setup()
       let start = lane(3)
@@ -241,6 +312,324 @@ describe('a Cluster slot whose master changed', () => {
     }
   })
 
+  it('tells a failover once where its frames reach the lane before the check: the read they make tells it, and it follows the new history', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    const states: string[] = []
+    attempt.onStateChange((state) => states.push(state))
+    publish(TEXT, frameOf(4, 'm4'))
+    // The new master's first frame takes m4's place: the attempt reads where its key stands, as after a cut, and finds
+    // its master of another history now.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => missed).toEqual([null])
+    await subscriptions.followMoves(moved, async () => null)
+    expect(states).toEqual(['lost', 'ready'])
+    expect(missed).toEqual([null])
+    // y5 goes on from y4, and another failover's master stands at y5: nothing in the frames told the lane of it.
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    start = { authority: 'c', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => states).toEqual(['lost', 'ready', 'lost', 'ready'])
+    expect(missed).toEqual([null, null])
+    expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('delivers both sides of a fork once each, under one report, in either order they arrive', async () => {
+    // The old master's x11 and the new master's y11 both follow x10.
+    const x11 = frameOf(11, 'x11')
+    const y11 = frameOf(11, 'y11', { id: BigInt(111) })
+    for (const newFirst of [false, true]) {
+      const { listen, publish, delivered, missed } = setup()
+      let start = lane(10)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      start = { authority: 'b', starts: new Map([['', { place: 11, id: BigInt(111) }]]) }
+      const order = newFirst ? ['y11', 'x11'] : ['x11', 'y11']
+      for (const text of order) publish(TEXT, text === 'x11' ? x11 : y11)
+      await expect.poll(() => delivered).toEqual(order)
+      publish(TEXT, frameOf(12, 'y12', { id: BigInt(112), prev: BigInt(111) }))
+      expect(delivered).toEqual([...order, 'y12'])
+      expect(missed).toEqual([null])
+    }
+  })
+
+  it('delivers each commit once to a holder whose two attempts carry the lane, across a fork', async () => {
+    // A Room's every-track channel and its member track's channel both carry lane 't' to the room's replica.
+    const EVERY = TEXT
+    const TRACK = `${TEXT}:t`
+    const { listen, publish, delivered, missed } = setup()
+    let authority = 'a'
+    let at = { place: 10, id: BigInt(10) }
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+    const every = listen(EVERY, async () => ({ authority, starts: new Map([['t', at]]) }), fanIn, 'room')
+    const track = listen(TRACK, async () => ({ authority, starts: new Map([['', at]]) }), single, 'room')
+    await expect.poll(() => [every.state(), track.state()]).toEqual(['ready', 'ready'])
+    const onEvery = (place: number, text: string, ids: { id?: bigint; prev?: bigint } = {}) =>
+      publish(EVERY, frameOf(place, text, { lane: 't', placed: false, ...ids }))
+    const onTrack = (place: number, text: string, ids: { id?: bigint; prev?: bigint } = {}) =>
+      publish(TRACK, frameOf(place, text, { placed: false, ...ids }))
+    onEvery(11, 'x11')
+    authority = 'b'
+    at = { place: 11, id: BigInt(111) }
+    onTrack(11, 'y11', { id: BigInt(111) })
+    onEvery(11, 'y11', { id: BigInt(111) })
+    // The old master's copy of x11 on the track's channel, late.
+    onTrack(11, 'x11')
+    await expect.poll(() => [every.state(), track.state()]).toEqual(['ready', 'ready'])
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
+  })
+
+  it("delivers the commit a holder's old attempt holds as it reads again, once its new attempt from the new history is ready first", async () => {
+    // A Room hands its member's track from her every-track channel to the track's every-member channel.
+    const EVERY = TEXT
+    const TRACK = `${TEXT}:t`
+    const { listen, publish, delivered, missed } = setup()
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+    let everyRead = Promise.resolve<Starts>({ authority: 'a', starts: new Map([['t', { place: 10, id: BigInt(10) }]]) })
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    const trackRead = createDeferred<Starts>()
+    const track = listen(TRACK, () => trackRead.promise, single, 'room')
+    // The new master forked at x10: its y11 replaces x11, and the old attempt reads where its key stands again.
+    const reread = createDeferred<Starts>()
+    everyRead = reread.promise
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    expect(every.state()).toBe('lost')
+    trackRead.resolve({ authority: 'b', starts: new Map([['', { place: 11, id: BigInt(111) }]]) })
+    await expect.poll(() => track.state()).toBe('ready')
+    // The room lets go of the old attempt once the new one is ready.
+    await every.unsubscribe()
+    reread.resolve({ authority: 'b', starts: new Map([['t', { place: 11, id: BigInt(111) }]]) })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once where the old master’s late frame follows the new history’s first', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => delivered).toEqual(['m4', 'y4'])
+    // Two writers for a moment: the old master's m5 reaches the lane after the new master's y4, then y5.
+    publish(TEXT, frameOf(5, 'm5'))
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    expect(attempt.state()).toBe('ready')
+    expect(delivered).toEqual(['m4', 'y4', 'm5', 'y5'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once where the check comes before its frames: the frames before the new start are of the change told', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    const attempt = listen(TEXT, async () => start)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    // The new master forked at m3 and has y4, y5; neither has reached the lane when the check reads its start.
+    start = { authority: 'b', starts: new Map([['', { place: 5, id: BigInt(105) }]]) }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => missed).toEqual([null])
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    publish(TEXT, frameOf(5, 'y5', { id: BigInt(105), prev: BigInt(104) }))
+    expect(missed).toEqual([null])
+    expect(delivered).toEqual(['m4', 'y4', 'y5'])
+  })
+
+  it('tells a failover once to a loss key whose other attempt met it in its frames first', async () => {
+    const { subscriptions, listen, publish, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => missed).toEqual([null])
+    // BINARY carried nothing: only the old master, gone, could show it lost nothing.
+    await subscriptions.followMoves(new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']]), async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once to a loss key whose two attempts each meet it in their frames', async () => {
+    const { subscriptions, listen, publish, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    for (const channel of [TEXT, BINARY]) publish(channel, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    for (const channel of [TEXT, BINARY]) publish(channel, frameOf(4, 'y4', { id: BigInt(104) }))
+    await subscriptions.followMoves(new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']]), async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once to a fan-in attempt whose two lanes each meet it in their frames', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    const startsAt = (authority: string, id: bigint) => ({
+      authority,
+      starts: new Map(['x', 'z'].map((laneKey) => [laneKey, { place: Number(id % BigInt(100)), id }])),
+    })
+    let start = startsAt('a', BigInt(3))
+    const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+    const attempt = listen(TEXT, async () => start, fanIn, 'room')
+    await expect.poll(() => attempt.state()).toBe('ready')
+    for (const laneKey of ['x', 'z']) publish(TEXT, frameOf(4, `m4${laneKey}`, { lane: laneKey, placed: false }))
+    start = startsAt('b', BigInt(104))
+    for (const laneKey of ['x', 'z']) {
+      publish(TEXT, frameOf(4, `y4${laneKey}`, { lane: laneKey, placed: false, id: BigInt(104) }))
+    }
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => attempt.state()).toBe('ready')
+    expect(missed).toEqual([null])
+    for (const laneKey of ['x', 'z']) {
+      expect(delivered.filter((text) => text.endsWith(laneKey))).toEqual([`m4${laneKey}`, `y4${laneKey}`])
+    }
+  })
+
+  it('tells a failover once to a loss key whose attempt met it in its frames, where a cut then resumes both', async () => {
+    const { listen, publish, close, missed } = setup()
+    let start = lane(3)
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    const resumed = attempts.map((attempt) => {
+      const states: string[] = []
+      attempt.onStateChange((state) => states.push(state))
+      return states
+    })
+    close()
+    await expect.poll(() => resumed).toEqual(attempts.map(() => ['lost', 'ready']))
+    expect(missed).toEqual([null])
+  })
+
+  it('tells a failover once where the read that places the fork its frames brought fails first', async () => {
+    const { subscriptions, listen, publish, delivered, missed } = setup()
+    let start = lane(3)
+    let failures = 0
+    const attempt = listen(TEXT, async () => {
+      if (failures === 0) return start
+      failures--
+      throw new Error('Connection is closed.')
+    })
+    await expect.poll(() => attempt.state()).toBe('ready')
+    publish(TEXT, frameOf(4, 'm4'))
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    failures = 1
+    publish(TEXT, frameOf(4, 'y4', { id: BigInt(104) }))
+    await subscriptions.followMoves(moved, async () => null)
+    await expect.poll(() => delivered, { timeout: 3_000 }).toEqual(['m4', 'y4'])
+    await subscriptions.followMoves(moved, async () => null)
+    expect(attempt.state()).toBe('ready')
+    expect(missed).toEqual([null])
+  })
+
+  it('reports where the lane went on, as next, from the start of the last switch or resharding into a failover', async () => {
+    for (const first of ['switch', 'resharding'] as const) {
+      const { subscriptions, listen, publish, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async () => start)
+      await expect.poll(() => attempt.state()).toBe('ready')
+      // Where the other history stands, a commit with id 100 + its place.
+      let place = 3
+      if (first === 'switch') {
+        // A reported failover to a master at another commit in place 3.
+        start = { authority: 'b', starts: new Map([['', { place, id: BigInt(103) }]]) }
+        await subscriptions.followMoves(moved, async () => null)
+        await expect.poll(() => missed).toEqual([null])
+      } else {
+        // A reported fork, y4 replacing m4 within the history, then a resharding.
+        publish(TEXT, frameOf(4, 'm4'))
+        start = { authority: 'a', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+        publish(TEXT, frameOf(++place, 'y4', { id: BigInt(104) }))
+        await expect.poll(() => missed).toEqual([null])
+        start = { authority: 'b', starts: new Map([['', { place, id: BigInt(104) }]]) }
+        await subscriptions.followMoves(moved, async () => resharded)
+      }
+      publish(TEXT, frameOf(++place, 'z', { id: BigInt(100 + place), prev: BigInt(99 + place) }))
+      start = { authority: 'c', starts: new Map([['', { place, id: BigInt(100 + place) }]]) }
+      await subscriptions.followMoves(moved, async () => null)
+      await expect.poll(() => missed).toEqual([null, null])
+    }
+  })
+
+  it('goes on where the old master rejoined by a partial resync, or holds no commit its lanes lack', async () => {
+    const cases: Array<[string, FormerMaster, Starts]> = [
+      [
+        'a partial resync, which Redis grants only to a node with nothing the new master lacks',
+        node({ master: false, history: 'b', previous: 'a' }),
+        lane(3),
+      ],
+      [
+        'a replica not yet resynced, whose record is at the commit the lane started at',
+        node({ master: false, history: 'a' }),
+        lane(3),
+      ],
+      [
+        'a replica not yet resynced, whose last commit the new master holds too',
+        node({ master: false, history: 'a' }),
+        lane(4),
+      ],
+    ]
+    for (const [, old, there] of cases) {
+      const { subscriptions, listen, close, missed } = setup()
+      let start = lane(3)
+      const attempt = listen(TEXT, async (on) => (on === OLD ? there : start))
+      await expect.poll(() => attempt.state()).toBe('ready')
+      const states: string[] = []
+      attempt.onStateChange((state) => states.push(state))
+      start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+      await subscriptions.followMoves(moved, async () => old)
+      expect(states).toEqual([])
+      // It follows the new master's history: a cut after resumes from it with no unknown loss.
+      close()
+      await expect.poll(() => states).toEqual(['lost', 'ready'])
+      expect(missed).toEqual([1])
+    }
+  })
+
+  it('resumes, told of a loss, where the old master, not yet resynced, holds a commit its lanes never got', async () => {
+    const { subscriptions, listen, missed } = setup()
+    let start = lane(3)
+    const there = { authority: 'a', starts: new Map([['', { place: 4, id: BigInt(4) }]]) }
+    const attempt = listen(TEXT, async (on) => (on === OLD ? there : start))
+    await expect.poll(() => attempt.state()).toBe('ready')
+    // The new master has its own commit at place 4.
+    start = { authority: 'b', starts: new Map([['', { place: 4, id: BigInt(104) }]]) }
+    await subscriptions.followMoves(moved, async () => node({ master: false, history: 'a' }))
+    await expect.poll(() => missed).toEqual([null])
+  })
+
+  it('tells one unknown loss of one change to the attempts that share a loss key, and the next change again', async () => {
+    const { subscriptions, listen, missed } = setup()
+    let start = lane(3)
+    // A Room's channels in one slot: one room, one loss key.
+    const attempts = [TEXT, BINARY].map((channel) => listen(channel, async () => start, undefined, 'room'))
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    const both = new Map([...moved, [slotOf(BINARY), '127.0.0.1:7001']])
+    start = lane(3, 'b')
+    await subscriptions.followMoves(both, async () => null)
+    await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
+    expect(missed).toEqual([null])
+    start = lane(3, 'c')
+    await subscriptions.followMoves(both, async () => null)
+    await expect.poll(() => missed).toEqual([null, null])
+  })
+
   it('goes on where the old master, of the history it started from, sends its key elsewhere: a resharding', async () => {
     const { subscriptions, listen, close, missed } = setup()
     let start = lane(3)
@@ -250,7 +639,7 @@ describe('a Cluster slot whose master changed', () => {
     attempt.onStateChange((state) => states.push(state))
     // The new master, which the key moved to with its record.
     start = lane(3, 'b')
-    await subscriptions.followMoves(moved, async () => ({ history: 'a', serves: false }))
+    await subscriptions.followMoves(moved, async () => resharded)
     expect(states).toEqual([])
     // A cut after it resumes from the new master's history, which it follows now: nothing was missed.
     close()
@@ -494,22 +883,24 @@ describe('a receiver that throws, ahead of another on the same channel', () => {
     const { subscriptions, publish } = setup()
     const thrower: string[] = []
     const healthy: string[] = []
-    const listen = (deliver: (payload: unknown) => void) =>
+    // Each its own holder: one holder would get each commit once, through one of them.
+    const listen = (holder: string, deliver: (payload: unknown) => void) =>
       subscriptions.subscribe({
         channel: TEXT,
         invalidationChannel: null,
         frames: { fanIn: false, placed: true, text: true, lanesEndWithMembers: false },
         laneChannel: null,
+        holder,
         readStarts: async () => none(),
         receiver: { deliver },
         reportMissed() {},
       })
     const attempts = [
-      listen((payload) => {
+      listen('thrower', (payload) => {
         thrower.push(String(payload))
         throw new Error('Test: a receiver throws')
       }),
-      listen((payload) => void healthy.push(String(payload))),
+      listen('healthy', (payload) => void healthy.push(String(payload))),
     ]
     await Promise.all(subscriptions.establishingOn([TEXT]))
     await expect.poll(() => attempts.map((attempt) => attempt.state())).toEqual(['ready', 'ready'])
@@ -519,5 +910,118 @@ describe('a receiver that throws, ahead of another on the same channel', () => {
 
     expect({ thrower, healthy }).toEqual({ thrower: ['first', 'second'], healthy: ['first', 'second'] })
     expect(reports.map(String)).toEqual(['Error: Test: a receiver throws', 'Error: Test: a receiver throws'])
+  })
+})
+
+// c6 probes (finality-436-redis-order round 6): a holder's lane across a handoff, not part of the product.
+describe('c6: a lane its holder hands from one route to another', () => {
+  const EVERY = TEXT
+  const TRACK = `${TEXT}:t`
+  const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
+  const single = { fanIn: false, placed: false, text: true, lanesEndWithMembers: false }
+  const at = (place: number, authority: string, laneKey: string, id = BigInt(place)): Starts => ({
+    authority,
+    starts: new Map([[laneKey, { place, id }]]),
+  })
+
+  it('P6a: delivers the new history’s commit only the old route brought, where the new route’s read answers first', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    const reread = createDeferred<Starts>()
+    everyRead = reread.promise
+    // y11 replaces x11, published before the track's route subscribes: only the old route has a copy.
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    expect(every.state()).toBe('lost')
+    const track = listen(TRACK, async () => at(11, 'b', '', BigInt(111)), single, 'room')
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    reread.resolve(at(11, 'b', 't', BigInt(111)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11', 'y11'])
+    expect(missed).toEqual([null])
+  })
+
+  it('P6b: delivers a commit the new route’s start covers that the lane never delivered, on one history', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    const trackRead = createDeferred<Starts>()
+    const track = listen(TRACK, () => trackRead.promise, single, 'room')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // One script publishes x11 on the track's lane channel first, then on the member's every-track channel.
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    trackRead.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(delivered).toEqual(['x11'])
+    expect(missed).toEqual([])
+  })
+
+  it('P6c: keeps what the old route parked once it leaves, and tells the hole', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
+    await expect.poll(() => every.state()).toBe('ready')
+    publish(EVERY, frameOf(12, 'x12', { lane: 't', placed: false }))
+    const track = listen(TRACK, async () => at(12, 'a', ''), single, 'room')
+    await expect.poll(() => track.state()).toBe('ready')
+    await every.unsubscribe()
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    expect(delivered).toEqual(['x12'])
+    expect(missed).toEqual([1])
+  })
+
+  it('P6d: tells a failover once where a stale read of the left history follows the new one', async () => {
+    const { listen, publish, delivered, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    let trackRead = Promise.resolve(at(10, 'a', ''))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    const track = listen(TRACK, () => trackRead, single, 'room')
+    await expect.poll(() => every.state() === 'ready' && track.state() === 'ready').toBe(true)
+    const stale = createDeferred<Starts>()
+    trackRead = stale.promise
+    everyRead = Promise.resolve(at(11, 'b', 't', BigInt(111)))
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    // y11 replaces x11: both routes fork on it and read again.
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    await expect.poll(() => every.state()).toBe('ready')
+    // The old master still answers the track route's read.
+    stale.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    expect(missed).toEqual([null])
+    expect(delivered).toEqual(['x11', 'y11'])
+  })
+
+  it('P6e: tells a later failover after a stale read of the left history', async () => {
+    const { listen, publish, missed } = setup()
+    let everyRead = Promise.resolve(at(10, 'a', 't'))
+    let trackRead = Promise.resolve(at(10, 'a', ''))
+    const every = listen(EVERY, () => everyRead, fanIn, 'room')
+    const track = listen(TRACK, () => trackRead, single, 'room')
+    await expect.poll(() => every.state() === 'ready' && track.state() === 'ready').toBe(true)
+    publish(EVERY, frameOf(11, 'x11', { lane: 't', placed: false }))
+    publish(TRACK, frameOf(11, 'x11', { placed: false }))
+    const stale = createDeferred<Starts>()
+    trackRead = stale.promise
+    everyRead = Promise.resolve(at(11, 'b', 't', BigInt(111)))
+    publish(EVERY, frameOf(11, 'y11', { lane: 't', placed: false, id: BigInt(111) }))
+    publish(TRACK, frameOf(11, 'y11', { placed: false, id: BigInt(111) }))
+    await expect.poll(() => every.state()).toBe('ready')
+    stale.resolve(at(11, 'a', ''))
+    await expect.poll(() => track.state()).toBe('ready')
+    // A second failover: c forked at y11, so its z12 replaces nothing delivered yet but y12.
+    everyRead = Promise.resolve(at(12, 'c', 't', BigInt(212)))
+    trackRead = Promise.resolve(at(12, 'c', '', BigInt(212)))
+    publish(EVERY, frameOf(12, 'y12', { lane: 't', placed: false, id: BigInt(112), prev: BigInt(111) }))
+    publish(EVERY, frameOf(12, 'z12', { lane: 't', placed: false, id: BigInt(212), prev: BigInt(111) }))
+    await expect.poll(() => missed.length, { timeout: 2_000 }).toBe(2)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(missed).toEqual([null, null])
   })
 })

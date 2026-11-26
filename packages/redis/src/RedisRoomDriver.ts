@@ -39,7 +39,7 @@ import type {
   StaleIncarnation,
 } from '@telefunc/room/backend'
 import { decodeRetainedFrame } from './orderingFrame.js'
-import { addressOf, isCluster } from './ioredis.js'
+import { addressOf, isCluster, type RedisClient } from './ioredis.js'
 import { staleStart } from './redisFailure.js'
 import {
   channelKey,
@@ -317,7 +317,7 @@ class RedisRoomDriver implements RoomDriver {
     assertCommittable({ lane, payload, kit: this.kit })
   }
 
-  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver): DriverAttempt {
+  subscribe(source: RoomSubscriptionSource, receiver: BackendReceiver, holder: string): DriverAttempt {
     const { prefix } = this.connection
     const { kind } = source.lane
     const fanIn = kind === 'binary-all' || kind === 'binary-track'
@@ -332,23 +332,23 @@ class RedisRoomDriver implements RoomDriver {
         lanesEndWithMembers: fanIn || kind === 'inbox' || kind === 'binary',
       },
       laneChannel: fanIn ? (laneKey) => channelKey(prefix, roomId, inc, laneKey) : null,
-      readStarts: () => this.readStarts(source),
+      readStarts: (on) => this.readStarts(source, on),
       receiver,
       reportMissed: (count) =>
         this.kit.reportLaneLost(source.roomId, source.lane, neverReachedSubscription(count, 'commit')),
+      holder,
     })
   }
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
-   *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. */
-  private async readStarts(source: RoomSubscriptionSource): Promise<Starts | null> {
+   *  on a fan-in channel and `''` on another; null once the source's incarnation is not the open head. `on`: a former
+   *  master to read them from. */
+  private async readStarts(source: RoomSubscriptionSource, on?: RedisClient): Promise<Starts | null> {
     const { roomId, inc, lane } = source
-    if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
-    if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
-    const read = await this.connection.run(REDIS_COMMANDS.laneStart, {
-      ...source,
-      laneKey: this.kit.encodeLaneKey(lane),
-    })
+    if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member, on)
+    if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track, on)
+    const laneKey = this.kit.encodeLaneKey(lane)
+    const read = await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey }, on)
     return read === null ? null : { authority: read.authority, starts: read.read }
   }
 
@@ -543,12 +543,17 @@ class RedisRoomDriver implements RoomDriver {
     return due.map(({ roomId, listing }) => directoryEntry(roomId, listing))
   }
 
-  private async memberLaneStarts(roomId: string, inc: string, member: string): Promise<Starts | null> {
+  private async memberLaneStarts(
+    roomId: string,
+    inc: string,
+    member: string,
+    on?: RedisClient,
+  ): Promise<Starts | null> {
     const starts = new Map<string, LaneStart>()
     let authority: string | null = null
     let cursor = '0'
     do {
-      const page = await this.connection.run(REDIS_COMMANDS.memberLaneStarts, { roomId, inc, member, cursor })
+      const page = await this.connection.run(REDIS_COMMANDS.memberLaneStarts, { roomId, inc, member, cursor }, on)
       if (page === null) return null
       authority = this.sameAuthority(authority, page)
       cursor = page.read.cursor
@@ -561,22 +566,21 @@ class RedisRoomDriver implements RoomDriver {
     return { authority, starts }
   }
 
-  private async trackLaneStarts(roomId: string, inc: string, track: string): Promise<Starts | null> {
+  private async trackLaneStarts(roomId: string, inc: string, track: string, on?: RedisClient): Promise<Starts | null> {
     const starts = new Map<string, LaneStart>()
     let authority: string | null = null
     let cursor = '0'
     do {
-      const page = await this.connection.run(REDIS_COMMANDS.trackLanes, { roomId, inc, track, cursor })
+      const page = await this.connection.run(REDIS_COMMANDS.trackLanes, { roomId, inc, track, cursor }, on)
       if (page === null) return null
       authority = this.sameAuthority(authority, page)
       cursor = page.read.cursor
       if (page.read.lanes.length === 0) continue
-      const marks = await this.connection.run(REDIS_COMMANDS.laneMarks, {
-        roomId,
-        inc,
-        lanes: page.read.lanes,
-        kit: this.kit,
-      })
+      const marks = await this.connection.run(
+        REDIS_COMMANDS.laneMarks,
+        { roomId, inc, lanes: page.read.lanes, kit: this.kit },
+        on,
+      )
       authority = this.sameAuthority(authority, marks)
       for (const [i, laneKey] of page.read.lanes.entries()) {
         const mark = marks.read[i]

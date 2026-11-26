@@ -532,15 +532,16 @@ return tf_cells_reply({'more', time, keys[#keys]}, keys, 1, now, ARGV[5], ARGV[6
 `
 
 // The history a start is read from, read before anything else: the node's replication id, and on a Cluster its config
-// epoch, which a slot moving away and back raises. A node that isn't a primary answers TFSTALE, read again; a user whose
-// ACL denies INFO, or CLUSTER INFO on a Cluster, TFINFO, before anything is read or written.
+// epoch, which a slot moving away and back raises. A node that isn't a primary answers TFSTALE, read again, unless the
+// read asks a former master (`tf_former`); a user whose ACL denies INFO, or CLUSTER INFO on a Cluster, TFINFO, before
+// anything is read or written.
 const AUTHORITY_LUA = `
 local function tf_authority()
   if redis.acl_check_cmd and not redis.acl_check_cmd('INFO', 'replication') then
     return nil, redis.error_reply("TFINFO INFO")
   end
   local info = redis.call('INFO', 'replication')
-  if not string.find(info, 'role:master', 1, true) then
+  if not tf_former and not string.find(info, 'role:master', 1, true) then
     return nil, redis.error_reply("TFSTALE a subscription's start reached a replica")
   end
   local authority = string.match(info, 'master_replid:(%x+)')
@@ -612,13 +613,13 @@ return {authority, marks}
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
 //   KEYS: [1]=order (ORDER_RECORD_LUA's Broadcast record)
-//   Reply: {authority, the record}
+//   Reply: {authority, the record}; a former master's, '' where the key has none
 const BROADCAST_START_HOLDS = ['string'] as const
 const BROADCAST_START_LUA = `${AUTHORITY_LUA}
 local authority, refusal = tf_authority()
 if not authority then return refusal end
 ${heldCallLua('local raw', BROADCAST_START_HOLDS[0], `'GET', KEYS[1]`, 'KEYS[1]')}
-if raw then return {authority, raw} end
+if raw or tf_former then return {authority, raw or ''} end
 local t = redis.call('TIME')
 local no_id = string.rep('\\0', 8)
 raw = struct.pack('<dddc8c8', ${firstSeqOf('t')}, 0, 0, no_id, no_id)
@@ -1273,7 +1274,9 @@ return reply
 type Invocation = { keys: readonly string[]; argv: ReadonlyArray<string | Buffer> }
 
 /** One script: whether it writes, its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys` is how many KEYS
- *  every call gives, `null` where a call's own input decides; `binaryReply` reads bulk strings as Buffers. */
+ *  every call gives, `null` where a call's own input decides; `binaryReply` reads bulk strings as Buffers; a start
+ *  read's `formerLua` is the same read as a Cluster node that lost the key's slot answers it, from its own data
+ *  (`startRead`). */
 type RedisCommand<Input, Output> = {
   /** The script's name, which tells it from the others where a run is read. */
   readonly name: string
@@ -1284,11 +1287,19 @@ type RedisCommand<Input, Output> = {
   readonly holds?: readonly Hold[]
   readonly numberOfKeys: number | null
   readonly binaryReply?: true
+  readonly formerLua?: string
   invoke(prefix: string, input: Input): Invocation
   parse(reply: unknown, input: Input): Output
 }
 
 const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
+
+/** A start read's script, and the same read as a Cluster node that lost the key's slot answers it: from a replica too,
+ *  and writing nothing. */
+const startRead = (lua: string) => ({
+  lua: `local tf_former = false\n${lua}`,
+  formerLua: `local tf_former = true\n${lua}`,
+})
 
 type RoomInc = { roomId: string; inc: string }
 type DirectoryPutInput = { roomId: string; listing: string; checkAt: number; minDelayMs: number }
@@ -1515,7 +1526,7 @@ const REDIS_COMMANDS = {
   laneStart: command({
     name: 'tfRoomLaneStart',
     writes: false,
-    lua: LANE_START_LUA,
+    ...startRead(LANE_START_LUA),
     numberOfKeys: 2,
     binaryReply: true,
     invoke: (prefix, { roomId, inc, lane, laneKey }: RoomSubscriptionSource & { laneKey: string }) => {
@@ -1541,7 +1552,7 @@ const REDIS_COMMANDS = {
   memberLaneStarts: command({
     name: 'tfRoomMemberLaneStarts',
     writes: false,
-    lua: MEMBER_LANE_STARTS_LUA,
+    ...startRead(MEMBER_LANE_STARTS_LUA),
     numberOfKeys: 2,
     binaryReply: true,
     invoke: (prefix, { roomId, inc, member, cursor }: RoomInc & { member: string; cursor: string }) => ({
@@ -1563,7 +1574,7 @@ const REDIS_COMMANDS = {
   trackLanes: command({
     name: 'tfRoomTrackLanes',
     writes: false,
-    lua: TRACK_LANES_LUA,
+    ...startRead(TRACK_LANES_LUA),
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, track, cursor }: RoomInc & { track: string; cursor: string }) => ({
       keys: [headKey(prefix, roomId), trackLanesKey(prefix, roomId, inc, track)],
@@ -1579,7 +1590,7 @@ const REDIS_COMMANDS = {
   laneMarks: command({
     name: 'tfRoomLaneMarks',
     writes: false,
-    lua: LANE_MARKS_LUA,
+    ...startRead(LANE_MARKS_LUA),
     numberOfKeys: null,
     binaryReply: true,
     invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
@@ -1602,10 +1613,10 @@ const REDIS_COMMANDS = {
   }),
   broadcastStart: command({
     name: 'tfBroadcastStart',
-    // It sets the key's mark where none is.
+    // It sets the key's mark where none is; as a former master's read, it writes nothing.
     writes: true,
     holds: BROADCAST_START_HOLDS,
-    lua: BROADCAST_START_LUA,
+    ...startRead(BROADCAST_START_LUA),
     numberOfKeys: 1,
     binaryReply: true,
     invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
@@ -1614,7 +1625,10 @@ const REDIS_COMMANDS = {
       const [authority, record] = twoOf(bytesList(reply))
       return {
         authority: authority.toString(),
-        read: new Map([['', decodeBroadcastOrder(record, kind, `the Broadcast key '${key}'`)]]),
+        read:
+          record.byteLength === 0
+            ? new Map()
+            : new Map([['', decodeBroadcastOrder(record, kind, `the Broadcast key '${key}'`)]]),
       }
     },
   }),
