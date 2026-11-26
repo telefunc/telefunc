@@ -275,6 +275,42 @@ test('a held callback preserves an extension tag that shares the replay prefix',
   expect(args[1]).toMatch(/^!TelefuncFunction:/)
 })
 
+test.each(['createChannel', 'sendStream'] as const)(
+  'a cold extension value whose replacer calls %s() waits for channels, then goes in one POST',
+  async (method) => {
+    const { call, config } = await page()
+    config.extensions.push({
+      name: 'ask',
+      requestTypes: [
+        {
+          prefix: '!Ask:',
+          detect: (value: unknown): value is { kind: 'ask' } =>
+            typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'ask',
+          replace(_value: unknown, context) {
+            if (method === 'sendStream') return context.sendStream(() => ({ chunks: oneChunk(31), cancel() {} }))
+            const channel = context.createChannel({ ack: true })
+            return {
+              metadata: { channelId: channel.id },
+              async close() {
+                await channel.close()
+              },
+              abort: () => channel.abort(),
+            }
+          },
+        },
+      ],
+    })
+    respond = text(1)
+    const pending = call([{ kind: 'ask' }])
+    await vi.waitFor(() => expect(imported).toEqual(['channels']))
+    expect(posts).toEqual([])
+    gates.channels.open()
+    expect(await pending).toBe(1)
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0] ?? '').args[0]).toMatch(/^!Ask:\{"channelId":"[^"]+"\}$/)
+  },
+)
+
 test('serialization failure cancels the stream an earlier replayed argument started', async () => {
   const { call, withContext } = await page()
   const cancel = vi.fn()
@@ -299,6 +335,9 @@ test('serialization failure cancels the stream an earlier replayed argument star
 
 test('a later invalid argument cancels a resource created by an extension replacer', async () => {
   const { call, config, withContext } = await page()
+  gates.channels.open()
+  gates.broadcasts.open()
+  await import('../../../client/__internal.js')
   const resource = {}
   const abort = vi.fn()
   config.extensions.push({
@@ -524,6 +563,10 @@ test('plain RPC: sent at once, an app string that looks like a value loads nothi
   expect([...ret]).toEqual(value)
   expect(imported).toEqual([])
 })
+
+async function* oneChunk(byte: number) {
+  yield new Uint8Array([byte])
+}
 
 function assertHas<K extends string>(value: unknown, key: K): asserts value is Record<K, unknown> {
   expect(value).toHaveProperty(key)
