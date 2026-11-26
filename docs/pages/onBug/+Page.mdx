@@ -19,6 +19,8 @@ This allows you, for example, to install the tracker code of some tracking servi
  - When Telefunc throws an error. (Telefunc has a bug.)
 
 > `throw Abort()` does *not* trigger `onBug()`. Telefunc handles `Abort` as an expected error, and returns the error data (if any) as part of a >= `4xx` response, see <Link href="/abort-vs-error" />.
+>
+> A client that disconnects mid-upload or mid-channel does *not* trigger `onBug()` either.
 
 ## See also
 

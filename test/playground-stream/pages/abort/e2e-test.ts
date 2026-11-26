@@ -168,6 +168,19 @@ function testAbort() {
       expect(bugs).deep.equal([])
     })
 
+  test('abort: a server stream that closes early is reported as a bug', async () => {
+    await navigate(`${getServerUrl()}/abort`)
+    await resetCleanupState()
+
+    await page.click('#test-save-to-storage')
+    await autoRetry(async () => {
+      expect((await getResult('#abort-result')).error).toContain('Internal Server Error')
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())['bug:Premature close']).toBe('reported')
+    })
+  })
+
   // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {

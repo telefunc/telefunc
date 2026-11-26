@@ -7,6 +7,7 @@ import {
   onSlowNormalTelefunc,
   onUploadAbortSingle,
   onUploadAbortMultiple,
+  onSaveToStorage,
 } from './Abort.telefunc'
 import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
 
@@ -233,6 +234,18 @@ function Abort() {
       </button>
 
       {abortButton('upload-abort-multiple', 'Abort upload (multiple files)')}
+
+      <h2>Server stream failure</h2>
+
+      <button
+        id="test-save-to-storage"
+        onClick={() => {
+          setResult('')
+          startAbortable('save-to-storage', onSaveToStorage())
+        }}
+      >
+        Save to storage
+      </button>
     </div>
   )
 }
