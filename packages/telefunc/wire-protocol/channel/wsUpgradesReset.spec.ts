@@ -14,8 +14,7 @@ import { getChannelMux } from './server/ChannelMux.js'
 // A page on a WebSocket gives up past two ping intervals and `reconnectTimeout`: 3 s.
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 1_000, reconnectTimeout: 1_000 }
 
-/** The proxy: it forwards every connection, and resets each that asks for a WebSocket upgrade while `resetting`, and the
- *  next `resets` of them; `seen` lists each connection, in order. */
+/** The proxy resets upgrades while `resetting`, and the next `resets` of them. `seen` lists connections in order. */
 const proxy = {
   resetting: false,
   resets: 0,
@@ -24,6 +23,8 @@ const proxy = {
   seen: Array<'reset' | 'upgrade' | 'request'>(),
 }
 const upgraded = new Set<Socket>()
+const holdUpgradeQuery = '?hold-upgrade=1'
+let unanswered: { sockets: Set<Socket>; seen: ('hold' | 'sse')[] } | null = null
 let server: Server
 let forwarder: net.Server
 let telefuncUrl: string
@@ -40,18 +41,31 @@ beforeAll(async () => {
     page.once('data', (head: Buffer) => {
       const text = head.toString('latin1')
       const isUpgrade = /\r\nupgrade: *websocket/i.test(text)
+      const isEventStream = /\r\naccept: *text\/event-stream/i.test(text)
+      const holdUpgrade = text.includes(`${holdUpgradeQuery}&`)
+      if (holdUpgrade && isUpgrade) {
+        const probe = unanswered
+        if (probe === null) return void page.destroy()
+        probe.seen.push('hold')
+        probe.sockets.add(page)
+        page.on('close', () => probe.sockets.delete(page))
+        return
+      }
       if (isUpgrade && (proxy.resetting || proxy.resets > 0)) {
         proxy.resets = Math.max(0, proxy.resets - 1)
         proxy.seen.push('reset')
         return void page.resetAndDestroy()
       }
-      proxy.seen.push(isUpgrade ? 'upgrade' : 'request')
-      if (isUpgrade) {
+      if (holdUpgrade) {
+        if (isEventStream) unanswered?.seen.push('sse')
+      } else if (isUpgrade) {
+        proxy.seen.push('upgrade')
         upgraded.add(page)
         page.on('close', () => upgraded.delete(page))
       } else {
+        proxy.seen.push('request')
         proxy.requests++
-        if (/\r\naccept: *text\/event-stream/i.test(text)) proxy.eventStreams++
+        if (isEventStream) proxy.eventStreams++
       }
       const upstream = net.connect(address.port, '127.0.0.1')
       upstream.on('error', () => {})
@@ -87,6 +101,33 @@ function within(ms: number, promise: Promise<unknown>): Promise<string> {
     new Promise<string>((resolve) => setTimeout(() => resolve('pending'), ms)),
   ])
 }
+
+test('a first WebSocket upgrade that receives no response falls back to SSE', async () => {
+  const probe = { sockets: new Set<Socket>(), seen: Array<'hold' | 'sse'>() }
+  unanswered = probe
+  const channel = new ServerChannel<string, string>()
+  getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
+  const page = new ClientChannel<string, string>({
+    channelId: channel.id,
+    connection: {
+      telefuncUrl: telefuncUrl + holdUpgradeQuery,
+      transports: ['ws', 'sse'],
+      connectionKey: crypto.randomUUID(),
+    },
+  })
+  try {
+    await vi.waitFor(() => expect(probe.sockets.size).toBe(1))
+    const [first] = probe.sockets
+    if (first === undefined) throw new Error('no held WebSocket')
+    const opened = await within(5_000, page.opened)
+    expect([opened, probe.seen.slice(0, 2)]).toEqual(['resolved', ['hold', 'sse']])
+    await vi.waitFor(() => expect(probe.sockets.has(first)).toBe(false))
+  } finally {
+    unanswered = null
+    page.abort()
+    for (const socket of probe.sockets) socket.destroy()
+  }
+}, 8_000)
 
 test("a page whose transports are ['ws', 'sse'] and whose WebSocket opens stays on it, after a drop too, with no request of SSE's", async () => {
   Object.assign(proxy, { resetting: false, resets: 0, eventStreams: 0, requests: 0, seen: [] })
@@ -172,6 +213,7 @@ test("a page whose transports are ['ws', 'sse'] opens its channel over the event
 
 test('an upgraded page whose WebSocket drops goes on over the event stream', async () => {
   Object.assign(proxy, { resetting: false, resets: 0, eventStreams: 0, requests: 0, seen: [] })
+  const random = vi.spyOn(Math, 'random').mockReturnValue(0.1)
   const channel = new ServerChannel<string, string>()
   getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   const received: string[] = []
@@ -185,10 +227,11 @@ test('an upgraded page whose WebSocket drops goes on over the event stream', asy
     await vi.waitFor(() => expect(upgraded.size).toBe(1))
     proxy.resetting = true
     for (const socket of upgraded) socket.resetAndDestroy()
-    // Past the 3 s a page on a WebSocket gives a lost wire.
+    await vi.waitFor(() => expect(proxy.eventStreams).toBe(2))
     expect(await within(3_500, page.send('after the drop', { ack: true }))).toBe('resolved')
     expect([page.isClosed, received.at(-1)]).toEqual([false, 'after the drop'])
   } finally {
+    random.mockRestore()
     page.abort()
   }
 })

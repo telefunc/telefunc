@@ -248,7 +248,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.closed || !this.transport.isConnecting()) return
     this.cuts++
     this.transport.cancelAttempt()
-    this.onTransportClosed(this.transport)
+    this.onTransportClosed(this.transport, { unopened: this.transport.type === CHANNEL_TRANSPORT.WS })
   }
 
   /** The attempt under way sent a request body of `bytes`: it is cut no sooner than that body and its answer take at the
