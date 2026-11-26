@@ -1,6 +1,7 @@
 export { loadTelefuncFilesUsingVite }
 export { loadServerProductionEntry }
 export { preloadServerProductionEntry }
+export { isServerProductionEntryPending }
 
 import { importServerProductionEntry } from '@brillout/vite-plugin-server-entry/runtime'
 import { assert, assertWarning } from '../../../utils/assert.js'
@@ -15,9 +16,17 @@ import { config } from '../serverConfig.js'
 import { handleError } from './handleError.js'
 import { VIRTUAL_FILE_ENTRY_ID } from '../../vite/plugins/pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
 
-const globalObject = getGlobalObject<{
-  serverProductionEntry?: { loaded: Promise<unknown>; preloaded?: Promise<unknown> }
-}>('loadTelefuncFilesUsingVite.ts', {})
+type ServerProductionEntry = {
+  loaded: Promise<unknown>
+  preloaded?: Promise<void>
+  /** Set once `preloaded` settled: the build's config is applied, or its load failed. */
+  settled?: true
+}
+
+const globalObject = getGlobalObject<{ serverProductionEntry?: ServerProductionEntry }>(
+  'loadTelefuncFilesUsingVite.ts',
+  {},
+)
 
 async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string }, failOnFailure: boolean) {
   const res = await loadVirtualFile(failOnFailure)
@@ -41,22 +50,40 @@ async function loadServerProductionEntry(): Promise<void> {
 async function preloadServerProductionEntry(): Promise<void> {
   const entry = getServerProductionEntry()
   if (!entry) return
-  entry.preloaded ??= entry.loaded.catch(handleError)
+  entry.preloaded ??= preload(entry)
   await entry.preloaded
 }
 
-function getServerProductionEntry() {
+async function preload(entry: ServerProductionEntry): Promise<void> {
+  try {
+    await entry.loaded
+  } catch (err) {
+    handleError(err)
+  }
+  entry.settled = true
+}
+
+/** Whether the build's config may still change, until `preloadServerProductionEntry()` settles: an adapter that must
+ *  answer synchronously can't read it yet. Starts no load. */
+function isServerProductionEntryPending(): boolean {
+  return getServerProductionEntryLoader() !== null && globalObject.serverProductionEntry?.settled !== true
+}
+
+function getServerProductionEntry(): ServerProductionEntry | null {
+  const load = getServerProductionEntryLoader()
+  if (!load) return null
+  globalObject.serverProductionEntry ??= { loaded: load() }
+  return globalObject.serverProductionEntry
+}
+
+function getServerProductionEntryLoader(): (() => Promise<unknown>) | null {
   if (getViteDevServer()) return null
   // Where Vite bundles Telefunc, the bundle has the entry, in dev too as the extensions' server entries (pluginBundledEntry.ts)
-  if (globalThis.__TELEFUNC__IS_BUNDLED) {
-    globalObject.serverProductionEntry ??= { loaded: importBundledEntry() }
-    return globalObject.serverProductionEntry
-  }
+  if (globalThis.__TELEFUNC__IS_BUNDLED) return importBundledEntry
   if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV) return null
   // Like loadTelefuncFiles(), the server's `config.telefuncFiles` take precedence over the build
   if (config.telefuncFiles) return null
-  globalObject.serverProductionEntry ??= { loaded: loadVirtualFile(false) }
-  return globalObject.serverProductionEntry
+  return () => loadVirtualFile(false)
 }
 
 async function loadVirtualFile(failOnFailure: boolean) {

@@ -4,7 +4,10 @@ export type { HttpServer }
 import crossws from 'crossws/adapters/node'
 import { type TakenServer, telefuncsUpgradesOn, upgradeServers } from '../node/server/runTelefunc/takesUpgrades.js'
 import { getServerConfig } from '../node/server/serverConfig.js'
-import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+import {
+  isServerProductionEntryPending,
+  preloadServerProductionEntry,
+} from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { readRequestUrl } from '../utils/getUrlPathname.js'
@@ -60,11 +63,14 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
 })
 
 /** Telefunc's `shouldUpgradeCallback` (Node 22.21, 24.9 and later) upgrades its handshake and leaves every other
- *  request to the server's own, which sees a `listenerCount` without Telefunc's listener. */
+ *  request to the server's own, which sees a `listenerCount` without Telefunc's listener. Until the build's entry
+ *  loaded, its `telefuncUrl` isn't known: the callback takes every handshake, and the `upgrade` listener judges it after
+ *  the load. */
 function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
   const callback = (req: IncomingMessage) => {
+    if (isServerProductionEntryPending()) return true
     const handshake = readHandshake(req)
     handshakes.set(req, handshake)
     if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
@@ -156,6 +162,8 @@ function takeUpgrades(httpServer: HttpServer): void {
     own: undefined,
     holdsRegistry: true,
   }
+  // The callback judges a handshake by the build's `telefuncUrl`: its load starts now, before the server's first request.
+  void preloadServerProductionEntry()
   registeredServers.add(httpServer)
   httpServer.on('upgrade', onUpgrade)
   upgradeOthersOnlyForTheirListeners(httpServer, taken)
