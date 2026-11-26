@@ -36,8 +36,8 @@ type ShieldErrorDetail = {
   subject: string
   /** The raw verifier output (human-readable breadcrumb). */
   wrongType: string
-  /** Optional extra sentence appended before `wrongType` (e.g. JSON of arguments). */
-  extra?: string
+  /** The telefunction's arguments, listed before `wrongType` in development logs. */
+  args?: unknown[]
 }
 
 /** Write a shield-error message to the server log, gated by `config.log.shieldErrors`.
@@ -47,7 +47,14 @@ function logShieldError(detail: ShieldErrorDetail, shieldErrors: ShieldLogConfig
   const parts = [
     `Shield Validation Error: ${detail.subject} on telefunction ${detail.telefunctionName}() (${detail.telefuncFilePath}) has the wrong type.`,
   ]
-  if (detail.extra) parts.push(detail.extra)
+  // Arguments can hold secrets such as passwords, so production logs leave them out
+  if (detail.args && !isProduction()) {
+    try {
+      parts.push(`Arguments: \`${JSON.stringify(detail.args)}\`.`)
+    } catch {
+      // Not JSON-serializable, e.g. a BigInt
+    }
+  }
   parts.push(`Wrong type: ${detail.wrongType}`)
   console.error(parts.join(' '))
 }
@@ -250,7 +257,12 @@ function verifyObject(obj: Record<string, unknown>, arg: unknown, breadcrumbs: s
     return errorMessage(breadcrumbs, getTypeName(arg), 'object')
   }
   for (const key of unique([...Object.keys(obj), ...Object.keys(arg)])) {
-    const res = verifyRecursive(obj[key], arg[key], `${breadcrumbs} > [object: value of key \`${key}\`]`)
+    const isShieldKey = Object.hasOwn(obj, key)
+    const res = verifyRecursive(
+      isShieldKey ? obj[key] : undefined,
+      Object.hasOwn(arg, key) ? arg[key] : undefined,
+      `${breadcrumbs} > ${keyBreadcrumb(key, !isShieldKey)}`,
+    )
     if (res !== true) {
       return res
     }
@@ -321,11 +333,11 @@ const type = (() => {
   }
   const object = <T>(objectType: T): Record<string, T> => {
     const verifier = (input: unknown, breadcrumbs: string) => {
-      if (typeof input !== 'object' || input === null || input.constructor !== Object) {
+      if (typeof input !== 'object' || input === null || Object.getPrototypeOf(input) !== Object.prototype) {
         return errorMessage(breadcrumbs, getTypeName(input), 'object')
       }
       const errorMessages = Object.entries(input)
-        .map(([key, val]) => verifyRecursive(objectType, val, `${breadcrumbs} > [object: value of key \`${key}\`]`))
+        .map(([key, val]) => verifyRecursive(objectType, val, `${breadcrumbs} > ${keyBreadcrumb(key, true)}`))
         .filter((res) => res !== true)
       if (errorMessages.length === 0) {
         return true
@@ -345,8 +357,12 @@ const type = (() => {
   }
 
   const const_ = <T extends Readonly<number> | Readonly<string> | Readonly<boolean> | undefined | null>(val: T): T => {
-    const verifier = (input: unknown, breadcrumbs: string) =>
-      input === val ? true : errorMessage(breadcrumbs, String(input), String(val))
+    const verifier = (input: unknown, breadcrumbs: string) => {
+      if (input === val) return true
+      // `String()` throws on a sent object whose `toString` isn't a function
+      const is = isProduction() || isObjectOrFunction(input) ? getTypeName(input) : String(input)
+      return errorMessage(breadcrumbs, is, String(val))
+    }
     markVerifier(verifier)
     verifier.toString = () => StringBetter(val)
     return verifier as any
@@ -455,6 +471,11 @@ function registerShieldType(name: string, verify: (input: unknown) => boolean) {
   verifier.toString = () => name
   const typeBag: Record<string, unknown> = type
   typeBag[name] = verifier
+}
+
+// Keys and values sent by the client can hold secrets such as passwords, so production messages leave them out
+function keyBreadcrumb(key: string, isInputKey: boolean): string {
+  return isInputKey && isProduction() ? '[object: value of a key]' : `[object: value of key \`${key}\`]`
 }
 
 function errorMessage(breadcrumbs: string, is: string, should: string) {

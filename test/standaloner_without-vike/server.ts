@@ -3,6 +3,7 @@ import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 
 config.disableNamingConvention = true
+config.log = { shieldErrors: false }
 
 const telefunc = new Telefunc()
 

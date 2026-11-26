@@ -83,33 +83,47 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   if (!isDev) {
     test('shield() generation', async () => {
       {
-        const resp = await makeTelefuncHttpRequest('Jon')
+        const resp = await makeTelefuncHttpRequest([{ name: 'Jon' }])
         expect(resp.status).toBe(200)
         const { ret } = await resp.json()
         expect(ret.message).toBe('Welcome Jon')
       }
       {
-        const resp = await makeTelefuncHttpRequest(1337)
+        const resp = await makeTelefuncHttpRequest([{ name: 1337 }])
         expect(resp.status).toBe(422)
         expect(await resp.text()).toBe('Shield Validation Error')
-        // [14:10:31.724][/.test-preview.test.ts][pnpm run preview][stderr] Shield Validation Error: the arguments passed to the telefunction onLoad() (/pages/index/Hello.telefunc.ts) have the wrong type. Arguments: `[{"name":1337}]`. Wrong type: [root] > [tuple: element 0] > [object: value of key `name`] is `number` but should be `string`.
+        // [14:10:31.724][/.test-preview.test.ts][pnpm run preview][stderr] Shield Validation Error: the arguments passed on telefunction onLoad() (/pages/index/Hello.telefunc.ts) has the wrong type. Wrong type: [root] > [tuple: element 0] > [object: value of key `name`] is `number` but should be `string`.
         expectLog('Shield Validation Error', {
           filter: (log) =>
-            log.logSource === 'stderr' && log.logText.includes('onLoad()') && log.logText.includes('Hello.telefunc.ts'),
+            log.logSource === 'stderr' &&
+            log.logText.includes('onLoad()') &&
+            log.logText.includes('Hello.telefunc.ts') &&
+            !log.logText.includes('1337'),
+        })
+      }
+      {
+        const resp = await makeTelefuncHttpRequest([{ name: 'Jon' }, 'some-secret'])
+        expect(resp.status).toBe(422)
+        expect(await resp.text()).toBe('Shield Validation Error')
+        expectLog('Shield Validation Error', {
+          filter: (log) =>
+            log.logSource === 'stderr' &&
+            log.logText.includes('[root] > [tuple: element 1] is `string` but should be `undefined`.') &&
+            !log.logText.includes('some-secret'),
         })
       }
     })
   }
 }
 
-async function makeTelefuncHttpRequest(name: string | number) {
+async function makeTelefuncHttpRequest(args: unknown[]) {
   const resp = await fetch(`${getServerUrl()}/_telefunc`, {
     method: 'POST',
     headers: { 'x-telefunc-request': 'txt' },
     body: JSON.stringify({
       file: '/pages/index/Hello.telefunc.ts',
       name: 'onLoad',
-      args: [{ name }],
+      args,
     }),
   })
   return resp

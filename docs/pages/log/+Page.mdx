@@ -2,9 +2,11 @@ import { Link, Warning } from '@brillout/docpress'
 import { ConfigWhereServer } from '../../components'
 
 **Environment**: server  
-**Default**: `{ shieldErrors: { dev: true, prod: false } }{:ts}`
+**Default**: `{ shieldErrors: { dev: true, prod: true } }{:ts}`
 
 Whether to log shield validation errors.
+
+In production, the logged error names the telefunction, its file, the path of the value with the wrong type and, for most types, the expected type, and leaves out the data sent (it may contain passwords or other secrets). In development, when the arguments of a telefunction call fail the shield, the error also lists the arguments passed if they can be shown as JSON.
 
 ```ts
 // Environment: server

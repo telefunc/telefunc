@@ -38,7 +38,7 @@ function applyShield(runContext: {
       telefuncFilePath,
       subject: 'the arguments passed',
       wrongType: applyResult,
-      extra: `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
+      args: telefunctionArgs,
     },
     runContext.serverConfig.log.shieldErrors,
   )

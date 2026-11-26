@@ -327,7 +327,7 @@ function getServerConfig(): ConfigResolved {
     log: {
       shieldErrors: (() => {
         const shieldErrors = configState.log?.shieldErrors ?? {}
-        if (typeof shieldErrors === 'boolean') return { dev: true, prod: true }
+        if (typeof shieldErrors === 'boolean') return { dev: shieldErrors, prod: shieldErrors }
         return {
           dev: shieldErrors.dev ?? true,
           prod: shieldErrors.prod ?? true,
