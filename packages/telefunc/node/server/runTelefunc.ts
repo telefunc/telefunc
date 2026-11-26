@@ -17,6 +17,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
+import { readResponseText } from './runTelefunc/readResponseText.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -142,7 +143,7 @@ function createHttpResponse(
     async getBody() {
       const body = sent()
       if (typeof body === 'string') return body
-      return new Response(getStreamReadableWeb(body)).text()
+      return readResponseText(body)
     },
     err,
   }
