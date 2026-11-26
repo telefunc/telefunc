@@ -319,9 +319,14 @@ const encode = {
     return frame
   },
   /** Writes the frames in order. A null slot takes the next publish index and sequence from `routes`. */
-  message(frames: readonly (Uint8Array | null)[], bytes: number, routes?: readonly number[]): Uint8Array<ArrayBuffer> {
+  message(
+    frames: readonly (Uint8Array | null)[],
+    bytes: number,
+    routes?: readonly number[],
+    count = frames.length,
+  ): Uint8Array<ArrayBuffer> {
     const message = new Uint8Array(bytes)
-    const last = frames.length - 1
+    const last = count - 1
     let at = 0
     let route = 0
     for (let i = 0; i <= last; i++) {

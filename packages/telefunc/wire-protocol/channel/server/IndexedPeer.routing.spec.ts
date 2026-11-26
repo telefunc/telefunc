@@ -41,6 +41,7 @@ test('a WebSocket gathers several recipients’ routes without encoding separate
       const first = Broadcast.publishBinary(key, Uint8Array.of(12))
       const second = Broadcast.publishBinary(key, Uint8Array.of(34))
       await Promise.all([first, second])
+      await Broadcast.publishBinary(key, Uint8Array.of(56))
 
       const decoded = page.frames.slice(start).flatMap<{ index: number; seq: number } | number[]>((raw) => {
         const frame = decode(raw)
@@ -57,6 +58,10 @@ test('a WebSocket gathers several recipients’ routes without encoding separate
         [34],
         { index: 300, seq: 2 },
         [34],
+        { index: 7, seq: 3 },
+        [56],
+        { index: 300, seq: 3 },
+        [56],
       ])
       expect(publishTo).toHaveBeenCalledTimes(0)
     } finally {
