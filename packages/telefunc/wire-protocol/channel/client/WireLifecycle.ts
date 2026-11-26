@@ -722,6 +722,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** One attempt, then what its end leaves to the connection. However it ends, the RECONCILE a registration owes goes
    *  after it. */
   private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
+    const wire = this.wire
     const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
     const end = await this.upgrade.run(
       from,
@@ -742,7 +743,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         void this.upgradeOnceDrained(from)
         break
       case 'stranded':
-        this.fallbackToSse()
+        // The server may have taken the barrier, and its probe is gone: the old wire goes, and the next one upgrades.
+        if (this.wire === wire) this.dropWire(from)
         break
       case 'flipped':
         // The barrier is the WebSocket's RECONCILE: it beats from here, as any wire does from its RECONCILE, and the

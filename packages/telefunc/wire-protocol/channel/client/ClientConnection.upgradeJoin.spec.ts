@@ -404,4 +404,68 @@ describe('SSE→WS barrier on batch POSTs', () => {
       clearInterval(delivering)
     }
   }, 60_000)
+
+  test('a probe that closes while its barrier POST is out sends the page back to SSE, whose next wire upgrades', async () => {
+    const dispatched: DecodedFrame[] = []
+    const channel = fakeMuxChannel({ _dispatchFrame: (frame) => dispatched.push(frame) })
+    const downstreams: ReturnType<typeof makeDownstream>[] = []
+    const barriers: Array<{ upgradeId: string; answer: () => void }> = []
+    let ix = 0
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      // No streaming upload: its frames go in batch POSTs.
+      if (!(init?.body instanceof Blob)) throw new TypeError('Failed to fetch')
+      const raw = parseLengthPrefixed(new Uint8Array(await init.body.arrayBuffer()))
+      const metadata = JSON.parse(new TextDecoder().decode(defined(raw[0], "the POST's metadata")))
+      const frames = raw.slice(1).map((frame) => decode(bytes(frame)))
+      for (const frame of frames) if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
+      if (metadata.streamResponse) {
+        const downstream = makeDownstream()
+        downstreams.push(downstream)
+        downstream.open()
+        downstream.push(reconciled({ ix, sessionId: crypto.randomUUID() }))
+        return new Response(downstream.stream, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      const barrier = frames.find((frame) => frame.tag === TAG.BARRIER)
+      if (barrier?.tag !== TAG.BARRIER) return new Response('')
+      // The barrier's POST waits, as one does behind a browser's full connection pool.
+      return await new Promise<Response>((resolve) =>
+        barriers.push({ upgradeId: barrier.payload.upgradeId, answer: () => resolve(new Response('')) }),
+      )
+    }
+    const readyOnPrepare = (probe: FakeWebSocket) => {
+      probe.answer((frame) => {
+        if (frame.tag === TAG.PING) probe.deliver(encode.pong())
+        if (frame.tag === TAG.PREPARE) probe.deliver(encode.ready({ upgradeId: frame.payload.upgradeId }))
+      })
+      probe.deliver(encode.pong())
+    }
+    ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
+      transports: ['sse', 'ws'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+    await settle()
+    const first = defined(FakeWebSocket.last, 'the first probe')
+    readyOnPrepare(first)
+    await settle()
+    expect(barriers.length, 'the first barrier should be out').toBe(1)
+
+    // The server lets go of the probe it staged, as when the SSE wire's ping deadline ends that wire.
+    first.close()
+    // The reconnect's backoff is at most 500 ms.
+    const limit = Date.now() + 2_000
+    while ((downstreams.length < 2 || FakeWebSocket.last === first) && Date.now() < limit) await delay(20)
+    expect(downstreams.length, 'the page should have reconnected over SSE').toBe(2)
+    const second = defined(FakeWebSocket.last, 'the second probe')
+    expect(second, 'the page should have probed a WebSocket again').not.toBe(first)
+    readyOnPrepare(second)
+    await settle()
+    const { upgradeId, answer } = defined(barriers[1], 'the second barrier')
+    answer()
+    second.deliver(reconciled({ ix, sessionId: crypto.randomUUID(), upgradeId }))
+    defined(downstreams[1], 'the second SSE wire').push(encode.fin())
+    second.deliver(encode.text(ix, '"on-ws"', 1))
+    await settle()
+    expect(dispatched.map((frame) => (frame.tag === TAG.TEXT ? frame.text : frame.tag))).toEqual(['"on-ws"'])
+  }, 60_000)
 })
