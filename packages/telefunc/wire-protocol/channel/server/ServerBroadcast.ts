@@ -861,12 +861,12 @@ const Broadcast = {
   },
 }
 
-/** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
 /** A text publish's data, as its publisher's `stringifyValue()` gave it: typed by the key's subscriber. */
 function decodePublish<T>(serialized: string): ChannelData<T> {
   return parse(serialized) as ChannelData<T>
 }
 
+/** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
 function callStaticListener<D>(
   callback: (data: D, info: ChannelPublishInfo) => unknown,
   data: D,
