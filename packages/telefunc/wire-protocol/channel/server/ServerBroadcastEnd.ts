@@ -4,7 +4,7 @@ export type { BroadcastEndOwner }
 import { ServerChannel } from './ServerChannel.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import { fitsPublish, hold, letGo, maxPendingBytesOf, type MemoryHolder } from './channelMemory.js'
+import { fitsPublish, hold, letGo, maxPendingBytesOf, nearBudget, type MemoryHolder } from './channelMemory.js'
 import type { PublishBody } from './PublishBody.js'
 import { LossyDelivery } from './LossyDelivery.js'
 import { EVERY_STREAM } from '../ownStream.js'
@@ -109,9 +109,12 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     if (this.heldBytes > most) this.shed(most)
   }
 
-  /** @internal Where its owner refuses a publish for it, one that another object cut ends now. */
-  _endOverflowed(): void {
+  /** @internal A publish of `bytes` its page doesn't get: it doesn't read `stream`, or began to close. Near the budget,
+   *  a lossy one leaves a closing end of the stream only its newest (`replaceWaiting`). One that another object cut ends
+   *  now. */
+  _passOver(stream: string, lossy: boolean, bytes: number): void {
     this.endOverflowed()
+    if (lossy && nearBudget(bytes)) this.replaceWaiting(stream)
   }
 
   /** @internal What it ended with, as its `closed` rejects. */
@@ -222,13 +225,13 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     this.lossyPublishes?.mayGo()
   }
 
-  /** Its publishes go ahead of its ABORT, as a channel's reliable sends do, lossy ones too: a publish is lossy or not
-   *  each on its own, so the wire's queue can't tell which of a channel's ungiven publishes may go. Only what waits for
-   *  a newer lossy publish goes. */
+  /** Its plain publishes go ahead of its ABORT, as a channel's reliable sends do; its lossy ones no wire has taken go,
+   *  as a channel's lossy sends do. */
   protected override onAbortOwed(): void {
     this.owesAbort = true
     this.endedOn = this.peer
     this.lossyPublishes?.dispose()
+    this.peer?.dropUnhandedLossy()
   }
 
   /** Its publishes that no wire has taken go, lossy or not, unless it ended: its replay is then what its page reads. */
@@ -247,13 +250,15 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     else this._replayBuffer?.dropLossyOf(stream, Number.POSITIVE_INFINITY)
   }
 
-  /** `MemoryHolder`: a newer lossy publish of `stream` is about to reach this object's pages. An open end on that object
-   *  whose page reads the stream lets go of what the publish replaces. A closing one gets no newer publish, so it keeps
-   *  what its page is owed. */
+  /** `MemoryHolder`: near the budget, a newer lossy publish of `stream` is about to reach this object's pages. An open
+   *  end on that object whose page reads the stream lets go of what the publish replaces. A closing one gets no newer
+   *  publish, so of that stream it keeps only its newest, and what its page is owed. */
   replaceWaiting(stream: string): void {
-    if (this._phase !== 'open' || !this.onOwnObject()) return
+    if (this._phase === 'ended' || !this.onOwnObject()) return
     if (this.owner?._pageReads?.(stream) === false) return
-    this.lossyPublishes?.letWaitingGo(stream)
+    if (this._phase === 'open') return this.lossyPublishes?.letWaitingGo(stream)
+    if (this.peer) this.peer.dropStaleLossy(stream)
+    else this._replayBuffer?.dropStaleLossy(Number.POSITIVE_INFINITY, stream)
   }
 
   /** How many of its newest publishes no wire has: all of them while it has no wire. Ended, those of the wire its page

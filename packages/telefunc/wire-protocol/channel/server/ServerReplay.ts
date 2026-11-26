@@ -240,15 +240,25 @@ class ServerReplay {
     return this.take(goes)
   }
 
-  /** A close. Of its newest `droppable`, each stream keeps its newest lossy publish and those its page is owed; the
-   *  lossy ones a newer one of their stream made stale go. */
-  dropStaleLossy(droppable: number): Dropped {
+  /** A close. Of its newest `droppable`, each stream, or only `stream`, keeps its newest lossy publish and those its
+   *  page is owed; the lossy ones a newer one of their stream made stale go. */
+  dropStaleLossy(droppable: number, only?: string): Dropped {
     const newestKept = new Set<string>()
     const goes: number[] = []
     this.walkNewest(droppable, (index, { stream }, owed) => {
-      if (owed || stream === null) return
+      if (owed || stream === null || (only !== undefined && stream !== only)) return
       if (newestKept.has(stream)) goes.push(index)
       else newestKept.add(stream)
+    })
+    return this.take(goes)
+  }
+
+  /** An abort, which its page gets behind its plain publishes. Of its newest `droppable`, the lossy ones go. */
+  dropLossy(droppable: number): Dropped {
+    if (this.lossyHeld === null) return { seqs: [], bytes: 0 }
+    const goes: number[] = []
+    this.walkNewest(droppable, (index, { lossy }) => {
+      if (lossy) goes.push(index)
     })
     return this.take(goes)
   }

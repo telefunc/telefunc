@@ -150,9 +150,15 @@ class IndexedPeer {
     return this.offWire(this.replay.dropUnhanded(this.replay.sinceFrame(this.unhanded())))
   }
 
-  /** Takes back those of its lossy publishes that no wire has taken and a newer one of their stream made stale. */
-  dropStaleLossy(): Dropped {
-    return this.offWire(this.replay.dropStaleLossy(this.unhanded()))
+  /** Takes back those of its lossy publishes, of every stream or only of `stream`, that no wire has taken and a newer
+   *  one of their stream made stale. */
+  dropStaleLossy(stream?: string): Dropped {
+    return this.offWire(this.replay.dropStaleLossy(this.unhanded(), stream))
+  }
+
+  /** Takes back its lossy publishes that no wire has taken. */
+  dropUnhandedLossy(): Dropped {
+    return this.offWire(this.replay.dropLossy(this.unhanded()))
   }
 
   private offWire(dropped: Dropped): Dropped {

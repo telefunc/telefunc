@@ -14,6 +14,8 @@ import { END_CAUSE } from '../endCause.js'
 import { ClientChannel } from './ClientChannel.js'
 import { ClientConnection } from './ClientConnection.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
+import { defined } from '../../../utils/defined.fixture.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import type { BroadcastPublishOptions } from '../channel.js'
 
 /** An SSE downstream that never sends a byte: the RECONCILED that would open sends never comes. */
@@ -107,17 +109,20 @@ describe('ClientBroadcast uplink', () => {
     expect(waiting(page)).toEqual([2])
     let closed = false
     void page.close().then(() => (closed = true))
-    const { ix } = (page as any).connection.lifecycle.channels.of(page)
+    const { ix } = defined(connectionOf(page)['lifecycle'].channels.of(page), "the broadcast's record")
     page._dispatchFrame(received(encode.closeAck(ix, 0, 1)))
     await vi.advanceTimersByTimeAsync(0)
     expect(closed).toBe(false)
 
-    const [seq] = (page as any).pendingAcks.keys()
+    const seq = defined(page['pendingAcks'].keys().next().value, 'the publish that waits for its answer')
     const receipt = { key: 'cursor', seq: 7, timestamp: 7 }
     page._dispatchFrame(received(encode.ackRes(ix, 2, seq, JSON.stringify(receipt))))
     await vi.advanceTimersByTimeAsync(0)
     expect(await first).toEqual(receipt)
     expect(await newer).toEqual(receipt)
+    // The server's side of the close is done once it answered.
+    page._dispatchFrame(received(encode.closeDone(ix, 0, 3)))
+    await vi.advanceTimersByTimeAsync(0)
     expect(closed).toBe(true)
   })
 })
@@ -248,11 +253,11 @@ describe("a page's broadcast whose close, asked by the server, times out on an `
 // Room's lone member closes its channel once its leave was answered, and lets the close settle on its own
 // (`room/src/client/LoneMember.ts`): what the server or a close callback does decides the outcome, never a rejection.
 describe("a page's broadcast `close()` resolves with its outcome", () => {
-  it('when the server never acknowledges it: 1, once its timeout passes', async () => {
+  it('when the server never acknowledges it: the timeout, once it passes', async () => {
     const page = new ClientBroadcast(channelOptions())
     const closing = page.close({ timeout: 10 })
     await vi.advanceTimersByTimeAsync(10)
-    await expect(closing).resolves.toBe(1)
+    await expect(closing).resolves.toMatchObject({ message: 'Channel close timed out' })
   })
 
   it('when an `onClose()` callback throws, and when the promise one returns rejects, each reported', async () => {
@@ -264,7 +269,7 @@ describe("a page's broadcast `close()` resolves with its outcome", () => {
     page.onClose(() => Promise.reject(new Error('rejected')))
     const closing = page.close({ timeout: 10 })
     await vi.advanceTimersByTimeAsync(10)
-    await expect(closing).resolves.toBe(1)
+    await expect(closing).resolves.toMatchObject({ message: 'Channel close timed out' })
     expect(reported.mock.calls.map(([, err]) => String(err))).toEqual(['Error: thrown', 'Error: rejected'])
   })
 
@@ -272,12 +277,14 @@ describe("a page's broadcast `close()` resolves with its outcome", () => {
     const asked = new ClientBroadcast(channelOptions())
     asked._dispatchFrame(received(encode.close(0, 10, 1)))
     const closing = asked.close({ timeout: 10 })
+    // The server decides: its deadline passes, and its ERROR ends the page's end.
+    setTimeout(() => asked._onEnded(END_CAUSE.closeTimedOut.error()), 10)
     await vi.advanceTimersByTimeAsync(10)
-    await expect(closing).resolves.toBe(1)
+    await expect(closing).resolves.toMatchObject({ message: 'Channel close timed out' })
 
     const ended = new ClientBroadcast(channelOptions())
     ended.abort('gone')
-    await expect(ended.close()).resolves.toBe(1)
+    await expect(ended.close()).resolves.toBe(await ended.closed)
   })
 })
 
@@ -378,10 +385,23 @@ function behindUplink() {
     },
   })
   vi.advanceTimersByTime(200)
-  ;(page as any).connection.transport.uplink.roundTrips.measured(50)
-  const { channels } = (page as any).connection.lifecycle
-  channels.open(channels.of(page))
+  const connection = connectionOf(page)
+  connection['transport'].uplink.roundTrips.measured(50)
+  const { channels } = connection['lifecycle']
+  channels.open(defined(channels.of(page), "the broadcast's record"))
   return page
+}
+
+/** The connection the page's broadcast is on. */
+function connectionOf(page: ClientBroadcast): ClientConnection {
+  const kept = getGlobalObject<{ connections: Map<string, ClientConnection> }>(
+    'channel/client/ClientConnection.ts',
+    () => {
+      throw new Error('The page keeps no connections yet')
+    },
+  )
+  const connection = [...kept.connections.values()].find((each) => each['lifecycle'].channels.of(page) !== undefined)
+  return defined(connection, "the broadcast's connection")
 }
 
 /** Past the wire's `behindAfter`, short of its reconcile timeout. */
@@ -396,10 +416,10 @@ function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
 
 /** Each publish the gate holds, in the order they go: its text, or its bytes. */
 function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
-  return (page as any).connection.gate
-    .settleQueue()
-    .map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
-    .flatMap((decoded: ReturnType<typeof decode>) => {
+  return connectionOf(page)
+    ['lifecycle'].gate['settleQueue']()
+    .map(({ frame }) => decode(frame))
+    .flatMap((decoded): (string | number[])[] => {
       if (decoded.tag === TAG.PUBLISH_ACK_REQ) return [decoded.text]
       return decoded.tag === TAG.PUBLISH_BINARY_ACK_REQ ? [[...decoded.data]] : []
     })
@@ -421,7 +441,7 @@ describe("a page's subscriber a close callback removes before the server confirm
       const closed = page.closed
       page._dispatchFrame(received(encode.close(0, 50, 1)))
       // The server's verdict once the page said it is done.
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await vi.advanceTimersByTimeAsync(10)
       page._dispatchFrame(received(encode.closeDone(0, 0, 2)))
       await expect(closed).resolves.toBeNull()
     })

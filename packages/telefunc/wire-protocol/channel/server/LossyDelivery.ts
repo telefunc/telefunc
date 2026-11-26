@@ -68,9 +68,15 @@ class LossyDelivery<U> {
     this.host.hand(unit)
   }
 
-  /** Those waiting of `stream` go now; all of them without `stream`; oldest first. */
+  /** Those waiting of `stream` go now; all of them without `stream`; oldest first. Behind, as a send then does, only
+   *  each stream's newest goes, in the place of those of its stream that no wire has taken. */
   flush(stream?: string): void {
-    for (const { unit } of this.takeWaiting(stream)) {
+    let waiting = this.takeWaiting(stream)
+    if (waiting.length > 0 && this.replaces()) {
+      waiting = this.newestOfEach(waiting)
+      for (const each of waiting) this.host.dropUnhanded(each.stream)
+    }
+    for (const { unit } of waiting) {
       this.host.hand(unit)
       this.host.letGo(unit)
     }
@@ -117,14 +123,19 @@ class LossyDelivery<U> {
 
   /** Of each stream, only its newest keeps waiting. */
   private keepNewest(): void {
+    this.waiting = this.newestOfEach(this.waiting)
+  }
+
+  /** Of `waiting`, each stream's newest, in order: the others go, unsent. */
+  private newestOfEach(waiting: readonly Waiting<U>[]): Waiting<U>[] {
     const newest = new Map<string, Waiting<U>>()
-    for (const each of this.waiting) newest.set(each.stream, each)
-    const waiting = this.waiting
-    this.waiting = []
+    for (const each of waiting) newest.set(each.stream, each)
+    const kept: Waiting<U>[] = []
     for (const each of waiting) {
-      if (newest.get(each.stream) === each) this.waiting.push(each)
+      if (newest.get(each.stream) === each) kept.push(each)
       else this.host.letGo(each.unit)
     }
+    return kept
   }
 
   /** Whether its page can't take a send now: one replaces, or it holds all it may before its first rate. */

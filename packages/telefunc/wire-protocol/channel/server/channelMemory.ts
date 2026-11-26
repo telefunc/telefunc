@@ -17,6 +17,7 @@ export {
   holdsEnough,
   letGo,
   maxPendingBytesOf,
+  nearBudget,
   queueMemory,
   releaseHolder,
   RoomWait,
@@ -282,7 +283,7 @@ function admitPublish(body: PublishBody): void {
   if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   const most = heldAtMost(maxMemory, memory.reserved)
-  if (memory.total + bytes > target) {
+  if (nearBudget(bytes)) {
     const { stream } = body
     if (body.lossy && stream !== null) for (const holder of [...memory.holders]) holder.replaceWaiting?.(stream)
     if (memory.total + bytes > target) reclaim(bytes, target)
@@ -459,6 +460,11 @@ function holdsAtMost(): number {
 }
 
 /** The top eighth is for wires' copies and for those under an equal share. */
+/** Whether `bytes` more would take what this server holds past the target it sheds to. */
+function nearBudget(bytes: number): boolean {
+  return memory.total + bytes > shedTarget(maxMemoryOf())
+}
+
 function shedTarget(maxMemory: number): number {
   return (maxMemory * 7) / 8
 }

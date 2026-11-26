@@ -447,7 +447,9 @@ test('on a WebSocket, abort() of a lossy broadcast drops what of it waits for th
   const ofEnded = pageReads.filter((read) => read.startsWith('0:'))
   expect(ofEnded.at(-1)).toBe('0:ABORT')
   expect(ofEnded.filter((read) => waiting.includes(read))).toEqual([])
-  expect(pageReads.filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
+  // The other channel's newest waits for its page to confirm a rate, and goes once it does.
+  fromPage(other, encode.window(1, CREDIT_WINDOW_INITIAL_BYTES, sentThrough(other)))
+  expect((await page.readAll()).filter((read) => read.startsWith('1:'))).toEqual(['1:p1', '1:p2', '1:p3'])
   other.abort()
 })
 

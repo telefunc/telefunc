@@ -192,7 +192,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
       if (invokeChannelListeners(this.subscribers.text.list(), callWithPublish, publish, this.onListenerError)) return
     }
     // Asked before a body is made, which admits it against the budget: a page that began to close costs nothing.
-    if (!this.peerSubscriptions.text || this._end.isClosed) return this._end._endOverflowed()
+    if (!this.peerSubscriptions.text || this._end.isClosed)
+      return this._end._passOver(this.streams.text, isLossy(payload), payload.length)
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.text))
   }
 
@@ -200,7 +201,8 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const info = { key: this.key, seq: rawInfo.seq, timestamp: rawInfo.timestamp }
     const publish = { data: payload, info }
     if (invokeChannelListeners(this.subscribers.binary.list(), callWithOwnBytes, publish, this.onListenerError)) return
-    if (!this.peerSubscriptions.binary || this._end.isClosed) return this._end._endOverflowed()
+    if (!this.peerSubscriptions.binary || this._end.isClosed)
+      return this._end._passOver(this.streams.binary, isLossy(payload), payload.byteLength)
     this._end.deliver(bodyOf(payload, rawInfo, this.streams.binary))
   }
 
