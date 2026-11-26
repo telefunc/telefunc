@@ -225,11 +225,11 @@ test("a call aborted while its chunk loads cancels the body of an app's fetch th
   const controller = new AbortController()
   const pending = withContext(call, { signal: controller.signal })([])
   // The chunk's first load in this process may wait behind an earlier test's load of it.
-  await vi.waitFor(() => expect(imported).toEqual(['streams']), { timeout: 5_000 })
+  await vi.waitFor(() => expect(imported).toEqual(['streams']), { timeout: 10_000 })
   controller.abort()
   expect(isAbort(await settledWithin(pending, 200))).toBe(true)
   expect(ownCancels).toBe(1)
-})
+}, 15_000)
 
 test('a call aborted while its text response waits for its chunk rejects at once, telling onAbort() once', async () => {
   const { call, withContext } = await page()
