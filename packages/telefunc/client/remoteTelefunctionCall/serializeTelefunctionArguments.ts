@@ -11,7 +11,7 @@ import { loadFeatures, loadedFeatures, loadedFeature } from '../../wire-protocol
 import { randomUuid } from '../../utils/randomUuid.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
-import { makeAbortError } from './errors.js'
+import { makeAbortError, throwIfAborted } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/values/types.js'
 import { CloseHandler } from '../close.js'
@@ -97,10 +97,14 @@ function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
 
 /** Opens the channels a call claimed before the page loaded channels' code, once it has loaded it. */
 async function openClaimedChannels(request: CallRequest, claimed: Claimed[], callContext: CallContext): Promise<void> {
-  const { channels } = await loadFeatures(['channels'], callContext).catch((err: unknown) => {
+  try {
+    await loadFeatures(['channels'], callContext)
+    throwIfAborted(callContext)
+  } catch (err) {
     cancelUnsentCall(request, callContext, err)
     throw err
-  })
+  }
+  const { channels } = loadedFeatures()
   assert(channels)
   const connection = getConnectionOptions(callContext)
   for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })

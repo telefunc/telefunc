@@ -5,6 +5,7 @@ import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import type { ClientReplacerContext } from '../types.js'
 
 type ClientChannelModule = typeof import('../../channel/client/ClientChannel.js')
+type LoadFeaturesModule = typeof import('./loadFeatures.js')
 
 // A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
 // finish, or fails, as the chunk's request would.
@@ -58,6 +59,7 @@ afterEach(async () => {
   for (const feature of FEATURES) gates[feature].open()
   await Promise.allSettled(loads)
   for (const feature of FEATURES) vi.doUnmock(`./${feature}.js`)
+  vi.doUnmock('./loadFeatures.js')
   vi.unstubAllGlobals()
 })
 
@@ -127,6 +129,12 @@ function streamed(
     })
     return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
   }
+}
+
+/** A streamed response of an app's `config.fetch` whose body outlives the call's signal and sends nothing yet. */
+function liveResponse(sse: boolean, onCancel: () => void) {
+  const body = new ReadableStream({ cancel: onCancel })
+  return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
 }
 
 /** A call that loads the streams chunk. */
@@ -238,6 +246,53 @@ test("a call aborted while its chunk loads cancels the body of an app's fetch th
   expect(isAbort(await settledWithin(pending, 200))).toBe(true)
   expect(ownCancels).toBe(1)
 })
+
+test.each([false, true])(
+  "a call aborted as its app's fetch hands over a live body, streams' code loaded, cancels it once and lets it go (SSE: %s)",
+  async (sse) => {
+    const { call, withContext } = await page()
+    await warmStreams(call)
+    // Each microtask from the fetch's return to the reader's first read.
+    for (let ticks = 0; ticks <= 16; ticks++) {
+      let ownCancels = 0
+      const response = liveResponse(sse, () => ownCancels++)
+      const controller = new AbortController()
+      respond = () => {
+        void abortAfterTicks(controller, ticks)
+        return response
+      }
+      const settled = await settledWithin(withContext(call, { signal: controller.signal })([]), 200)
+      expect(isAbort(settled), `aborted after ${ticks} microtasks`).toBe(true)
+      expect(ownCancels).toBe(1)
+      assert(response.body)
+      expect(response.body.locked).toBe(false)
+    }
+  },
+)
+
+test.each(['a streamed response', 'a text response', 'a claimed upload'] as const)(
+  'a call aborted once its chunk loaded, before it resumes, rejects without using it (%s)',
+  async (kind) => {
+    abortOnceLoaded()
+    const { call, withContext } = await page()
+    let ownCancels = 0
+    const response = liveResponse(false, () => ownCancels++)
+    respond = kind === 'a streamed response' ? () => response : text(CHANNEL)
+    const upload = new ReadableStream({
+      cancel() {
+        ownCancels++
+      },
+    })
+    const controller = new AbortController()
+    for (const feature of FEATURES) gates[feature].open()
+    const pending = withContext(call, { signal: controller.signal })(kind === 'a claimed upload' ? [upload] : [])
+    expect(isAbort(await settledWithin(pending, 5000))).toBe(true)
+    expect(posts).toHaveLength(kind === 'a claimed upload' ? 0 : 1)
+    if (kind !== 'a text response') expect(ownCancels).toBe(1)
+    assert(response.body)
+    expect(response.body.locked).toBe(false)
+  },
+)
 
 test('a call aborted while its text response waits for its chunk rejects at once, telling onAbort() once', async () => {
   const { call, withContext } = await page()
@@ -745,6 +800,24 @@ test('plain RPC: sent at once, an app string that looks like a value loads nothi
   expect([...ret]).toEqual(value)
   expect(imported).toEqual([])
 })
+
+async function abortAfterTicks(controller: AbortController, ticks: number) {
+  for (let tick = 0; tick < ticks; tick++) await null
+  controller.abort()
+}
+
+/** The page's chunk loads settle, then the call is aborted before its code resumes. */
+function abortOnceLoaded() {
+  vi.doMock('./loadFeatures.js', async (importOriginal: () => Promise<LoadFeaturesModule>) => {
+    const original = await importOriginal()
+    const loadFeatures: LoadFeaturesModule['loadFeatures'] = async (features, call) => {
+      const loaded = await original.loadFeatures(features, call)
+      call.abortController.abort()
+      return loaded
+    }
+    return { ...original, loadFeatures }
+  })
+}
 
 async function* oneChunk(byte: number) {
   yield new Uint8Array([byte])

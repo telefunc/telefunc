@@ -6,7 +6,12 @@ import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
-import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
+import {
+  makeAbortError,
+  throwAbortError,
+  throwBugError,
+  throwIfAborted,
+} from '../../../../client/remoteTelefunctionCall/errors.js'
 import type { BaseStreamReader } from './BaseStreamReader.js'
 import type { FrameDemuxer } from './FrameDemuxer.js'
 import { isPendingValue, resolvePendingValues, type PendingValue } from './PendingValue.js'
@@ -78,14 +83,14 @@ async function parseStreamedResponse(
 ): Promise<unknown> {
   let streamReader: BaseStreamReader | undefined
   try {
-    const { streams } = await loadFeatures(['streams'], callContext)
+    const streams = loadedFeatures().streams ?? (await loadFeatures(['streams'], callContext)).streams
     assert(streams)
+    // The reader cancels the body on the call's abort from here on.
+    throwIfAborted(callContext)
     streamReader = streams.createBodyReader(body.getReader(), isSse, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
-    if (callContext.abortController.signal.aborted) {
-      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
-    }
+    throwIfAborted(callContext)
     const metaText = new TextDecoder().decode(metaBytes)
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
@@ -183,7 +188,10 @@ async function reviveResponse(
     const values = new ResponseValues(body, callContext.extensionResponseTypes, !bodyStreamReader)
     const loaded = loadedFeatures()
     const needed = values.missingFeatures(loaded)
-    if (needed?.length) await loadFeatures(needed, callContext)
+    if (needed?.length) {
+      await loadFeatures(needed, callContext)
+      throwIfAborted(callContext)
+    }
     parsed = values.revive(context, handOut, loaded)
     if (pendingValues.length > 0) {
       parsed = await resolvePendingValues(parsed, pendingValues, (value) => closeHandlers.has(value))

@@ -1,4 +1,4 @@
-export { throwAbortError, makeAbortError, throwBugError, makeBugError }
+export { throwAbortError, throwIfAborted, makeAbortError, throwBugError, makeBugError }
 
 import { createAbortError } from '../../shared/Abort.js'
 import { callOnAbortListeners } from './onAbort.js'
@@ -15,6 +15,15 @@ function throwAbortError(telefunctionName: string, telefuncFilePath: string, abo
   const err = makeAbortError(abortValue, { telefunctionName, telefuncFilePath })
   callOnAbortListeners(err)
   throw err
+}
+
+/** Where a call resumes after an `await`: an abort in between ends it there, before it starts anything more. */
+function throwIfAborted(call: {
+  abortController: AbortController
+  telefunctionName: string
+  telefuncFilePath: string
+}) {
+  if (call.abortController.signal.aborted) throwAbortError(call.telefunctionName, call.telefuncFilePath, undefined)
 }
 
 function getAbortMessage(messageOrContext?: string | { telefunctionName: string; telefuncFilePath: string }) {
