@@ -89,8 +89,8 @@ async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
 
 // Single file upload — read slowly so client has time to abort mid-upload.
 // The sleep(100) between reads stretches consumption to ~1.6s for ~16 chunks,
-// giving the client's abort time to arrive mid-read.
-async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; error: string | null }> {
+// giving the client's abort time to arrive mid-read. The disconnect error is left uncaught.
+async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number }> {
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
   const context = getContext()
@@ -106,12 +106,10 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
       bytesRead += value.byteLength
       await sleep(100)
     }
-    cleanupState.uploadAbortSingleError = ''
-    return { bytesRead, error: null }
+    return { bytesRead }
   } catch (e: any) {
-    const msg = e?.message || String(e)
-    cleanupState.uploadAbortSingleError = msg
-    return { bytesRead, error: msg }
+    cleanupState.uploadAbortSingleError = e?.message || String(e)
+    throw e
   }
 }
 

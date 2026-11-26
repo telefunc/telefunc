@@ -1,4 +1,4 @@
-export { handleError }
+export { handleError, isPeerDisconnect }
 
 import type { ViteDevServer } from 'vite'
 import { hasProp } from '../../../utils/hasProp.js'
@@ -7,11 +7,7 @@ import { StreamTruncatedError } from '../../../wire-protocol/wire/BodyReader.js'
 import { isNetworkError } from '../../../shared/NetworkError.js'
 
 function handleError(err: unknown) {
-  // The peer left: mid-upload, or mid-channel. Not bugs, nothing to log. `ERR_STREAM_PREMATURE_CLOSE`
-  // is Node's own error, so it's the one that can only be duck-typed.
-  if (err instanceof StreamTruncatedError) return
-  if (isNetworkError(err) && err.isChannel) return
-  if (hasProp(err, 'code') && err.code === 'ERR_STREAM_PREMATURE_CLOSE') return
+  if (isPeerDisconnect(err)) return
 
   // We ensure we print a string; Cloudflare Workers doesn't seem to properly stringify `Error` objects.
   const errStr = (hasProp(err, 'stack') && String(err.stack)) || String(err)
@@ -23,6 +19,16 @@ function handleError(err: unknown) {
   viteErrorCleanup(err, viteDevServer)
 
   console.error(errStr)
+}
+
+/** The peer left: mid-upload, or mid-channel. Not bugs, nothing to log. `ERR_STREAM_PREMATURE_CLOSE`
+ *  is Node's own error, so it's the one that can only be duck-typed. */
+function isPeerDisconnect(err: unknown): boolean {
+  return (
+    err instanceof StreamTruncatedError ||
+    (isNetworkError(err) && err.isChannel) ||
+    (hasProp(err, 'code') && err.code === 'ERR_STREAM_PREMATURE_CLOSE')
+  )
 }
 
 function viteAlreadyLoggedError(err: unknown, viteDevServer: ViteDevServer | null) {
