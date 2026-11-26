@@ -203,8 +203,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   /** Delivers what listeners published in answer, and what they publish in answer to that, in order. */
   private deliverQueued(): void {
-    while (this.queued.length > 0) {
-      const publish = this.queued.shift()!
+    for (let publish = this.queued.shift(); publish !== undefined; publish = this.queued.shift()) {
       this.queuedBytes -= publish.size
       this.depth = publish.depth
       publish.deliver()

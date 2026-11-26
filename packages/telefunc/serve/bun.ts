@@ -37,7 +37,7 @@ function telefunc(): TelefuncServe {
   const sockets = new WeakMap<Peer, BunSocket>()
   const ws = crossws(
     getTelefuncChannelOptions({
-      bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount(),
+      bufferedAmount: (peer) => sockets.get(peer)?.getBufferedAmount() ?? 0,
       copiesOnSend: true,
     }),
   )

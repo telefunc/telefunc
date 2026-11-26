@@ -67,8 +67,6 @@ type ServerTransport<TWire> = {
   sendNow(wire: TWire, frame: Uint8Array<ArrayBuffer>): void
   /** Which transport the wire is, whose ping deadline allows for the PING its page may hold. */
   type: ChannelTransport
-  /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
-  wholeMessages: boolean
   /** True if the runtime keeps a copy of each message it's handed, as Bun, Deno and workerd do: Node keeps the bytes. */
   copiesOnSend?: boolean
   /** Bytes of sent frames still in the wire, never undercounted; `undefined` if the runtime can't tell. */
@@ -76,12 +74,20 @@ type ServerTransport<TWire> = {
   /** The part of `bufferedAmount` a frame sent now waits behind, where it can pass the rest (SSE). Without this
    *  method, a frame waits behind all of `bufferedAmount`. */
   queuedAhead?(wire: TWire): number | undefined
-  /** What the wire holds back for its page, on a transport that isn't `wholeMessages`. */
-  queueOf?(wire: TWire): WireQueue
   /** Ends the wire as `end` says, and tells the mux nothing: the mux forgot the wire before. `held`: the session the
    *  wire held, which an HTTP transport keeps for the page's close POST. */
   close(wire: TWire, end: ServerEnd, held: SessionHold | null): void
-}
+} & (
+  | {
+      /** True if the peer gets a message only once all of it has arrived, as on a WebSocket (see `pieces.ts`). */
+      wholeMessages: true
+    }
+  | {
+      wholeMessages: false
+      /** What the wire holds back for its page. */
+      queueOf(wire: TWire): WireQueue
+    }
+)
 
 /** How the server ends a wire: lost, or for good for a session cause. `refusal`: the end the server decided, which the
  *  wire's own end carries (a WebSocket's close, the event stream's last event); null for a plain loss, which tells

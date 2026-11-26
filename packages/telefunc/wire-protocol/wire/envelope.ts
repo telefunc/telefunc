@@ -184,7 +184,7 @@ function parseSseRequestMetadata(value: unknown): SseRequestMetadata {
 
 const INDEX_BYTES = 1 // u8 stream index
 
-function encodeIndexedFrame(index: number, payload: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+function encodeIndexedFrame(index: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const bodyLen = INDEX_BYTES + payload.byteLength
   const frame = new Uint8Array(U32_SIZE + bodyLen)
   writeU32(frame, 0, bodyLen)

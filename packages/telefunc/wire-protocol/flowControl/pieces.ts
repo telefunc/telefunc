@@ -25,7 +25,7 @@ import {
 import type { PieceRate } from './PieceRate.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, lengthBytes, type PiecesAck } from '../wire/frame.js'
 import { TAG, isPublishBody, isSequencedTag, passesData } from '../wire/tags.js'
-import { HEADER, readU16 } from '../wire/header.js'
+import { HEADER, readTag, readU16 } from '../wire/header.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { assert } from '../../utils/assert.js'
@@ -272,7 +272,7 @@ class PieceSender {
       this.firstAt = performance.now()
     }
     this.takeCarried()
-    const tag = frame[0]!
+    const tag = readTag(frame)
     // While no announcement is open, a PIECES_ACK goes ahead of what waits: the peer's probe may be waiting for it.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     const lane = this.laneOf(frame, tag)
@@ -464,7 +464,7 @@ class PieceSender {
 
   /** Sends `frame`, which nothing waits ahead of. */
   private start(frame: Uint8Array<ArrayBuffer>): void {
-    const tag = frame[0]!
+    const tag = readTag(frame)
     if (isSequencedTag(tag) && this.copies(frame) && this.copyRoom() < frame.byteLength) {
       // An open announcement names whole frames.
       return this.open === null ? this.cut(frame, 0) : this.wait(frame, 0)
@@ -490,7 +490,7 @@ class PieceSender {
       this.probe !== null ||
       (this.pieceRate.fastest === 0 &&
         bytes > this.unannouncedUpTo &&
-        (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
+        (bytes > this.wholeUpTo || isSequencedTag(readTag(frame))))
     )
   }
 
@@ -500,7 +500,7 @@ class PieceSender {
     return (
       this.pieceRate.fastest === 0 &&
       this.probe === null &&
-      isSequencedTag(frame[0]!) &&
+      isSequencedTag(readTag(frame)) &&
       frame.byteLength <=
         Math.min(
           WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
@@ -519,13 +519,13 @@ class PieceSender {
 
   /** Whether `frame` may pass the waiting rest of a data frame: it `passesData` and is small enough to go whole. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
-    return passesData(frame[0]!) && frame.byteLength <= this.wholeUpTo
+    return passesData(readTag(frame)) && frame.byteLength <= this.wholeUpTo
   }
 
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     // A frame within the window waits whole for its room; one past it goes in pieces of the room.
     if (data && !this.cutsData && bytes > this.headroom - this.messages.ungivenBytes) {
       if (bytes > this.mostFor(frame)) return this.cut(frame, 0)
@@ -599,7 +599,7 @@ class PieceSender {
     this.give()
     const bytes = frame.byteLength
     const now = performance.now()
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     const copyRoom = data ? this.copyRoom() : Number.POSITIVE_INFINITY
     const headroom = Math.max(0, Math.floor(Math.min(this.headroom, copyRoom, this.largestCut())))
     const end = data ? Math.min(bytes, offset + headroom) : bytes
@@ -701,7 +701,7 @@ class PieceSender {
    *  the rest. */
   private sendProbe(frame: Uint8Array<ArrayBuffer>, now: number): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     this.sendEmptyPiece(bytes)
     for (const [at, size] of [
       [0, WIRE_PROBE_FIRST_BYTES],
@@ -715,11 +715,13 @@ class PieceSender {
     const second = data ? this.transmittedBytes - PIECE_HEADER_BYTES - WIRE_PROBE_PAIR_BYTES : null
     this.probe = { end: this.transmittedBytes, second }
     const sent = WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES
+    const open = this.open
+    assert(open)
     if (this.cutsData) {
-      this.open!.bytes += bytes
+      open.bytes += bytes
       return this.sendAnnounced(frame, sent, now)
     }
-    this.open!.bytes += sent
+    open.bytes += sent
     // The rest goes by the rate the probe measures, and what passes it goes outside the announcement.
     this.closeAnnouncement()
     this.wait(frame, sent)
@@ -728,7 +730,7 @@ class PieceSender {
   /** Sends `frame` from `offset` as announced messages, none past what `announcedNext` allows after the one before. */
   private sendAnnounced(frame: Uint8Array<ArrayBuffer>, offset: number, now: number): void {
     const bytes = frame.byteLength
-    const data = isSequencedTag(frame[0]!)
+    const data = isSequencedTag(readTag(frame))
     if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor)) {
       this.countHanded(bytes, data, this.copiesOnSend)
       if (acknowledges(bytes)) this.track(bytes, now, false)
@@ -1005,7 +1007,7 @@ class SocketMessages {
   /** Adds `frame`, which the task sent. */
   gather(frame: Uint8Array<ArrayBuffer>): void {
     this.gathered = true
-    if (!isSequencedTag(frame[0]!)) this.atOnce = true
+    if (!isSequencedTag(readTag(frame))) this.atOnce = true
     this.add(frame)
   }
 
@@ -1022,7 +1024,7 @@ class SocketMessages {
   add(frame: Uint8Array<ArrayBuffer>): void {
     this.frames[this.frameCount++] = frame
     this.bytes += this.lengthAhead + frame.byteLength
-    this.lengthAhead = lengthBytes(frame[0]!)
+    this.lengthAhead = lengthBytes(readTag(frame))
   }
 
   /** Hands the socket `message`, with the carried frames riding ahead of it in the same message. */
@@ -1177,7 +1179,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
       this.probing = 2
       return null
     }
-    if (this.received === 0) this.data = isSequencedTag(piece[0]!)
+    if (this.received === 0) this.data = isSequencedTag(readTag(piece))
     if (this.received + bytes > this.frame.byteLength) {
       const grown = new Uint8Array(Math.min(total, Math.max(2 * this.frame.byteLength, this.received + bytes)))
       grown.set(this.frame.subarray(0, this.received))

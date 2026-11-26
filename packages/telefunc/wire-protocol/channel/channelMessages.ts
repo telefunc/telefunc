@@ -116,7 +116,8 @@ async function* iterateMessages<M extends Message<unknown>>(
   }
   const abort = () => finish(signal!.reason)
   // The next message waits only for the loop's current one to finish, so what counts is what waits beyond it.
-  const isBehind = () => held - (queue.peek()?.size ?? 0) > budget!
+  const limit = budget ?? Number.POSITIVE_INFINITY
+  const isBehind = () => held - (queue.peek()?.size ?? 0) > limit
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {

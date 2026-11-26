@@ -459,7 +459,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return {
       peer: () => this.peer,
       replay: () => this._replayBuffer,
-      hand: ({ data }) => this.handLossy(this.peer!, data),
+      hand: ({ data }) => {
+        assert(this.peer)
+        this.handLossy(this.peer, data)
+      },
       hold: (send) => {
         // The caller may write into its bytes once `sendBinary` returned.
         if (typeof send.data !== 'string') send.data = new Uint8Array(send.data)

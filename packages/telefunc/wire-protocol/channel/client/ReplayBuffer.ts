@@ -2,6 +2,7 @@ export { ReplayBuffer }
 export type { Stall }
 
 import type { OutboundFrame, OutboundFrameKind } from './ClientConnection.js'
+import { readTag } from '../../wire/header.js'
 import { replayKindOf, type ReplayKind } from '../../wire/tags.js'
 import { assert } from '../../../utils/assert.js'
 import { SeqQueue } from '../SeqQueue.js'
@@ -59,7 +60,7 @@ class ReplayBuffer {
     assert(seq <= this.issuedSeq)
     assert(seq >= this.pushedSeq)
     this.pushedSeq = seq
-    const replayKind = replayKindOf(frame[0]!)
+    const replayKind = replayKindOf(readTag(frame))
     const queue = (this.queues[replayKind] ??= new ReplayQueue(this.budgets[replayKind]))
     queue.push(seq, { kind, frame }, ++handed)
   }
@@ -117,15 +118,18 @@ function mergeBySeq(a: Run, b: Run): Run {
   let ai = 0
   let bi = 0
   for (let ri = 0; ri < length; ri++) {
-    if (bi >= b.frames.length || (ai < a.frames.length && a.seqs[ai]! <= b.seqs[bi]!)) {
-      seqs[ri] = a.seqs[ai]!
-      handed[ri] = a.handed[ai]!
-      frames[ri] = a.frames[ai++]!
-    } else {
-      seqs[ri] = b.seqs[bi]!
-      handed[ri] = b.handed[bi]!
-      frames[ri] = b.frames[bi++]!
-    }
+    const aSeq = a.seqs[ai]
+    const bSeq = b.seqs[bi]
+    const fromA = bSeq === undefined || (aSeq !== undefined && aSeq <= bSeq)
+    const run = fromA ? a : b
+    const at = fromA ? ai++ : bi++
+    const frame = run.frames[at]
+    const seq = run.seqs[at]
+    const handedAt = run.handed[at]
+    assert(frame !== undefined && seq !== undefined && handedAt !== undefined)
+    seqs[ri] = seq
+    handed[ri] = handedAt
+    frames[ri] = frame
   }
   return { seqs, frames, handed }
 }

@@ -30,7 +30,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { getWireUrl } from './getSessionUrl.js'
 import { decode, isOneFrame, messageFrames, stampWindowHold } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
-import { HEADER, readU16, readU32 } from '../../wire/header.js'
+import { HEADER, readTag, readU16, readU32 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
@@ -941,7 +941,7 @@ class SseTransport implements UpgradeSource {
   bufferedAmount(): number {
     if (this.streamRequest.tag === 'active') return this.streamRequest.upload.body.bufferedAmount
     let bytes = 0
-    for (const { frame } of this.outbox) if (isSequencedTag(frame[0]!)) bytes += frame.byteLength
+    for (const { frame } of this.outbox) if (isSequencedTag(readTag(frame))) bytes += frame.byteLength
     return bytes
   }
 

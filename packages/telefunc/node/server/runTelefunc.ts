@@ -142,15 +142,7 @@ function createHttpResponse(
     async getBody() {
       const body = sent()
       if (typeof body === 'string') return body
-      const decoder = new TextDecoder()
-      let result = ''
-      // A `ReadableStream` is iterable on modern runtimes; the cast is just to
-      // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of body as AsyncIterable<Uint8Array<ArrayBuffer>>) {
-        result += decoder.decode(chunk, { stream: true })
-      }
-      result += decoder.decode()
-      return result
+      return new Response(getStreamReadableWeb(body)).text()
     },
     err,
   }

@@ -11,6 +11,7 @@ import { PieceSender, type PieceReceiverOwner, type PieceSenderOptions, type Pie
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
 import type { PiecesAck } from '../../wire/frame.js'
+import { readTag } from '../../wire/header.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
@@ -53,7 +54,7 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    if (isSequencedTag(frame[0]!)) {
+    if (isSequencedTag(readTag(frame))) {
       this.sender.send(frame, this.sender.dataWaits ? 0 : this.headroom())
       return this.pace()
     }

@@ -24,7 +24,7 @@ import type {
 } from '../../broadcast/broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assertUsage } from '../../../utils/assert.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 import {
   admitPublish,
   fitsPublish,
@@ -98,7 +98,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
       ? new LossyDelivery({
           peer: () => this.peer,
           replay: () => this._replayBuffer,
-          hand: (body) => this.lastPeer!.sendPublish(body),
+          hand: (body) => {
+            assert(this.lastPeer)
+            this.lastPeer.sendPublish(body)
+          },
           hold: (body) => hold(this, body),
           letGo: (body) => letGo(this, body),
           dropReplaceable: () => this.dropUnhanded(),
@@ -287,9 +290,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private forwardPublish(body: PublishBody): void {
     if (this.overflowed !== null) return this.endOverflowed()
     if (!fitsPublish(body)) return this.overflow(this.lossy ? NOT_EVEN_NEWEST : FELL_BEHIND, this.owner)
-    if (this.lastPeer === null) return this.holdBeforeAttach(body)
+    const peer = this.lastPeer
+    if (peer === null) return this.holdBeforeAttach(body)
     if (this.lossyPublishes) return this.lossyPublishes.send(body)
-    this.lastPeer!.sendPublish(body)
+    peer.sendPublish(body)
     const most = maxPendingBytesOf()
     if (this.heldBytes > most) this.shed(most, this.owner)
   }
@@ -712,7 +716,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private async dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
       const validateData = this._validators.get('data')
-      const verdict = validateData ? validateData(parse(serialized) as ChannelData<T>) : true
+      const verdict = validateData ? validateData(parse(serialized)) : true
       // `shield-error` status lets the client reject its `publish()` promise with a branded
       // ShieldValidationError — same identity every other shield-fail surface produces.
       if (verdict !== true) return this.sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)

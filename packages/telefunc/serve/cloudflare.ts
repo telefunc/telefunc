@@ -141,7 +141,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           // that time: its channels live in memory, and each wire's ping deadline is a timer (`armPingDeadline`).
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
-        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        const context = getContext ? await getContext(request, this.env) : undefined
         const httpResponse = await serveRuntimeRequest(
           context ? { request, context } : { request },
           noTransportEvidence,

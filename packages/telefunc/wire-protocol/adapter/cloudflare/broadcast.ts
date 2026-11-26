@@ -117,9 +117,8 @@ class CloudflareBucketPublishBuffer {
     if (this.isFlushing) return
     this.isFlushing = true
     try {
-      while (this.entries.length > 0) {
-        // It leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
-        const entry = this.entries.shift()!
+      // Each leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
+      for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
         this.totalBytes -= entry.bytes
         try {
           const ack = await entry.send()
@@ -134,8 +133,8 @@ class CloudflareBucketPublishBuffer {
   }
 
   clear(): void {
-    while (this.entries.length > 0) {
-      this.entries.shift()!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
+    for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
+      entry.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
     }
     this.totalBytes = 0
   }
@@ -155,8 +154,9 @@ class CloudflareBucketPublishBuffer {
   }
 
   private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.entries.length > 0) {
-      const entry = this.entries.shift()!
+    while (this.totalBytes > this.maxBytes) {
+      const entry = this.entries.shift()
+      if (entry === undefined) return
       entry.pending.reject(
         new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
       )

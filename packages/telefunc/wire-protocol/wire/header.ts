@@ -1,4 +1,4 @@
-export { HEADER, SEQ_OFFSET, SEQ_SPAN, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 }
+export { HEADER, SEQ_OFFSET, SEQ_SPAN, writeHeader, writeU16, writeU32, writeU64, readTag, readU16, readU32, readU64 }
 
 // ===== Wire protocol =====
 //
@@ -38,6 +38,11 @@ function writeU32(frame: Uint8Array, offset: number, n: number): void {
   frame[offset + 1] = (n >> 8) & 0xff
   frame[offset + 2] = (n >> 16) & 0xff
   frame[offset + 3] = (n >> 24) & 0xff
+}
+
+/** A frame's tag; 0, which no tag is, for an empty one. */
+function readTag(frame: Uint8Array): number {
+  return frame[0] ?? 0
 }
 
 function readU16(buf: Uint8Array, offset: number): number {

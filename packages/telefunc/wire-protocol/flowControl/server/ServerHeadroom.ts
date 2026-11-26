@@ -228,7 +228,10 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** The page took `bytes` of all the sender handed. */
   private releaseCopies(bytes: number): void {
     let released = 0
-    while (this.copied.length > 0 && this.copied.peek()!.end <= bytes) released += this.copied.shift()!.bytes
+    for (let copy = this.copied.peek(); copy !== undefined && copy.end <= bytes; copy = this.copied.peek()) {
+      released += copy.bytes
+      this.copied.shift()
+    }
     if (released > 0) dropWireCopies(released)
   }
 

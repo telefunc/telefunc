@@ -163,7 +163,7 @@ function buildInlineResponseBody(runContext: {
       }
       // An empty frame means this index is done, and an empty chunk has no bytes to send.
       if (result.value.byteLength > 0) {
-        await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+        await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value)))
       }
       void pullNext(entry)
     }

@@ -206,7 +206,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.text, serialized)
+      return this.sendNewest(encode.text, serialized, keepText)
     }
     this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
@@ -237,7 +237,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.stopped) throw this.lifecycle.sendRefusal()
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.binary, data)
+      return this.sendNewest(encode.binary, data, copyBytes)
     }
     this.flushLossy()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
@@ -547,13 +547,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** A send of which only the newest matters. It goes, or takes the place of the newest that still waits for a link
    *  that is behind; while the server grants no more credit, it waits as the newest. */
-  private sendNewest<D extends string | Uint8Array>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
+  private sendNewest<D>(encodeFrame: SequencedEncoder<D>, data: D, keep: (data: D) => D): Promise<void> {
     if (this.sendCredit.isOutOfCredit()) {
       // Too large, it throws here, and the one held stays.
       this.connection.assertFits(this, encodeFrame, data)
-      // The caller may write into its bytes once `sendBinary` returned.
-      const copy = (typeof data === 'string' ? data : new Uint8Array(data)) as D
-      this.heldLossy = () => void this.handLossy(encodeFrame, copy)
+      const kept = keep(data)
+      this.heldLossy = () => void this.handLossy(encodeFrame, kept)
       return Promise.resolve()
     }
     this.heldLossy = null
@@ -630,4 +629,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
+}
+
+/** What a held lossy send keeps of its text: the string itself. */
+function keepText(text: string): string {
+  return text
+}
+
+/** What a held lossy send keeps of its bytes: a copy, as the caller may write into them once `sendBinary` returned. */
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
 }

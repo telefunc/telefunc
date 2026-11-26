@@ -171,7 +171,7 @@ class SendGate {
     const { ix } = record
     for (const entry of this.waitingForHeadroom) {
       if (entry.channelIx !== ix || entry.seq !== seq) continue
-      if (!this.isBehind(this.waitingForHeadroom.peek()!)) return null
+      if (!this.isBehind(this.waitingForHeadroom.peek() ?? entry)) return null
       const added = frame.byteLength - entry.frame.byteLength
       this.waitingForHeadroomBytes += added
       entry.frame = frame
@@ -181,7 +181,7 @@ class SendGate {
     const held = sendBuffer.find((entry) => entry.channelIx === ix && entry.seq === seq)
     if (held === undefined) return null
     const away = this.owner.reconnecting || record.state.tag === 'pending'
-    if (!away && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix)!)) return null
+    if (!away && !this.isBehind(sendBuffer.find((entry) => entry.channelIx === ix) ?? held)) return null
     const added = frame.byteLength - held.frame.byteLength
     held.frame = frame
     return added
@@ -204,11 +204,13 @@ class SendGate {
     this.dropQueues()
     const { transport } = this.owner
     let headroom = transport.headroom()
-    while (headroom > 0 && this.waitingForHeadroom.length > 0) {
-      const { frame, kind, channelIx, seq } = this.waitingForHeadroom.shift()!
+    while (headroom > 0) {
+      const held = this.waitingForHeadroom.shift()
+      if (held === undefined) return
+      const { frame, kind, channelIx, seq } = held
       this.waitingForHeadroomBytes -= frame.byteLength
       headroom -= frame.byteLength
-      this.channels.get(channelIx)!.replay.push(seq, frame, kind)
+      this.channels.get(channelIx)?.replay.push(seq, frame, kind)
       transport.sendFrame({ kind, frame, released: true })
     }
   }

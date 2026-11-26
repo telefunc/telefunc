@@ -1,7 +1,7 @@
 export { countWaitingPublishes, droppingLossy, droppingPublishes, droppingFrom }
 export type { WireQueue }
 
-import { readU16 } from '../../wire/header.js'
+import { readTag, readU16 } from '../../wire/header.js'
 import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind, or a channel its page left, can let go of. */
@@ -40,7 +40,8 @@ function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array
       return true
     }
     if (isHeadOf(frame, ix)) dropping = bodyNext = true
-    return dropping && isSequencedTag(frame[0]!) && !isPublishBody(frame[0]!) && readU16(frame, 1) === ix
+    const tag = readTag(frame)
+    return dropping && isSequencedTag(tag) && !isPublishBody(tag) && readU16(frame, 1) === ix
   }
 }
 

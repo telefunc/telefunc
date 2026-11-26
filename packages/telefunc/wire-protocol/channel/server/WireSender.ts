@@ -7,7 +7,7 @@ import {
   WIRE_QUEUE_DELAY_MS,
 } from '../../constants.js'
 import { encode } from '../../wire/frame.js'
-import { HEADER } from '../../wire/header.js'
+import { HEADER, readTag } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
 import type { MuxChannel } from './ServerChannel.js'
@@ -102,13 +102,14 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
-    this.pieces = transport.wholeMessages
-      ? {
-          headroom: new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval }),
-          receiver: new ServerPieceReceiver({ owner: this }),
-        }
-      : null
-    this.wireQueue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
+    if (transport.wholeMessages) {
+      const headroom = new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval })
+      this.pieces = { headroom, receiver: new ServerPieceReceiver({ owner: this }) }
+      this.wireQueue = headroom
+    } else {
+      this.pieces = null
+      this.wireQueue = transport.queueOf(wire)
+    }
     this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.heldChannels = heldChannels
@@ -269,7 +270,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     if (this.closed || this.pastBacklog) return
     if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
     const at = performance.now()
-    this.wait.handed(frame.byteLength, passesData(frame[0]!), at)
+    this.wait.handed(frame.byteLength, passesData(readTag(frame)), at)
     if (this.pieces) this.pieces.headroom.send(frame)
     else this.transport.sendNow(this.wire, frame)
   }

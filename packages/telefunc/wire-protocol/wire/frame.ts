@@ -33,7 +33,18 @@ export type {
   SequencedEncoder,
 }
 
-import { HEADER, SEQ_OFFSET, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 } from './header.js'
+import {
+  HEADER,
+  SEQ_OFFSET,
+  writeHeader,
+  writeU16,
+  writeU32,
+  writeU64,
+  readTag,
+  readU16,
+  readU32,
+  readU64,
+} from './header.js'
 import { TAG, isSequencedTag, isWireCtrlTag } from './tags.js'
 import {
   parseBarrierPayload,
@@ -448,7 +459,7 @@ const TOOK_TAGS: ReadonlySet<number> = new Set([TAG.PING, TAG.WINDOW, TAG.MSG_WI
 
 /** What the page took off its WebSocket, as `frame` says; null for a frame that doesn't say. */
 function tookOf(frame: Uint8Array): number | null {
-  return TOOK_TAGS.has(frame[0]!) ? readU32(frame, SEQ_OFFSET) : null
+  return TOOK_TAGS.has(readTag(frame)) ? readU32(frame, SEQ_OFFSET) : null
 }
 
 // ===== Decode =====
