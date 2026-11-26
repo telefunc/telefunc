@@ -476,26 +476,64 @@ test('an extension value of metadata only is replaced once, at invocation, and i
   expect(imported).toEqual([])
 })
 
-test('serialization failure cancels the stream an earlier replayed argument started', async () => {
+test("a cold upload is the call's from its invocation: locked at return, then sent", async () => {
+  const { call } = await page()
+  respond = text(1)
+  const upload = new ReadableStream({
+    pull(controller) {
+      controller.close()
+    },
+  })
+  const pending = call([upload])
+  expect(upload.locked).toBe(true)
+  expect(() => upload.getReader()).toThrow()
+  gates.channels.open()
+  expect(await pending).toBe(1)
+  expect(posts).toHaveLength(1)
+})
+
+test('serialization failure at invocation cancels the upload an earlier argument claimed', async () => {
   const { call, withContext } = await page()
   const cancel = vi.fn()
   const upload = new ReadableStream({ cancel })
   const second = new ReadableStream()
   const secondReader = second.getReader()
   const controller = new AbortController()
-  const pending = withContext(call, { signal: controller.signal })([upload, second])
-  gates.channels.open()
 
   try {
-    await expect(pending).rejects.toThrow(/ReadableStream is locked/)
-    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce())
+    expect(() => withContext(call, { signal: controller.signal })([upload, second])).toThrow(/locked/)
+    expect(cancel).toHaveBeenCalledOnce()
     expect(upload.locked).toBe(false)
     controller.abort()
     expect(cancel).toHaveBeenCalledOnce()
     expect(posts).toEqual([])
+    expect(imported).toEqual([])
   } finally {
     secondReader.releaseLock()
   }
+})
+
+test("a cold upload whose source's cancel throws leaves no unhandled rejection", async () => {
+  const { call, withContext } = await page()
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const upload = new ReadableStream({
+      cancel() {
+        throw new Error('the source fails to cancel')
+      },
+    })
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([upload])
+    await vi.waitFor(() => expect(imported).toEqual(['channels']))
+    controller.abort()
+    expect(isAbort(await settledWithin(pending, 200))).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
+  expect(unhandled).toEqual([])
 })
 
 test('a later invalid argument cancels a resource created by an extension replacer', async () => {

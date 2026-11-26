@@ -97,15 +97,13 @@ function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
 
 /** Opens the channels a call claimed before the page loaded channels' code, once it has loaded it. */
 async function openClaimedChannels(request: CallRequest, claimed: Claimed[], callContext: CallContext): Promise<void> {
-  try {
-    const { channels } = await loadFeatures(['channels'], callContext)
-    assert(channels)
-    const connection = getConnectionOptions(callContext)
-    for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })
-  } catch (err) {
+  const { channels } = await loadFeatures(['channels'], callContext).catch((err: unknown) => {
     cancelUnsentCall(request, callContext, err)
     throw err
-  }
+  })
+  assert(channels)
+  const connection = getConnectionOptions(callContext)
+  for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })
 }
 
 /** Undoes a call that ends before it is sent: what it replaced or opened, through its controller, and what it claimed. */

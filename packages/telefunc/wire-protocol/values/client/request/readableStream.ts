@@ -13,15 +13,14 @@ const readableStreamType: ChannelCarriedType<ReadableStreamRequestContract> & {
   prefix: SERIALIZER_PREFIX_STREAM,
   detect: (value) => value instanceof ReadableStream,
   claim(stream) {
+    // The call takes the stream's reader now: a locked stream throws here, and the app can't read what it passed.
+    const producer = readableStreamType.createProducer(stream)
     const channelId = randomUuid()
     return {
       metadata: { channelId },
-      open({ ClientChannel, pumpProducerToChannel }, connection) {
-        const channel = new ClientChannel({ channelId, connection })
-        return pumpProducerToChannel(readableStreamType.createProducer(stream), channel)
-      },
-      // A stream the app holds locked rejects its cancel, which is the app's.
-      release: (reason) => stream.cancel(reason).catch(() => {}),
+      open: ({ ClientChannel, pumpProducerToChannel }, connection) =>
+        pumpProducerToChannel(producer, new ClientChannel({ channelId, connection })),
+      release: (reason) => producer.cancel(reason),
     }
   },
   createProducer: (stream) =>

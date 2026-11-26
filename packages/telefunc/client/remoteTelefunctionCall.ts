@@ -87,8 +87,7 @@ function remoteTelefunctionCall(
 type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
   Omit<Parameters<typeof makeHttpRequest>[0], 'httpRequestBody' | 'requestCloseHandlers'>
 
-/** Sends the call. Its arguments are serialized now, at its invocation: a serialization error throws here, except for
- *  a stream argument the app has locked, on a page that hasn't loaded channels' code, whose call's promise rejects. */
+/** Sends the call. Its arguments are serialized now, at its invocation, where a serialization error throws. */
 function sendCall(callContext: CallContext): Promise<unknown> {
   const request = serializeTelefunctionArguments(callContext)
   objectAssign(callContext, request)
