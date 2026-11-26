@@ -442,7 +442,7 @@ test('an extension response can create a broadcast and a channel', async () => {
   gates.channels.open()
   gates.broadcasts.open()
   // The extension's client code: its values create channels and broadcasts.
-  await import('../../../client/__internal.js')
+  await import('../../../client/__internal/broadcasts.js')
   const created: string[] = []
   config.extensions.push({
     name: 'probe',
@@ -475,6 +475,7 @@ test('an extension response whose values create channels loads no other code', a
   gates.broadcasts.open()
   // The extension's client code: its values create channels.
   await import('../../../client/__internal.js')
+  expect(imported).toEqual(['channels'])
   imported = []
   failing.add('broadcasts')
   config.extensions.push({
