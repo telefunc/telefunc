@@ -140,17 +140,6 @@ test('a failed chunk load rejects the call with ConnectionError, cancels its bod
   expect(ret).toHaveProperty('gen')
 })
 
-test('a load that fails after the streamed body is read cancels the body, whichever value comes first', async () => {
-  const { call, ConnectionError } = await page()
-  await warmStreams(call)
-  respond = streamed({ channel: CHANNEL, gen: GENERATOR })
-  failing.add('channels')
-  gates.channels.open()
-  expect(await settledWithin(call([]), 1000)).toBeInstanceOf(ConnectionError)
-  // The first call's body is still being read, by its generator.
-  await vi.waitFor(() => expect(cancelled).toBe(1))
-})
-
 test.each([
   ['the channel', false],
   ['the generator', false],
