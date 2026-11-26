@@ -425,8 +425,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // The two go together, so a lossy one they can't both fit in its channel is refused, leaving the other its turn.
     if (wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
     // The caller may write into its bytes once `send` returned, as for a send that waits.
-    const kept = { ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) }
-    if (!wait.putBehind(kept, lossy.held))
+    const keep = () => ({ ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) })
+    if (!wait.putBehind(lossy.held, keep))
       return Promise.reject<void>(this.refuseSend(lossy.held - wait.behindBytes, false))
   }
 

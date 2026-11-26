@@ -581,6 +581,48 @@ test('on a WebSocket, a binary send refused while another of its channel waits f
   }
 })
 
+test('on a WebSocket, a binary lossy send that maxMemory refuses behind a send of its channel waiting for room copies none of its bytes, and the lossy send it was to replace still goes', async () => {
+  const channel = new ServerChannel()
+  const other = new ServerChannel()
+  const page = overWebSocket([channel, other])
+  const free = fillTo(HELD_AT_MOST, 15)
+  try {
+    // Another channel's send waits first, so the room left is less than what one channel may hold.
+    expect(await settledIn(other.sendBinary(new Uint8Array(1_500_000)), 5)).toBe('pending')
+    const waiting = channel.send('a1')
+    expect(await settledIn(waiting, 5)).toBe('pending')
+    void channel.send('l2', { lossy: true })
+    const reserved = channelLedger().reserved
+    const data = new Uint8Array(1024 * 1024)
+    const nativeBytes = globalThis.Uint8Array
+    let copied = 0
+    globalThis.Uint8Array = new Proxy(nativeBytes, {
+      construct(target, args, newTarget) {
+        if (args[0] === data) copied += data.byteLength
+        return Reflect.construct(target, args, newTarget)
+      },
+    })
+    let refused: Promise<void>
+    try {
+      refused = channel.sendBinary(data, { lossy: true })
+    } finally {
+      globalThis.Uint8Array = nativeBytes
+    }
+    expect({ outcome: await settledIn(refused, 5), copied, reserved: channelLedger().reserved }).toEqual({
+      outcome: 'overflow',
+      copied: 0,
+      reserved,
+    })
+    free()
+    expect(await settledIn(waiting)).toBe('resolved')
+    expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(['0:a1', '0:l2'])
+  } finally {
+    channel.abort()
+    other.abort()
+    free()
+  }
+})
+
 test("on a WebSocket, an acknowledged send that waited for its channel's earlier one to be confirmed settles with the page's answer", async () => {
   const channel = new ServerChannel()
   const page = overWebSocket([channel])

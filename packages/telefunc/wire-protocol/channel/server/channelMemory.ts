@@ -123,17 +123,17 @@ class RoomWait<Behind = unknown> {
     return true
   }
 
-  /** `send` waits behind it in place of the one that did, reserving `bytes`, where `maxMemory` has room for what that
-   *  adds with what is held and what waits, or, while parked, as it joins the line. It goes in this one's turn, never
-   *  ahead of an older wait. */
-  putBehind(send: Behind, bytes: number): boolean {
+  /** The send `makeSend` makes waits behind it in place of the one that did, reserving `bytes`, where `maxMemory` has
+   *  room for what that adds with what is held and what waits, or, while parked, as it joins the line; `makeSend` runs
+   *  only then. It goes in this one's turn, never ahead of an older wait. */
+  putBehind(bytes: number, makeSend: () => Behind): boolean {
     const added = bytes - this.behindBytes
     if (!this.parked && added > 0) {
       if (!hasRoomFor(added)) return false
       memory.reserved += added
     }
     if (!this.parked && added < 0) unreserve(-added)
-    this.behind = { send, bytes }
+    this.behind = { send: makeSend(), bytes }
     return true
   }
 
