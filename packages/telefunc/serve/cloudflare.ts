@@ -147,7 +147,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     private readonly authorityState: CloudflareBroadcastAuthorityState
     private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
     private readonly session: CloudflareSession
-    private readonly durableObjects = new Map<string, CloudflareExtensionDurableObject>()
+    // An own field, not a method: Workers RPC lets any stub call a method on a Durable Object's prototype.
+    private readonly extensionDurableObject: (name: string) => CloudflareExtensionDurableObject
     /** The extension this Durable Object's storage is known to hold. */
     private storedExtension: string | undefined
 
@@ -156,6 +157,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
       this.session = cloudflareSession(broadcast.member(id, this.broadcastCalls), new ChannelMux({ hostId: id }))
+      this.extensionDurableObject = extensionDurableObjects(ctx, env, this.broadcastCalls)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
@@ -234,7 +236,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     /** The RPC method every extension's `durableObject` is called through. */
     async telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown> {
-      const { methods } = this.#durableObject(name)
+      const { methods } = this.extensionDurableObject(name)
       const call = Object.hasOwn(methods, method) ? methods[method] : undefined
       assertUsage(call, `The Cloudflare extension ${name} serves no Durable Object method ${method}()`)
       if (this.storedExtension !== name) {
@@ -252,27 +254,27 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const name: unknown = await this.ctx.storage.get(EXTENSION_STORAGE_KEY)
       if (typeof name !== 'string') return this.authorityState.alarm()
       this.storedExtension = name
-      await this.#durableObject(name).alarm?.()
+      await this.extensionDurableObject(name).alarm?.()
     }
+  }
 
-    // This one is `#`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's
-    // prototype, a TypeScript `private` one too, but reaches no `#` method and no own instance field.
-
-    /** Built once, synchronously, so that concurrent first calls share it. */
-    #durableObject(name: string): CloudflareExtensionDurableObject {
-      const built = this.durableObjects.get(name)
-      if (built) return built
+  /** Each extension's `durableObject` is built once, synchronously, so that concurrent first calls share it. */
+  function extensionDurableObjects(ctx: DurableObjectState, env: Cloudflare.Env, broadcastCalls: BroadcastCalls) {
+    const built = new Map<string, CloudflareExtensionDurableObject>()
+    return (name: string): CloudflareExtensionDurableObject => {
+      const durableObject = built.get(name)
+      if (durableObject) return durableObject
       const extension = getCloudflareExtension(name)
       assertUsage(
         extension?.durableObject,
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use ` +
           `Telefunc's Vite plugin?`,
       )
-      const regions = broadcast.regions(this.broadcastCalls)
-      const getNamespace = () => telefuncNamespace(this.env)
-      const durableObject = extension.durableObject(this.ctx, { regions, getNamespace })
-      this.durableObjects.set(name, durableObject)
-      return durableObject
+      const regions = broadcast.regions(broadcastCalls)
+      const getNamespace = () => telefuncNamespace(env)
+      const created = extension.durableObject(ctx, { regions, getNamespace })
+      built.set(name, created)
+      return created
     }
   }
 
