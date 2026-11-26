@@ -383,6 +383,10 @@ function misc() {
         title: '❌ Non-function exports',
         url: '/warning/non-function-export',
       },
+      {
+        title: '❌ Multiple versions',
+        url: '/warning/version-mismatch',
+      },
     ] as const
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
 }

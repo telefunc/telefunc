@@ -5,6 +5,7 @@ export { assertInfo }
 export { getProjectError }
 export { errorPrefix }
 
+import { assertSingleInstance } from './assertSingleInstance.js'
 import { createErrorWithCleanStackTrace } from './createErrorWithCleanStackTrace.js'
 import { getGlobalObject } from './getGlobalObject.js'
 import { projectInfo } from './projectInfo.js'
@@ -65,7 +66,11 @@ function getProjectError(errorMessage: string) {
   return pluginError
 }
 
-const globalObject = getGlobalObject<{ alreadyLogged: Set<string> }>('assert.ts', { alreadyLogged: new Set() })
+const globalObject = getGlobalObject<{ alreadyLogged: Set<string>; version?: string }>('assert.ts', {
+  alreadyLogged: new Set(),
+  version: projectInfo.projectVersion,
+})
+assertSingleInstance(globalObject)
 function assertWarning(
   condition: unknown,
   errorMessage: string,
