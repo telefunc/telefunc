@@ -195,9 +195,34 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     this.heard()
     this.measureAnswer()
     this.releaseCopies(this.sender.heartbeatBytes)
+    this.mergeConfirmedAppLimited()
     // A page taking small frames says what it took mostly here, in the frames it sends anyway.
     if (this.awaitsCopyRoom || this.drain.rate === 0) this.sendWaiting()
     return true
+  }
+
+  /** No acknowledgement after a heartbeat covers less than it confirmed, so the ranges it confirmed overlap a later span
+   *  only as one does: one range stands for them. */
+  private mergeConfirmedAppLimited(): void {
+    let first = this.dropAppLimited(this.sender.acknowledgedBytes)
+    if (first === undefined) return
+    for (let next = this.appLimited.at(1); next !== undefined && next.end <= this.sender.heartbeatBytes; ) {
+      next.start = first.start
+      this.appLimited.shift()
+      first = next
+      next = this.appLimited.at(1)
+    }
+  }
+
+  /** Drops the ranges that end by `bytes`, and returns the first left. */
+  private dropAppLimited(bytes: number): { start: number; end: number } | undefined {
+    let first = this.appLimited.peek()
+    while (first !== undefined && first.end <= bytes) {
+      this.appLimited.shift()
+      if (first === this.lastAppLimited) this.lastAppLimited = null
+      first = this.appLimited.peek()
+    }
+    return first
   }
 
   /** The page took `bytes` of all the sender handed. */
@@ -221,12 +246,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
     // Only measure spans that ran without waiting for the app.
-    let limited = this.appLimited.peek()
-    while (limited !== undefined && limited.end <= before) {
-      this.appLimited.shift()
-      if (limited === this.lastAppLimited) this.lastAppLimited = null
-      limited = this.appLimited.peek()
-    }
+    const limited = this.dropAppLimited(before)
     if (limited !== undefined && limited.start < acknowledged) this.drain.dropSpan()
     else this.drain.spanned(acknowledged - before, spanMs)
     // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.

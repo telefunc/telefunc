@@ -249,3 +249,44 @@ describe('ServerHeadroom.headroom', () => {
     }
   })
 })
+
+describe('ServerHeadroom.heartbeat', () => {
+  it('a page that confirms small frames by heartbeat alone keeps the app-limited ranges bounded, and a later acknowledgement still drops the span they taint', () => {
+    let buffered = 0
+    const headroom = new ServerHeadroom({
+      socket: {
+        send: () => {},
+        get bufferedAmount() {
+          return buffered
+        },
+        copiesOnSend: false,
+      },
+      pingInterval: 5_000,
+    })
+    let seq = 0
+    const send = (frame: Uint8Array<ArrayBuffer>) => {
+      headroom.send(frame)
+      headroom.sender.flush()
+    }
+    // Small frames, each app-limited or behind what the socket holds by turns, each confirmed by the page's heartbeat.
+    for (let n = 0; n < 500; n++) {
+      buffered = n % 2 === 0 ? 0 : 1024 * 1024
+      send(encode.text(1, 'x', ++seq))
+      expect(headroom.heartbeat(headroom.sender.transmittedBytes, performance.now())).toBe(true)
+    }
+    expect(headroom['appLimited'].length).toBeLessThanOrEqual(2)
+    const ack = (spanMs: number) =>
+      headroom.acknowledged({ bytes: headroom.sender.transmittedBytes, heldMs: 0, spanUs: spanMs * 1000 })
+    // An acknowledgement whose span includes an app-limited send measures no rate, though a heartbeat confirmed it first.
+    buffered = 0
+    send(encode.binary(1, new Uint8Array(20 * 1024), ++seq))
+    expect(headroom.heartbeat(headroom.sender.transmittedBytes, performance.now())).toBe(true)
+    expect(ack(200)).toBe(true)
+    expect(headroom['drain'].rate).toBe(0)
+    // The next span, behind what the socket holds throughout, measures one.
+    buffered = 1024 * 1024
+    send(encode.binary(1, new Uint8Array(20 * 1024), ++seq))
+    expect(ack(200)).toBe(true)
+    expect(headroom['drain'].rate).toBeGreaterThan(0)
+  })
+})
