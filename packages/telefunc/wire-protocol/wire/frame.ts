@@ -467,14 +467,14 @@ function lengthBytes(tag: number): number {
   return fixedBytes(tag) === 0 ? HEADER : 0
 }
 
-/** Whether a WebSocket `message` holds one frame. */
+/** Whether a transport message holds one frame. */
 function isOneFrame(message: Uint8Array): boolean {
   const bytes = fixedBytes(message[0]!)
   return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
 }
 
 /** The frames of a message of several, each a copy (a `Buffer`'s `slice` is a view), read only as it is taken. */
-function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>> {
+function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>, undefined> {
   const end = message.byteLength
   let at = 0
   for (;;) {

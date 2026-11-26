@@ -21,6 +21,7 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 import { TransportSocket } from './TransportSocket.js'
+import { EventStream } from './EventStream.js'
 
 type WireSenderOptions = {
   wire: Wire
@@ -118,20 +119,30 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   sendPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>): void {
-    const headroom = this.pieces?.headroom
     const bytes = head.byteLength + body.byteLength
-    if (headroom && !this.closed && !this.pastBacklog && !this.owed && bytes <= this.headroom) {
-      const room = headroom.gatherRoom(bytes)
-      if (room !== undefined) {
-        this.headroom -= bytes
-        this.largestSent = Math.max(this.largestSent, head.byteLength, body.byteLength)
-        this.wait.handed(bytes, false, performance.now())
-        headroom.sender.gatherPublish(head, body, room)
+    if (!this.closed && !this.pastBacklog && !this.owed && bytes <= this.headroom) {
+      const headroom = this.pieces?.headroom
+      if (headroom) {
+        const room = headroom.gatherRoom(bytes)
+        if (room !== undefined) {
+          this.handGatheredPublish(head, body, bytes)
+          headroom.sender.gatherPublish(head, body, room)
+          return
+        }
+      } else if (this.wireQueue instanceof EventStream && this.wireQueue.canGatherPublish(bytes)) {
+        this.handGatheredPublish(head, body, bytes)
+        this.wireQueue.gatherPublish(head, body)
         return
       }
     }
     this.send(head)
     this.send(body)
+  }
+
+  private handGatheredPublish(head: Uint8Array<ArrayBuffer>, body: Uint8Array<ArrayBuffer>, bytes: number): void {
+    this.headroom -= bytes
+    this.largestSent = Math.max(this.largestSent, head.byteLength, body.byteLength)
+    this.wait.handed(bytes, false, performance.now())
   }
 
   /** A RECONCILE is answered: what is sent from now, its replay first, goes behind its RECONCILED (`sendReconciled`),

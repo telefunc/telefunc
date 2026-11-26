@@ -28,7 +28,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { decode, stampWindowHold } from '../../wire/frame.js'
+import { decode, isOneFrame, messageFrames, stampWindowHold } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { HEADER, readU16, readU32 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
@@ -518,28 +518,32 @@ class SseTransport implements UpgradeSource {
     /** What the stream's last event says ended the wire, where the server decided its end; a loss where none says. */
     let end: TransportEnd | undefined
     try {
-      while (true) {
+      events: while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
-        if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
-          onOpenAck()
-          continue
-        }
-        const frame = decode(raw)
-        if (frame.tag === TAG.END) {
-          end = endOfWire(frame.refusal)
-          break
-        }
-        if (frame.tag === TAG.PONG) {
-          // A PONG still on its way on a wire the page left says nothing of the wire in use.
-          if (this.transportAbort !== abortController) continue
-          this.heartbeat?.resetPong()
-          this.owner.onTransportPong(frame.ended)
-          continue
-        }
-        const paired = pair(frame)
-        if (paired) {
-          this.owner.onTransportFrame(paired, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        const packed = isOneFrame(raw) ? null : messageFrames(raw)
+        let each = packed === null ? raw : packed.next().value
+        while (each !== undefined) {
+          const frame = decode(each)
+          if (frame.tag === TAG.END) {
+            end = endOfWire(frame.refusal)
+            break events
+          }
+          if (frame.tag === TAG.STREAM_REQUEST_OPEN_ACK) {
+            onOpenAck()
+          } else if (frame.tag === TAG.PONG) {
+            // A PONG still on its way on a wire the page left says nothing of the wire in use.
+            if (this.transportAbort === abortController) {
+              this.heartbeat?.resetPong()
+              this.owner.onTransportPong(frame.ended)
+            }
+          } else {
+            const paired = pair(frame)
+            if (paired) {
+              this.owner.onTransportFrame(paired, this, each.byteLength, this.abandonedControllers.has(abortController))
+            }
+          }
+          each = packed?.next().value
         }
       }
     } catch {
