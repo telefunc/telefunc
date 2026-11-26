@@ -1,4 +1,3 @@
-// Loaded by `loadFeatures()`: the streams, files and promises a response's own body carries, and their revivers.
 export { responseTypes, createBodyReader }
 export { FrameDemuxer } from './response/FrameDemuxer.js'
 

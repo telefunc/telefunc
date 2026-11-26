@@ -1,4 +1,3 @@
-// Loaded by `loadFeatures()`: channels with their connection and transports, and the values that ride one.
 export { responseTypes }
 export { ClientChannel } from '../../channel/client/ClientChannel.js'
 export { ChannelStreamSource } from '../ChannelStreamSource.js'

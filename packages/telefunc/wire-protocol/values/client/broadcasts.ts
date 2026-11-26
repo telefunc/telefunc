@@ -1,4 +1,3 @@
-// Loaded by `loadFeatures()`: broadcast channels, which ride channels.
 export { responseTypes, unconfirmedWants }
 export { ClientBroadcast } from '../../channel/client/ClientBroadcast.js'
 

@@ -11,8 +11,7 @@ type ClientReplacerType = ReplacerType<TypeContract, ClientReplacerContext>
 
 /** Carried in the request's own body. File before Blob — File extends Blob, so must be checked first. */
 const bodyTypes: ClientReplacerType[] = [fileReplacer, blobReplacer]
-/** Carried over a channel of their own. ReadableStream before Function — ReadableStream is an object with methods, not
- *  a function. */
+/** Carried over a channel of their own. */
 const channelTypes: ClientReplacerType[] = [readableStreamReplacer, functionReplacer]
 
 /** Before the page loaded channels, a built-in value carried over a channel is held: `hold(value)` names it in the
