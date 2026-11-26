@@ -1,12 +1,7 @@
 export { remoteTelefunctionCall }
 
 import { makeHttpRequest } from './remoteTelefunctionCall/makeHttpRequest.js'
-import {
-  serializeTelefunctionArguments,
-  openClaimedChannels,
-  type CallRequest,
-  type Claimed,
-} from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
+import { serializeTelefunctionArguments } from './remoteTelefunctionCall/serializeTelefunctionArguments.js'
 import { resolveClientConfig } from './clientConfig.js'
 import { assertUsage } from '../utils/assert.js'
 import { isBrowser } from '../utils/isBrowser.js'
@@ -91,14 +86,16 @@ type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
 function sendCall(callContext: CallContext): Promise<unknown> {
   const request = serializeTelefunctionArguments(callContext)
   objectAssign(callContext, request)
-  if (request.claimed) return sendOnceChannelsOpen(request, request.claimed, callContext)
+  if (request.prepareChannels) return sendOnceChannelsPrepared(request.prepareChannels, callContext)
   return makeHttpRequest(callContext)
 }
 
-/** A call that claimed values before the page loaded channels' code: it sends what its invocation serialized once
- *  their channels are open. */
-async function sendOnceChannelsOpen(request: CallRequest, claimed: Claimed[], callContext: CallContext & CallRequest) {
-  await openClaimedChannels(request, claimed, callContext)
+/** A cold call sends what its invocation serialized once its claimed values' channels are prepared. */
+async function sendOnceChannelsPrepared(
+  prepareChannels: () => Promise<void>,
+  callContext: Parameters<typeof makeHttpRequest>[0],
+) {
+  await prepareChannels()
   return makeHttpRequest(callContext)
 }
 

@@ -1,5 +1,4 @@
-export { serializeTelefunctionArguments, openClaimedChannels }
-export type { CallRequest, Claimed }
+export { serializeTelefunctionArguments }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -10,6 +9,7 @@ import { encodeRequestEnvelope } from '../../wire-protocol/wire/envelope.js'
 import { loadFeatures, loadedFeatures, loadedFeature } from '../../wire-protocol/values/client/loadFeatures.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { getConnectionOptions } from './getConnectionOptions.js'
+import type { ConnectionOptions } from '../../wire-protocol/channel/client/ClientChannel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError, throwIfAborted } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
@@ -33,12 +33,12 @@ type CallContext = {
   fetch: typeof globalThis.fetch | null
 }
 
-/** The call's request, serialized at its invocation. `claimed`: values carried over a channel of their own, claimed
- *  before the page loaded channels' code, whose channels open once it has. */
+/** The call's request, serialized at its invocation. `prepareChannels`: what it awaits before its POST where it claimed
+ *  values carried over a channel of their own before the page loaded channels' code, to open their channels. */
 type CallRequest = {
   httpRequestBody: string | Blob
   requestCloseHandlers: CloseHandler[]
-  claimed?: Claimed[]
+  prepareChannels?: () => Promise<void>
 }
 type Claimed = { value: unknown; claim: Claim }
 
@@ -64,6 +64,7 @@ function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
 
   const files: Blob[] = []
   const request: CallRequest = { httpRequestBody: '', requestCloseHandlers: [] }
+  let claimed: Claimed[] | undefined
   const connection = getConnectionOptions(callContext)
   const replacer = createRequestReplacer(
     {
@@ -82,39 +83,46 @@ function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
     (value, claim) => {
       const { channels } = loadedFeatures()
       if (channels) attach(request, callContext, { value, ...claim.open(channels, connection) })
-      else (request.claimed ??= []).push({ value, claim })
+      else (claimed ??= []).push({ value, claim })
     },
     callContext.extensionRequestTypes,
   )
   try {
     const serialized = serialize(dataMain, callContext, replacer)
     request.httpRequestBody = files.length > 0 ? encodeRequestEnvelope(serialized, files) : serialized
-    return request
   } catch (err) {
-    cancelUnsentCall(request, callContext, err)
+    cancelUnsentCall(callContext, claimed, err)
     throw err
   }
+  if (claimed) request.prepareChannels = channelsPreparation(claimed, request, connection, callContext)
+  return request
 }
 
-/** Opens the channels a call claimed before the page loaded channels' code, once it has loaded it. */
-async function openClaimedChannels(request: CallRequest, claimed: Claimed[], callContext: CallContext): Promise<void> {
-  try {
-    await loadFeatures(['channels'], callContext)
-    throwIfAborted(callContext)
-  } catch (err) {
-    cancelUnsentCall(request, callContext, err)
-    throw err
+/** Loads channels' code for the values a call claimed before the page had it, then opens their channels. */
+function channelsPreparation(
+  claimed: Claimed[],
+  request: CallRequest,
+  connection: ConnectionOptions,
+  callContext: CallContext,
+): () => Promise<void> {
+  return async () => {
+    try {
+      await loadFeatures(['channels'], callContext)
+      throwIfAborted(callContext)
+    } catch (err) {
+      cancelUnsentCall(callContext, claimed, err)
+      throw err
+    }
+    const { channels } = loadedFeatures()
+    assert(channels)
+    for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })
   }
-  const { channels } = loadedFeatures()
-  assert(channels)
-  const connection = getConnectionOptions(callContext)
-  for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })
 }
 
 /** Undoes a call that ends before it is sent: what it replaced or opened, through its controller, and what it claimed. */
-function cancelUnsentCall(request: CallRequest, callContext: CallContext, reason: unknown): void {
+function cancelUnsentCall(callContext: CallContext, claimed: Claimed[] | undefined, reason: unknown): void {
   callContext.abortController.abort()
-  request.claimed?.forEach(({ claim }) => claim.release(reason))
+  claimed?.forEach(({ claim }) => claim.release(reason))
 }
 
 /** Ties a value whose resources are live to its call: the call's abort aborts them, its end closes them, and so does
