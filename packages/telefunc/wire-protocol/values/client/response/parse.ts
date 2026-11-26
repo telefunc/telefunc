@@ -218,6 +218,8 @@ class FrameDemuxer {
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
   >()
   private reading = false
+  /** The index whose unread buffer stopped reading; reading only restarts once that consumer drains or cancels. */
+  private pausedByIndex: number | null = null
   private ended = false
   private streamError: unknown = null
   private cancelledIndices = new Set<number>()
@@ -244,6 +246,7 @@ class FrameDemuxer {
     // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
     // the body under a stream still being read.
     this.pendingFrames.delete(index)
+    this.pendingBytes.delete(index)
     if (this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
@@ -254,6 +257,7 @@ class FrameDemuxer {
     }
     this.cancelUpstreamIfAllTerminal()
     // Reading may have stopped on this index's buffer, with another consumer waiting behind it.
+    this.resumeIfUnblocked(index)
     this.ensureReading()
   }
 
@@ -270,6 +274,7 @@ class FrameDemuxer {
     const buffered = this.pendingFrames.get(index)?.shift()
     if (buffered) {
       this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - buffered.byteLength)
+      this.resumeIfUnblocked(index)
       this.ensureReading()
       return buffered
     }
@@ -308,7 +313,7 @@ class FrameDemuxer {
   }
 
   private async ensureReading() {
-    if (this.reading) return
+    if (this.reading || this.pausedByIndex !== null) return
     this.reading = true
     clearTimeout(this.stallTimer)
     try {
@@ -359,7 +364,20 @@ class FrameDemuxer {
     const newBytes = (this.pendingBytes.get(index) ?? 0) + payload.byteLength
     this.pendingBytes.set(index, newBytes)
     // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-    return this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX
+    if (!this.canStopReading || newBytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) return false
+    this.pausedByIndex = index
+    return true
+  }
+
+  /** Lifts the pause once its index drained below the cap, unless an unfinished index's buffer is still full. */
+  private resumeIfUnblocked(index: number): void {
+    if (this.pausedByIndex !== index) return
+    this.pausedByIndex = null
+    for (const [other, bytes] of this.pendingBytes) {
+      if (bytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX || this.doneIndices.has(other)) continue
+      this.pausedByIndex = other
+      return
+    }
   }
 
   private failWaiters(err: unknown): void {
