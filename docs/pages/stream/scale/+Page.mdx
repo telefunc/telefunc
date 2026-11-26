@@ -39,7 +39,7 @@ backend telefunc
   server app2 app2:3000 check cookie app2
 ```
 
-> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. If two consecutive requests carry different values, the load balancer isn't configured for sticky sessions.
+> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. With all app instances healthy, if two consecutive requests carry different values, the load balancer isn't configured for sticky sessions.
 
 ### Caddy — `lb_policy cookie`
 

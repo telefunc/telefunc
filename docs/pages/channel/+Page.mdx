@@ -442,7 +442,7 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- Messages sent while offline are buffered and delivered in order on reconnect.
+- Reliable messages sent while offline are buffered and delivered in order on reconnect.
 - When a channel reconnects, Telefunc resends the reliable messages it kept for the other end.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
