@@ -5,12 +5,12 @@ import type { PublishBody } from './PublishBody.js'
 
 /** A replay's publish records, kept in seq order and dropped from either end. */
 class PublishQueue {
-  private bodies: (PublishBody | undefined)[] = []
-  private seqs: number[] = []
-  private indexes: number[] = []
-  private sentAt: number[] = []
-  private confirmed: number[] = []
-  private alone: boolean[] = []
+  private readonly bodies: (PublishBody | undefined)[] = []
+  private readonly seqs: number[] = []
+  private readonly indexes: number[] = []
+  private readonly sentAt: number[] = []
+  private readonly confirmed: number[] = []
+  private readonly alone: boolean[] = []
   private head = 0
 
   get length(): number {
@@ -73,12 +73,12 @@ class PublishQueue {
     const head = this.head + count
     if (head >= this.bodies.length) return this.clear()
     if (head >= this.bodies.length - head) {
-      this.bodies = this.bodies.slice(head)
-      this.seqs = this.seqs.slice(head)
-      this.indexes = this.indexes.slice(head)
-      this.sentAt = this.sentAt.slice(head)
-      this.alone = this.alone.slice(head)
-      this.confirmed = this.confirmed.slice(head)
+      discardPrefix(this.bodies, head)
+      discardPrefix(this.seqs, head)
+      discardPrefix(this.indexes, head)
+      discardPrefix(this.sentAt, head)
+      discardPrefix(this.alone, head)
+      discardPrefix(this.confirmed, head)
       this.head = 0
       return
     }
@@ -109,4 +109,11 @@ class PublishQueue {
     this.confirmed.length = 0
     this.head = 0
   }
+}
+
+/** Moves the live slots forward before releasing the discarded tail. */
+function discardPrefix<T>(items: (T | undefined)[], count: number): void {
+  const remaining = items.length - count
+  for (let i = 0; i < remaining; i++) items[i] = items[count + i]
+  items.length = remaining
 }
