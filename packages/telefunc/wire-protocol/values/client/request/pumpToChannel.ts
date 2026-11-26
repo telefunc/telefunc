@@ -1,27 +1,22 @@
-export { pumpClientProducerToChannel }
+export { pumpProducerToChannel }
 
 import { CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { concat, textEncoder } from '../../../wire/envelope.js'
 import { ChannelClosedError } from '../../../channel/channelErrors.js'
-import { ClientChannel, type ConnectionOptions } from '../../../channel/client/ClientChannel.js'
+import type { ClientChannel } from '../../../channel/client/ClientChannel.js'
 import type { StreamingProducer } from '../../types.js'
-import { randomUuid } from '../../../../utils/randomUuid.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
 import { sendChunks } from '../../sendChunks.js'
 
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 
 /**
- * Pumps a single producer's chunks to the server through a channel of its own, and returns the channel's id as the
- * metadata the request carries, with `close()` and `abort()` for the request's lifetime.
+ * Pumps a single producer's chunks to the server over `channel`, its own, and returns `close()` and `abort()` for the
+ * request's lifetime.
  *
  * The channel's end, a close or an abort, wakes the pump at once, and its error, if any, goes to `producer.cancel()`.
  */
-function pumpClientProducerToChannel(createProducer: () => StreamingProducer, connection: ConnectionOptions) {
-  const channel = new ClientChannel({ channelId: randomUuid(), connection })
-
-  const producer = createProducer()
-
+function pumpProducerToChannel(producer: StreamingProducer, channel: ClientChannel) {
   let cancelled = false
   const { promise: cancelledPromise, resolve: resolveCancelled } = createDeferred<null>()
   const doCancel = (err: Error | null) => {
@@ -57,7 +52,6 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, co
   void runUploadPump()
 
   return {
-    metadata: { channelId: channel.id },
     async close() {
       doCancel(null)
       await channel.close()

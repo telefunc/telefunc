@@ -145,7 +145,9 @@ function createCallReplacer(args: HeldArguments, callContext: CallContext, hold:
         return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
       },
       sendStream(createProducer) {
-        return loadedFeature('channels').pumpClientProducerToChannel(createProducer, connection)
+        const { ClientChannel, pumpProducerToChannel } = loadedFeature('channels')
+        const channel = new ClientChannel({ channelId: randomUuid(), connection })
+        return { metadata: { channelId: channel.id }, ...pumpProducerToChannel(createProducer(), channel) }
       },
     },
     ({ value, close, abort }) => {
