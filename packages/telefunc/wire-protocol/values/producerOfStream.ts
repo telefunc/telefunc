@@ -10,39 +10,39 @@ function producerOfStream(
   checkChunk?: (chunk: unknown) => void,
 ): StreamingProducer {
   const reader = stream.getReader()
-  let lettingGo: Promise<void> | null = null
-  // The stream is the app's: at its end or on `cancel()`, whichever comes first, it is let go of for the app's own
-  // `cancel()` or another read. A `cancel()` before the first read ends `chunks` without running its `finally`.
-  const letGo = (reason?: unknown) => (lettingGo ??= cancelAndRelease(reader, reason))
+  let released = false
+  let finished = false
+  // The stream is the app's: at its end or on `cancel()`, whichever comes first, it is let go of at once for the app's
+  // own `cancel()` or another read, while its source may still clean up. A `cancel()` before the first read ends
+  // `chunks` without running its `finally`.
+  const letGo = (reason?: unknown): void => {
+    if (released) return
+    released = true
+    // Nothing awaits it: a read that failed already threw its error.
+    if (!finished) reader.cancel(reason).catch(() => {})
+    reader.releaseLock()
+  }
   const chunks = (async function* () {
     try {
       while (true) {
         const { done, value: chunk } = await reader.read()
-        if (done) break
+        if (done) {
+          finished = true
+          break
+        }
         checkChunk?.(chunk)
         yield chunk
       }
     } finally {
-      await letGo()
+      letGo()
     }
   })()
   return {
     chunks,
     cancel: (reason) => {
+      letGo(reason)
       // Nothing awaits it: it rejects with the source's error.
       chunks.return(undefined).catch(() => {})
-      void letGo(reason)
     },
-  }
-}
-
-/** Cancels `reader`'s stream, then releases it. */
-async function cancelAndRelease(reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>, reason: unknown) {
-  try {
-    await reader.cancel(reason)
-  } catch {
-    // The app's source failed to cancel: a read that failed already threw its error, and nothing else awaits a cancel.
-  } finally {
-    reader.releaseLock()
   }
 }
