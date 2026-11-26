@@ -189,12 +189,14 @@ type WireEntry = {
 const CHANNEL_MUX = Symbol.for('telefunc.channelMux')
 
 function getChannelMux(): ChannelMux {
+  // A context's keys are symbols each adapter types itself: `Context` types every value `unknown`.
   return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
 
 /** One value per host: one per process on Node/Bun/Deno, one per session Durable Object on Cloudflare. */
 function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T {
   const mux = getChannelMux()
+  // `hostLocals` holds each value under its own key, a type a `Map` can't tie to its key.
   return getOrCreate(mux.hostLocals, key, () => init({ id: mux.hostId })) as T
 }
 

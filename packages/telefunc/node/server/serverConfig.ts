@@ -678,9 +678,11 @@ function applyBroadcastConfig(val: unknown): void {
         'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and ' +
           'listenBinary() methods',
       )
+      // A runtime check proves each method is a function, never its signature.
       next.transport = value as BroadcastTransport
     } else if (key === 'onDeliveryLost') {
       assertUsage(typeof value === 'function', 'config.broadcast.onDeliveryLost should be a function')
+      // `typeof` narrows to `Function`, never to the listener's signature.
       next.onDeliveryLost = value as BroadcastConfigUser['onDeliveryLost']
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)

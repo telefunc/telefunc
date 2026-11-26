@@ -61,7 +61,12 @@ const FALLBACK_KEY = [Symbol.for('telefunc.memoryBackend')]
  *  one; the key names the factory's configuration, so that backend is the one the factory would build. */
 function installBackend<B extends BroadcastDriver>(factory: () => B, key: readonly unknown[]): B {
   const installed = state.installed
-  if (installed === null) return install(factory, key, false).backend as B
+  if (installed === null) {
+    const backend = factory()
+    install(backend, key, false)
+    return backend
+  }
+  // The same key names the same factory configuration, so the installed backend is the `B` it built.
   if (sameKey(installed.key, key)) return installed.backend as B
   assertUsage(
     !installed.fallback,
@@ -108,6 +113,7 @@ function backendPlane<Kit, Driver extends PlaneDriver, Plane extends BackendPlan
       'backend or use the Cloudflare adapter.',
   )
   const installed = currentBackend()
+  // `planes` holds each plane under its own key, a type a `Map` can't tie to its key.
   return getOrCreate(installed.planes, plane.key, () => {
     let driver: Driver
     if (installed.fallback) driver = plane.memoryDriver()
@@ -133,9 +139,9 @@ function disposeBackend(): void {
   for (const plane of installed?.planes.values() ?? []) plane.dispose()
 }
 
-function install(factory: () => BroadcastDriver, key: readonly unknown[], fallback: boolean): Installed {
+function install(backend: BroadcastDriver, key: readonly unknown[], fallback: boolean): Installed {
   const installed: Installed = {
-    backend: factory(),
+    backend,
     key,
     fallback,
     planes: new Map(),
@@ -145,7 +151,7 @@ function install(factory: () => BroadcastDriver, key: readonly unknown[], fallba
 }
 
 function currentBackend(): Installed {
-  return state.installed ?? install(() => new MemoryBackend(), FALLBACK_KEY, true)
+  return state.installed ?? install(new MemoryBackend(), FALLBACK_KEY, true)
 }
 
 function sameKey(a: readonly unknown[], b: readonly unknown[]): boolean {

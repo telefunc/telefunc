@@ -91,6 +91,7 @@ type PlaneServer = { readonly key: PlaneKey; build(kit: never): unknown; readonl
 
 /** The key `Key` types, by its name, which the compiler checks against `Key`. */
 function planeKey<Key extends PlaneKey>(name: Key extends PlaneKey<infer Name> ? Name : never): Key {
+  // `Key`'s brand is a type only, which no runtime symbol carries.
   return Symbol.for(name) as Key
 }
 

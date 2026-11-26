@@ -166,6 +166,7 @@ class ResponseValues {
 
   private readonly responseState = <T>(key: symbol, init: () => T): T => {
     if (!this.states.has(key)) this.states.set(key, init())
+    // `states` holds each value under its own key, a type a `Map` can't tie to its key.
     return this.states.get(key) as T
   }
 

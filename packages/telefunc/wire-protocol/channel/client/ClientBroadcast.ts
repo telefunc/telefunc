@@ -219,6 +219,7 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
   private onPeerPublish(payload: string, wireInfo: WirePublishInfo, bytes: number): void {
     this.receiveCredit.onPublishArrived()
+    // The wire carries no type: `T` is what the key's publishers send, as its subscriber declares.
     const parsed = parse(payload) as ChannelData<T>
     this.deliverPublish(this.subscribers.text.list(), () => parsed, wireInfo, bytes, isLossy(payload))
   }
