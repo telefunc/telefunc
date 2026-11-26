@@ -680,28 +680,9 @@ class ChannelMux implements UpgradeStagesOwner {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CTRL_FRAME_BYTES)
-    const took = tookOf(rawFrame)
-    const pieces = entry.sender.pieces
-    // The bytes the page took off this wire: more than it was sent is a broken peer, and the wire ends.
-    if (took !== null && pieces) {
-      const known = pieces.headroom.heartbeat(took, performance.now())
-      assertProtocol(known, 'the page says it took more bytes than this wire sent it')
-      entry.sender.rebalanceMemory()
-    }
+    this.countTook(entry, rawFrame)
     if (frame.tag === TAG.PING) {
-      const { ended } = frame
-      assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
-      this.resetPingTimer(entry)
-      this.acknowledgeArrivals(entry)
-      if (ended.length === 0 || entry.state.recvChain === null) this.pong(entry, this.answerPing(entry, ended))
-      else {
-        // What it names, the page sent before it: answered once the frames ahead of it had their turn.
-        this.pong(entry, [])
-        void this.chainRecv(
-          entry,
-          async () => void (entry.closed === null && this.pong(entry, this.answerPing(entry, ended))),
-        )
-      }
+      this.handlePing(entry, frame.ended)
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
@@ -713,36 +694,7 @@ class ChannelMux implements UpgradeStagesOwner {
     assertProtocol(this.stages.get(entry.wire) === undefined, 'frame on a staged probe')
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, frame.payload)
-    if (frame.tag === TAG.RECONCILE) {
-      const ctrl = frame.payload
-      // An open its wire can't send is refused before anything kept is answered or any channel it names is touched.
-      this.admitReconcile(entry, ctrl)
-      const kept = this.sessions.keptOf(ctrl.sessionId)
-      if (kept !== undefined) {
-        // An attempt not above the highest the record holds is older than one the server answered: it takes nothing.
-        if (ctrl.attempt === undefined || ctrl.attempt <= kept.high) {
-          this.endFault(entry.wire, { scope: 'loss' })
-          return null
-        }
-        // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or
-        // awaited, and so does each channel it names. The record is not written again: only its highest attempt
-        // rises, so that one between this and the last, read later still, takes nothing; its instant stays.
-        if (kept.end !== 'retired') {
-          kept.high = ctrl.attempt
-          this.refuseNamed(ctrl.open, entry, kept.end)
-          this.endSessionOn(entry, kept.end)
-          return null
-        }
-        // A newer attempt of a session that retired takes it again.
-        this.sessions.revive(ctrl.sessionId)
-      }
-      if (this.isStale(entry, ctrl)) {
-        this.endFault(entry.wire, { scope: 'loss' })
-        return null
-      }
-      this.claimSessionForReconcile(ctrl, entry)
-      return this.reconcile(entry, ctrl)
-    }
+    if (frame.tag === TAG.RECONCILE) return this.handleReconcile(entry, frame.payload)
     const session = entry.holds
     assertProtocol(session, 'frame on a wire that holds no session')
     const channelFrame = frame as ChannelFrame
@@ -754,6 +706,64 @@ class ChannelMux implements UpgradeStagesOwner {
     }
     this.dispatchChannelFrame(session, channelFrame)
     return null
+  }
+
+  /** The bytes the page says it took off this wire, which a frame may carry: more than it was sent is a broken peer, and
+   *  the wire ends. */
+  private countTook(entry: WireEntry, rawFrame: Uint8Array<ArrayBuffer>): void {
+    const took = tookOf(rawFrame)
+    const pieces = entry.sender.pieces
+    if (took === null || !pieces) return
+    const known = pieces.headroom.heartbeat(took, performance.now())
+    assertProtocol(known, 'the page says it took more bytes than this wire sent it')
+    entry.sender.rebalanceMemory()
+  }
+
+  /** A PING is answered with a PONG, whose answers for the channels it names wait for the frames the page sent ahead
+   *  of it. */
+  private handlePing(entry: WireEntry, ended: PingEntry[]): void {
+    assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
+    this.resetPingTimer(entry)
+    this.acknowledgeArrivals(entry)
+    if (ended.length === 0 || entry.state.recvChain === null) return this.pong(entry, this.answerPing(entry, ended))
+    // What it names, the page sent before it: answered once the frames ahead of it had their turn.
+    this.pong(entry, [])
+    void this.chainRecv(
+      entry,
+      async () => void (entry.closed === null && this.pong(entry, this.answerPing(entry, ended))),
+    )
+  }
+
+  /** A RECONCILE opens or reopens the page's session on `entry`, or, for an attempt older than one answered or for a
+   *  session the server ended, ends the wire or the session instead. */
+  private handleReconcile(entry: WireEntry, ctrl: ReconcilePayload): null | ReconcileOutcome {
+    // An open its wire can't send is refused before anything kept is answered or any channel it names is touched.
+    this.admitReconcile(entry, ctrl)
+    const kept = this.sessions.keptOf(ctrl.sessionId)
+    if (kept !== undefined) {
+      // An attempt not above the highest the record holds is older than one the server answered: it takes nothing.
+      if (ctrl.attempt === undefined || ctrl.attempt <= kept.high) {
+        this.endFault(entry.wire, { scope: 'loss' })
+        return null
+      }
+      // A reopen of a session the server ended gets the same end, before anything of it is claimed, attached or
+      // awaited, and so does each channel it names. The record is not written again: only its highest attempt
+      // rises, so that one between this and the last, read later still, takes nothing; its instant stays.
+      if (kept.end !== 'retired') {
+        kept.high = ctrl.attempt
+        this.refuseNamed(ctrl.open, entry, kept.end)
+        this.endSessionOn(entry, kept.end)
+        return null
+      }
+      // A newer attempt of a session that retired takes it again.
+      this.sessions.revive(ctrl.sessionId)
+    }
+    if (this.isStale(entry, ctrl)) {
+      this.endFault(entry.wire, { scope: 'loss' })
+      return null
+    }
+    this.claimSessionForReconcile(ctrl, entry)
+    return this.reconcile(entry, ctrl)
   }
 
   /** The channels a RECONCILE on `entry` names, where it is a RECONCILE, end with `cause`: its wire ended its session

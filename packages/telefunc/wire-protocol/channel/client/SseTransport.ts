@@ -28,7 +28,7 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { decode, isOneFrame, messageFrames, stampWindowHold } from '../../wire/frame.js'
+import { decode, isOneFrame, messageFrames, stampWindowHold, type DecodedFrame } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { HEADER, readTag, readU16, readU32 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
@@ -63,6 +63,9 @@ type StreamUpload = {
 }
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
+
+/** A batch POST: the outbox entries it carried, its body's size, when it started, and whether it carried a RECONCILE. */
+type BatchPost = { queued: OutboxEntry[]; bytes: number; startedAt: number; reconcile: boolean }
 
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
@@ -515,33 +518,13 @@ class SseTransport implements UpgradeSource {
     /** What the stream's last event says ended the wire, where the server decided its end; a loss where none says. */
     let end: TransportEnd | undefined
     try {
-      events: while (true) {
+      while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
-        const packed = isOneFrame(raw) ? null : messageFrames(raw)
-        let each = packed === null ? raw : packed.next().value
-        while (each !== undefined) {
-          const frame = decode(each)
-          if (frame.tag === TAG.END) {
-            end = endOfWire(frame.refusal)
-            break events
-          }
-          if (frame.tag === TAG.STREAM_REQUEST_OPEN_ACK) {
-            onOpenAck()
-          } else if (frame.tag === TAG.PONG) {
-            // A PONG still on its way on a wire the page left says nothing of the wire in use.
-            if (this.transportAbort === abortController) {
-              this.heartbeat?.resetPong()
-              this.owner.onTransportPong(frame.ended)
-            }
-          } else {
-            const paired = pair(frame)
-            if (paired) {
-              this.owner.onTransportFrame(paired, this, each.byteLength, this.abandonedControllers.has(abortController))
-            }
-          }
-          each = packed?.next().value
-        }
+        const ended = this.dispatchEvent(raw, pair, abortController, onOpenAck)
+        if (ended === null) continue
+        end = ended.end
+        break
       }
     } catch {
       // A failed read ends the wire as its end does.
@@ -560,6 +543,35 @@ class SseTransport implements UpgradeSource {
       // Abandoned controllers are owned by a successor transport — don't notify closed.
       if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this, end)
     }
+  }
+
+  /** Dispatches the frames of one downstream event; where one ends the wire, what its END says ended it. */
+  private dispatchEvent(
+    raw: Uint8Array<ArrayBuffer>,
+    pair: (frame: DecodedFrame) => DecodedFrame | null,
+    abortController: AbortController,
+    onOpenAck: () => void,
+  ): { end: TransportEnd | undefined } | null {
+    const packed = isOneFrame(raw) ? null : messageFrames(raw)
+    for (let each = packed === null ? raw : packed.next().value; each !== undefined; each = packed?.next().value) {
+      const frame = decode(each)
+      if (frame.tag === TAG.END) return { end: endOfWire(frame.refusal) }
+      if (frame.tag === TAG.STREAM_REQUEST_OPEN_ACK) {
+        onOpenAck()
+        continue
+      }
+      if (frame.tag === TAG.PONG) {
+        // A PONG still on its way on a wire the page left says nothing of the wire in use.
+        if (this.transportAbort !== abortController) continue
+        this.heartbeat?.resetPong()
+        this.owner.onTransportPong(frame.ended)
+        continue
+      }
+      const paired = pair(frame)
+      if (paired)
+        this.owner.onTransportFrame(paired, this, each.byteLength, this.abandonedControllers.has(abortController))
+    }
+    return null
   }
 
   /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
@@ -683,67 +695,7 @@ class SseTransport implements UpgradeSource {
       const reconcile = queued.some(isReconcile)
       if (reconcile) this.owner.onTransportReconcileSent(this, body.size)
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
-      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
-      // refresh goes again whatever it was answered: its limit is cumulative.
-      if (answer === 'left') {
-        this.requeue(queued.filter(isWindowRefresh))
-        return
-      }
-      if (answer?.tag === 'expected') {
-        this.sizePosts(body.size, performance.now() - now)
-        this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
-        if (reconcile) this.owner.onTransportAnswered(this)
-        return
-      }
-      // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
-      // Nothing of it is counted as a refusal of the data.
-      if (telefuncAnswer(answer)) {
-        this.requeue(queued)
-        this.abandonActiveTransport()
-        this.owner.onTransportClosed(this, telefuncEndOf(answer))
-        return
-      }
-      if (answer?.tag === 'tooLarge') {
-        this.owner.onTransportTooLarge(body.size)
-        this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
-        // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
-        // wait the answer asked for is out.
-        if (queued.length > 1) {
-          if (answer.retryAfterMs > 0) this.hold(queued, answer.retryAfterMs)
-          else this.requeue(queued)
-          return
-        }
-      }
-      const counted = countedAnswer(answer)
-      if (counted !== null) {
-        // Every channel whose data it refused ended: the wire goes on without that data.
-        if (
-          !this.owner.onTransportRefused(
-            queued.map(({ frame }) => frame),
-            counted,
-          )
-        ) {
-          this.requeue(queued.filter((entry) => !isSequenced(entry)))
-          return
-        }
-      }
-      // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on,
-      // and that data goes again on the stalled schedule (that try is those channels' loss), no sooner than the answer
-      // asked.
-      const askedLater = answer?.tag === 'refused' && asksLater(answer.status) ? answer : null
-      const cause =
-        answer === null
-          ? 'The request carrying it got no answer'
-          : askedLater !== null
-            ? `The server refused what the page sent with ${askedLater.answer}`
-            : null
-      if (cause !== null && this.carriesStalledOnly(queued)) {
-        this.hold(queued, Math.max(this.owner.onStalledPostLost(cause), askedLater?.retryAfterMs ?? 0))
-        return
-      }
-      this.requeue(queued)
-      this.abandonActiveTransport()
-      this.owner.onTransportClosed(this, endOf(answer))
+      this.settlePost(answer, { queued, bytes: body.size, startedAt: now, reconcile })
     } finally {
       this.flushing = false
       this.postOutBytes = 0
@@ -754,6 +706,74 @@ class SseTransport implements UpgradeSource {
       }
       this.owner.onTransportHeadroom(this)
     }
+  }
+
+  /** Where the frames `post` carried go, by its answer: the server's once answered, else again on this wire or the next. */
+  private settlePost(answer: HttpAnswer | null | 'left', post: BatchPost): void {
+    const { queued } = post
+    // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
+    // refresh goes again whatever it was answered: its limit is cumulative.
+    if (answer === 'left') return this.requeue(queued.filter(isWindowRefresh))
+    if (answer?.tag === 'expected') {
+      this.sizePosts(post.bytes, performance.now() - post.startedAt)
+      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
+      if (post.reconcile) this.owner.onTransportAnswered(this)
+      return
+    }
+    // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
+    // Nothing of it is counted as a refusal of the data.
+    if (telefuncAnswer(answer)) {
+      this.requeue(queued)
+      this.abandonActiveTransport()
+      this.owner.onTransportClosed(this, telefuncEndOf(answer))
+      return
+    }
+    if (answer?.tag === 'tooLarge') {
+      this.owner.onTransportTooLarge(post.bytes)
+      this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
+      // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
+      // wait the answer asked for is out.
+      if (queued.length > 1) return this.resendLater(queued, answer.retryAfterMs)
+    }
+    this.settleRefused(answer, queued)
+  }
+
+  /** Where the frames of a POST go that the server refused, or never answered: on this wire where only the data of
+   *  channels it ended or stalled channels' data is lost, else to the next wire. */
+  private settleRefused(answer: HttpAnswer | null, queued: OutboxEntry[]): void {
+    const counted = countedAnswer(answer)
+    // Every channel whose data it refused ended: the wire goes on without that data.
+    if (
+      counted !== null &&
+      !this.owner.onTransportRefused(
+        queued.map(({ frame }) => frame),
+        counted,
+      )
+    ) {
+      return this.requeue(queued.filter((entry) => !isSequenced(entry)))
+    }
+    // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on,
+    // and that data goes again on the stalled schedule (that try is those channels' loss), no sooner than the answer
+    // asked.
+    const askedLater = answer?.tag === 'refused' && asksLater(answer.status) ? answer : null
+    const cause =
+      answer === null
+        ? 'The request carrying it got no answer'
+        : askedLater !== null
+          ? `The server refused what the page sent with ${askedLater.answer}`
+          : null
+    if (cause !== null && this.carriesStalledOnly(queued)) {
+      return this.hold(queued, Math.max(this.owner.onStalledPostLost(cause), askedLater?.retryAfterMs ?? 0))
+    }
+    this.requeue(queued)
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, endOf(answer))
+  }
+
+  /** `queued` goes again once `wait` ms are out, or at once without one. */
+  private resendLater(queued: OutboxEntry[], wait: number): void {
+    if (wait > 0) this.hold(queued, wait)
+    else this.requeue(queued)
   }
 
   /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */

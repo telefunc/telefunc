@@ -52,6 +52,9 @@ const CONTROL_LANE = -2
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 
+/** The rest of a data frame, waiting for headroom: `frame`, from `offset` on. */
+type FrameRest = { frame: Uint8Array<ArrayBuffer>; offset: number }
+
 /** Tracks what a piece sender hands its socket: a page's `ClientHeadroom` or a server's `ServerHeadroom`. */
 interface PieceSenderOwner {
   /** The sender handed or carried `bytes`. A burst's `firstBytes` includes its first piece's header. */
@@ -135,7 +138,7 @@ class PieceSender {
    *  its second piece starts, or null for a non-data frame, which the receiver does not date. */
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for headroom. */
-  private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
+  private rest: FrameRest | null = null
   /** The frames that wait for headroom, by lane (`laneOf`), each lane in order; the first lane has the turn. One that
    *  passes what waits (`passesRest`) isn't here. The rest's lane stays while it waits, empty or not. */
   private readonly lanes = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
@@ -391,27 +394,9 @@ class PieceSender {
 
   /** Lane `key`'s unit: what it hands, or whether it passes the turn on or keeps it. */
   private serve(key: number, lane: Fifo<Uint8Array<ArrayBuffer>>): 'went' | 'passed' | 'held' {
-    const before = this.transmittedBytes + this.messages.ungivenBytes
     this.servingLane = key
     const rest = this.rest
-    if (rest !== null && this.restLane === key) {
-      // A wire's control frame keeps the turn while its probe's answer is awaited: the page reads it before any data.
-      if (this.awaitsProbe) return key === CONTROL_LANE ? 'held' : 'passed'
-      this.rest = null
-      this.waitingBytes -= rest.frame.byteLength - rest.offset
-      if (this.cutsData || rest.offset > 0) this.cut(rest.frame, rest.offset)
-      else this.start(rest.frame)
-      // A publish's head that went takes its body along, so that no other publish goes between them.
-      const body = lane.peek()
-      if (rest.frame[0] === TAG.PUBLISH_TO && this.rest === null && body !== undefined && isPublishBody(body[0])) {
-        lane.shift()
-        this.waitingBytes -= body.byteLength
-        this.start(body)
-      }
-      if (this.transmittedBytes + this.messages.ungivenBytes > before) return 'went'
-      // Blocked, it keeps the turn only if it handed nothing since its lane's last turn.
-      return this.restHanded ? 'passed' : 'held'
-    }
+    if (rest !== null && this.restLane === key) return this.serveRest(key, rest, lane)
     const frame = lane.peek()
     if (frame === undefined) return 'passed'
     const tag = frame[0]
@@ -419,29 +404,76 @@ class PieceSender {
     if (key === FIN_LANE && (rest !== null || this.lanes.size > 1)) return 'passed'
     if (rest !== null && (this.cutsData || !isSequencedTag(tag))) return this.cutsData ? 'held' : 'passed'
     const body = tag === TAG.PUBLISH_TO ? lane.at(1) : undefined
+    const waits = this.unitWaits(frame, body, rest)
+    if (waits !== null) return waits
+    this.handUnit(lane, frame, body, rest)
+    return 'went'
+  }
+
+  /** Lane `key`'s frame in pieces goes on, taking along the body of a publish's head: whether it went, or, blocked,
+   *  whether the lane passes the turn on or keeps it. */
+  private serveRest(key: number, rest: FrameRest, lane: Fifo<Uint8Array<ArrayBuffer>>): 'went' | 'passed' | 'held' {
+    // A wire's control frame keeps the turn while its probe's answer is awaited: the page reads it before any data.
+    if (this.awaitsProbe) return key === CONTROL_LANE ? 'held' : 'passed'
+    const before = this.transmittedBytes + this.messages.ungivenBytes
+    this.rest = null
+    this.waitingBytes -= rest.frame.byteLength - rest.offset
+    if (this.cutsData || rest.offset > 0) this.cut(rest.frame, rest.offset)
+    else this.start(rest.frame)
+    // A publish's head that went takes its body along, so that no other publish goes between them.
+    const body = lane.peek()
+    if (rest.frame[0] === TAG.PUBLISH_TO && this.rest === null && body !== undefined && isPublishBody(body[0])) {
+      this.dequeue(lane, body)
+      this.start(body)
+    }
+    if (this.transmittedBytes + this.messages.ungivenBytes > before) return 'went'
+    // Blocked, it keeps the turn only if it handed nothing since its lane's last turn.
+    return this.restHanded ? 'passed' : 'held'
+  }
+
+  /** Whether the unit of `frame` and the body of its publish waits for room, passing the turn on or keeping it: one that
+   *  will fit keeps it. Past a frame in pieces, `rest`, only what fits goes, and a publish only where that frame is no
+   *  publish's own: else the frame in pieces would take every room that frees ahead of it. */
+  private unitWaits(
+    frame: Uint8Array<ArrayBuffer>,
+    body: Uint8Array<ArrayBuffer> | undefined,
+    rest: FrameRest | null,
+  ): 'passed' | 'held' | null {
+    const sequenced = isSequencedTag(frame[0])
     const bytes = frame.byteLength + (body?.byteLength ?? 0)
     const room = this.roomFor(frame)
-    if (rest !== null) {
-      // Past a frame in pieces only what fits goes, whole, and a publish only where that frame is no publish's own. A
-      // unit that will fit keeps the turn, or the frame in pieces would take every room that frees ahead of it.
-      const publishes = isPublishBody(rest.frame[0]) || rest.frame[0] === TAG.PUBLISH_TO
-      if (this.open !== null || (body !== undefined && publishes)) return 'passed'
-      if (bytes > room) return isSequencedTag(tag) && bytes <= this.mostFor(frame) ? this.holds(bytes, room) : 'passed'
-    } else if (!this.cutsData && isSequencedTag(tag) && bytes > room && bytes <= this.mostFor(frame)) {
-      return this.holds(bytes, room)
+    if (rest === null) {
+      return !this.cutsData && sequenced && bytes > room && bytes <= this.mostFor(frame)
+        ? this.holds(bytes, room)
+        : null
     }
-    lane.shift()
-    this.waitingBytes -= frame.byteLength
+    const publishes = isPublishBody(rest.frame[0]) || rest.frame[0] === TAG.PUBLISH_TO
+    if (this.open !== null || (body !== undefined && publishes)) return 'passed'
+    if (bytes <= room) return null
+    return sequenced && bytes <= this.mostFor(frame) ? this.holds(bytes, room) : 'passed'
+  }
+
+  /** Hands `frame`, the next of `lane`, and the body of its publish after it: whole past a frame in pieces, `rest`. */
+  private handUnit(
+    lane: Fifo<Uint8Array<ArrayBuffer>>,
+    frame: Uint8Array<ArrayBuffer>,
+    body: Uint8Array<ArrayBuffer> | undefined,
+    rest: FrameRest | null,
+  ): void {
+    this.dequeue(lane, frame)
     if (rest !== null) this.sendWhole(frame)
     else this.start(frame)
     // The head went, whole or in part, so its body follows it before any other lane's publish.
-    if (body !== undefined && this.rest?.frame !== frame) {
-      lane.shift()
-      this.waitingBytes -= body.byteLength
-      if (rest !== null) this.sendWhole(body)
-      else this.start(body)
-    }
-    return 'went'
+    if (body === undefined || this.rest?.frame === frame) return
+    this.dequeue(lane, body)
+    if (rest !== null) this.sendWhole(body)
+    else this.start(body)
+  }
+
+  /** Takes `frame` off the front of `lane`: it no longer waits. */
+  private dequeue(lane: Fifo<Uint8Array<ArrayBuffer>>, frame: Uint8Array<ArrayBuffer>): void {
+    lane.shift()
+    this.waitingBytes -= frame.byteLength
   }
 
   /** The bytes of data `frame` may take now: the headroom, less what waits to go with this task's message, and where the
