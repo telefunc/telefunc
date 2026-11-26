@@ -14,6 +14,9 @@ importers:
       '@biomejs/biome':
         specifier: ^1.9.4
         version: 1.9.4
+      '@brillout/release-me':
+        specifier: ^0.5.1
+        version: 0.5.1(conventional-commits-filter@5.0.0)
       '@brillout/replace':
         specifier: ^0.1.4
         version: 0.1.4
@@ -394,9 +397,6 @@ importers:
       '@babel/types':
         specifier: 7.29.0
         version: 7.29.0
-      '@brillout/release-me':
-        specifier: ^0.4.18
-        version: 0.4.18(conventional-commits-filter@5.0.0)
       '@cloudflare/workers-types':
         specifier: ^4.20260305.1
         version: 4.20260615.1
@@ -1386,8 +1386,8 @@ packages:
   '@brillout/picocolors@1.0.30':
     resolution: {integrity: sha512-xJjdgyN1H0qh2nB2xlzazIipiDixuUd9oD5msh/Qv5bXJG9j8MSD/m4lREt6Z10ej6FF31b8vB4tdT7lDUbiyA==}
 
-  '@brillout/release-me@0.4.18':
-    resolution: {integrity: sha512-X+IQ4pFYYuBiVgUxNTx/wpFQ4b/JLFI2OkDxW6IlA10TeJOGYrDSst1xuEzi7FmHw8kEzd0zU79yF+8bO4dnFA==}
+  '@brillout/release-me@0.5.1':
+    resolution: {integrity: sha512-RrASPtoJUmn+xrglplHzmMdGmtmw9YaRj2mY0oIroOxXHhyHJaKd1hvU57wHf2hQYLLoMNsF2/A1SVziseaA3w==}
     hasBin: true
 
   '@brillout/replace@0.1.4':
@@ -8274,7 +8274,7 @@ snapshots:
 
   '@brillout/picocolors@1.0.30': {}
 
-  '@brillout/release-me@0.4.18(conventional-commits-filter@5.0.0)':
+  '@brillout/release-me@0.5.1(conventional-commits-filter@5.0.0)':
     dependencies:
       '@brillout/picocolors': 1.0.30
       commander: 11.1.0
