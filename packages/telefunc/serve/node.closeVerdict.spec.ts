@@ -19,8 +19,10 @@ afterEach(async () => {
 })
 
 /** An app that serves Telefunc with `serve({ request })`, with Telefunc's WebSocket where `webSocket`; `drop()` destroys
- *  its connections, `close()` closes it too. */
-async function app(webSocket: boolean): Promise<{ host: string; drop: () => void; close: () => void }> {
+ *  its connections, `close()` closes it too; `upgradesSince(at)`: the WebSocket upgrades it got since `at`. */
+async function app(
+  webSocket: boolean,
+): Promise<{ host: string; drop: () => void; close: () => void; upgradesSince: (at: number) => number }> {
   const telefunc = new Telefunc()
   const server: Server = createServer(async (req, res) => {
     const { request } = await nodeReadableToWebRequest(
@@ -48,8 +50,13 @@ async function app(webSocket: boolean): Promise<{ host: string; drop: () => void
   })
   if (webSocket) telefunc.installWebSocket(server)
   const sockets = new Set<Socket>()
+  const upgrades: number[] = []
   server.on('connection', (socket: Socket) => {
     sockets.add(socket)
+    socket.on('data', (chunk: Buffer) => {
+      if (/^GET [^\r\n]* HTTP\/1\.1\r\n[\s\S]*\r\nupgrade: *websocket/i.test(chunk.toString('latin1', 0, 4096)))
+        upgrades.push(Date.now())
+    })
     socket.once('close', () => sockets.delete(socket))
   })
   row.closers.push(row.closerOf(server))
@@ -59,7 +66,12 @@ async function app(webSocket: boolean): Promise<{ host: string; drop: () => void
   const drop = () => {
     for (const socket of sockets) socket.destroy()
   }
-  return { host: `127.0.0.1:${address.port}`, drop, close: () => (server.close(), drop()) }
+  return {
+    host: `127.0.0.1:${address.port}`,
+    drop,
+    close: () => (server.close(), drop()),
+    upgradesSince: (at) => upgrades.filter((upgradedAt) => upgradedAt >= at).length,
+  }
 }
 
 /** What the page's realm holds open that could start a request: its timers and its sockets. */
@@ -96,7 +108,7 @@ for (const transport of ['sse', 'ws'] as const) {
   })
 
   test(`over ${over}, a page whose close its server acknowledged, its wire dropped the moment the close ended there, reconnects once, is let go, and its server's channel ended gracefully`, async () => {
-    const { host, drop } = await app(transport === 'ws')
+    const { host, drop, upgradesSince } = await app(transport === 'ws')
     let droppedAt = 0
     let serverOutcome: unknown = 'pending'
     // Its first reconnect at once, so that it reaches the server well before the server's idle timeout.
@@ -116,6 +128,12 @@ for (const transport of ['sse', 'ws'] as const) {
     expect(serverOutcome).toBe(null)
     const reconnect = (await page.attempts()).filter(({ at }) => at >= droppedAt).map(({ what }) => what)
     // Over SSE: the streamed upload, the open, the first PING's batch, then the goodbye.
-    expect(reconnect).toEqual(transport === 'sse' ? ['POST', 'POST', 'POST', 'POST keepalive'] : ['WebSocket'])
+    if (transport === 'sse') expect(reconnect).toEqual(['POST', 'POST', 'POST', 'POST keepalive'])
+    else {
+      // Node's WebSocket may send its first upgrade on a socket the drop destroyed, which the server never sees: one more.
+      expect(reconnect.filter((what) => what !== 'WebSocket')).toEqual([])
+      expect(upgradesSince(droppedAt)).toBe(1)
+      expect([1, 2]).toContain(reconnect.length)
+    }
   })
 }
