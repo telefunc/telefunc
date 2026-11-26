@@ -45,7 +45,19 @@ Internally, Telefunc calls `duplicate()` on the client to open a dedicated subsc
 
 ## Errors
 
-Await `subscription.opened` when a publish must wait for a subscription to be active: while Redis is unreachable it waits, and it rejects with the error once the subscription fails. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> whose subscription fails closes.
+When a publish must wait for a subscription to be active, await its `opened`:
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Broadcast } from 'telefunc'
+
+const subscription = Broadcast.subscribe(key, listener)
+await subscription.opened
+```
+
+While Redis is unreachable, `opened` waits while it remains subscribed, and rejects with the error once the subscription fails. A <Link href="/channel#broadcast">`BroadcastChannel`</Link> whose subscription fails closes.
 
 ## Channels
 

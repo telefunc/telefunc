@@ -134,6 +134,8 @@ Deno.serve({ port: 3000 }, async (request, info) => {
   return new Response('Not found', { status: 404 })
 })
 ```
+
+> On Deno, add `"unstable": ["no-legacy-abort"]` to your `deno.json` to silence Deno's legacy-abort warning.
 :::
 
 :::Choice{#Cloudflare}

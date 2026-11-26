@@ -149,7 +149,7 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 |---|---|
 | Ordering | Messages are delivered in order. |
 | Buffering | The server holds messages while the client is disconnected, within <Link href="/channel-config">`config.channel.maxMemory`</Link>, which all its channels share (default on Cloudflare: 64 MiB). |
-| Replay | On reconnect, missing messages are resent and duplicates are ignored. |
+| Replay | On reconnect, the kept reliable messages are resent and duplicates are ignored (see <Link href="/channel#errors" />). |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
 | Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
@@ -158,10 +158,10 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 | Guarantee | Details |
 |---|---|
 | Ordering | Publishes for a given key are serialized and delivered in order. |
-| Delivery | `publish()` resolves after all Durable Objects with subscribers visible to the publisher at the time have received the message. Delivery to clients then happens over the channel connection. |
+| Delivery | A publish waits for delivery to the Durable Objects Telefunc found in KV. Those objects forward it to their clients. |
 | Presence lag | A new subscriber may miss publishes from other locations until KV shows its presence record there, which [can take 60 seconds or more](https://developers.cloudflare.com/kv/concepts/how-kv-works/). |
 
-> Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
+> Once a reliable broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages; a `lossy` one skips to the newest.
 
 
 ## Configuration

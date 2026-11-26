@@ -86,6 +86,8 @@ channel.onClose((err) => {
 
 > The `channel.onClose()` hook can be used on both the server- and client-side.
 
+> The hook runs its cleanup while the channel closes, and `channel.closed` resolves with the final outcome once it has: async cleanup shouldn't await `channel.closed`.
+
 
 ## `context.signal`
 

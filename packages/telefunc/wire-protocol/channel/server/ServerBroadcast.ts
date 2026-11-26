@@ -783,7 +783,7 @@ type BroadcastChannelOptions = {
    * client of the same key without it gets every message, or its channel closes with `ChannelOverflowError` past what
    * the server holds for it.
    *
-   * https://telefunc.com/channel#skip-to-the-newest
+   * https://telefunc.com/channel#broadcastchannel-methods
    *
    * @default false
    */
