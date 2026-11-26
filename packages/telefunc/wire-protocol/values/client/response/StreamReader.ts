@@ -2,9 +2,9 @@ export { StreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { splitOwned } from '../../../wire/envelope.js'
-import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
+const CONNECTION_LOST = 'Connection lost — the server closed the stream before all data was received.'
 
 /** Buffered reader for the inline binary HTTP response body (`'binary-inline'` transport).
  *
@@ -18,20 +18,12 @@ class StreamReader extends BaseStreamReader {
     let length = this.buffer.length
     while (length < n) {
       let read: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>
-      let readError: unknown
       try {
         read = await this.reader.read()
       } catch (err) {
-        readError = err
-        read = { done: true, value: undefined }
+        return this.endOfRead(err, CONNECTION_LOST)
       }
-      if (read.done) {
-        if (this.callContext.abortController.signal.aborted) {
-          throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
-        }
-        if (this.released) return EMPTY
-        throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
-      }
+      if (read.done) return this.endOfRead(undefined, CONNECTION_LOST)
       parts ??= this.buffer.length > 0 ? [this.buffer] : []
       parts.push(read.value)
       length += read.value.length

@@ -3,9 +3,9 @@ export { SseStreamReader }
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { SseEvents } from '../../../wire/SseEvents.js'
 import { splitOwned } from '../../../wire/envelope.js'
-import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
+const CONNECTION_LOST = 'Connection lost — server closed the SSE stream before all data was received.'
 
 /** SSE transport reader — decodes `data: <base64url>\n\n` events back to
  *  binary frames.
@@ -24,20 +24,12 @@ class SseStreamReader extends BaseStreamReader {
     let length = this.binary.length
     while (length < n) {
       let read: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>
-      let readError: unknown
       try {
         read = await this.reader.read()
       } catch (err) {
-        readError = err
-        read = { done: true, value: undefined }
+        return this.endOfRead(err, CONNECTION_LOST)
       }
-      if (read.done) {
-        if (this.callContext.abortController.signal.aborted) {
-          throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
-        }
-        if (this.released) return EMPTY
-        throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
-      }
+      if (read.done) return this.endOfRead(undefined, CONNECTION_LOST)
       const gathered = (parts ??= this.binary.length > 0 ? [this.binary] : [])
       this.sse.push(read.value, (event) => {
         gathered.push(event)

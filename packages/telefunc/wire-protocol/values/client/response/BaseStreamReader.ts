@@ -7,6 +7,8 @@ import { decodeU32, decodeIndexedFrame } from '../../../wire/envelope.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
+const EMPTY = new Uint8Array(0)
+
 type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
@@ -47,6 +49,16 @@ abstract class BaseStreamReader {
 
   /** Implemented by each transport — pull exactly n bytes from the wire source. */
   abstract readExact(n: number): Promise<Uint8Array<ArrayBuffer>>
+
+  /** Where a read gets no more bytes, as its body failed with `readError` or ended: an abort ends the call, a body let
+   *  go reads as empty, and else the read fails. */
+  protected endOfRead(readError: unknown, lostMessage: string): Uint8Array<ArrayBuffer> {
+    if (this.callContext.abortController.signal.aborted) {
+      throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
+    }
+    if (this.released) return EMPTY
+    throw readError ?? new Error(lostMessage)
+  }
 
   async readU32(): Promise<number> {
     const buf = await this.readExact(4) // sizeof uint32
