@@ -128,7 +128,7 @@ type ChannelConfigUser = {
    *
    * https://telefunc.com/channel-config
    *
-   * @default a quarter of the memory the process may use
+   * @default a quarter of the memory the process reports (1 GiB fallback, 64 MiB on Cloudflare)
    */
   maxMemory?: number | string
   /** The most one channel holds for its client, of its sends, of what awaits acknowledgement and of the messages its

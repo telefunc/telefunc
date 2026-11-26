@@ -163,7 +163,8 @@ type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => 
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 /** Removes the listener, as aborting its `signal` does. `opened` resolves once the listener is in effect, at once for
- *  `listen()`, and rejects where it never will be, as where its channel closes first; each case is on the page.
+ *  `listen()`, or once you remove it while its channel is open, and rejects where its channel closes before the
+ *  subscription takes effect.
  *
  *  https://telefunc.com/channel#broadcastchannel-methods */
 type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
@@ -200,7 +201,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   /** Per-send ack opt-out — always returns `Promise<void>`. */
   send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
   /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
-   *  the newest. It resolves at once, and can't be combined with `ack: true`.
+   *  the newest. Can reject with `ChannelOverflowError` if the server's memory limit is full, and can't be combined with
+   *  `ack: true`.
    *
    *  https://telefunc.com/channel#channel-methods */
   send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
@@ -208,7 +210,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
   /** Send binary where only the newest matters: a receiver that keeps up gets every message, and one that falls behind
-   *  skips to the newest. It resolves at once, and can't be combined with `ack: true`.
+   *  skips to the newest. Can reject with `ChannelOverflowError` if the server's memory limit is full, and can't be
+   *  combined with `ack: true`.
    *
    *  https://telefunc.com/channel#channel-methods */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>

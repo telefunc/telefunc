@@ -429,7 +429,7 @@ Channels and broadcasts signal failure through these errors:
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A `send()` was refused — the server already holds too much for that client | **Open** | Only the refused `send()` rejects; `await` your sends to apply backpressure |
 | `ChannelOverflowError` | A reliable broadcast subscriber fell behind, or inbound sends exceeded the server's budget | Closed | Call the telefunction again to rejoin, read faster, or pass `lossy: true` to a `BroadcastChannel` |
@@ -445,8 +445,7 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- On reconnect, Telefunc delivers the reliable messages it kept while the client was offline, in order.
-- When a channel reconnects, Telefunc resends the reliable messages it kept for the other end.
+- On reconnect, Telefunc resends the reliable messages it kept for the other end, in order, including those buffered while the client was offline.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
