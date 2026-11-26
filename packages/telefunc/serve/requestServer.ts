@@ -1,10 +1,11 @@
-export { markRequestsOfServer, serverOfRequest }
+export { markRequestsOfServer, upgradesOfRequest }
 
 import type { EventEmitter } from 'node:events'
 import { IncomingMessage } from 'node:http'
 import { Http2ServerRequest } from 'node:http2'
 import type { HttpServer } from './nodeUpgrades.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { noUpgrades, upgradesOfServer, type TakesUpgrades } from '../node/server/runTelefunc/takesUpgrades.js'
 import { isTelefuncUrl } from './shared.js'
 
 /** The header in which a server names itself to `serve({ request })`, on each request to Telefunc's URL it gets. */
@@ -42,16 +43,11 @@ function markRequest(req: unknown, token: string): void {
   req.headers[SERVER_HEADER] = token
 }
 
-/** The server the request came in on, where it marks its requests. A token names its server from the server's
- *  `listening` event until its `close` event, so also while it closes; what the page is offered is that server's answer
- *  at each offer, which has no WebSocket once the server stopped listening, lost Telefunc's listener or has another
- *  callback in place of Telefunc's. The token names a server and proves nothing, as the app's handler for Telefunc's
- *  URL sees it: a request that carries another taken server's token gets that server's answer, so where that server
- *  offers WebSocket, a page of a server that takes no upgrades is offered it too, its upgrade is refused, and its
- *  channel goes on over SSE. */
-function serverOfRequest(request: Request): HttpServer | undefined {
+/** The upgrades of the server whose token the request carries; a token proves nothing: a refused upgrade uses SSE. */
+function upgradesOfRequest(request: Request): TakesUpgrades {
   const value = request.headers.get(SERVER_HEADER)
-  if (value === null) return undefined
+  if (value === null) return noUpgrades
   // `Headers` joins what the client sent under that name before the token, with ", ".
-  return serverOfToken.get(value.slice(value.lastIndexOf(' ') + 1))
+  const server = serverOfToken.get(value.slice(value.lastIndexOf(' ') + 1))
+  return server ? upgradesOfServer(server) : noUpgrades
 }

@@ -2,10 +2,9 @@ export { Telefunc }
 
 import { serveNode, serveRuntimeRequest } from '../node/server/telefunc.js'
 import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
-import { noUpgrades, upgradesOfServer } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import { takeUpgrades, takeUpgradesOfNewServer, type HttpServer } from './nodeUpgrades.js'
-import { markRequestsOfServer, serverOfRequest } from './requestServer.js'
+import { installWebSocketOn, takeUpgradesOfNewServer, type HttpServer } from './nodeUpgrades.js'
+import { upgradesOfRequest } from './requestServer.js'
 import { getTelefuncRequestUrl, isTelefuncUrl, toResponse } from './shared.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
@@ -50,10 +49,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         'installWebSocket() received an unsupported server object. Pass a Node.js `http.Server` or a srvx-compatible wrapper.',
       )
     }
-    takeUpgrades(httpServer)
-    // The app's own call, which an app on `serve({ request })` makes to get WebSocket: that form reads the server off
-    // the header this marks. The others read it off the request's socket, so `serve({ req, res })` marks none.
-    markRequestsOfServer(httpServer)
+    installWebSocketOn(httpServer)
   }
 
   function inferServer(req: Req): HttpServer | undefined {
@@ -69,12 +65,11 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   async function serve(input: ServeInput<Req, Res>): Promise<boolean | Response | undefined> {
     if (!isNodeServeInput(input)) {
       if (getTelefuncRequestUrl(input.request) === null) return undefined
-      const server = serverOfRequest(input.request)
       const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
         noTransportEvidence,
         input.request.signal,
-        server ? upgradesOfServer(server) : noUpgrades,
+        upgradesOfRequest(input.request),
       )
       return toResponse(httpResponse)
     }
