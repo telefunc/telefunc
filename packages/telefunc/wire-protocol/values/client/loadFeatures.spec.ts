@@ -17,7 +17,7 @@ let respond: (signal: AbortSignal | undefined) => Response
 let cancelled: number
 
 beforeEach(() => {
-  delete (globalThis as { _telefunc?: unknown })._telefunc
+  Reflect.deleteProperty(globalThis, '_telefunc')
   vi.resetModules()
   failing = new Set()
   imported = []
