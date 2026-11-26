@@ -3,6 +3,7 @@ export type { LaneFrame, LaneRoute }
 
 import type { OrderingInfo } from 'telefunc/__internal'
 import { unrefTimer } from 'telefunc/__internal'
+import { assert } from './assert.js'
 import { NO_ID, type LaneStart } from './orderRecord.js'
 
 /** A frame as its route decoded it: its lane key on the route's channel (`''` on a channel of one lane), its place, its
@@ -141,7 +142,7 @@ class LaneHistory {
   /** Frames a route that left brought and the lane didn't decide yet: they go on through a route that stays. */
   adopt(frames: LaneFrame[]): void {
     const [via] = this.routes
-    if (via === undefined) return
+    assert(via !== undefined)
     for (const frame of frames) this.offer({ ...frame, via })
   }
 
