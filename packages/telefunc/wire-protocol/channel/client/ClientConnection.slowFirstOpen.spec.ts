@@ -63,12 +63,16 @@ test("1,000 channels of 256-byte ids open on a page's first SSE wire at 400 kbit
   expect({ opened, expired }).toEqual({ opened: 1_000, expired: [] })
 })
 
-test('an SSE open whose server never answers, its body small, is still given up 3 s after its attempt starts, then 6 s', async () => {
+test('unanswered SSE opens are cut at 3 s, then 6 s, and keep an upload refusal', async () => {
   vi.spyOn(Math, 'random').mockReturnValue(0.5)
   type Open = { at: number; endedAfter: number | null }
   const opens: Open[] = []
+  let uploads = 0
   vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
-    if (init?.body instanceof ReadableStream) return Promise.reject(new TypeError('Failed to fetch'))
+    if (init?.body instanceof ReadableStream) {
+      uploads++
+      return Promise.resolve(new Response(null, { status: 413 }))
+    }
     const open: Open = { at: performance.now(), endedAfter: null }
     opens.push(open)
     return new Promise<Response>((_resolve, reject) => {
@@ -84,10 +88,15 @@ test('an SSE open whose server never answers, its body small, is still given up 
   })
   const page = new ClientChannel({
     channelId: 'silent',
-    connection: { transports: ['sse'], telefuncUrl: world.telefuncUrl, connectionKey: 'silent server' },
+    connection: { transports: ['sse', 'ws'], telefuncUrl: world.telefuncUrl, connectionKey: 'silent server' },
   })
-  page.opened.catch(() => {})
-  await advance(9_500)
-  // Each open goes 10 ms into its attempt (`SSE_RECONCILE_DEADLINE_MS`).
-  expect(opens.slice(0, 2).map(({ endedAfter }) => endedAfter)).toEqual([2_990, 5_990])
+  void page.opened.catch(() => {})
+  try {
+    await advance(9_500)
+    // Each open goes 10 ms into its attempt (`SSE_RECONCILE_DEADLINE_MS`).
+    expect(opens.slice(0, 2).map(({ endedAfter }) => endedAfter)).toEqual([2_990, 5_990])
+    expect(uploads).toBe(1)
+  } finally {
+    page.abort()
+  }
 })

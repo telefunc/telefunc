@@ -450,17 +450,14 @@ class SseTransport implements UpgradeSource {
     this.moveToUpload()
   }
 
-  /** An acknowledged probe takes the wire's frames once no POST is out: the server reads the upload's frames after
-   *  what the POST out carried, which it took before answering, so no seq passes an earlier one. What waits goes first,
-   *  in its order: held data still owed, then the outbox. */
+  /** An acknowledged probe takes the outbox once the batch POST and any refusal hold have ended. */
   private moveToUpload(): void {
     const probing = this.streamRequest
-    if (probing.tag !== 'probing' || !probing.acknowledged || this.flushing) return
+    if (probing.tag !== 'probing' || !probing.acknowledged || this.flushing || this.held.length > 0) return
     this.flushScheduler.cancel()
     this.folded = null
-    const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.dropHeld()
-    const waiting = held.concat(this.takeOutbox())
+    const waiting = this.takeOutbox()
     const { body } = probing.upload
     this.streamRequest = { tag: 'active', upload: probing.upload }
     for (const entry of waiting) {
@@ -792,6 +789,8 @@ class SseTransport implements UpgradeSource {
     const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.held = []
     this.requeue(held)
+    this.moveToUpload()
+    if (this.streamRequest.tag === 'active') return
     if (this.outbox.length > 0) void this.flushOutbox()
     else this.flushNextOrDrain()
   }
