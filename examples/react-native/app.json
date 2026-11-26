@@ -2,7 +2,6 @@
   "expo": {
     "name": "telefunc-demo",
     "slug": "telefunc-demo",
-    "version": "0.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {

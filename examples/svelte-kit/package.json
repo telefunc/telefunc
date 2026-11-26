@@ -1,7 +1,4 @@
 {
-  "name": "my-app",
-  "private": true,
-  "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -17,7 +14,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
-    "telefunc": "0.3.1",
+    "telefunc": "0.4.0",
     "typescript": "^6.0.3",
     "vite": "^6.2.6"
   },
