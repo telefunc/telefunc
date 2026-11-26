@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 import { ChannelMux, type ServerTransport } from './server/ChannelMux.js'
 import { noUpgrades } from '../../node/server/runTelefunc/takesUpgrades.js'
 import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
@@ -60,7 +61,7 @@ async function setupUpgrade() {
   )
   const sessionId = old.sessionId()
   expect(sessionId).toBeTypeOf('string')
-  await probe.deliver(encode.prepare({ attempt: 2, sessionId: sessionId!, upgradeId: 'upgrade-1' }))
+  await probe.deliver(encode.prepare({ attempt: 2, sessionId: defined(sessionId), upgradeId: 'upgrade-1' }))
   const barrier = encode.barrier({
     sessionId: sessionId!,
     upgradeId: 'upgrade-1',

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 
 import { addWireCopies, dropWireCopies, hasCopyRoom } from '../channel/server/channelMemory.js'
 import { WIRE_PIECES_ACK_GAP_MS, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
@@ -15,12 +16,6 @@ afterEach(() => {
   vi.useRealTimers()
   dropWireCopies(FULL)
 })
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 /** The PIECES_ACK `frame` holds. */
 function piecesAck(frame: Uint8Array): PiecesAck {

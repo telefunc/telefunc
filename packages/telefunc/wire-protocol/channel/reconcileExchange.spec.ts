@@ -2,6 +2,7 @@
 // it does with a message holding two, with a reconcile that throws, and how a large join's upload goes.
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 import { createServer, type Server } from 'node:http'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
@@ -62,12 +63,6 @@ function serverChannel() {
   const channel = new ServerChannel<string, string>({ id: crypto.randomUUID() })
   getChannelMux().registerChannel(channel, ATTACHABLE_NOW)
   return channel
-}
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
 }
 
 /** Resolves once `check` holds; a stuck row ends at the harness's timeout. */

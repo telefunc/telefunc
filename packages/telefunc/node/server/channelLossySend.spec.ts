@@ -1,4 +1,6 @@
 import { afterEach, assert, describe, expect, expectTypeOf, onTestFinished, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
+import { channelLedger } from '../../wire-protocol/channel/server/channelMemory.fixture.js'
 import { runInNewContext } from 'node:vm'
 
 import { Channel, ServerChannel, ATTACHABLE_NOW } from '../../wire-protocol/channel/server/ServerChannel.js'
@@ -26,7 +28,7 @@ import { getChannelConfig } from './serverConfig.js'
 afterEach(() => vi.useRealTimers())
 
 /** What this server's channels hold, on the ledger every channel shares. */
-const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+const ledgerTotal = () => channelLedger().total
 /** The most bytes held: `maxMemory` less the room it keeps for sends waiting to be held, one channel's limit at most. */
 const heldAtMost = () => {
   const { maxMemory, maxPendingBytes } = getChannelConfig()
@@ -91,8 +93,8 @@ function wire(
     /** Attaches the page as `ChannelMux.attachChannel` does: what it lacks from the replay, then the channel. */
     attach() {
       channel._onPageAttach(page.lastSeq, undefined)
-      const peer = new IndexedPeer({ sender, index: 7, replay: channel._replayBuffer! })
-      for (const frame of channel._replayBuffer!.getAfter(page.lastSeq)) sender.send(frame)
+      const peer = new IndexedPeer({ sender, index: 7, replay: defined(channel._replayBuffer) })
+      for (const frame of defined(channel._replayBuffer).getAfter(page.lastSeq)) sender.send(frame)
       channel._attachPeer(peer)
       return peer
     },
@@ -443,7 +445,7 @@ describe('the confirmation time a lossy send measures', () => {
     void channel.send('warm', { lossy: true })
     vi.advanceTimersByTime(50)
     w.confirm()
-    expect(channel._replayBuffer!.leastConfirmMs).toBe(50)
+    expect(defined(channel._replayBuffer).leastConfirmMs).toBe(50)
     // A 1 MiB snapshot, then a cursor value, which waits for the snapshot's 8.4 s at 1 Mbit/s before it is confirmed.
     w.stall()
     void channel.send('R'.repeat(1024 * 1024))
@@ -451,14 +453,14 @@ describe('the confirmation time a lossy send measures', () => {
     vi.advanceTimersByTime((1024 * 1024 * 8) / 1000 + 50)
     w.deliver()
     w.confirm()
-    expect(channel._replayBuffer!.leastConfirmMs).toBeCloseTo(50, 0)
+    expect(defined(channel._replayBuffer).leastConfirmMs).toBeCloseTo(50, 0)
     w.close()
-    const handed = channel._replayBuffer!.seq
+    const handed = defined(channel._replayBuffer).seq
     for (let i = 0; i < 60; i++) {
       vi.advanceTimersByTime(1000 / 30)
       void channel.send(`cursor ${i}`, { lossy: true })
     }
-    expect(channel._replayBuffer!.seq - handed).toBe(20)
+    expect(defined(channel._replayBuffer).seq - handed).toBe(20)
   })
 })
 
@@ -657,7 +659,7 @@ describe('a large lossy send near the memory budget', () => {
       /** Past what its wire takes to confirm a send, after the one the page confirmed: the page is then behind. */
       untilBehind() {
         behindAfter.mockRestore()
-        const after = peer.sender.behindAfter(channel._replayBuffer!.leastConfirmMs)
+        const after = peer.sender.behindAfter(defined(channel._replayBuffer).leastConfirmMs)
         return new Promise((resolve) => setTimeout(resolve, after + 50))
       },
       async leave() {

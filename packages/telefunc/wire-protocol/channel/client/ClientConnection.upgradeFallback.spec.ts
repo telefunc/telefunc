@@ -4,6 +4,7 @@
 // real one answers what it receives with flow-control frames, which a stand-in doesn't send.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 
 import { ClientChannel } from './ClientChannel.js'
 import { decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
@@ -30,12 +31,6 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
 const settle = async () => {
   for (let i = 0; i < 20; i++) await delay(5)
-}
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
 }
 
 class FakeWebSocket {

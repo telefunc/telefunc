@@ -1,4 +1,6 @@
 import { afterEach, expect, onTestFinished, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
+import { channelLedger } from './channelMemory.fixture.js'
 
 import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
@@ -37,9 +39,7 @@ import { ATTACHABLE_NOW, ServerChannel } from './ServerChannel.js'
 // One channel may hold 2 MiB, the credit window it starts with, and the server 32 MiB in all.
 config.channel = { maxPendingBytes: CREDIT_WINDOW_INITIAL_BYTES, maxMemory: '32m' }
 
-type Ledger = { total: number; reserved: number; holders: Set<MemoryHolder>; waiting: Iterable<RoomWait> }
 /** The ledger every channel of this server shares. */
-const ledger = () => (globalThis as unknown as { _telefunc: Record<string, Ledger> })._telefunc['channelMemory.ts']!
 
 /** The room `maxMemory` keeps for sends waiting to be held: the most one channel may hold, within the top eighth. */
 const WAITING_ROOM = Math.min(getChannelConfig().maxPendingBytes, getChannelConfig().maxMemory / 8)
@@ -60,7 +60,7 @@ async function collect() {
 
 // Each row starts on an empty ledger: what a row's channels still hold or wait with as it ends goes.
 afterEach(() => {
-  const { holders, waiting } = ledger()
+  const { holders, waiting } = channelLedger()
   for (const wait of waiting) cancelWait(wait)
   // A channel's publish bodies go first, as other holders share them (`releaseHolder`).
   for (const holder of holders) if (holder instanceof ServerChannel) holder._replayBuffer?.dispose()
@@ -70,7 +70,7 @@ afterEach(() => {
 /** Holds what one-to-one channels would, leaving `room` below the most bytes held; returns what lets it go. */
 function leaveRoomUnderMax(room: number): () => void {
   const filler: MemoryHolder = { heldBytes: 0 }
-  hold(filler, HELD_AT_MOST - ledger().total - room)
+  hold(filler, HELD_AT_MOST - channelLedger().total - room)
   return () => {
     letGo(filler, filler.heldBytes)
     releaseHolder(filler)
@@ -80,7 +80,7 @@ function leaveRoomUnderMax(room: number): () => void {
 /** As `leaveRoomUnderMax`, but `room` below the shedding target, the top eighth of `maxMemory`. */
 function leaveRoom(room: number): () => void {
   const filler: MemoryHolder = { heldBytes: 0 }
-  hold(filler, (getChannelConfig().maxMemory * 7) / 8 - ledger().total - room)
+  hold(filler, (getChannelConfig().maxMemory * 7) / 8 - channelLedger().total - room)
   return () => {
     letGo(filler, filler.heldBytes)
     releaseHolder(filler)
@@ -90,7 +90,7 @@ function leaveRoom(room: number): () => void {
 /** Fills the ledger to `total` with `count` holders, each admitted as a page's input queue is. */
 function fillTo(total: number, count: number): () => void {
   const holders = Array.from({ length: count }, () => queueMemory())
-  const remaining = total - ledger().total
+  const remaining = total - channelLedger().total
   const each = Math.floor(remaining / count)
   for (const [i, holder] of holders.entries())
     expect(holder.tryHold(each + (i === 0 ? remaining % count : 0))).toBe(true)
@@ -190,7 +190,7 @@ function overWebSocket(channels: ServerChannel[]) {
     onTestFinished(() => {
       if (channel._phase === 'ended') channel._release()
     })
-    const replay = channel._replayBuffer!
+    const replay = defined(channel._replayBuffer)
     channel._onPageAttach(lastSeq, undefined)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
@@ -227,7 +227,10 @@ test('on a WebSocket, channels that each await every send near maxMemory wait fo
     done++
   })
   await new Promise((resolve) => setTimeout(resolve, 20))
-  expect({ refused, overMax: ledger().total > getChannelConfig().maxMemory }).toEqual({ refused: 0, overMax: false })
+  expect({ refused, overMax: channelLedger().total > getChannelConfig().maxMemory }).toEqual({
+    refused: 0,
+    overMax: false,
+  })
   // The pages say they have all that was sent, again and again, until every send went.
   for (let round = 0; round < 200 && done < channels.length; round++) {
     for (const [index, channel] of channels.entries()) confirm(channel, index)
@@ -326,7 +329,7 @@ test('on a WebSocket, what the ledger holds and what the sends waiting for room 
   try {
     const sending = channel.sendBinary(new Uint8Array(128 * 1024))
     expect(await settledIn(sending, 5)).toBe('pending')
-    const { total, waiting } = ledger()
+    const { total, waiting } = channelLedger()
     const waits = [...waiting].reduce((bytes, wait) => bytes + wait.bytes, 0)
     expect(total + waits).toBeLessThanOrEqual(getChannelConfig().maxMemory)
   } finally {
@@ -452,13 +455,13 @@ for (const ending of ['close', 'abort'] as const)
     try {
       const forRoom = channel.sendBinary(new Uint8Array(2 * 1024 * 1024 - 519))
       expect(await settledIn(forRoom, 5)).toBe('pending')
-      expect({ total: ledger().total, reserved: ledger().reserved }).toEqual({
+      expect({ total: channelLedger().total, reserved: channelLedger().reserved }).toEqual({
         total: HELD_AT_MOST,
         reserved: 2 * 1024 * 1024,
       })
       if (ending === 'close') void channel.close()
       else channel.abort('x'.repeat(256 * 1024))
-      expect(ledger().total + ledger().reserved).toBeLessThanOrEqual(getChannelConfig().maxMemory)
+      expect(channelLedger().total + channelLedger().reserved).toBeLessThanOrEqual(getChannelConfig().maxMemory)
     } finally {
       channel._onPeerGone(new Error('fixture closed'))
       free()
@@ -500,7 +503,7 @@ test("on a WebSocket, the server's end rejects a send waiting for room once, and
     free()
     await new Promise((resolve) => setTimeout(resolve))
     expect(outcomes).toEqual([ended])
-    expect({ total: ledger().total, reserved: ledger().reserved }).toEqual({ total: 0, reserved: 0 })
+    expect({ total: channelLedger().total, reserved: channelLedger().reserved }).toEqual({ total: 0, reserved: 0 })
   } finally {
     channel._onPeerGone(new Error('fixture closed'))
   }
@@ -518,7 +521,10 @@ function droppedWithWaitingSend(): WeakRef<ServerChannel> {
 test('a channel dropped before its telefunction returned it, with a send waiting for room, leaves the ledger nothing', async () => {
   const dropped = droppedWithWaitingSend()
   await new Promise((resolve) => setTimeout(resolve))
-  expect({ reserved: ledger().reserved, waiting: [...ledger().waiting].length }).toEqual({ reserved: 0, waiting: 0 })
+  expect({ reserved: channelLedger().reserved, waiting: [...channelLedger().waiting].length }).toEqual({
+    reserved: 0,
+    waiting: 0,
+  })
   await collect()
   expect(dropped.deref()).toBeUndefined()
 })
@@ -551,9 +557,9 @@ test('on a WebSocket, a send waiting for room, made before its telefunction retu
   fillTo(HELD_AT_MOST, 15)
   try {
     expect(await settledIn(other.sendBinary(new Uint8Array(WAITING_ROOM - 519)), 5)).toBe('pending')
-    const reserved = ledger().reserved
+    const reserved = channelLedger().reserved
     channel._registerChannel(ATTACHABLE_NOW)
-    expect({ second: await settledIn(second, 5), reserved: ledger().reserved }).toEqual({
+    expect({ second: await settledIn(second, 5), reserved: channelLedger().reserved }).toEqual({
       second: 'overflow',
       reserved,
     })

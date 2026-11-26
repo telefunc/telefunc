@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 
 import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
@@ -223,12 +224,6 @@ function reconciledFor({ open }: ReconcilePayload) {
     ssePostIdleFlushDelay: 50,
     transports: ['ws'],
   })
-}
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
 }
 
 /** The `n`th `ServerSocket` the page opened (0, the first; -1, the last). */

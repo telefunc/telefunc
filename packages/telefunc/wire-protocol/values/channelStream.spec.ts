@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 
 import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
@@ -27,12 +28,6 @@ config.channel = { maxMemory: '2m' }
 
 /** What this server's channels hold, on the ledger every channel shares. */
 const ledgerTotal = () => getGlobalObject('channelMemory.ts', { total: 0 }).total
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 /** Whether `value` is an async generator, as the page revives a returned one. */
 function isAsyncGenerator(value: unknown): value is AsyncGenerator<unknown> {

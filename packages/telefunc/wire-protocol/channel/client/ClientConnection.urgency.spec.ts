@@ -3,17 +3,12 @@
 // Telefunc's own throttle and idle delay.
 
 import { expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 import { SSE_FLUSH_THROTTLE_MS, SSE_POST_IDLE_FLUSH_DELAY_MS, SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { TAG } from '../../wire/tags.js'
 import { advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
 
 useScriptedServer()
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 /** A channel open over SSE, with Telefunc's own throttle and idle delay, idle since. */
 async function openIdle() {

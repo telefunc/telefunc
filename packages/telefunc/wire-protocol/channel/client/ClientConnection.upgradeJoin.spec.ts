@@ -8,6 +8,7 @@
 // WebSocket, so each interleaving is chosen rather than raced.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 
 import { ClientConnection, type MuxChannel } from './ClientConnection.js'
 import { withTook, decode, encode, isOneFrame, messageFrames } from '../../wire/frame.js'
@@ -38,12 +39,6 @@ const settle = async () => {
 }
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 class FakeWebSocket {
   static OPEN = 1
@@ -228,7 +223,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   const barrier = await Promise.race([barrierSent, settle().then(() => null)])
   expect(barrier, 'the client should have emitted its barrier').not.toBeNull()
 
-  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel, register }
+  return { ix, probe: defined(probe), barrierSent, pushOld: downstream.push, dispatched, connection, channel, register }
 }
 
 const realWebSocket = globalThis.WebSocket

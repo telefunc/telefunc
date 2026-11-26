@@ -1,4 +1,6 @@
 import { expect, onTestFinished, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
+import { channelLedger } from './channelMemory.fixture.js'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -176,7 +178,7 @@ async function overSse(channels: ServerChannel[]) {
 }
 
 /** What this server's channels hold, on the ledger every channel shares. */
-const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+const ledgerTotal = () => channelLedger().total
 
 /** Holds what one-to-one channels would, which no publish can make them let go of, leaving `room` below the shedding
  *  target; returns what lets it go. */
@@ -247,7 +249,7 @@ function overWebSocket(
   /** Attaches `channel` at `index` as the mux does: what the page lacks after `lastSeq` goes first. */
   const attach = (channel: ServerChannel, index: number, lastSeq = 0, request?: Request) => {
     releaseWhenDone([channel])
-    const replay = channel._replayBuffer!
+    const replay = defined(channel._replayBuffer)
     channel._onPageAttach(lastSeq, request)
     for (const frame of replay.getAfter(lastSeq)) sender.send(frame)
     const peer = new IndexedPeer({ sender, index, replay })
@@ -451,7 +453,7 @@ for (const [closing, begin] of Object.entries(CLOSING)) {
       held: channel.heldBytes,
     })
     const before = left()
-    const publishing = Broadcast.publish(key, MESSAGES[0]!)
+    const publishing = Broadcast.publish(key, defined(MESSAGES[0]))
     expect(left()).toEqual(before)
     await publishing
     other.abort()
@@ -690,7 +692,7 @@ for (const attach of ['before', 'after'] as const) {
     const request = new Request('http://one.test/')
     const page = overWebSocket([channel, other], [request, new Request('http://two.test/')])
     for (const name of ['p1', 'p2', 'p3']) await Broadcast.publish(key, name + 'x'.repeat(600_000))
-    channel._onPeerDisconnect(page.peers[0]!, 60_000)
+    channel._onPeerDisconnect(defined(page.peers[0]), 60_000)
     // Its page is away, so the CLOSE waits for it to attach again.
     const closing = channel.close({ timeout: 1_000 })
     const release = leaveRoom(300_000)
@@ -1157,7 +1159,7 @@ for (const [ending, { create, away, pageReads }] of Object.entries(WHILE_AWAY)) 
     const key = crypto.randomUUID()
     const channel = create(key)
     const [peer] = overWebSocket([channel]).peers
-    channel._onPeerDisconnect(peer!, 60_000)
+    channel._onPeerDisconnect(defined(peer), 60_000)
     await away(channel, key)
     const back = overWebSocket([])
     back.attach(channel, 0)
@@ -1467,7 +1469,7 @@ for (const [overflow, { publishes, pageReads }] of Object.entries(OVERFLOWS)) {
     const page = await overSse([channel])
     // The page starts reading: p1 leaves the server's queue, as it does on a WebSocket. The others come while its event
     // is under way, so they wait: once it ended, the stream would ask for the next.
-    await Broadcast.publish(key, publishes[0]!)
+    await Broadcast.publish(key, defined(publishes[0]))
     await page.readBytes(100_000)
     await Promise.all(publishes.slice(1).map((data) => Broadcast.publish(key, data)))
     expect(channel.isClosed).toBe(true)
@@ -1489,8 +1491,8 @@ test('on a WebSocket, a reliable subscriber that fell behind lets go of each mes
   const key = crypto.randomUUID()
   const channel = new ServerBroadcast<string>({ key })
   overWebSocket([channel])
-  const [first, ...rest] = OVERFLOWS['a publish is larger than all the server may hold']!.publishes
-  await Broadcast.publish(key, first!)
+  const [first, ...rest] = defined(OVERFLOWS['a publish is larger than all the server may hold']).publishes
+  await Broadcast.publish(key, defined(first))
   const oneMessage = channel.heldBytes
   await Promise.all(rest.map((data) => Broadcast.publish(key, data)))
   expect(channel.isClosed).toBe(true)
@@ -1502,8 +1504,8 @@ test('on a WebSocket, a reliable subscriber that fell behind lets go of each mes
 
 /** Each way the page leaves channel 0, which then reads nothing more of it. */
 const PAGE_GONE: Record<string, (channel: ServerChannel) => void> = {
-  "the page's abort": ENDINGS["the page's abort"]!,
-  'the page losing its replay': ENDINGS['the page losing its replay']!,
+  "the page's abort": defined(ENDINGS["the page's abort"]),
+  'the page losing its replay': defined(ENDINGS['the page losing its replay']),
 }
 
 for (const [ending, end] of Object.entries(PAGE_GONE)) {
@@ -1657,11 +1659,6 @@ async function overdue(
   const back = overWebSocket([])
   back.attach(channel, 0)
   return { ended, reads: await back.readAll() }
-}
-
-function defined<T>(value: T | undefined): T {
-  if (value === undefined) throw new Error('Expected a value')
-  return value
 }
 
 const OVERDUE: Record<

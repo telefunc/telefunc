@@ -4,16 +4,11 @@
 // the page doesn't read.
 
 import { expect, test } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { FakeWebSocket, advance, openChannel, serveSse, useScriptedServer, world } from './scriptedServer.fixture.js'
 
 useScriptedServer()
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 /** Opens `count` channels over `transports`, the first at index 0, and waits till their wire carries them. */
 async function open(count: number, transports: ('sse' | 'ws')[] = ['sse']) {

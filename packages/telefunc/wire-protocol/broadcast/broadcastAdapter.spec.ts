@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
@@ -1197,7 +1198,7 @@ describe('lossy broadcast under memory pressure', () => {
           },
         },
         index: 7,
-        replay: broadcast._replayBuffer!,
+        replay: defined(broadcast._replayBuffer),
       }),
       { want: { version: 1, text: true, binary: false } },
     )

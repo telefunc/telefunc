@@ -3,6 +3,8 @@
 // names; the real ServerChannel, ServerBroadcast and memory ledger run.
 
 import { expect, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
+import { channelLedger } from '../../wire-protocol/channel/server/channelMemory.fixture.js'
 
 import { ServerChannel, ATTACHABLE_NOW } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { Broadcast, ServerBroadcast } from '../../wire-protocol/channel/server/ServerBroadcast.js'
@@ -15,7 +17,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 config.channel = { maxMemory: '2m' }
 
 /** What this server's channels hold, on the ledger every channel shares. */
-const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+const ledgerTotal = () => channelLedger().total
 
 /** A page's wire that takes nothing off its queue: every publish waits there, so its broadcast may shed them. */
 const stalledSender: PeerSender = {
@@ -32,18 +34,24 @@ const stalledSender: PeerSender = {
 function subscribedPage(key: string, lossy: boolean) {
   const broadcast = new ServerBroadcast<string>({ key, lossy })
   broadcast._registerChannel(ATTACHABLE_NOW)
-  broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
-    want: { version: 1, text: true, binary: false },
-  })
+  broadcast._attachPeer(
+    new IndexedPeer({ sender: stalledSender, index: 2, replay: defined(broadcast._replayBuffer) }),
+    {
+      want: { version: 1, text: true, binary: false },
+    },
+  )
   return broadcast
 }
 
 test("a reliable broadcast near the budget stays open when another channel's text send fits at its real size", async () => {
   const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
   broadcast._registerChannel(ATTACHABLE_NOW)
-  broadcast._attachPeer(new IndexedPeer({ sender: stalledSender, index: 2, replay: broadcast._replayBuffer! }), {
-    want: { version: 1, text: true, binary: false },
-  })
+  broadcast._attachPeer(
+    new IndexedPeer({ sender: stalledSender, index: 2, replay: defined(broadcast._replayBuffer) }),
+    {
+      want: { version: 1, text: true, binary: false },
+    },
+  )
   const channel = new ServerChannel<never, string>()
   channel._registerChannel(ATTACHABLE_NOW)
   const filler: MemoryHolder = { heldBytes: 0 }
