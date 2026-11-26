@@ -195,12 +195,12 @@ const STALL_WARNING_MS = 5_000
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
  *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
+ *  MAX_BUFFER_BYTES_PER_INDEX, resumes once that consumer drains or cancels. Active consumers (registered as
  *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
  *
  *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
- *  another consumer's drain restarts the read loop, and the next frame on the wire
- *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
+ *  its consumer's read of one chunk restarts the read loop, and the next frame on the wire
+ *  is for that same index. Each restart adds at most 1 frame of overshoot.
  *  This is the unavoidable cost of multiplexing over a single stream — we can't
  *  peek at the next frame's index without reading it.
  *
@@ -254,6 +254,8 @@ class FrameDemuxer {
     if (waiter) {
       this.indexWaiters.delete(index)
       waiter.resolve(null)
+      // With no one left waiting, no warning is due.
+      if (this.indexWaiters.size === 0) this.clearStallTimer()
     }
     this.cancelUpstreamIfAllTerminal()
     // Reading may have stopped on this index's buffer, with another consumer waiting behind it.

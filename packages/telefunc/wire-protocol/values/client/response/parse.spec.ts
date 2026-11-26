@@ -46,13 +46,13 @@ test('a download read to its end and then cancelled leaves the next download of 
   expect((await b.bytes()).byteLength).toBe(16 * 64 * KiB)
 })
 
-/** The body of a call that returned `{ a, b, c }`, three downloads: 1 KiB and then 1 MiB of `a`, then a chunk of `b` and
- *  of `c`, then the ends. It is sent one wire piece per pull, counting them in `sent`; `beforePull` runs before each. */
-function threeDownloadsBody() {
+/** The body of a call that returned `{ a, b, c, d }`, four downloads: 1 KiB and then 1 MiB of `a`, then a chunk of `b`,
+ *  `c` and `d`, then the ends. It is sent one wire piece per pull, counting them in `sent`; `beforePull` runs before each. */
+function fourDownloadsBody() {
   const download = (index: number, chunks: number) =>
     SERIALIZER_PREFIX_BLOB_DOWNLOAD + JSON.stringify({ __index: index, type: '', size: chunks * 64 * KiB })
   const metadata = textEncoder.encode(
-    JSON.stringify({ ret: { a: download(0, 17), b: download(1, 1), c: download(2, 1) } }),
+    JSON.stringify({ ret: { a: download(0, 17), b: download(1, 1), c: download(2, 1), d: download(3, 1) } }),
   )
   const pieces = [
     concat(encodeU32(metadata.length), metadata),
@@ -60,8 +60,10 @@ function threeDownloadsBody() {
     ...Array.from({ length: 16 }, () => encodeIndexedFrame(0, new Uint8Array(64 * KiB))),
     encodeIndexedFrame(1, new Uint8Array(64 * KiB)),
     encodeIndexedFrame(2, new Uint8Array(64 * KiB)),
+    encodeIndexedFrame(3, new Uint8Array(64 * KiB)),
     encodeIndexedFrame(1, new Uint8Array(0)),
     encodeIndexedFrame(2, new Uint8Array(0)),
+    encodeIndexedFrame(3, new Uint8Array(0)),
     encodeIndexedFrame(0, new Uint8Array(0)),
     encodeU32(0),
   ]
@@ -87,7 +89,7 @@ async function settle(): Promise<void> {
 test.each(['read', 'cancelled'])(
   'a download left with 1 MiB unread holds the others till it is %s',
   async (release) => {
-    const { body, state } = threeDownloadsBody()
+    const { body, state } = fourDownloadsBody()
     const ret = await parseBinaryBody(body)
     if (!(typeof ret === 'object' && ret !== null && 'a' in ret && 'b' in ret && 'c' in ret)) {
       throw new Error('Expected `{ a, b, c }`')
@@ -126,7 +128,7 @@ test.each(['left unread', 'read'])(
   async (release) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { body, state } = threeDownloadsBody()
+    const { body, state } = fourDownloadsBody()
     const ret = await parseBinaryBody(body)
     if (!(typeof ret === 'object' && ret !== null && 'a' in ret && 'b' in ret && 'c' in ret)) {
       throw new Error('Expected `{ a, b, c }`')
@@ -154,3 +156,41 @@ test.each(['left unread', 'read'])(
     else expect(warn).toHaveBeenCalledWith(expect.stringContaining('onDownloads() returned is waiting for a stream'))
   },
 )
+
+test('a download that stops waiting behind another with 1 MiB unread gets no warning, and the next one to wait does', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const { body, state } = fourDownloadsBody()
+  const ret = await parseBinaryBody(body)
+  if (!(typeof ret === 'object' && ret !== null && 'a' in ret && 'b' in ret && 'c' in ret && 'd' in ret)) {
+    throw new Error('Expected `{ a, b, c, d }`')
+  }
+  const { a, b, c, d } = ret
+  if (!isBlobDownload(a) || !isBlobDownload(b) || !isBlobDownload(c) || !isBlobDownload(d)) {
+    throw new Error('Expected four downloads')
+  }
+  // Reading stops on `a` with none waiting, as above.
+  state.beforePull = (sent) => sent === 17 && b.cancel()
+  await expect(b.bytes()).rejects.toThrow('Stream cancelled')
+  await settle()
+  expect(state.sent).toBe(18)
+
+  const cBytes = c.bytes()
+  await settle()
+  vi.advanceTimersByTime(100)
+  c.cancel()
+  await expect(cBytes).rejects.toThrow('Stream cancelled')
+  vi.advanceTimersByTime(5_000)
+  expect(warn).not.toHaveBeenCalled()
+
+  const dBytes = d.bytes()
+  await settle()
+  expect(state.sent).toBe(18)
+  vi.advanceTimersByTime(4_999)
+  expect(warn).not.toHaveBeenCalled()
+  vi.advanceTimersByTime(1)
+  expect(warn).toHaveBeenCalledOnce()
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('onDownloads() returned is waiting for a stream'))
+  d.cancel()
+  await expect(dBytes).rejects.toThrow('Stream cancelled')
+})
