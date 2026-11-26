@@ -137,8 +137,10 @@ class ReceiveCredit {
     if (!wantBytes && !wantMsgs) return
     if (this.selfTime.utilisation() > FC_SELF_UTIL_THRESHOLD) return
     if (wantBytes) {
+      const remaining = this.grantedBytes - Math.max(this.receivedBytes, this.consumedBytes)
+      const needsLimit = this.arrived || remaining < this.byteWindow
       this.bdp.growBytes()
-      this.advertiseBytes('flow-control')
+      if (needsLimit) this.advertiseBytes('flow-control')
     }
     if (wantMsgs) {
       this.bdp.growMsgs()
@@ -231,7 +233,9 @@ class ReceiveCredit {
   }
 
   private refresh(): void {
-    if (this.consumedBytes - this.advertisedBytes >= this.bdp.byteWindow >> 2) this.advertiseBytes('flow-control')
+    // Until growth is advertised, refresh within the window the sender has.
+    const byteWindow = Math.min(this.bdp.byteWindow, this.grantedBytes - this.advertisedBytes)
+    if (this.consumedBytes - this.advertisedBytes >= byteWindow >> 2) this.advertiseBytes('flow-control')
     if (this.consumedMessages - this.advertisedMessages >= this.bdp.msgWindow >> 2) {
       this.advertiseMessages('flow-control')
     }

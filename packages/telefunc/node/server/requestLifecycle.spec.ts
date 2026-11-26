@@ -1,4 +1,6 @@
-import { describe, expect, onTestFinished, test, vi } from 'vitest'
+import { assert, describe, expect, onTestFinished, test, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
+import { channelLedger } from '../../wire-protocol/channel/server/channelMemory.fixture.js'
 
 import { serve } from './telefunc.js'
 import { config } from './serverConfig.js'
@@ -6,11 +8,12 @@ import { shield } from './shield.js'
 import { Abort } from './Abort.js'
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
-import { TAG } from '../../wire-protocol/wire/tags.js'
+import { encode } from '../../wire-protocol/wire/frame.js'
+import { decodeChannelFrame } from '../../wire-protocol/wire/decode.fixture.js'
 import { holdsAtMost } from '../../wire-protocol/channel/server/channelMemory.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
-const requests = vi.hoisted(() => [] as { closed: number; signal: AbortSignal }[])
+const requests = vi.hoisted((): { closed: number; signal: AbortSignal }[] => [])
 vi.mock('./context/requestContext.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./context/requestContext.js')>()
   return {
@@ -35,11 +38,15 @@ config.disableNamingConvention = true
 // One channel may hold 8 MiB, so a row can send past that quickly.
 config.channel = { maxPendingBytes: 8 * 1024 * 1024 }
 /** What this server's channels hold, on the ledger every channel shares. */
-const ledgerTotal = () => (globalThis as any)._telefunc['channelMemory.ts'].total as number
+const ledgerTotal = () => channelLedger().total
 /** What the sends waiting for room reserve, on that ledger. */
-const ledgerReserved = () => (globalThis as any)._telefunc['channelMemory.ts'].reserved as number
+const ledgerReserved = () => channelLedger().reserved
 /** The last channel a telefunction made, how often a stream it returned was cancelled, and what lets a waiting one return. */
-const opened = { channel: null as Channel<never, string> | null, cancelled: 0, letReturn: null as (() => void) | null }
+const opened: { channel: Channel<never, string> | null; cancelled: number; letReturn: (() => void) | null } = {
+  channel: null,
+  cancelled: 0,
+  letReturn: null,
+}
 /** A channel holding a 64 KiB send. */
 function heldChannel() {
   opened.channel = new Channel<never, string>()
@@ -51,7 +58,7 @@ function circular() {
   value.self = value
   return value
 }
-const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
+const telefunctions: Record<string, (...args: never[]) => Promise<unknown>> = {
   onSuccess: async () => 42,
   onThrow: async () => {
     throw new Error('the telefunction fails, as the test means it to')
@@ -157,7 +164,7 @@ function pageThatStopsReading(channel: ServerChannel, index: number) {
       queue: { waitingPublishes: () => 0, dropUngiven: () => 0, dropWaitingPublishes() {}, dropWaitingFrom() {} },
     },
     index,
-    replay: channel._replayBuffer!,
+    replay: defined(channel._replayBuffer),
   })
 }
 
@@ -209,7 +216,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(response.statusCode).toBe(statusCode)
       expect(requests.length).toBe(before + 1)
-      const request = requests.at(-1)!
+      const request = defined(requests.at(-1))
       expect(request.closed).toBe(1)
       expect(request.signal.aborted).toBe(true)
     })
@@ -231,10 +238,10 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       await response.getBody()
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(response.statusCode).toBe(500)
-      const request = requests.at(-1)!
+      const request = defined(requests.at(-1))
       expect(request.closed).toBe(1)
       expect(request.signal.aborted).toBe(true)
-      expect(opened.channel!.isClosed).toBe(true)
+      expect(defined(opened.channel).isClosed).toBe(true)
       expect(ledgerTotal()).toBe(before)
     })
   }
@@ -242,13 +249,13 @@ describe('a request ends its lifecycle once, however the call ends', () => {
   for (const name of ['onSameChannelThenCircular', 'onSameChannel']) {
     test(`${name}(): 500, and the channel an earlier call returned stays open`, async () => {
       await (await call('onChannel')).getBody()
-      const earlier = requests.at(-1)!
-      const channel = opened.channel!
+      const earlier = defined(requests.at(-1))
+      const channel = defined(opened.channel)
       const response = await call(name)
       await response.getBody()
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(response.statusCode).toBe(500)
-      const request = requests.at(-1)!
+      const request = defined(requests.at(-1))
       expect(request.closed).toBe(1)
       expect(request.signal.aborted).toBe(true)
       expect(channel.isClosed).toBe(false)
@@ -263,7 +270,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     await response.getBody()
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(response.statusCode).toBe(500)
-    const request = requests.at(-1)!
+    const request = defined(requests.at(-1))
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
     expect(opened.cancelled).toBe(1)
@@ -276,11 +283,11 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       await response.getBody()
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(response.statusCode).toBe(500)
-      const request = requests.at(-1)!
+      const request = defined(requests.at(-1))
       expect(request.closed).toBe(1)
       expect(request.signal.aborted).toBe(true)
       expect(opened.cancelled).toBe(cancelledBefore + 1)
-      expect(opened.channel!.isClosed).toBe(true)
+      expect(defined(opened.channel).isClosed).toBe(true)
     })
   }
 
@@ -290,7 +297,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     await response.getBody()
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(response.statusCode).toBe(403)
-    const request = requests.at(-1)!
+    const request = defined(requests.at(-1))
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
     expect(opened.cancelled).toBe(cancelledBefore + 1)
@@ -310,15 +317,19 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       // An inline response is the stream's body, which the page doesn't read.
       if (transport === 'channel') await response.getBody()
       else onTestFinished(() => response.getReadableWebStream().cancel())
-      const request = requests.at(-1)!
-      const [control, stream] = registered.mock.contexts as ServerChannel[]
+      const request = defined(requests.at(-1))
+      const [control, stream] = registered.mock.contexts.filter((context) => context instanceof ServerChannel)
       onTestFinished(() => stream?.abort())
-      control!._attachPeer(pageThatStopsReading(control!, 1))
-      if (waitsFor === 'credit') stream!._attachPeer(pageThatStopsReading(stream!, 2))
+      assert(control)
+      control._attachPeer(pageThatStopsReading(control, 1))
+      if (waitsFor === 'credit') {
+        assert(stream)
+        stream._attachPeer(pageThatStopsReading(stream, 2))
+      }
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(opened.cancelled).toBe(cancelledBefore)
       // The page's message makes the control channel's listener throw `Abort()`, which aborts the response.
-      control!._dispatchFrame({ tag: TAG.TEXT, index: 1, seq: 1, text: 'null', bytes: 4 } as any)
+      control._dispatchFrame(decodeChannelFrame(encode.text(1, 'null', 1)))
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(opened.cancelled).toBe(cancelledBefore + 1)
       expect(request.closed).toBe(1)
@@ -330,10 +341,10 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     const response = await call('onChannel')
     await response.getBody()
     await new Promise((resolve) => setTimeout(resolve, 10))
-    const request = requests.at(-1)!
+    const request = defined(requests.at(-1))
     expect(request.closed).toBe(0)
     expect(request.signal.aborted).toBe(false)
-    await opened.channel!.close({ timeout: 0 })
+    await defined(opened.channel).close({ timeout: 0 })
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
   })
@@ -343,12 +354,12 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     opened.letReturn = null
     const page = new AbortController()
     const response = call(name, [], { signal: page.signal, transport })
-    await vi.waitFor(() => expect(opened.letReturn).toBeTypeOf('function'))
+    const letReturn = await vi.waitFor(() => defined(opened.letReturn, 'a telefunction waiting to return'))
     page.abort()
-    const request = requests.at(-1)!
+    const request = defined(requests.at(-1))
     expect(request.closed).toBe(1)
     expect(request.signal.aborted).toBe(true)
-    opened.letReturn!()
+    letReturn()
     await response
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
@@ -364,7 +375,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
   test('a channel it returns after its page left closes at once', async () => {
     const before = ledgerTotal()
     await callThatReturnsAfterItsPageLeft('onChannelOnceLetReturn')
-    expect(opened.channel!.isClosed).toBe(true)
+    expect(defined(opened.channel).isClosed).toBe(true)
     expect(ledgerTotal()).toBe(before)
   })
 
@@ -374,16 +385,16 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     await response.getBody()
     page.abort()
     await new Promise((resolve) => setTimeout(resolve, 10))
-    const request = requests.at(-1)!
-    expect(opened.channel!.isClosed).toBe(false)
+    const request = defined(requests.at(-1))
+    expect(defined(opened.channel).isClosed).toBe(false)
     expect(request.closed).toBe(0)
-    await opened.channel!.close({ timeout: 0 })
+    await defined(opened.channel).close({ timeout: 0 })
     expect(request.closed).toBe(1)
   })
 
   test('a stream it returned holds the request till the page read it', async () => {
     const response = await call('onStream')
-    const request = requests.at(-1)!
+    const request = defined(requests.at(-1))
     expect(request.closed).toBe(0)
     await response.getBody()
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -397,6 +408,8 @@ describe('a request ends its lifecycle once, however the call ends', () => {
     const channelId = crypto.randomUUID()
     const response = await call('onText', [1, `!TelefuncFunction:${JSON.stringify({ channelId })}`])
     expect(response.statusCode).toBe(422)
-    expect(close.mock.contexts.map((channel) => (channel as ServerChannel).id)).toEqual([channelId])
+    expect(
+      close.mock.contexts.filter((context) => context instanceof ServerChannel).map((channel) => channel.id),
+    ).toEqual([channelId])
   })
 })

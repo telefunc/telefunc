@@ -129,7 +129,7 @@ export const WS_CLOSE_PAGE_LEFT = 4000
 /** The version of the channel wire, which each channel request names in its URL. A server on another version refuses
  *  the page's channels with `WS_CLOSE_WIRE_VERSION` or `STATUS_CODE_WIRE_VERSION`, which the page reports as a page to
  *  reload: those two never change. */
-export const WIRE_VERSION = 3
+export const WIRE_VERSION = 5
 export const WS_CLOSE_WIRE_VERSION = 4001
 export const STATUS_CODE_WIRE_VERSION = 409
 
@@ -178,9 +178,6 @@ export const MAX_CHANNELS_PER_CONNECTION = 4_096
 
 /** A peer past its wire's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
-
-/** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
-export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
@@ -268,14 +265,13 @@ export const WIRE_SEND_ACK_MS = 25
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 /** The least data the sender on a WebSocket, page or server, hands its socket ahead of its peer's acknowledgements. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
-/** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
+/** A server hands its socket data while its path holds less than the page takes in this many least round trips, and
+ *  at least `WIRE_SEND_AHEAD_MIN_BYTES` (`ServerHeadroom.window()`). */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
-/** How many milliseconds of its path's measured rate a sender hands its socket ahead of acknowledgements: a page this
- *  (the allowance in `ClientHeadroom`), a server this or less, where `WIRE_SEND_AHEAD_ROUND_TRIPS` least round trips
- *  and two acknowledgement gaps take less (`ServerHeadroom.window()`). It caps only that part: a page hands at least
- *  `WIRE_SEND_AHEAD_MIN_BYTES` and a server two messages of it, so on a link that drains less than that in 300 ms, a
- *  frame waits in the socket longer. A lossy send's confirmation is late past this, its slack and a round trip
- *  (`behindAfter()` in `WireSender` for a WebSocket page, and in `WsTransport`). */
+/** How many milliseconds of its uplink's measured rate a page hands its socket ahead of acknowledgements (the allowance
+ *  in `ClientHeadroom`). It caps only that part: a page hands at least `WIRE_SEND_AHEAD_MIN_BYTES`, so on a link that
+ *  drains less than that in 300 ms, a frame waits in the socket longer. A lossy send's confirmation is late past this,
+ *  its slack and a round trip (`behindAfter()` in `WireSender` for a WebSocket page, and in `WsTransport`). */
 export const WIRE_QUEUE_DELAY_MS = 300
 /** What a lossy sender allows past its wire's own wait and its least round trip: their variation, a confirmation's wait. */
 export const LOSSY_CONFIRM_SLACK_MS = 300

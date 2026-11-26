@@ -151,8 +151,8 @@ async function onBroadcastSubscriberAborts() {
 /** A loop that read one message and stopped, with the next one queued for it, when its channel closes. */
 async function onBroadcastLoopLeftBehind() {
   const room = new BroadcastChannel<string>({ key: `room:left-behind:${crypto.randomUUID()}` })
-  const { _telefunc } = globalThis as unknown as Ledger
-  const { holders } = _telefunc['channelMemory.ts']
+  const holders = globalThis._telefunc?.['channelMemory.ts']?.holders
+  if (holders === undefined) throw new Error("Expected the server's channel memory")
   const before = new Set(holders)
   const first = room.messages().next()
   const queued = Promise.withResolvers<void>()
@@ -168,7 +168,10 @@ async function onBroadcastLoopLeftBehind() {
   await room.close()
   return { held, heldOnceClosed: loop?.heldBytes }
 }
-type Ledger = { _telefunc: { 'channelMemory.ts': { holders: Set<{ heldBytes: number }> } } }
+declare global {
+  /** Telefunc's state on the server: here, what its channels' memory holds, by holder. */
+  var _telefunc: { 'channelMemory.ts'?: { holders: Set<{ heldBytes: number }> } } | undefined
+}
 
 /** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */
 async function onBroadcastAnswerOrder() {

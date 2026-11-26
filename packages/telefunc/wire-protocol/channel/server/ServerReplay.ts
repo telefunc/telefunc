@@ -9,23 +9,22 @@ import {
   letGo,
   type MemoryHolder,
 } from './channelMemory.js'
+import { encode } from '../../wire/frame.js'
 import { isClosingTag } from '../../wire/tags.js'
 import type { PublishBody } from './PublishBody.js'
+import { PublishQueue } from './PublishQueue.js'
 import { SeqQueue } from '../SeqQueue.js'
 import { DrainRate } from '../../flowControl/DrainRate.js'
 
 /** When a channel's unconfirmed data was dated, at a loss of its page's wire. */
 type Stall = { since: number }
 
-/** `alone`: sent with nothing of its channel's unconfirmed, publish or frame, so nothing waits ahead of its confirmation. */
-type Publish = { head: Uint8Array<ArrayBuffer>; body: PublishBody; at: number; alone: boolean; confirmedBefore: number }
-
 /** What a channel sent and its page hasn't confirmed, for a reconnect to send again: its own frames, and its publishes,
- *  each a head and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
+ *  each a channel index and a reference to the body its subscribers share. Each queue is in seq order and loses entries only at
  *  its ends: acknowledged ones from the oldest, publishes skipped or past a gap from the newest. */
 class ServerReplay {
   private readonly frames = new SeqQueue<Uint8Array<ArrayBuffer>>()
-  private readonly publishes = new SeqQueue<Publish>()
+  private readonly publishes = new PublishQueue()
   private readonly holder: MemoryHolder
   private issuedSeq = 0
   private pushedSeq = 0
@@ -72,18 +71,24 @@ class ServerReplay {
     return this.unkeptEnd > lastSeq
   }
 
-  pushPublish(seq: number, head: Uint8Array<ArrayBuffer>, body: PublishBody): void {
+  pushPublish(seq: number, index: number, body: PublishBody): void {
     this.pushed(seq)
     const alone = this.publishes.length === 0 && this.frames.length === 0
-    this.publishes.push(seq, { head, body, at: performance.now(), alone, confirmedBefore: this.confirmedBytes })
+    this.publishes.push(seq, index, body, performance.now(), alone, this.confirmedBytes)
     this.heldPublishBytes += body.frame.byteLength
     hold(this.holder, body)
   }
 
-  /** The least time a publish waited for its page's confirmation, `Infinity` before the first. One sent with nothing
-   *  unconfirmed ahead of it waited for the path alone, so its confirmation sets it, also where the path got slower; one
-   *  sent behind others, publishes or frames, only lowers it. */
-  leastConfirmMs = Number.POSITIVE_INFINITY
+  /** The quickest confirmation and the bytes it covered: a lone publish's sets them, any other's only lowers them. */
+  private leastConfirmAtMs = Number.POSITIVE_INFINITY
+  private leastConfirmBytes = 0
+
+  /** The least a publish waits for its page's confirmation, its own transfer aside: `Infinity` before the first. */
+  get leastConfirmMs(): number {
+    if (!Number.isFinite(this.leastConfirmAtMs)) return Number.POSITIVE_INFINITY
+    const rate = this.confirms.rate
+    return rate > 0 ? Math.max(0, this.leastConfirmAtMs - this.leastConfirmBytes / rate) : this.leastConfirmAtMs
+  }
 
   /** Since when its page hasn't confirmed what it holds, across the page's losses of its wire; null while the page
    *  confirms something of it after each. */
@@ -102,7 +107,7 @@ class ServerReplay {
   }
 
   /** The page has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
-  acknowledge(lastSeq: number): void {
+  acknowledge(lastSeq: number, heldMs = 0): void {
     if (lastSeq >= this.unkeptEnd) this.unkeptEnd = 0
     const frames = this.frames.indexAfter(lastSeq)
     for (let i = 0; i < frames; i++) {
@@ -114,22 +119,34 @@ class ServerReplay {
     if (frames > 0 || publishes > 0) this.stallDate = null
     if (publishes === 0) return
     // Only the oldest can be alone: the others were sent while it was unconfirmed.
-    const alone = this.publishes.at(0).alone
-    const newest = this.publishes.at(publishes - 1)
+    const alone = this.publishes.wasAlone(0)
+    const newest = publishes - 1
+    const sentAt = this.publishes.timeAt(newest)
+    const confirmedBefore = this.publishes.confirmedBefore(newest)
+    const hold = heldMs > 0 && this.publishes.seqAt(newest) === lastSeq ? heldMs : 0
     for (let i = 0; i < publishes; i++) {
-      this.confirmedBytes += this.publishes.at(i).body.frame.byteLength
-      this.letPublishGo(this.publishes.at(i))
+      const body = this.publishes.bodyAt(i)
+      this.confirmedBytes += body.frame.byteLength
+      this.letPublishGo(body)
     }
     this.publishes.dropOldest(publishes)
     // Sent before the wire its confirmation came on: its page may have had it long before.
-    if (newest.at < this.movedAt) return
-    const confirmMs = performance.now() - newest.at
-    // One that went alone, or before any least, took a round trip that no rate is in.
-    if (!(publishes === 1 && alone) && this.leastConfirmMs !== Number.POSITIVE_INFINITY)
-      this.confirms.measured(
-        (this.confirmedBytes - newest.confirmedBefore) / Math.max(1, confirmMs - this.leastConfirmMs),
-      )
-    this.leastConfirmMs = alone ? confirmMs : Math.min(this.leastConfirmMs, confirmMs)
+    if (sentAt < this.movedAt) return
+    const confirmMs = Math.max(1, performance.now() - sentAt - hold)
+    const bytes = this.confirmedBytes - confirmedBefore
+    const lone = publishes === 1 && alone
+    // Both hold the round trip: past the quickest by half its bytes or more, what lies between is the rate.
+    if (
+      !lone &&
+      Number.isFinite(this.leastConfirmAtMs) &&
+      bytes - this.leastConfirmBytes >= this.leastConfirmBytes / 2 &&
+      confirmMs > this.leastConfirmAtMs
+    )
+      this.confirms.measured((bytes - this.leastConfirmBytes) / (confirmMs - this.leastConfirmAtMs))
+    if (lone || confirmMs < this.leastConfirmAtMs) {
+      this.leastConfirmAtMs = confirmMs
+      this.leastConfirmBytes = bytes
+    }
   }
 
   /** The frames after `afterSeq` in seq order, each publish's head and then its body. A channel's are all there, as
@@ -144,8 +161,8 @@ class ServerReplay {
         out.push(this.frames.at(f++))
         continue
       }
-      const { head, body } = this.publishes.at(p++)
-      out.push(head, body.frame)
+      out.push(encode.publishTo(this.publishes.indexAt(p), this.publishes.seqAt(p)), this.publishes.bodyAt(p).frame)
+      p++
     }
     return out
   }
@@ -166,7 +183,7 @@ class ServerReplay {
   heldByNewestPublishes(count: number): number {
     let held = 0
     for (let i = Math.max(0, this.publishes.length - count); i < this.publishes.length; i++)
-      held += heldPublishBytes(this.publishes.at(i).body)
+      held += heldPublishBytes(this.publishes.bodyAt(i))
     return held
   }
 
@@ -187,9 +204,9 @@ class ServerReplay {
     const units = Math.min(this.publishes.length, droppable)
     let bytes = 0
     for (let i = 0; i < units; i++) {
-      const publish = this.publishes.pop()
-      bytes += publish.body.frame.byteLength
-      this.letPublishGo(publish)
+      const body = this.publishes.pop()
+      bytes += body.frame.byteLength
+      this.letPublishGo(body)
     }
     return { units, bytes }
   }
@@ -198,10 +215,15 @@ class ServerReplay {
   dropBeforeNewestPublish(count: number): void {
     const waiting = Math.min(this.publishes.length, count)
     if (waiting < 2) return
-    const seq = this.publishes.seqAt(this.publishes.length - 1)
-    const newest = this.publishes.pop()
+    const newest = this.publishes.length - 1
+    const seq = this.publishes.seqAt(newest)
+    const index = this.publishes.indexAt(newest)
+    const sentAt = this.publishes.timeAt(newest)
+    const alone = this.publishes.wasAlone(newest)
+    const confirmedBefore = this.publishes.confirmedBefore(newest)
+    const body = this.publishes.pop()
     for (let i = 1; i < waiting; i++) this.letPublishGo(this.publishes.pop())
-    this.publishes.push(seq, newest)
+    this.publishes.push(seq, index, body, sentAt, alone, confirmedBefore)
   }
 
   /** For a page that may miss none: where its holder holds more than `toBytes`, and one of its newest `droppable`
@@ -226,12 +248,12 @@ class ServerReplay {
   /** Since when the oldest publish its page hasn't confirmed waits for that: since it was sent, or since its page began
    *  moving to the wire that confirms it. `undefined` with none. */
   get unconfirmedSince(): number | undefined {
-    return this.publishes.length > 0 ? Math.max(this.publishes.at(0).at, this.movedAt) : undefined
+    return this.publishes.length > 0 ? Math.max(this.publishes.timeAt(0), this.movedAt) : undefined
   }
 
   /** The publish bytes its page hasn't confirmed behind the oldest, which it may be taking now. */
   get publishBytesBehindOldest(): number {
-    return this.publishes.length > 0 ? this.heldPublishBytes - this.publishes.at(0).body.frame.byteLength : 0
+    return this.publishes.length > 0 ? this.heldPublishBytes - this.publishes.bodyAt(0).frame.byteLength : 0
   }
 
   /** The rate its page confirms publishes at, in bytes per ms: 0 before a confirmation measured it. */
@@ -241,7 +263,7 @@ class ServerReplay {
 
   /** The body of the newest publish it holds. */
   newestPublish(): PublishBody | undefined {
-    return this.publishes.length > 0 ? this.publishes.at(this.publishes.length - 1).body : undefined
+    return this.publishes.length > 0 ? this.publishes.bodyAt(this.publishes.length - 1) : undefined
   }
 
   dispose(): void {
@@ -259,7 +281,7 @@ class ServerReplay {
     letGo(this.holder, frame.byteLength + HELD_SEND_OVERHEAD_BYTES)
   }
 
-  private letPublishGo({ body }: Publish): void {
+  private letPublishGo(body: PublishBody): void {
     this.heldPublishBytes -= body.frame.byteLength
     letGo(this.holder, body)
   }

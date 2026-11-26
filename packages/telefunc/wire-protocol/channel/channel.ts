@@ -163,9 +163,10 @@ type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => 
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 /** Removes the listener, as aborting its `signal` does. `opened` resolves once the listener is in effect, at once for
- *  `listen()`, and rejects where it never will be, as where its channel closes first; each case is on the page.
+ *  `listen()`, or once you remove it while its channel is open, and rejects where its channel closes before the
+ *  subscription takes effect.
  *
- *  https://telefunc.com/channel#when-opened-settles */
+ *  https://telefunc.com/channel#broadcastchannel-methods */
 type Unsubscribe = (() => void) & { readonly opened: Promise<void> }
 type ChannelCloseOptions = {
   timeout?: number
@@ -173,7 +174,7 @@ type ChannelCloseOptions = {
 /** How the channel ended, as `close()` and `closed` give it: `null` where it closed gracefully on both ends, else the
  *  error it ended with.
  *
- *  https://telefunc.com/channel#how-a-channel-ends */
+ *  https://telefunc.com/channel#errors */
 type ChannelCloseResult = Error | null
 /** Cleanup, called once with what is known of the end when it is called: `null` where the channel is closing
  *  gracefully, as a close's cleanup starts before its outcome is known, else the error it ended with. `closed` and
@@ -200,17 +201,19 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   /** Per-send ack opt-out — always returns `Promise<void>`. */
   send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
   /** Send where only the newest matters: a receiver that keeps up gets every message, and one that falls behind skips to
-   *  the newest. It resolves at once, and can't be combined with `ack: true`.
+   *  the newest. Can reject with `ChannelOverflowError` if the server's memory limit is full, and can't be combined with
+   *  `ack: true`.
    *
-   *  https://telefunc.com/channel#skip-to-the-newest */
+   *  https://telefunc.com/channel#channel-methods */
   send(data: ChannelData<TOut>, opts: { lossy: true; ack?: false }): Promise<void>
   sendBinary(data: Uint8Array): Promise<void>
   sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
   sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
   /** Send binary where only the newest matters: a receiver that keeps up gets every message, and one that falls behind
-   *  skips to the newest. It resolves at once, and can't be combined with `ack: true`.
+   *  skips to the newest. Can reject with `ChannelOverflowError` if the server's memory limit is full, and can't be
+   *  combined with `ack: true`.
    *
-   *  https://telefunc.com/channel#skip-to-the-newest */
+   *  https://telefunc.com/channel#channel-methods */
   sendBinary(data: Uint8Array, opts: { lossy: true; ack?: false }): Promise<void>
   /** Receive messages. Return a value to ack the sender. Returns an unlisten function, whose `opened` resolves at once:
    *  the listener is in effect once `listen()` returns. On a channel that ended, it registers nothing, and `opened`

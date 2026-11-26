@@ -1,4 +1,15 @@
-export { StallClock, isVoid, stoppedFor, formatStalls, STALL_TICK_MS, type Stall, type StallSource, type Stop }
+export {
+  StallClock,
+  isVoid,
+  stoppedFor,
+  formatStalls,
+  stallsOf,
+  stopOf,
+  STALL_TICK_MS,
+  type Stall,
+  type StallSource,
+  type Stop,
+}
 
 /** Which process on a card's path stalled: the page (Chrome's renderer), the server, or the test process, which runs the
  *  paced link. */
@@ -71,4 +82,24 @@ class StallClock {
     this.timer = null
     return this.stalls
   }
+}
+
+/** `value`, a stop read back from JSON. */
+function stopOf(value: unknown): Stop {
+  if (typeof value !== 'object' || value === null || !('endedAt' in value) || !('ms' in value))
+    throw new Error('Expected a stop')
+  const { endedAt, ms } = value
+  if (typeof endedAt !== 'number' || typeof ms !== 'number') throw new Error('Expected a stop')
+  return { endedAt, ms }
+}
+
+/** `value`, the stalls a process's clock kept, read back from JSON. */
+function stallsOf(value: unknown): Stall[] {
+  if (!Array.isArray(value)) throw new Error('Expected stalls')
+  const each: unknown[] = value
+  return each.map((stall) => {
+    const who = typeof stall === 'object' && stall !== null && 'who' in stall ? stall.who : null
+    if (who !== 'page' && who !== 'server' && who !== 'test') throw new Error('Expected a stall')
+    return { who, ...stopOf(stall) }
+  })
 }

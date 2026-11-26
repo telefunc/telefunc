@@ -7,7 +7,7 @@ import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
-import { BODY_READ, REQUEST_CONTEXT } from './context/requestContext.js'
+import { REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
@@ -17,6 +17,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
+import { readResponseText } from './runTelefunc/readResponseText.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -142,15 +143,7 @@ function createHttpResponse(
     async getBody() {
       const body = sent()
       if (typeof body === 'string') return body
-      const decoder = new TextDecoder()
-      let result = ''
-      // A `ReadableStream` is iterable on modern runtimes; the cast is just to
-      // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
-      for await (const chunk of body as AsyncIterable<Uint8Array<ArrayBuffer>>) {
-        result += decoder.decode(chunk, { stream: true })
-      }
-      result += decoder.decode()
-      return result
+      return readResponseText(body)
     },
     err,
   }
@@ -276,16 +269,9 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   // sync access guarded by `useNodeStream`).
   await loadStreamNodeModuleOnce()
   const requestContext = createRequestContext(httpRequestResolved.request)
-  // A `Request`'s own `signal` (`telefunc/deno`, `serve({ request })`) is one Deno.serve aborts at every response's end
-  // too; the Node entries' is their socket's, which no response aborts, also on Deno's `node:http`.
-  const { request, clientGone } = httpRequestResolved
-  const held = isDeno() && clientGone === request.signal ? heldClientGone(clientGone) : null
   let response: HttpResponseParts | undefined
   try {
-    response = await runTelefunc_(
-      held ? { ...httpRequestResolved, clientGone: held.signal } : httpRequestResolved,
-      requestContext,
-    )
+    response = await runTelefunc_(httpRequestResolved, requestContext)
   } catch (err: unknown) {
     handleTelefunctionBug(err)
     response = { ...serverError, err }
@@ -295,39 +281,14 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
     // However the call ended: what its response still sends, a stream or a channel, holds the request from here on.
     requestContext.markComplete()
   }
-  // Deno never settles a read of a request's body that is pending as its streamed response ends, and every later read
-  // waits behind it; and its `request.signal` says the client left only while the response is open, as it also aborts
-  // at every response's end. So on Deno the response to a `Request` ends once the call's body is over, and from then on
-  // nothing is read from the body: Deno's abort at that response's end isn't taken for the client leaving.
-  if (held) void requestContext.bodyRead.then(held.unheld)
-  // A call with no body to read off (a text call) has nothing to hold its response for.
-  const holds = held !== null && requestContext.bodyRead !== BODY_READ
-  return createHttpResponse(response, holds ? { over: requestContext.bodyRead, unheld: held.unheld } : null)
+  const hold = requestContext.responseHold
+  if (hold) void unholdOnceOver(hold)
+  return createHttpResponse(response, hold)
 }
 
-/** On Deno, a `Request`'s `signal` while the response holds it: Deno's `request.signal` says the client left only while
- *  the response is open, and Deno also aborts it at every response's end. Its aborts stop counting once the call's body
- *  is over, which is where a held response ends, or once the answer goes out as a string (`httpResponse.body`), which
- *  nothing holds open; after a string answer, a failed read of the body says the client left. */
-function heldClientGone(clientGone: AbortSignal): { signal: AbortSignal; unheld: () => void } {
-  const gone = new AbortController()
-  let held = true
-  const abort = () => {
-    if (held) gone.abort(clientGone.reason)
-  }
-  if (clientGone.aborted) abort()
-  else clientGone.addEventListener('abort', abort, { once: true })
-  return {
-    signal: gone.signal,
-    unheld: () => {
-      held = false
-    },
-  }
-}
-
-/** Whether this runs on Deno: `globalThis.Deno`, which isn't typed here. */
-function isDeno(): boolean {
-  return hasProp(globalThis, 'Deno', 'object')
+async function unholdOnceOver(hold: NonNullable<RequestContext['responseHold']>): Promise<void> {
+  await hold.over
+  hold.unheld()
 }
 
 async function runTelefunc_(
@@ -338,6 +299,7 @@ async function runTelefunc_(
     clientLeft,
     clientGone,
     takesUpgrades,
+    onBodyRead,
   }: {
     request: Request
     readable?: StreamReadableNode
@@ -345,6 +307,7 @@ async function runTelefunc_(
     clientLeft: ClientLeft
     clientGone: AbortSignal
     takesUpgrades: TakesUpgrades
+    onBodyRead?: () => void
   },
   requestContext: RequestContext,
 ): Promise<HttpResponseParts> {
@@ -359,6 +322,7 @@ async function runTelefunc_(
       clientLeft,
       clientGone,
       takesUpgrades,
+      onBodyRead,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,

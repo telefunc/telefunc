@@ -5,6 +5,8 @@ import type { ReplayBuffer } from './ReplayBuffer.js'
 import type { MuxChannel } from './ClientConnection.js'
 import { assert } from '../../../utils/assert.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
+import type { SequencedFrame } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -26,11 +28,14 @@ type ClosedState = Extract<ChannelState, { tag: 'closed' }>
 type ChannelRecord = {
   readonly ix: number
   readonly channel: MuxChannel
+  readonly lossyBroadcast: boolean
   state: ChannelState
   /** What the page sent on it, till the server has it. */
   readonly replay: ReplayBuffer
   /** The newest seq the server sent on it. */
   lastSeq: number
+  /** When the newest seq arrived, if it is a lossy value. */
+  receivedAt: number | undefined
   /** An initial channel a RECONCILED left out, till its ATTACH_RESULT: what it queues waits, so its replay goes first. */
   awaited: boolean
   /** The last time a request carrying what it sent was refused: on `wire`, through `throughSeq`. */
@@ -110,16 +115,18 @@ class ChannelTable {
   }
 
   /** The full seq of a frame the server sent on a channel, or null for a frame to drop. */
-  receivedSeq({ index, seq: bits }: { index: number; seq: number }): number | null {
-    const record = this.records.get(index)
+  receivedSeq(frame: SequencedFrame): number | null {
+    const record = this.records.get(frame.index)
     // A channel this page let go.
     if (record === undefined) return null
     const prev = record.lastSeq
     // The header holds a seq's low 32 bits: the full seq is the one nearest the next, as no wire holds 2^31 frames.
-    const seq = seqNear(bits, prev + 1)
+    const seq = seqNear(frame.seq, prev + 1)
     // A seq already seen: a replay resends what arrived.
     if (seq <= prev) return null
     record.lastSeq = seq
+    const lossy = record.lossyBroadcast || ((frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) && frame.lossy)
+    record.receivedAt = lossy ? performance.now() : undefined
     return seq
   }
 
@@ -135,13 +142,15 @@ class ChannelTable {
 
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
-  add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
+  add(ix: number, channel: MuxChannel, replay: ReplayBuffer, lossyBroadcast = false): ChannelRecord {
     const record: ChannelRecord = {
       ix,
       channel,
+      lossyBroadcast,
       state: { tag: 'pending' },
       replay,
       lastSeq: 0,
+      receivedAt: undefined,
       awaited: false,
       refused: null,
     }

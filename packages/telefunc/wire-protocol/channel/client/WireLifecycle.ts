@@ -55,6 +55,8 @@ type TransportEnd = {
   lost?: string
   /** Telefunc doesn't serve the page's SSE requests so (`route`): the page leaves SSE for this connection. */
   route?: string
+  /** A WebSocket that ended before it opened, which may take a page whose transports list SSE to SSE. */
+  unopened?: boolean
   /** Telefunc ended `channel` for the cause `cause` (`frames` naming it): that channel ends with the cause's error, and
    *  the wire goes as a loss. */
   framesRefused?: { channel: number; cause: number }
@@ -182,6 +184,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private readonly upgrade: Upgrade
   /** The page's transports include a WebSocket. */
   private readonly allowsWebSocket: boolean
+  /** Whether a WebSocket opened on this connection, and how many WebSockets ended unopened in a row since. */
+  private openedWebSocket = false
+  private unopenedInARow = 0
   /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
    *  before or after the SSE wire opened. */
   private serverTransports: ReconciledPayload['transports'] | null = null
@@ -190,7 +195,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** The largest credit window, each way, from the last RECONCILED. */
   private creditWindow: number | null = null
   /** The largest frame the server accepts on a WebSocket, from the last RECONCILED. */
-  maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
+  private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   constructor({ owner, telefuncUrl, options }: WireLifecycleOptions) {
     this.owner = owner
     this.telefuncUrl = telefuncUrl
@@ -199,6 +204,12 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.allowsWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+  }
+
+  /** The largest frame the server accepts from `channel`; on a WebSocket, a runtime's lower limit wins. */
+  maxFrameBytesOf(channel: MuxChannel): number {
+    if (!this.allowsWebSocket) return WIRE_MAX_RAW_FRAME_BYTES
+    return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
   private enterOpen(): void {
@@ -243,7 +254,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.closed || !this.transport.isConnecting()) return
     this.cuts++
     this.transport.cancelAttempt()
-    this.onTransportClosed(this.transport)
+    this.onTransportClosed(this.transport, { unopened: this.transport.type === CHANNEL_TRANSPORT.WS })
   }
 
   /** The attempt under way sent a request body of `bytes`: it is cut no sooner than that body and its answer take at the
@@ -315,7 +326,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return !this.closed && this.nextIndex <= 0xffff
   }
 
-  register(channel: MuxChannel): void {
+  register(channel: MuxChannel, lossyBroadcast = false): void {
     // A new wire's RECONCILE lists closed channels too, so at the limit the oldest closed one the server has in full
     // makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
@@ -331,9 +342,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     )
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
-    this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES))
+    this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES), lossyBroadcast)
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -372,6 +383,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (transport !== this.transport) return
+    if (transport.type === CHANNEL_TRANSPORT.WS) this.openedWebSocket = true
+    this.unopenedInARow = 0
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
     if (this.attemptStartedAt !== null) this.attemptStartedAt = startedAt
@@ -537,6 +550,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       route,
       framesRefused,
       sessionEnded,
+      unopened = false,
     }: TransportEnd = {},
   ): void {
     if (this.closed) return
@@ -563,6 +577,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     this.clearAllowance()
     this.upgrade.abortAttempt()
+    // One that never opened takes the page to SSE, unless a WebSocket opened before: then only a second in a row does.
+    if (unopened && (++this.unopenedInARow > 1 || !this.openedWebSocket)) this.leaveWsWhereSse()
     const why = refused === undefined ? (lost ?? refusal) : `The server refused what the page sent with ${refused}`
     this.handleTransportLoss(
       why === undefined ? null : new NetworkError(why, true),
@@ -594,6 +610,14 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.WS](this.telefuncUrl, this.connectionOptions, this)
     this.handleTransportLoss(err, false)
+  }
+
+  /** Where the page's transports list SSE, the next attempt goes over it, and upgrades once a WebSocket opens. */
+  private leaveWsWhereSse(): void {
+    if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.SSE)) return
+    this.unopenedInARow = 0
+    this.transport.dispose()
+    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
   }
 
   /** Counts the refusal against the channels whose sequenced frames are among `frames`, through the highest seq
@@ -680,6 +704,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   private adoptTransport(transport: UpgradeTarget): void {
+    this.openedWebSocket = true
+    this.unopenedInARow = 0
     this.transport = transport
     this.wire++
   }
@@ -702,6 +728,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** One attempt, then what its end leaves to the connection. However it ends, the RECONCILE a registration owes goes
    *  after it. */
   private async runUpgrade(from: UpgradeSource, sessionId: string): Promise<void> {
+    const wire = this.wire
     const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
     const end = await this.upgrade.run(
       from,
@@ -722,7 +749,8 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
         void this.upgradeOnceDrained(from)
         break
       case 'stranded':
-        this.fallbackToSse()
+        // The server may have taken the barrier, and its probe is gone: the old wire goes, and the next one upgrades.
+        if (this.wire === wire) this.dropWire(from)
         break
       case 'flipped':
         // The barrier is the WebSocket's RECONCILE: it beats from here, as any wire does from its RECONCILE, and the
@@ -798,7 +826,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.exchange.forgetWire()
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
 
     const now = performance.now()
@@ -921,7 +949,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
   private startTtlIfIdle(): void {
     // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
-    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) this.ttl = this.confirming = null
+    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) return this.dispose()
     if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
@@ -929,21 +957,20 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.ttl = ttl
   }
 
-  /** Disposes the connection once the server has what its closed channels sent. Till then the expired timer stays as
-   *  `ttl`, so nothing arms another, and one PING asks the server at once (`startTtlIfIdle` lets the timer go). */
+  /** Waits for queued frames to go. If the server still owes confirmation, keep the expired timer and ask with a PING. */
   private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
     await this.transport.drained()
     if (this.ttl !== ttl || !this.channels.idle) return
     if (this.channels.delivered) return this.dispose()
-    this.liveness.pingNow(this.transport)
     this.confirming = ttl
+    this.liveness.pingNow(this.transport)
   }
 
   private dispose(): void {
     if (this.closed) return
     if (this.ttl) {
       clearTimeout(this.ttl)
-      this.ttl = null
+      this.ttl = this.confirming = null
     }
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.

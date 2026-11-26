@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { addWireCopies, dropWireCopies } from '../channel/server/channelMemory.js'
 import { CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
-import { HEADER, readU16 } from '../wire/header.js'
+import { decodePiecesAck } from '../wire/decode.fixture.js'
+import { HEADER, readTag, readU16 } from '../wire/header.js'
+import { defined } from '../../utils/defined.fixture.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { TAG, isPublishBody, isSequencedTag } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
@@ -30,9 +32,9 @@ const FAST = { bytesPerMs: 100_000, delayMs: 2 }
 /** Slow 3G: 400 kbit/s, 200 ms each way. */
 const SLOW = { bytesPerMs: 50, delayMs: 200 }
 
-/** A server wire to a page through a socket that takes whatever it is handed and reports none of it buffered, as one
- *  whose kernel buffers hold it: the link carries what the socket took, in order, at its rate, `delayMs` each way, and
- *  both can change. The page takes every message as it arrives and answers through its receiver. */
+/** A server wire to a page through a socket that reports what its link holds as buffered, as Node's does once its
+ *  kernel buffers are full: the link carries what the socket took, in order, at its rate, `delayMs` each way, and both
+ *  can change. The page takes every message as it arrives and answers through its receiver. */
 function wireTo(
   { bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: number },
   { pingInterval = 60_000, copiesOnSend = false } = {},
@@ -46,7 +48,7 @@ function wireTo(
   const delivered: number[] = []
   let heldReplies: Uint8Array<ArrayBuffer>[] | null = null
   const sendAck = (frame: Uint8Array<ArrayBuffer>) =>
-    void setTimeout(() => headroom.acknowledged(decode(frame) as PiecesAck), shape.delayMs)
+    void setTimeout(() => headroom.acknowledged(decodePiecesAck(frame)), shape.delayMs)
   const receiver = new ClientPieceReceiver({
     owner: {
       sendAck: (frame) => {
@@ -58,16 +60,16 @@ function wireTo(
     },
   })
   const got = (frame: Uint8Array, at: number) => {
-    const tag = frame[0]!
+    const tag = readTag(frame)
     arrivals.push({ tag, ix: isSequencedTag(tag) && !isPublishBody(tag) ? readU16(frame, 1) : -1, at })
   }
   const take = (message: Uint8Array<ArrayBuffer>) => {
     const at = performance.now()
     delivered.push(at)
     const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-    const own = frames.pop()!
+    const own = defined(frames.pop(), "a message's own frame")
     for (const each of frames) {
-      receiver.arrived(each[0]!, each.byteLength, at, 'riding')
+      receiver.arrived(readTag(each), each.byteLength, at, 'riding')
       got(each, at)
     }
     const frame = decode(own)
@@ -86,8 +88,8 @@ function wireTo(
     const now = performance.now()
     budget += (now - last) * shape.bytesPerMs
     last = now
-    while (link.length > 0 && link[0]!.byteLength <= budget) {
-      const message = link.shift()!
+    for (let message = link[0]; message !== undefined && message.byteLength <= budget; message = link[0]) {
+      link.shift()
       budget -= message.byteLength
       linkBytes -= message.byteLength
       setTimeout(() => take(message), shape.delayMs)
@@ -100,7 +102,9 @@ function wireTo(
         link.push(message)
         linkBytes += message.byteLength
       },
-      bufferedAmount: 0,
+      get bufferedAmount() {
+        return linkBytes
+      },
       copiesOnSend,
     },
     pingInterval,
@@ -126,7 +130,7 @@ function wireTo(
     delivered,
     /** When the first frame of `tag` arrived, of channel `ix` where it has one, past `since`. */
     arrived: (tag: number, ix = -1, since = 0) =>
-      arrivals.find((a) => a.tag === tag && a.ix === ix && a.at >= since)?.at,
+      defined(arrivals.find((a) => a.tag === tag && a.ix === ix && a.at >= since)?.at, `a frame of tag ${tag}`),
     stop: () => {
       clearInterval(timer)
       headroom.close()
@@ -148,15 +152,15 @@ function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: numb
   let delivered = 0
   const receiver = new ClientPieceReceiver({
     owner: {
-      sendAck: (frame) => void toServer.push({ ack: decode(frame) as PiecesAck, due: performance.now() + delayMs }),
+      sendAck: (frame) => void toServer.push({ ack: decodePiecesAck(frame), due: performance.now() + delayMs }),
       carryAck: () => {},
     },
   })
   const take = (message: Uint8Array<ArrayBuffer>, at: number) => {
     delivered += message.byteLength
     const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-    const own = frames.pop()!
-    for (const each of frames) receiver.arrived(each[0]!, each.byteLength, at, 'riding')
+    const own = defined(frames.pop(), "a message's own frame")
+    for (const each of frames) receiver.arrived(readTag(each), each.byteLength, at, 'riding')
     const frame = decode(own)
     if (frame.tag === TAG.ANNOUNCE) receiver.announce(frame.bytes, at, frame.floor)
     else if (frame.tag === TAG.PIECE) receiver.add(frame.total, frame.piece, at)
@@ -181,8 +185,14 @@ function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: numb
     async step() {
       await vi.advanceTimersByTimeAsync(STEP_MS)
       const now = performance.now()
-      while (toPage.length > 0 && toPage[0]!.due <= now) take(toPage.shift()!.message, now)
-      while (toServer.length > 0 && toServer[0]!.due <= now) headroom.acknowledged(toServer.shift()!.ack)
+      for (let next = toPage[0]; next !== undefined && next.due <= now; next = toPage[0]) {
+        toPage.shift()
+        take(next.message, now)
+      }
+      for (let next = toServer[0]; next !== undefined && next.due <= now; next = toServer[0]) {
+        toServer.shift()
+        headroom.acknowledged(next.ack)
+      }
     },
     stop: () => headroom.close(),
   }
@@ -213,14 +223,16 @@ function framesOfFourChannels(wire: Wire): void {
 }
 
 /** A wire that carried a 64 KiB download on a fast link, then nineteen on Slow 3G 2.5 s apart, each over and the link
- *  idle by the next. */
+ *  idle by the next. Each goes as two frames: the second queues behind the first, so its acknowledgement measures the
+ *  link. */
 async function wireThatSlowed(): Promise<Wire> {
   const wire = wireTo({ bytesPerMs: 1_000, delayMs: 10 })
   wire.binary(1, 64 * 1024)
   await sleep(500)
   wire.reshape(SLOW)
   for (let n = 0; n < 19; n++) {
-    wire.binary(1, 64 * 1024)
+    wire.binary(1, 32 * 1024)
+    wire.binary(1, 32 * 1024)
     await sleep(2_500)
   }
   expect(wire.linkBytes()).toBe(0)
@@ -326,34 +338,34 @@ describe('the lanes', () => {
           const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
           if (frames.some((frame) => frame[0] === TAG.PIECES_ACK_REQ)) asks.push(headroom.sender.transmittedBytes)
         },
-        // The kernel holds what the socket took, so the data handed queued and its acknowledgement measures the path.
-        bufferedAmount: 1024 * 1024,
+        bufferedAmount: 0,
+        copiesOnSend: true,
       },
       pingInterval: 60_000,
     })
+    addWireCopies(ALL_COPIES)
     try {
       let seq = 0
-      for (let n = 0; n < 50; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
-      await sleep(30)
-      // 100 kB over a second: a window of the least send-ahead.
-      headroom.acknowledged({ bytes: headroom.sender.transmittedBytes, heldMs: 0, spanUs: 1_000_000 })
-      const confirmed = headroom.sender.confirmedBytes
-      // 2 KiB frames past the window, which wait whole: no probe, and the blocked window asks.
+      // 2 KiB frames past what copies may hold, which wait for the page's word: it hears none, so it asks.
       for (let n = 0; n < 200; n++) headroom.send(encode.binary(1, new Uint8Array(2048), ++seq))
-      await Promise.resolve()
-      const first = headroom.sender.transmittedBytes
-      // Half the window confirmed frees room for more data while the request is open.
       await sleep(10)
-      headroom.acknowledged({ bytes: confirmed + Math.floor((first - confirmed) / 2), heldMs: 0, spanUs: 0 })
-      // The answer to the first request, 20 ms after it, asks again of the data handed since.
+      const [asked = 0] = asks
+      expect(asks).toEqual([asked])
+      // Half of what went confirmed frees copy room for more data while the request is open.
       await sleep(10)
-      headroom.acknowledged({ bytes: asks[0]!, heldMs: 0, spanUs: 0 })
-      expect(asks.length).toBe(2)
+      headroom.acknowledged({ bytes: Math.floor(asked / 2), heldMs: 0, spanUs: 0 })
+      // The answer to the request, 20 ms after it: the page hears nothing again, and it asks of the data handed since.
+      await sleep(10)
+      headroom.acknowledged({ bytes: asked, heldMs: 0, spanUs: 0 })
+      await sleep(10)
+      const [, again = 0] = asks
+      expect(asks).toEqual([asked, again])
       // 1 ms after that request, the page's report of all it got before it: the request ends its message.
       await sleep(1)
-      headroom.acknowledged({ bytes: asks[1]! - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
+      headroom.acknowledged({ bytes: again - encode.piecesAckReq().byteLength, heldMs: 0, spanUs: 0 })
       expect(headroom['leastRtt']).toBe(20)
     } finally {
+      dropWireCopies(ALL_COPIES)
       headroom.close()
     }
   })
@@ -489,9 +501,12 @@ async function downloadFor(wire: Wire, ms: number, during: (t: number) => void =
     await sleep(50)
   }
   await sleep(Math.ceil(wire.linkBytes() / SLOW.bytesPerMs) + 60_000)
-  const times = [at, ...wire.delivered.filter((t) => t >= at)]
   let quiet = 0
-  for (let i = 1; i < times.length; i++) quiet = Math.max(quiet, times[i]! - times[i - 1]!)
+  let previous = at
+  for (const t of wire.delivered.filter((t) => t >= at)) {
+    quiet = Math.max(quiet, t - previous)
+    previous = t
+  }
   const got = wire.arrivals.filter((a) => a.tag === TAG.BINARY && a.ix === 1 && a.at >= at).length
   return { quiet, frames, got }
 }
@@ -555,8 +570,8 @@ describe("the wire's control frames", () => {
       expect([...wire.headroom.sender.waitingFrames]).toContain(reconciled)
       await sleep(30_000)
       // Behind the 1 MB it would have waited out 20 s of the link.
-      expect(wire.arrived(TAG.RECONCILED)! - at).toBeLessThan(5_000)
-      expect(wire.arrived(TAG.RECONCILED)!).toBeLessThan(wire.arrived(TAG.BINARY, 1)!)
+      expect(wire.arrived(TAG.RECONCILED) - at).toBeLessThan(5_000)
+      expect(wire.arrived(TAG.RECONCILED)).toBeLessThan(wire.arrived(TAG.BINARY, 1))
     } finally {
       wire.stop()
     }
@@ -570,7 +585,7 @@ describe("the wire's control frames", () => {
       wire.send(() => reconciled)
       expect([...wire.headroom.sender.waitingFrames]).not.toContain(reconciled)
       await sleep(30_000)
-      expect(wire.arrived(TAG.RECONCILED)!).toBeLessThan(wire.arrived(TAG.BINARY, 1)!)
+      expect(wire.arrived(TAG.RECONCILED)).toBeLessThan(wire.arrived(TAG.BINARY, 1))
     } finally {
       wire.stop()
     }

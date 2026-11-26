@@ -11,7 +11,7 @@ function Page() {
   })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
-  const key = () => new URLSearchParams(window.location.search).get('key')!
+  const key = () => new URLSearchParams(window.location.search).get('key') ?? ''
 
   const subscribe = async () => {
     await onSubscribeAndUnsubscribeTwice(key())

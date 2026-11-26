@@ -26,6 +26,9 @@ type HttpRequestResolved = {
   clientGone: AbortSignal
   /** Whether the server that received the request takes WebSocket upgrades. */
   takesUpgrades: TakesUpgrades
+  /** Called once the request's body is read, or, where it streams for as long as the call's channels live, once that
+   *  stream opens: from then on, telefunc alone ends the request. */
+  onBodyRead?: () => void
 }
 
 type HttpRequest =
@@ -97,23 +100,15 @@ async function serveNode(
 }
 
 /** `serve()` for the adapters handed a `Request` with what its server shows: how its client left (`Bun.serve`,
- *  `Deno.serve`), and whether it takes WebSocket upgrades (those two, a Durable Object, and on Node the server
- *  `serve({ request })` runs on). */
+ *  `Deno.serve`), whether it takes WebSocket upgrades (those two, a Durable Object, and on Node the server
+ *  `serve({ request })` runs on), and what it does once the body is read (`Bun.serve`). */
 async function serveRuntimeRequest(
   httpRequest: Extract<HttpRequest, { request: Request }>,
-  clientLeft: ClientLeft,
-  clientGone: AbortSignal,
-  takesUpgrades: TakesUpgrades,
+  server: Pick<HttpRequestResolved, 'clientLeft' | 'clientGone' | 'takesUpgrades' | 'onBodyRead'>,
 ): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, 1)
   assertRequestSignalFlag()
-  return runTelefunc({
-    request: httpRequest.request,
-    context: httpRequest.context,
-    clientLeft,
-    clientGone,
-    takesUpgrades,
-  })
+  return runTelefunc({ request: httpRequest.request, context: httpRequest.context, ...server })
 }
 
 /** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/Telefunc */

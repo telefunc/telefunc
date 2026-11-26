@@ -11,6 +11,7 @@ import { OrderedStubs } from './OrderedStubs.js'
 import { Outcome } from '../../channel/channel.js'
 import type {
   BroadcastBinaryOnMessage,
+  BroadcastDelivery,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
@@ -116,9 +117,8 @@ class CloudflareBucketPublishBuffer {
     if (this.isFlushing) return
     this.isFlushing = true
     try {
-      while (this.entries.length > 0) {
-        // It leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
-        const entry = this.entries.shift()!
+      // Each leaves before its send: eviction and clear() are for what still waits, and its send holds its bytes.
+      for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
         this.totalBytes -= entry.bytes
         try {
           const ack = await entry.send()
@@ -133,8 +133,8 @@ class CloudflareBucketPublishBuffer {
   }
 
   clear(): void {
-    while (this.entries.length > 0) {
-      this.entries.shift()!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
+    for (let entry = this.entries.shift(); entry !== undefined; entry = this.entries.shift()) {
+      entry.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
     }
     this.totalBytes = 0
   }
@@ -154,8 +154,9 @@ class CloudflareBucketPublishBuffer {
   }
 
   private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.entries.length > 0) {
-      const entry = this.entries.shift()!
+    while (this.totalBytes > this.maxBytes) {
+      const entry = this.entries.shift()
+      if (entry === undefined) return
       entry.pending.reject(
         new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
       )
@@ -395,10 +396,14 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       () => {},
     )
     this.presenceOperations.set(presence, settled)
-    void settled.then(() => {
-      if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
-    })
+    void this.forgetPresenceOperation(presence, settled)
     return done
+  }
+
+  /** Drops `presence`'s queue once `settled`, its last operation, has settled, unless another one joined it meanwhile. */
+  private async forgetPresenceOperation(presence: string, settled: Promise<void>): Promise<void> {
+    await settled
+    if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
   }
 
   private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
@@ -599,7 +604,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
-      activeBuckets.map((activeBucket) => {
+      Array.from(presenceByBucket, ([activeBucket, doNames]) => {
         const coordinator = this.getBucketCoordinatorName(key, activeBucket)
         return authorityState.broadcastCalls.call(
           coordinator,
@@ -611,7 +616,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
               binaryData,
               forwarded: true,
               locationBucket: activeBucket,
-              doNames: presenceByBucket.get(activeBucket)!,
+              doNames,
               info,
             }),
         )
@@ -715,11 +720,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
 /** Calls each of `subs` the Durable Object `doName` owns with `payload`. */
 function deliverToOwned<T>(
-  subs: Map<(payload: T, info: WirePublishInfo) => void, string> | undefined,
+  subs: Map<(payload: T, info: WirePublishInfo, delivery?: BroadcastDelivery) => void, string> | undefined,
   doName: string,
   payload: T,
   info: WirePublishInfo,
 ): void {
   if (subs === undefined) return
-  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info)
+  const delivery: BroadcastDelivery = { body: undefined }
+  for (const [cb, owner] of subs) if (owner === doName) cb(payload, info, delivery)
 }

@@ -1,4 +1,4 @@
-export { takeUpgrades, takeUpgradesOfNewServer }
+export { installWebSocketOn, takeUpgradesOfNewServer }
 export type { HttpServer }
 
 import crossws from 'crossws/adapters/node'
@@ -13,6 +13,8 @@ import type { IncomingMessage, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 import type { Duplex } from 'node:stream'
 import type { Peer } from 'crossws'
+import { assert } from '../utils/assert.js'
+import { markRequestsOfServer } from './requestServer.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -24,11 +26,9 @@ declare module 'crossws' {
 
 type HttpServer = Server | Http2SecureServer
 
-// 0.3.1 checks this registry, under this key and in this shape, before it adds its own `upgrade` listener: a server in
-// it has one copy's listener already, and two would each take the same socket.
+// 0.3.1 reads this registry, key and shape before it adds its `upgrade` listener: two would take one socket.
 const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServers: new WeakSet<object>() })
 
-// TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
 // Each upgrade's socket, by the request its upgrade hook gets.
 const sockets = new WeakMap<Request, Duplex>()
 // Made with the first upgrade listener, so an app that takes no upgrades makes no adapter.
@@ -58,13 +58,8 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
   handshakes: new WeakMap<IncomingMessage, Handshake>(),
 })
 
-/** Where the server reads `shouldUpgradeCallback` (Node 22.21, 24.9 and later), Telefunc's callback goes in front of the
- *  server's current one: it upgrades Telefunc's handshake, and the server's own callback (the app's, or Node's default)
- *  decides every other request with `Upgrade`, as on the same server without Telefunc's listener. So Node's default
- *  upgrades a request only where another `upgrade` listener is there to take it, and sends any other to the app's
- *  `request` listeners. Node offers no way to ask what a callback decides without one of the listeners, so while the
- *  server's own callback runs, on the server as Node calls it, the server's `listenerCount` leaves Telefunc's listener
- *  out; its `listeners('upgrade')` and `rawListeners('upgrade')` still show it. */
+/** Telefunc's `shouldUpgradeCallback` (Node 22.21, 24.9 and later) upgrades its handshake and leaves every other
+ *  request to the server's own, which sees a `listenerCount` without Telefunc's listener. */
 function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
   if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
   const own = server.shouldUpgradeCallback
@@ -107,9 +102,14 @@ function takeUpgradesOfNewServer(httpServer: HttpServer): void {
   takeUpgrades(httpServer)
 }
 
-/** Telefunc's `upgrade` listener on `httpServer`, once: its pages are offered WebSocket while the listener is there. A
- *  page's server is read off its request's socket, as `serve({ req, res })` and Vite dev's middleware do, or, for
- *  `serve({ request })`, off the header an app's own `installWebSocket()` adds (serve/requestServer.ts). */
+/** The app's `installWebSocket()`: Telefunc takes the server's upgrades, and marks its requests for
+ *  `serve({ request })`, which can't read the server off a `Request`'s socket as the other forms do. */
+function installWebSocketOn(httpServer: HttpServer): void {
+  takeUpgrades(httpServer)
+  markRequestsOfServer(httpServer)
+}
+
+/** Telefunc's `upgrade` listener on `httpServer`, once: its pages are offered WebSocket while the listener is there. */
 function takeUpgrades(httpServer: HttpServer): void {
   const before = upgradeServers.get(httpServer)
   const on = telefuncsUpgradesOn(httpServer)
@@ -127,10 +127,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { url, config } = handshakes.get(req) ?? readHandshake(req)
     if (url?.pathname !== config.telefuncUrl) {
-      // Here where Node upgraded a request that isn't Telefunc's: on a Node that doesn't read `shouldUpgradeCallback`
-      // (before 22.21 and 24.9), which hands every request with `Upgrade` to the `upgrade` listeners, or where the
-      // server's own callback upgraded it. One that no other listener is there to take is answered as a page the
-      // server doesn't have.
+      // Upgraded by a Node before 22.21 and 24.9, or by the server's own callback: with no other listener, a 404.
       if (httpServer.listenerCount('upgrade') === 1) {
         socket.once('finish', socket.destroy)
         socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
@@ -161,8 +158,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   httpServer.on('upgrade', onUpgrade)
   upgradeOthersOnlyForTheirListeners(httpServer, taken)
   upgradeServers.set(httpServer, taken)
-  // What only the removal itself can do: give the server its own callback back at once, and free 0.3.1's registry for
-  // 0.3.1's next install. A removal it doesn't see, the next `installWebSocket()` makes up for.
+  // The removal gives the server its own callback back and frees 0.3.1's registry; the next install covers one unseen.
   const onRemoved = (event: string | symbol, removed: unknown) => {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)
@@ -177,7 +173,8 @@ function takeUpgrades(httpServer: HttpServer): void {
 /** Sends `frame` in one write with the task's other frames, up to the socket's mark: written alone, each frame costs a
  *  syscall while the socket has room. Past the mark it goes at once, or the page would wait for the whole task. */
 function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
-  const socket = peer.context.socket!
+  const { socket } = peer.context
+  assert(socket)
   if (!socket.writableCorked) {
     socket.cork()
     process.nextTick(() => socket.uncork())

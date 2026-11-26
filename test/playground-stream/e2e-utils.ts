@@ -27,6 +27,7 @@ export {
   setServerRuntime,
   canCutWire,
   REDIS_TOOK_REFUSED_KEY,
+  defined,
 }
 
 import { page, getServerUrl, expectLog } from '@brillout/test-e2e'
@@ -110,7 +111,17 @@ async function serverHeapUsed(): Promise<number> {
 async function serverArrayBuffers(): Promise<number> {
   await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
   const resp = await fetch(`${getServerUrl()}/api/array-buffers`)
-  return ((await resp.json()) as { arrayBuffers: number }).arrayBuffers
+  const answer: unknown = await resp.json()
+  if (
+    !(
+      typeof answer === 'object' &&
+      answer !== null &&
+      'arrayBuffers' in answer &&
+      typeof answer.arrayBuffers === 'number'
+    )
+  )
+    throw new Error('Expected `{ arrayBuffers }`')
+  return answer.arrayBuffers
 }
 
 function fetchFromPage(url: string, method: 'GET' | 'POST'): Promise<{ ok: boolean; text: string }> {
@@ -273,6 +284,12 @@ function isTransientNetworkError(err: unknown): boolean {
   // bounce as transient too, so the navigation still gets retried.
   if (message.includes('chrome-error://chromewebdata')) return true
   return transientNetworkErrors.some((code) => message.includes(code))
+}
+
+/** `value`, once the page has shown it: `what` says what it is. */
+function defined<T>(value: T | null | undefined, what: string): T {
+  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
+  return value
 }
 
 async function getResult<T = any>(selector: string): Promise<T> {

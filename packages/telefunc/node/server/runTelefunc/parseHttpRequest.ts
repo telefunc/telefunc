@@ -44,6 +44,8 @@ type RunContext = {
   clientGone: AbortSignal
   /** Whether the server that received the request takes WebSocket upgrades, as its adapter says. */
   takesUpgrades: TakesUpgrades
+  /** The adapter's, called once the body is read: `HttpRequestResolved['onBodyRead']`. */
+  onBodyRead?: () => void
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -81,7 +83,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, clientLeft, takesUpgrades, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, takesUpgrades, onBodyRead, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -92,7 +94,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades)
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades, onBodyRead)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
@@ -204,11 +206,11 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     if (!source) return refuseEndedEnvelope(runContext)
-    const reader = new BodyReader(source, clientLeft)
+    const reader = new BodyReader(source, clientLeft, queueMemory)
+    reader.onEnd = runContext.onBodyRead
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
-    const { clientGone } = runContext
-    runContext.requestContext.bodyRead = Promise.race([reader.restRead, aborted(clientGone)])
+    const clientGone = holdUploadResponse(runContext, reader.restRead)
     // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
     // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign;
     // one that stopped short for a whole connect window is given up on, with its files.
@@ -226,10 +228,10 @@ async function readBody(
       else clientGone.addEventListener('abort', leftByClient, { once: true })
     }
     // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
-    const leftDuringCall = () => void reader.readSettled().then(() => reader.clientGaveUp())
+    const leftDuringCall = () => void giveUpOnceReadSettled(reader)
     clientGone.addEventListener('abort', leftDuringCall, { once: true })
     runContext.requestContext.onAnswered(() => {
-      reader.keepRest(queueMemory)
+      reader.keepRest()
       watchClient()
     })
     runContext.requestContext.onClose(() => void readOffBody(reader, clientGone, watchClient))
@@ -259,9 +261,11 @@ async function readBody(
       registerFile: (i, s) => reader.registerFile(i, s),
     }
   }
+  const text = await readText(request, clientLeft)
+  runContext.onBodyRead?.()
   return {
     isMalformedRequest: false,
-    text: await readText(request, clientLeft),
+    text,
     registerFile: () => ({
       stream: () =>
         new ReadableStream<Uint8Array<ArrayBuffer>>({
@@ -273,6 +277,28 @@ async function readBody(
       onGone: (callback) => callback(),
     }),
   }
+}
+
+/** Ends the file reads of `reader`, whose client left, once the read of the body under way took its failure. */
+async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
+  await reader.readSettled()
+  reader.clientGaveUp()
+}
+
+/** Deno can stall reads when the response ends, and its legacy signal aborts at that point. Keep the response
+ *  open until the upload ends or the client leaves. A string answer releases the hold itself. */
+function holdUploadResponse({ request, clientGone, requestContext }: RunContext, restRead: Promise<void>): AbortSignal {
+  // A Node adapter's socket signal stays valid after the response, including under Deno's node:http.
+  if (!hasProp(globalThis, 'Deno', 'object') || clientGone !== request.signal) return clientGone
+  const gone = new AbortController()
+  const abort = () => gone.abort(clientGone.reason)
+  if (clientGone.aborted) abort()
+  else clientGone.addEventListener('abort', abort, { once: true })
+  requestContext.responseHold = {
+    over: Promise.race([restRead, aborted(gone.signal)]),
+    unheld: () => clientGone.removeEventListener('abort', abort),
+  }
+  return gone.signal
 }
 
 /** A binary request whose body ends before its envelope is complete: no body (a Web `Request`'s `null`), an empty one, or
@@ -288,13 +314,13 @@ function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true
  *  hold the connection as long as it sends, as they do without Telefunc. A failure that is the app's own error is a bug;
  *  a client that left ends it quietly. `watchClient`: from now on, the client's leaving ends the read. */
 async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
-  // A client that leaves ends the call (`signal`) in the same event in which its body fails: the read of the body under
-  // way settles first, so that the file reads end with that failure, or, with none under way, as the client's. A call
-  // that answered has no failure coming.
+  // A client that left (on Node 22.0, `signal` says so a microtask late) fails the read under way, which settles first to
+  // keep its own failure; an answered call's read may wait on the client, so it isn't awaited.
+  if (!signal.aborted) await Promise.resolve()
   if (signal.aborted) await reader.readSettled()
   watchClient()
   try {
-    await reader.endCall(signal.aborted ? 'client' : 'server', queueMemory)
+    await reader.endCall(signal.aborted ? 'client' : 'server')
   } catch (err: unknown) {
     handleTelefunctionBug(err)
   }

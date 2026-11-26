@@ -48,7 +48,7 @@ class Liveness {
     else this.installProvisional(transport)
   }
 
-  /** Idempotent once a RECONCILED set the interval; replaces a provisional heartbeat. Its first PING goes at once. */
+  /** Idempotent once a RECONCILED set the interval; replaces a provisional heartbeat. Queues its first PING. */
   install(transport: ClientChannelTransport, intervalMs: number): void {
     if (this.beatsAt(transport, intervalMs)) return
     this.pingIntervalMs = intervalMs

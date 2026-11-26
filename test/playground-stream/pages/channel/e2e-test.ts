@@ -11,9 +11,11 @@ import {
   stopProxy,
   startProxy,
   countConnections,
+  defined,
 } from '../../e2e-utils'
 import { newCDPSession, sendRefusedWarning, withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
+import { WIRE_VERSION } from '../../../../packages/telefunc/wire-protocol/constants'
 import { messageFrames } from '../../../../packages/telefunc/wire-protocol/wire/frame'
 import { TAG } from '../../../../packages/telefunc/wire-protocol/wire/tags'
 
@@ -355,7 +357,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   // Whichever wire carries the ACK_RES, the WebSocket or the SSE stream, the page gets it with its value corrupted, for
   // OK and ABORT: the send rejects, and the parse failure is reported as uncaught, the same on both.
   test('channel: a malformed acknowledgement rejects its send with the parse failure', async () => {
-    const context = await page.context().browser()!.newContext()
+    const context = await defined(page.context().browser(), 'the browser').newContext()
     const routed = await context.newPage()
     try {
       let status = 0
@@ -382,13 +384,15 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
       for (status of [0, 2]) {
         await navigate(`${getServerUrl()}/channel`, undefined, routed)
-        await routed.evaluate((s) => ((window as any).ackStatus = s), status)
+        await routed.evaluate((s) => (window.ackStatus = s), status)
         await routed.click('#channel-test-per-send-ack')
         await autoRetry(async () => {
-          const state = JSON.parse((await routed.textContent('#channel-state'))!)
+          const state: ChannelState = JSON.parse(
+            defined(await routed.textContent('#channel-state'), 'the channel state'),
+          )
           expect(state.perSendAck).toBe('SyntaxError')
         })
-        corrupted += await routed.evaluate(() => (window as any).acksCorrupted ?? 0)
+        corrupted += await routed.evaluate(() => window.acksCorrupted ?? 0)
       }
       expect(corrupted).toBe(2)
       expect(failures).deep.equal(['SyntaxError', 'SyntaxError'])
@@ -918,7 +922,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   // The test holds what goes to the server on the page's channels' wire, SSE's POSTs and the WebSocket's messages, while
   // the page gets two channels: the RECONCILE naming the first can't be answered before the page sent on both.
   test("channel: a page's sends on a channel it just got and on an older one reach the server in the order it made them", async () => {
-    const context = await page.context().browser()!.newContext()
+    const context = await defined(page.context().browser(), 'the browser').newContext()
     const routed = await context.newPage()
     try {
       let holding = false
@@ -934,8 +938,10 @@ function testChannel(isDev: boolean, inDocker = false) {
         ws.onMessage((message) => hold(() => server.send(message)))
         server.onMessage((message) => ws.send(message))
       })
-      const sendOrder = async () =>
-        (JSON.parse((await routed.textContent('#channel-state'))!) as ChannelState).sendOrder
+      const sendOrder = async () => {
+        const state: ChannelState = JSON.parse(defined(await routed.textContent('#channel-state'), 'the channel state'))
+        return state.sendOrder
+      }
       await routed.goto(`${getServerUrl()}/channel`)
       // A new context loads every asset cold: under load it hydrates later than `navigate` waits.
       await routed.locator('#hydrated').waitFor({ state: 'attached' })
@@ -944,13 +950,13 @@ function testChannel(isDev: boolean, inDocker = false) {
         expect(await sendOrder()).not.toBe(null)
       })
       holding = true
-      await routed.evaluate(() => (window as any).sendOrderGo())
+      await routed.evaluate(() => window.sendOrderGo?.(undefined))
       await autoRetry(async () => {
-        expect((await sendOrder())!.sent).toBe(true)
+        expect(defined(await sendOrder(), 'the send order').sent).toBe(true)
       })
       holding = false
       for (const go of held.splice(0)) go()
-      const { id } = (await sendOrder())!
+      const { id } = defined(await sendOrder(), 'the send order')
       let received = ''
       await autoRetry(async () => {
         received = (await getCleanupState())[`sendOrder_${id}`] ?? ''
@@ -1023,13 +1029,16 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
     await page.evaluate(
       async ({ timers, delay }) => {
-        const frame = document.querySelector('iframe')!
+        const frame = document.querySelector('iframe')
+        if (!frame?.contentWindow) throw new Error('Expected the left page in an iframe')
         // Keeps the left page's realm alive past the navigation, as a browser's own references do at times.
-        ;(window as any).leftPageRealm = (frame.contentWindow as any).Object
+        window.leftPageRealm = frame.contentWindow.setTimeout
         frame.src = '/'
         await new Promise((resolve) => (frame.onload = resolve))
-        ;(window as any).timersRan = 0
-        for (let i = 0; i < timers; i++) frame.contentWindow!.setTimeout(() => (window as any).timersRan++, delay)
+        const next = frame.contentWindow
+        if (!next) throw new Error('Expected the next page in the iframe')
+        window.timersRan = 0
+        for (let i = 0; i < timers; i++) next.setTimeout(() => (window.timersRan = (window.timersRan ?? 0) + 1), delay)
       },
       { timers: 100, delay: 2000 },
     )
@@ -1037,7 +1046,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.send('HeapProfiler.collectGarbage')
     await cdp.detach()
     await autoRetry(async () => {
-      expect(await page.evaluate(() => (window as any).timersRan)).toBe(100)
+      expect(await page.evaluate(() => window.timersRan)).toBe(100)
     })
   })
 
@@ -1093,17 +1102,17 @@ function testChannel(isDev: boolean, inDocker = false) {
   test('channel: lossy sends on a channel keep only the newest before the telefunction returns, and their order, the newest and the plain ones on a link that keeps up', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-lossy-sends')
-    let lossySends: string[] | null = null
-    await autoRetry(
+    const sends = await autoRetry(
       async () => {
-        lossySends = (await getResult<{ lossySends: string[] | null }>('#channel-state')).lossySends
+        const { lossySends } = await getResult<{ lossySends: string[] | null }>('#channel-state')
         expect(lossySends?.at(-1)).toBe('done')
+        return defined(lossySends, "the lossy sends' order")
       },
       { timeout: 20_000 },
     )
     // Before the telefunction returns, nothing is sent, so which go doesn't depend on the link.
-    expect(lossySends!.slice(0, 3)).deep.equal(['L3', 'R1', 'L4'])
-    expectLossyStream(lossySends!.slice(3), lossyStream())
+    expect(sends.slice(0, 3)).deep.equal(['L3', 'R1', 'L4'])
+    expectLossyStream(sends.slice(3), lossyStream())
   })
 
   /** What the server read of the page's lossy-sends channel, once the page opened it. */
@@ -1287,7 +1296,7 @@ function testChannel(isDev: boolean, inDocker = false) {
       )
     })
     expectLog(sendRefusedWarning)
-    const paced = (await getResult<ChannelState>('#channel-state')).paced!
+    const paced = defined((await getResult<ChannelState>('#channel-state')).paced, 'the paced row')
     expect(paced.ended).toBe(false)
   })
 
@@ -1564,13 +1573,13 @@ function testChannel(isDev: boolean, inDocker = false) {
     await navigate(`${getServerUrl()}/channel`)
     const bugs = async () => Object.keys(await getCleanupState()).filter((key) => key.startsWith('bug:'))
     const bugsBefore = await bugs()
-    const answer = await page.evaluate(async () => {
-      const resp = await fetch('/_telefunc?_telefunc=sse&wire=3', {
+    const answer = await page.evaluate(async (url) => {
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'x-telefunc-request': 'sse' },
       })
       return { status: resp.status, text: await resp.text() }
-    })
+    }, `/_telefunc?_telefunc=sse&wire=${WIRE_VERSION}`)
     expect(answer).deep.equal({
       status: 400,
       text: 'The request has no body: an SSE channel request starts with its metadata.',
@@ -1655,7 +1664,7 @@ function testChannelApi() {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-config-checks')
     await autoRetry(async () => {
-      const checks = JSON.parse((await page.textContent('#channel-config-checks-result'))!)
+      const checks = await getResult('#channel-config-checks-result')
       expect(checks.same).toBe(null)
       expect(checks.changed).toContain("can't change once the server has used it")
       expect(checks.reconnectTimeout).toContain('`config.channel.reconnectTimeout` should be at least 1000')
@@ -1695,7 +1704,6 @@ const PER_SEND_ACK = '"ack:per-send-test"'
 /** In the page: an SSE event carrying `needle` gets it corrupted as the WebSocket route does, its status byte set to
  *  `window.ackStatus`; `window.acksCorrupted` counts them. */
 function corruptSseAcks(needle: string) {
-  const w = window as any
   const bytes = new TextEncoder().encode(needle)
   const indexOf = (frame: Uint8Array) => {
     for (let i = 0; i + bytes.length <= frame.length; i++) if (bytes.every((b, k) => frame[i + k] === b)) return i
@@ -1713,9 +1721,9 @@ function corruptSseAcks(needle: string) {
     const frame = fromBase64url(line.slice(6))
     const payload = indexOf(frame)
     if (payload === -1) return line
-    frame[payload - 1] = w.ackStatus
+    frame[payload - 1] = window.ackStatus ?? 0
     frame[payload] = '{'.charCodeAt(0)
-    w.acksCorrupted = (w.acksCorrupted ?? 0) + 1
+    window.acksCorrupted = (window.acksCorrupted ?? 0) + 1
     return `data: ${toBase64url(frame)}`
   }
   const corrupting = () => {
@@ -1725,7 +1733,7 @@ function corruptSseAcks(needle: string) {
     return new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         const lines = (partial + decoder.decode(chunk, { stream: true })).split('\n')
-        partial = lines.pop()!
+        partial = lines.pop() ?? ''
         for (const line of lines) controller.enqueue(encoder.encode(`${corruptLine(line)}\n`))
       },
     })
@@ -1735,5 +1743,17 @@ function corruptSseAcks(needle: string) {
     const response = await fetchPage(input, init)
     if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) return response
     return new Response(response.body.pipeThrough(corrupting()), response)
+  }
+}
+
+declare global {
+  interface Window {
+    /** The status byte a corrupted acknowledgement gets, and how many the page corrupted. */
+    ackStatus?: number
+    acksCorrupted?: number
+    /** A function of the left page's realm, which keeps it alive. */
+    leftPageRealm?: unknown
+    /** How many of the next page's timers ran. */
+    timersRan?: number
   }
 }

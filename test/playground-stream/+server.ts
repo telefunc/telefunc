@@ -158,6 +158,11 @@ app.post('/api/wire/release', (c) => {
   return c.json({ released })
 })
 
+function testUserContext(request: Request) {
+  const user = request.headers.get('x-test-user')
+  return user === null ? undefined : { user }
+}
+
 app.all('/_telefunc', async (c) => {
   const isSse = c.req.query('_telefunc') === 'sse'
   const node = (c.req.raw as unknown as { runtime?: { node?: { req: IncomingMessage } } }).runtime?.node
@@ -217,7 +222,7 @@ app.all('/_telefunc', async (c) => {
     return new Response(null)
   }
   console.log(`[INST=${INST}] Handling /_telefunc via web request adapter`)
-  const response = await tf!.serve({ request: c.req.raw })
+  const response = await tf?.serve({ request: c.req.raw, context: testUserContext(c.req.raw) })
   return response ?? c.text('Not found', 404)
 })
 
@@ -245,13 +250,13 @@ type RuntimeRequest = Request & {
 async function fetch(request: RuntimeRequest): Promise<Response | undefined> {
   const { runtime } = request
   if (tfBun && runtime?.bun) {
-    const response = await tfBun.serve({ request, server: runtime.bun.server })
+    const response = await tfBun.serve({ request, server: runtime.bun.server, context: testUserContext(request) })
     // Telefunc's own WebSocket handshake is answered by Bun, once upgraded; one for another path is the app's.
     const upgraded = request.headers.get('upgrade') === 'websocket' && new URL(request.url).pathname === '/_telefunc'
     if (response || upgraded) return response
   }
   if (tfDeno && runtime?.deno) {
-    const response = await tfDeno.serve({ request, info: runtime.deno.info })
+    const response = await tfDeno.serve({ request, info: runtime.deno.info, context: testUserContext(request) })
     if (response) return response
   }
   return app.fetch(request)

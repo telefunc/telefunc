@@ -3,6 +3,7 @@
 // against a scripted server (scriptedServer.fixture.ts), over SSE batch POSTs unless a test says otherwise.
 
 import { expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 import { SSE_RECONCILE_DEADLINE_MS } from '../../constants.js'
 import { ERROR_REASON, encode } from '../../wire/frame.js'
 import {
@@ -20,12 +21,6 @@ import {
 import type { PostAnswer } from './scriptedServer.fixture.js'
 
 useScriptedServer()
-
-/** `value`, which the test must have by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 /** Opens `count` channels over SSE, the first at index 0, and waits till their wire carries them. */
 async function openOverSse(count: number) {

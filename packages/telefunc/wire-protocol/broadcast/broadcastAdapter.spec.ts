@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defined } from '../../utils/defined.fixture.js'
 import { createHook } from 'node:async_hooks'
 import { getEventListeners } from 'node:events'
 import { Broadcast, ServerBroadcast } from '../channel/server/ServerBroadcast.js'
@@ -271,7 +272,7 @@ describe('in-memory publishes in answer', () => {
     unsubscribe()
     expect(errors).toHaveLength(1)
     expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
-    expect((errors[0] as Error).message).toContain("past Telefunc's limit on nested publishes")
+    expect(errors[0]).toHaveProperty('message', expect.stringContaining("past Telefunc's limit on nested publishes"))
   }, 60_000)
 })
 
@@ -1197,7 +1198,7 @@ describe('lossy broadcast under memory pressure', () => {
           },
         },
         index: 7,
-        replay: broadcast._replayBuffer!,
+        replay: defined(broadcast._replayBuffer),
       }),
       { want: { version: 1, text: true, binary: false } },
     )

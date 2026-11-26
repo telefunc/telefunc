@@ -4,13 +4,6 @@ export {
   admit,
   admitPublish,
   admitSend,
-  waitForRoom,
-  parkWait,
-  joinLine,
-  cancelWait,
-  takeWait,
-  reserveBehind,
-  releaseBehind,
   dropWireCopies,
   fits,
   fitsPublish,
@@ -26,9 +19,10 @@ export {
   maxPendingBytesOf,
   queueMemory,
   releaseHolder,
+  RoomWait,
   tryHold,
 }
-export type { MemoryHolder, RoomWait }
+export type { MemoryHolder }
 
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getChannelConfig } from '../../../node/server/serverConfig.js'
@@ -38,6 +32,7 @@ import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import type { PublishBody } from './PublishBody.js'
 import type { QueueMemory } from '../channelMessages.js'
+import { assert } from '../../../utils/assert.js'
 
 /** What a held send takes beyond its payload, its callbacks and promise, rounded up: one buffered, waiting as a lossy
  *  channel's newest, awaiting its answer or credit, kept to replay, or waiting in the in-memory broadcast adapter. A
@@ -75,88 +70,110 @@ const memory = getGlobalObject('channelMemory.ts', {
   wakeQueued: false,
 })
 
-/** A send waiting for room: `go` makes it, holding its bytes, once `admit` admits them and what the lossy send behind it
- *  reserves (`behind`); `cancelled` takes it out of line. A `parked` one is out of line and reserves nothing, till
- *  `joinLine`. */
-type RoomWait = {
-  holder: MemoryHolder
-  bytes: number
-  behind: number
-  go: () => void
-  cancelled: boolean
-  parked: boolean
-}
-
-/** Whether a send of `bytes` for `holder` is admitted now, is refused, or is to wait for room (`waitForRoom`), its
- *  bytes reserved. Sends wait in the order they were made, so one made while others wait waits too. One is refused
- *  where it is past what one holder may hold when it holds nothing, or where `maxMemory` has no room left for it with
- *  what is held and what waits. */
+/** Whether a send of `bytes` for `holder` is admitted now, is refused, or is to wait for room (`RoomWait`), its bytes
+ *  reserved. Sends wait in the order they were made, so one made while others wait waits too. One is refused where it is
+ *  past what one holder may hold when it holds nothing, or where `maxMemory` has no room left for it with what is held
+ *  and what waits. */
 function admitSend(holder: MemoryHolder, bytes: number): 'now' | 'refused' | 'wait' {
   if (bytes > holdsAtMost()) return 'refused'
   if (memory.waiting.length === 0 && admit(holder, bytes)) return 'now'
   return hasRoomFor(bytes) ? 'wait' : 'refused'
 }
 
-/** Puts a send of `bytes` for `holder` in line, its bytes reserved, which `admitSend` found room for: `go` makes it,
- *  holding them, once room frees for it. The line is looked at once this task ends, so a send that fits already goes
- *  then. */
-function waitForRoom(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
-  const wait = parkWait(holder, bytes, go)
-  enterLine(wait)
-  return wait
-}
+/** A send of `bytes` for `holder` waiting for room, which `admitSend` found: `go` makes it, holding its bytes, once
+ *  `admit` admits them and what the lossy send behind it reserves (`putBehind`). The line is looked at once this task
+ *  ends, so a send that fits already goes then. One made out of line (`inLine: false`) reserves nothing, so a holder
+ *  dropped before the ledger counts it leaves the ledger nothing, till `joinLine`. */
+class RoomWait<Behind = unknown> {
+  readonly holder: MemoryHolder
+  readonly bytes: number
+  private readonly go: () => void
+  private parked = true
+  /** It was made, or is never made: it is out of line. */
+  private gone = false
+  /** The lossy send to make right after it, and what that reserves. */
+  private behind: { send: Behind; bytes: number } | null = null
 
-/** A send of `bytes` for `holder`, which the ledger doesn't count yet, made by `go`: it waits out of line, so a holder
- *  dropped before it counts leaves the ledger nothing. */
-function parkWait(holder: MemoryHolder, bytes: number, go: () => void): RoomWait {
-  return { holder, bytes, behind: 0, go, cancelled: false, parked: true }
-}
-
-/** Puts a parked `wait` in line, with what the lossy send behind it reserves, where `maxMemory` has room for them. */
-function joinLine(wait: RoomWait): boolean {
-  if (!hasRoomFor(wait.bytes + wait.behind)) return false
-  enterLine(wait)
-  return true
-}
-
-function enterLine(wait: RoomWait): void {
-  wait.parked = false
-  memory.waiting.push(wait)
-  memory.reserved += wait.bytes + wait.behind
-  wakeSoon()
-}
-
-/** `wait` is never made: its reservation goes, and the line moves on without it. */
-function cancelWait(wait: RoomWait): void {
-  if (wait.cancelled) return
-  wait.cancelled = true
-  if (!wait.parked) unreserve(wait.bytes + wait.behind)
-  wait.behind = 0
-}
-
-/** `wait` goes now, out of turn, holding what it reserved: its channel ends, and its page reads what was sent first. */
-function takeWait(wait: RoomWait): void {
-  if (wait.cancelled) return
-  wait.cancelled = true
-  if (!wait.parked) unreserve(wait.bytes)
-  wait.go()
-}
-
-/** Reserves `bytes` more for the lossy send made behind `wait`, where `maxMemory` has room for them with what is held
- *  and what waits, or, for a parked one, as it joins the line. They go in its turn, never ahead of an older wait. */
-function reserveBehind(wait: RoomWait, bytes: number): boolean {
-  if (!wait.parked) {
-    if (!hasRoomFor(bytes)) return false
-    memory.reserved += bytes
+  constructor({ holder, bytes, go, inLine }: { holder: MemoryHolder; bytes: number; go: () => void; inLine: boolean }) {
+    this.holder = holder
+    this.bytes = bytes
+    this.go = go
+    if (inLine) this.enterLine()
   }
-  wait.behind += bytes
-  return true
-}
 
-/** The lossy send behind `wait` reserves `bytes` less: it was made, or a smaller one or none took its place. */
-function releaseBehind(wait: RoomWait, bytes: number): void {
-  wait.behind -= bytes
-  if (!wait.parked) unreserve(bytes)
+  /** Whether it waits in line: it joined it, and is neither made nor cancelled. */
+  get inLine(): boolean {
+    return !this.parked && !this.gone
+  }
+
+  /** What it reserves, which it holds once made: its bytes, and what the lossy send behind it reserves. */
+  get reserved(): number {
+    return this.bytes + this.behindBytes
+  }
+
+  /** What the lossy send behind it reserves. */
+  get behindBytes(): number {
+    return this.behind?.bytes ?? 0
+  }
+
+  /** Puts a parked wait in line, with the lossy send behind it, where `maxMemory` has room for them. */
+  joinLine(): boolean {
+    if (!hasRoomFor(this.reserved)) return false
+    this.enterLine()
+    return true
+  }
+
+  /** The send `makeSend` makes waits behind it in place of the one that did, reserving `bytes`, where `maxMemory` has
+   *  room for what that adds with what is held and what waits, or, while parked, as it joins the line; `makeSend` runs
+   *  only then. It goes in this one's turn, never ahead of an older wait. */
+  putBehind(bytes: number, makeSend: () => Behind): boolean {
+    const added = bytes - this.behindBytes
+    if (!this.parked && added > 0 && !hasRoomFor(added)) return false
+    const send = makeSend()
+    if (!this.parked && added > 0) memory.reserved += added
+    if (!this.parked && added < 0) unreserve(-added)
+    this.behind = { send, bytes }
+    return true
+  }
+
+  /** The lossy send behind it, which no longer reserves anything: it is made now, or never. */
+  takeBehind(): Behind | null {
+    const behind = this.behind
+    if (behind === null) return null
+    this.behind = null
+    if (!this.parked) unreserve(behind.bytes)
+    return behind.send
+  }
+
+  /** It goes now, out of turn, holding what it reserved: its channel ends, and its page reads what was sent first. */
+  goNow(): void {
+    if (this.gone) return
+    this.gone = true
+    if (!this.parked) unreserve(this.bytes)
+    this.go()
+  }
+
+  /** Its turn came (`wake`): it goes holding what it reserved, so the next one in line sees it held. */
+  goInTurn(): void {
+    this.gone = true
+    memory.reserved -= this.bytes
+    this.go()
+  }
+
+  /** It is never made: its reservation goes, and the line moves on without it. */
+  cancel(): void {
+    if (this.gone) return
+    this.gone = true
+    if (!this.parked) unreserve(this.reserved)
+    this.behind = null
+  }
+
+  private enterLine(): void {
+    this.parked = false
+    memory.waiting.push(this)
+    memory.reserved += this.reserved
+    wakeSoon()
+  }
 }
 
 /** Whether `maxMemory` has room for `bytes` more with what is held and what waits. */
@@ -212,13 +229,13 @@ function wake(): void {
   const most = maxMemory - waitingRoom(maxMemory)
   // What waits ahead, held back by the cap.
   let ahead = memory.reserved
-  for (const wait of memory.waiting) if (!wait.cancelled) ahead -= wait.bytes + wait.behind
+  for (const wait of memory.waiting) if (wait.inLine) ahead -= wait.reserved
   let reclaimed = false
   const perHolder = holdsAtMost()
   memory.waiting.remove((wait) => {
-    if (wait.cancelled) return true
+    if (!wait.inLine) return true
     // It goes with the lossy send behind it.
-    const bytes = wait.bytes + wait.behind
+    const bytes = wait.reserved
     // One past its channel's limit waits for its own page, and holds back no other channel.
     if (wait.holder.heldBytes + bytes > perHolder) return false
     if (ahead + memory.total + bytes > most) {
@@ -231,10 +248,7 @@ function wake(): void {
     }
     // One its share holds back leaves its room to the sends behind it, as one past its channel's limit does.
     if (!admitsAsIs(wait.holder, bytes, ahead, maxMemory, most)) return false
-    // Held as it goes, so the next one in line sees it.
-    wait.cancelled = true
-    memory.reserved -= wait.bytes
-    wait.go()
+    wait.goInTurn()
     return true
   })
 }
@@ -259,19 +273,29 @@ function fits(holder: MemoryHolder, bytes: number): boolean {
  *  publishes it replaces lets go of them first (`replace`), so what's measured is what stays. Past that, it ends the
  *  pages whose newest no wire has, fewest sharers first, until the body fits or none is left: where ending them can't
  *  make room, they end all the same, and so do its own pages (`fitsPublish`). */
-function admitPublish(body: PublishBody, owner: string | undefined, replace: (holder: MemoryHolder) => void): void {
+function admitPublish(
+  body: PublishBody,
+  owner: string | undefined,
+  replace: (holder: MemoryHolder, body: PublishBody) => void,
+): void {
   const maxMemory = maxMemoryOf()
   const bytes = body.frame.byteLength
   // Nothing let go makes room for one that can't fit at all: its own pages end (`fitsPublish`), and no other page does.
   if (bytes + HELD_PUBLISH_OVERHEAD_BYTES > maxMemory) return
   const target = shedTarget(maxMemory)
   const most = heldAtMost(maxMemory, memory.reserved)
-  if (memory.total + bytes > target) for (const holder of [...memory.holders]) replace(holder)
-  reclaim(bytes, target)
+  if (memory.total + bytes > target) {
+    for (const holder of [...memory.holders]) replace(holder, body)
+    if (memory.total + bytes > target) reclaim(bytes, target)
+  }
   if (memory.total + bytes <= most) return
   for (const [newest, holders] of newestsThatEndingFrees()) {
     if (memory.total + bytes <= most) return
-    if (holders.length === newest.refs) for (const holder of holders) holder.shed!(0, owner)
+    if (holders.length !== newest.refs) continue
+    for (const holder of holders) {
+      assert(holder.shed)
+      holder.shed(0, owner)
+    }
   }
 }
 

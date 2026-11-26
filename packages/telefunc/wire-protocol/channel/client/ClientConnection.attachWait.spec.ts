@@ -4,6 +4,7 @@
 // A virtual clock runs the real deadlines: each test states when the page gives up, with and without the chatter.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { defined } from '../../../utils/defined.fixture.js'
 import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_TRANSPORT,
@@ -114,12 +115,6 @@ class FakeWebSocket {
 }
 
 type Open = { at: number; wire: ReturnType<typeof sseResponse> }
-
-/** `value`, which the page must have produced by now: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
-}
 
 let opens: Open[] = []
 /** The size of each RECONCILE the page sent this test's SSE server. */

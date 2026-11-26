@@ -28,9 +28,9 @@ import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
 import { getWireUrl } from './getSessionUrl.js'
-import { decode } from '../../wire/frame.js'
+import { decode, isOneFrame, messageFrames, stampWindowHold, type DecodedFrame } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
-import { readU16 } from '../../wire/header.js'
+import { HEADER, readTag, readU16, readU32 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
@@ -44,7 +44,7 @@ import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { asksLater, endOfWire, readAnswer, telefuncAnswer, telefuncEndOf, type HttpAnswer } from './readAnswer.js'
 
-type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
+type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number; receivedAt?: number }
 
 /** A POST body built ahead from the outbox's first `count` entries, `first` through `last`. */
 type OutboxFold = { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry }
@@ -63,6 +63,9 @@ type StreamUpload = {
 }
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
+
+/** A batch POST: the outbox entries it carried, its body's size, when it started, and whether it carried a RECONCILE. */
+type BatchPost = { queued: OutboxEntry[]; bytes: number; startedAt: number; reconcile: boolean }
 
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
@@ -103,6 +106,8 @@ class SseTransport implements UpgradeSource {
   private partwayAt = Number.NEGATIVE_INFINITY
   private readonly abandonedControllers = new WeakSet<AbortController>()
   private outbox: OutboxEntry[] = []
+  private readonly windows = new Map<number, OutboxEntry>()
+  private readonly lastWindowByChannel = new Map<number, OutboxEntry>()
   /** Data whose POST failed or was refused, waiting out `heldTimer` till `heldUntil` (`hold`). */
   private held: OutboxEntry[] = []
   private heldTimer: ReturnType<typeof setTimeout> | null = null
@@ -197,7 +202,7 @@ class SseTransport implements UpgradeSource {
       return 'not-emitted'
     }
     this.flushScheduler.cancel()
-    const queued = this.takeOutbox().map((entry) => entry.frame)
+    const queued = this.takeOutbox().map(atSend)
     this.dropHeld()
     queued.push(buildFrame().frame)
     // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
@@ -267,13 +272,13 @@ class SseTransport implements UpgradeSource {
   sendFrame(frame: OutboundFrame): void {
     if (this.streamRequest.tag === 'active') {
       this.streamRequest.upload.body.push(encodeU32(frame.frame.byteLength))
-      this.streamRequest.upload.body.push(frame.frame)
+      this.streamRequest.upload.body.push(atSend(frame))
       return
     }
     const now = performance.now()
     const own = this.getFrameDeadline(frame.kind, now)
     const deadline = frame.released ? Math.min(own, now + SSE_RECONCILE_DEADLINE_MS) : own
-    const entry = { frame: frame.frame, deadline, queuedAt: now }
+    const entry = { frame: frame.frame, deadline, queuedAt: now, receivedAt: frame.receivedAt }
     if (this.held.length > 0 && isSequenced(entry)) {
       const ix = readU16(entry.frame, 1)
       if (this.held.some((held) => isDataOf(held, ix))) {
@@ -281,9 +286,11 @@ class SseTransport implements UpgradeSource {
         return
       }
     }
-    this.outbox.push(entry)
-    this.outboxBytes += frame.frame.byteLength
-    this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
+    if (!this.coalesceWindow(entry)) {
+      this.outbox.push(entry)
+      this.outboxBytes += frame.frame.byteLength
+      this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
+    }
     if (this.flushing) {
       this.foldOutbox()
       if (frame.kind === 'heartbeat') this.unholdPing(entry)
@@ -295,18 +302,43 @@ class SseTransport implements UpgradeSource {
     if (deadline <= now || this.headroom() <= 0) void this.flushOutbox()
   }
 
+  /** Per lossy channel between POSTs: one report per new lastSeq, up to one per 50 ms tick, credit refresh, or heartbeat (at most once a second). */
+  private coalesceWindow(entry: OutboxEntry): boolean {
+    const key = windowKey(entry)
+    if (key === undefined) return false
+    const ix = readU16(entry.frame, 1)
+    const previous = this.windows.get(key)
+    if (previous && (entry.receivedAt !== undefined || this.lastWindowByChannel.get(ix) === previous)) {
+      previous.frame = entry.frame
+      previous.deadline = Math.min(previous.deadline, entry.deadline)
+      return true
+    }
+    if (previous) {
+      // A refreshed credit limit still follows reports queued before it.
+      const at = this.outbox.indexOf(previous)
+      assert(at >= 0)
+      this.outbox.splice(at, 1)
+      this.outboxBytes -= previous.frame.byteLength
+      entry.deadline = Math.min(previous.deadline, entry.deadline)
+    }
+    this.windows.set(key, entry)
+    this.lastWindowByChannel.set(ix, entry)
+    return false
+  }
+
   /** While a POST is out, folds the outbox into the next body a MiB at a time: the flush after copies only the rest. */
   private foldOutbox(): void {
     if (this.unfolded < SSE_FOLD_BYTES) return
     this.unfolded = 0
     const folded = this.foldHeading(this.outbox)
-    const rest = this.outbox.slice(folded?.count ?? 0).map((entry) => entry.frame)
-    this.folded = {
-      blob: encodeLengthPrefixedBlob(rest, folded?.blob),
-      count: this.outbox.length,
-      first: this.outbox[0]!,
-      last: this.outbox[this.outbox.length - 1]!,
-    }
+    // A queued WINDOW can change until the POST takes it.
+    const windowAt = this.windows.size === 0 ? -1 : this.outbox.findIndex(({ frame }) => frame[0] === TAG.WINDOW)
+    const count = windowAt === -1 ? this.outbox.length : windowAt
+    const first = this.outbox[0]
+    const last = this.outbox[count - 1]
+    if (count <= (folded?.count ?? 0) || first === undefined || last === undefined) return
+    const rest = this.outbox.slice(folded?.count ?? 0, count).map((entry) => entry.frame)
+    this.folded = { blob: encodeLengthPrefixedBlob(rest, folded?.blob), count, first, last }
   }
 
   /** The fold, if it still heads `entries`. */
@@ -325,10 +357,7 @@ class SseTransport implements UpgradeSource {
     const stage = this.stageInitialBatch()
 
     // The event stream and the upload's probe go together; frames go in batch POSTs until the server acknowledges it.
-    const openBody = encodeSseRequest(
-      { connId: this.connId, streamResponse: true },
-      stage.initialFrames.map((entry) => entry.frame),
-    )
+    const openBody = encodeSseRequest({ connId: this.connId, streamResponse: true }, stage.initialFrames.map(atSend))
     const ssePromise = this.post(openBody, abortController.signal, { accept: 'text/event-stream' })
     const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
     this.owner.onTransportReconcileSent(this, openBody.size)
@@ -424,22 +453,19 @@ class SseTransport implements UpgradeSource {
     this.moveToUpload()
   }
 
-  /** An acknowledged probe takes the wire's frames once no POST is out: the server reads the upload's frames after
-   *  what the POST out carried, which it took before answering, so no seq passes an earlier one. What waits goes first,
-   *  in its order: held data still owed, then the outbox. */
+  /** An acknowledged probe takes the outbox once the batch POST and any refusal hold have ended. */
   private moveToUpload(): void {
     const probing = this.streamRequest
-    if (probing.tag !== 'probing' || !probing.acknowledged || this.flushing) return
+    if (probing.tag !== 'probing' || !probing.acknowledged || this.flushing || this.held.length > 0) return
     this.flushScheduler.cancel()
     this.folded = null
-    const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.dropHeld()
-    const waiting = held.concat(this.takeOutbox())
+    const waiting = this.takeOutbox()
     const { body } = probing.upload
     this.streamRequest = { tag: 'active', upload: probing.upload }
-    for (const { frame } of waiting) {
-      body.push(encodeU32(frame.byteLength))
-      body.push(frame)
+    for (const entry of waiting) {
+      body.push(encodeU32(entry.frame.byteLength))
+      body.push(atSend(entry))
     }
     this.settleDrained()
     this.owner.onTransportHeadroom(this)
@@ -495,26 +521,10 @@ class SseTransport implements UpgradeSource {
       while (true) {
         const raw = await reader.readNextEntry()
         if (!raw) break
-        if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
-          onOpenAck()
-          continue
-        }
-        const frame = decode(raw)
-        if (frame.tag === TAG.END) {
-          end = endOfWire(frame.refusal)
-          break
-        }
-        if (frame.tag === TAG.PONG) {
-          // A PONG still on its way on a wire the page left says nothing of the wire in use.
-          if (this.transportAbort !== abortController) continue
-          this.heartbeat?.resetPong()
-          this.owner.onTransportPong(frame.ended)
-          continue
-        }
-        const paired = pair(frame)
-        if (paired) {
-          this.owner.onTransportFrame(paired, this, raw.byteLength, this.abandonedControllers.has(abortController))
-        }
+        const ended = this.dispatchEvent(raw, pair, abortController, onOpenAck)
+        if (ended === null) continue
+        end = ended.end
+        break
       }
     } catch {
       // A failed read ends the wire as its end does.
@@ -535,6 +545,35 @@ class SseTransport implements UpgradeSource {
     }
   }
 
+  /** Dispatches the frames of one downstream event; where one ends the wire, what its END says ended it. */
+  private dispatchEvent(
+    raw: Uint8Array<ArrayBuffer>,
+    pair: (frame: DecodedFrame) => DecodedFrame | null,
+    abortController: AbortController,
+    onOpenAck: () => void,
+  ): { end: TransportEnd | undefined } | null {
+    const packed = isOneFrame(raw) ? null : messageFrames(raw)
+    for (let each = packed === null ? raw : packed.next().value; each !== undefined; each = packed?.next().value) {
+      const frame = decode(each)
+      if (frame.tag === TAG.END) return { end: endOfWire(frame.refusal) }
+      if (frame.tag === TAG.STREAM_REQUEST_OPEN_ACK) {
+        onOpenAck()
+        continue
+      }
+      if (frame.tag === TAG.PONG) {
+        // A PONG still on its way on a wire the page left says nothing of the wire in use.
+        if (this.transportAbort !== abortController) continue
+        this.heartbeat?.resetPong()
+        this.owner.onTransportPong(frame.ended)
+        continue
+      }
+      const paired = pair(frame)
+      if (paired)
+        this.owner.onTransportFrame(paired, this, each.byteLength, this.abandonedControllers.has(abortController))
+    }
+    return null
+  }
+
   /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
    *  nothing of the wire in use. */
   private heartbeatOf(abortController: AbortController): Heartbeat | null {
@@ -552,7 +591,7 @@ class SseTransport implements UpgradeSource {
     const movedOutbox = this.takeOutbox().filter(isWindowRefresh)
     // So does what waited behind a failed try on a wire before, however that wire ended.
     this.dropHeld()
-    for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
+    for (const { frame, receivedAt } of movedOutbox) initialFrames.push({ kind: 'data', frame, receivedAt })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
   }
@@ -564,6 +603,7 @@ class SseTransport implements UpgradeSource {
       frame: entry.frame,
       deadline: this.getFrameDeadline(entry.kind, now),
       queuedAt: now,
+      receivedAt: entry.receivedAt,
     }))
     this.requeue(stage.movedOutbox.concat(movedBuffered))
   }
@@ -573,6 +613,8 @@ class SseTransport implements UpgradeSource {
     const entries = this.outbox
     this.outbox = []
     this.outboxBytes = 0
+    this.windows.clear()
+    this.lastWindowByChannel.clear()
     return entries
   }
 
@@ -587,7 +629,8 @@ class SseTransport implements UpgradeSource {
     let body = encodeSseRequestMetadata({ connId: this.connId }).byteLength
     const stalled = this.owner.stalledChannels
     let carries: number | 'others' | null = null
-    for (const { frame } of this.outbox) {
+    for (const entry of this.outbox) {
+      const { frame } = entry
       const size = U32_SIZE + frame.byteLength
       if (count > 0 && (body >= this.postBytes || body + size > this.owner.ssePostLimit)) break
       const tag = frame[0]
@@ -596,6 +639,12 @@ class SseTransport implements UpgradeSource {
         const of = stalled.has(ix) ? ix : 'others'
         if (carries !== null && carries !== of) break
         carries = of
+      }
+      const key = windowKey(entry)
+      if (key !== undefined) {
+        this.windows.delete(key)
+        const ix = readU16(frame, 1)
+        if (this.lastWindowByChannel.get(ix) === entry) this.lastWindowByChannel.delete(ix)
       }
       body += size
       bytes += frame.byteLength
@@ -608,8 +657,23 @@ class SseTransport implements UpgradeSource {
 
   /** Puts `entries` back at the head of the outbox. */
   private requeue(entries: OutboxEntry[]): void {
-    this.outbox = entries.concat(this.outbox)
-    this.outboxBytes += bytesOf(entries)
+    const kept: OutboxEntry[] = []
+    for (const entry of entries.slice().reverse()) {
+      const key = windowKey(entry)
+      if (key !== undefined) {
+        const later = this.windows.get(key)
+        if (later) {
+          later.receivedAt = entry.receivedAt
+          continue
+        }
+        this.windows.set(key, entry)
+        const ix = readU16(entry.frame, 1)
+        if (!this.lastWindowByChannel.has(ix)) this.lastWindowByChannel.set(ix, entry)
+      }
+      kept.push(entry)
+    }
+    this.outbox = kept.reverse().concat(this.outbox)
+    this.outboxBytes += bytesOf(kept)
   }
 
   private async flushOutbox(): Promise<void> {
@@ -619,84 +683,19 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = performance.now()
-    // One that goes before its deadline, because the outbox is full, waited for no throttle, so the next frame doesn't
-    // wait for one after it either.
-    if (this.outbox.some(({ deadline }) => deadline <= now)) this.lastPostStartedAt = now
+    // Every POST starts the throttle, whatever made it go: the next waits for it.
+    this.lastPostStartedAt = now
     const queued = this.takeOutboxHead()
     const head = this.foldHeading(queued)
     this.folded = null
     const wire = this.transportAbort
     try {
-      const body = encodeSseRequest(
-        { connId: this.connId },
-        queued.slice(head?.count ?? 0).map((entry) => entry.frame),
-        head?.blob,
-      )
+      const body = encodeSseRequest({ connId: this.connId }, queued.slice(head?.count ?? 0).map(atSend), head?.blob)
       this.postOutBytes = body.size
       const reconcile = queued.some(isReconcile)
       if (reconcile) this.owner.onTransportReconcileSent(this, body.size)
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
-      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
-      // refresh goes again whatever it was answered: its limit is cumulative.
-      if (answer === 'left') {
-        this.requeue(queued.filter(isWindowRefresh))
-        return
-      }
-      if (answer?.tag === 'expected') {
-        this.sizePosts(body.size, performance.now() - now)
-        this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
-        if (reconcile) this.owner.onTransportAnswered(this)
-        return
-      }
-      // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
-      // Nothing of it is counted as a refusal of the data.
-      if (telefuncAnswer(answer)) {
-        this.requeue(queued)
-        this.abandonActiveTransport()
-        this.owner.onTransportClosed(this, telefuncEndOf(answer))
-        return
-      }
-      if (answer?.tag === 'tooLarge') {
-        this.owner.onTransportTooLarge(body.size)
-        this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
-        // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
-        // wait the answer asked for is out.
-        if (queued.length > 1) {
-          if (answer.retryAfterMs > 0) this.hold(queued, answer.retryAfterMs)
-          else this.requeue(queued)
-          return
-        }
-      }
-      const counted = countedAnswer(answer)
-      if (counted !== null) {
-        // Every channel whose data it refused ended: the wire goes on without that data.
-        if (
-          !this.owner.onTransportRefused(
-            queued.map(({ frame }) => frame),
-            counted,
-          )
-        ) {
-          this.requeue(queued.filter((entry) => !isSequenced(entry)))
-          return
-        }
-      }
-      // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on,
-      // and that data goes again on the stalled schedule (that try is those channels' loss), no sooner than the answer
-      // asked.
-      const askedLater = answer?.tag === 'refused' && asksLater(answer.status) ? answer : null
-      const cause =
-        answer === null
-          ? 'The request carrying it got no answer'
-          : askedLater !== null
-            ? `The server refused what the page sent with ${askedLater.answer}`
-            : null
-      if (cause !== null && this.carriesStalledOnly(queued)) {
-        this.hold(queued, Math.max(this.owner.onStalledPostLost(cause), askedLater?.retryAfterMs ?? 0))
-        return
-      }
-      this.requeue(queued)
-      this.abandonActiveTransport()
-      this.owner.onTransportClosed(this, endOf(answer))
+      this.settlePost(answer, { queued, bytes: body.size, startedAt: now, reconcile })
     } finally {
       this.flushing = false
       this.postOutBytes = 0
@@ -707,6 +706,74 @@ class SseTransport implements UpgradeSource {
       }
       this.owner.onTransportHeadroom(this)
     }
+  }
+
+  /** Where the frames `post` carried go, by its answer: the server's once answered, else again on this wire or the next. */
+  private settlePost(answer: HttpAnswer | null | 'left', post: BatchPost): void {
+    const { queued } = post
+    // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch). A window
+    // refresh goes again whatever it was answered: its limit is cumulative.
+    if (answer === 'left') return this.requeue(queued.filter(isWindowRefresh))
+    if (answer?.tag === 'expected') {
+      this.sizePosts(post.bytes, performance.now() - post.startedAt)
+      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
+      if (post.reconcile) this.owner.onTransportAnswered(this)
+      return
+    }
+    // Telefunc's own: the server no longer has the wire, ended a channel or the page's session, or isn't served so.
+    // Nothing of it is counted as a refusal of the data.
+    if (telefuncAnswer(answer)) {
+      this.requeue(queued)
+      this.abandonActiveTransport()
+      this.owner.onTransportClosed(this, telefuncEndOf(answer))
+      return
+    }
+    if (answer?.tag === 'tooLarge') {
+      this.owner.onTransportTooLarge(post.bytes)
+      this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
+      // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
+      // wait the answer asked for is out.
+      if (queued.length > 1) return this.resendLater(queued, answer.retryAfterMs)
+    }
+    this.settleRefused(answer, queued)
+  }
+
+  /** Where the frames of a POST go that the server refused, or never answered: on this wire where only the data of
+   *  channels it ended or stalled channels' data is lost, else to the next wire. */
+  private settleRefused(answer: HttpAnswer | null, queued: OutboxEntry[]): void {
+    const counted = countedAnswer(answer)
+    // Every channel whose data it refused ended: the wire goes on without that data.
+    if (
+      counted !== null &&
+      !this.owner.onTransportRefused(
+        queued.map(({ frame }) => frame),
+        counted,
+      )
+    ) {
+      return this.requeue(queued.filter((entry) => !isSequenced(entry)))
+    }
+    // Stalled channels' data alone, unanswered or asked to come later, while the event stream is up: the wire goes on,
+    // and that data goes again on the stalled schedule (that try is those channels' loss), no sooner than the answer
+    // asked.
+    const askedLater = answer?.tag === 'refused' && asksLater(answer.status) ? answer : null
+    const cause =
+      answer === null
+        ? 'The request carrying it got no answer'
+        : askedLater !== null
+          ? `The server refused what the page sent with ${askedLater.answer}`
+          : null
+    if (cause !== null && this.carriesStalledOnly(queued)) {
+      return this.hold(queued, Math.max(this.owner.onStalledPostLost(cause), askedLater?.retryAfterMs ?? 0))
+    }
+    this.requeue(queued)
+    this.abandonActiveTransport()
+    this.owner.onTransportClosed(this, endOf(answer))
+  }
+
+  /** `queued` goes again once `wait` ms are out, or at once without one. */
+  private resendLater(queued: OutboxEntry[], wait: number): void {
+    if (wait > 0) this.hold(queued, wait)
+    else this.requeue(queued)
   }
 
   /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */
@@ -742,6 +809,8 @@ class SseTransport implements UpgradeSource {
     const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.held = []
     this.requeue(held)
+    this.moveToUpload()
+    if (this.streamRequest.tag === 'active') return
     if (this.outbox.length > 0) void this.flushOutbox()
     else this.flushNextOrDrain()
   }
@@ -892,7 +961,7 @@ class SseTransport implements UpgradeSource {
   bufferedAmount(): number {
     if (this.streamRequest.tag === 'active') return this.streamRequest.upload.body.bufferedAmount
     let bytes = 0
-    for (const { frame } of this.outbox) if (isSequencedTag(frame[0]!)) bytes += frame.byteLength
+    for (const { frame } of this.outbox) if (isSequencedTag(readTag(frame))) bytes += frame.byteLength
     return bytes
   }
 
@@ -907,15 +976,14 @@ class SseTransport implements UpgradeSource {
     switch (kind) {
       case 'reconcile':
         return now + SSE_RECONCILE_DEADLINE_MS
-      // The app awaits the server's answer to an `ack` send: nothing that could join its POST brings that sooner.
       case 'control':
       case 'urgent-flow-control':
-      case 'ack':
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
       case 'flow-control':
       case 'acknowledgement':
+      case 'ack':
       case 'data':
         // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
         return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
@@ -1041,6 +1109,20 @@ function isSequenced({ frame }: OutboxEntry): boolean {
 
 function isReconcile({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.RECONCILE
+}
+
+/** Credit refreshes are keyed by channel, timed reports by channel and lastSeq. */
+function windowKey({ frame, receivedAt }: OutboxEntry): number | undefined {
+  if (frame[0] !== TAG.WINDOW) return undefined
+  const ix = readU16(frame, 1)
+  return receivedAt === undefined ? -1 - ix : ix * 0x1_0000_0000 + readU32(frame, HEADER + 4)
+}
+
+function atSend({
+  frame,
+  receivedAt,
+}: { frame: Uint8Array<ArrayBuffer>; receivedAt?: number }): Uint8Array<ArrayBuffer> {
+  return stampWindowHold(frame, receivedAt)
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {

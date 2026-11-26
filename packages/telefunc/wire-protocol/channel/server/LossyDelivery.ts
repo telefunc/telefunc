@@ -54,8 +54,8 @@ class LossyDelivery<U> {
     if (!this.host.peer() || this.replaces()) this.letWaitingGo()
     // Those that went gave their credit back, and may have been all its page left unconfirmed: this one may go at once.
     if (this.waits()) {
-      this.waiting.push(unit)
       this.host.hold(unit)
+      this.waiting.push(unit)
       return
     }
     this.flush()

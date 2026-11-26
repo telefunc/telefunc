@@ -1,7 +1,7 @@
-export { countWaitingPublishes, droppingLossy, droppingPublishes, droppingFrom, overtakes }
+export { countWaitingPublishes, droppingLossy, droppingPublishes, droppingFrom }
 export type { WireQueue }
 
-import { readU16 } from '../../wire/header.js'
+import { readTag, readU16 } from '../../wire/header.js'
 import { TAG, isPublishBody, isSequencedTag } from '../../wire/tags.js'
 
 /** What a server wire holds back for its page, which a broadcast falling behind, or a channel its page left, can let go of. */
@@ -22,22 +22,6 @@ function isHeadOf(frame: Uint8Array, ix: number): boolean {
   return frame[0] === TAG.PUBLISH_TO && readU16(frame, 1) === ix
 }
 
-/** Whether data `frame` goes ahead of `ahead`, the frames its wire holds back: a channel orders only its own frames, so a
- *  slow page's publishes don't hold up its other channels. Publishes keep their line, being what falls behind. Any other
- *  frame of the channel, one that ends or closes it too, waits behind all of it, so the page gets what was sent before. */
-function overtakes(frame: Uint8Array, ahead: Iterable<Uint8Array>): boolean {
-  const tag = frame[0]!
-  if (!isSequencedTag(tag) || tag === TAG.PUBLISH_TO || isPublishBody(tag)) return false
-  const ix = readU16(frame, 1)
-  for (const other of ahead) {
-    const otherTag = other[0]!
-    // A body's index names no channel; its head does.
-    if (!isSequencedTag(otherTag) || isPublishBody(otherTag) || readU16(other, 1) !== ix) continue
-    return false
-  }
-  return true
-}
-
 /** A body whose head left stays, which is never counted: it goes in the order it was sent. */
 function countWaitingPublishes(waiting: Iterable<Uint8Array>, ix: number): number {
   let count = 0
@@ -56,7 +40,8 @@ function droppingFrom(ix: number, from: 'publish' | 'start'): (frame: Uint8Array
       return true
     }
     if (isHeadOf(frame, ix)) dropping = bodyNext = true
-    return dropping && isSequencedTag(frame[0]!) && !isPublishBody(frame[0]!) && readU16(frame, 1) === ix
+    const tag = readTag(frame)
+    return dropping && isSequencedTag(tag) && !isPublishBody(tag) && readU16(frame, 1) === ix
   }
 }
 

@@ -116,7 +116,8 @@ async function* iterateMessages<M extends Message<unknown>>(
   }
   const abort = () => finish(signal!.reason)
   // The next message waits only for the loop's current one to finish, so what counts is what waits beyond it.
-  const isBehind = () => held - (queue.peek()?.size ?? 0) > budget!
+  const limit = budget ?? Number.POSITIVE_INFINITY
+  const isBehind = () => held - (queue.peek()?.size ?? 0) > limit
   // A burst delivered in one task reaches the loop only once that task ends, so the loop is behind where it still
   // holds more than `budget` then, whether or not its source closed meanwhile.
   const checkBehind = () => {
@@ -172,8 +173,13 @@ async function* iterateMessages<M extends Message<unknown>>(
 
 // A pending close promise keeps its callbacks; their scope must release the iterator when it returns.
 function observeClose(closed: Promise<Error | null>, callback?: (err?: unknown) => void): () => void {
-  void closed.then((outcome) => callback?.(outcome ?? undefined))
+  void callOnClose()
   return () => {
     callback = undefined
+  }
+
+  async function callOnClose(): Promise<void> {
+    const outcome = await closed
+    callback?.(outcome ?? undefined)
   }
 }

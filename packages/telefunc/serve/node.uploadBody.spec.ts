@@ -79,6 +79,17 @@ const holdsFirstStart = concat(
   ),
   encoder.encode('x'.repeat(10)),
 )
+/** A binary call to `peeksFirstReadsBoth` up to the first bytes of its first `Blob`. */
+const peeksFirstStart = concat(
+  frame(
+    JSON.stringify({
+      file,
+      name: 'peeksFirstReadsBoth',
+      args: [0, 1].map((index) => `!TelefuncBlob:${JSON.stringify({ index, size: FILE_SIZE, type: '' })}`),
+    }),
+  ),
+  encoder.encode('x'.repeat(10)),
+)
 /** A binary call to `startsReadingBlob` up to the first bytes of its `Blob`. */
 const readStartedStart = concat(
   frame(
@@ -221,6 +232,39 @@ async function sendWhole(body: Uint8Array, via: keyof typeof servers) {
   socket.write(body)
   return { socket, answered }
 }
+
+test.each(vias)(
+  'a binary call that reads its first `Blob` in part, releases that reader, and reads its rest with a new one a turn later while it reads its second, reads both whole (Telefunc given a %s)',
+  async (via) => {
+    const { printed, bugs } = recordErrors()
+    const port = ports.get(via)
+    if (port === undefined) throw new Error('no server')
+    const rest = concat(encoder.encode('x'.repeat(FILE_SIZE - 10)), encoder.encode('y'.repeat(FILE_SIZE)))
+    const socket = connect(port, '127.0.0.1')
+    socket.on('error', () => {})
+    let answer = ''
+    const answered = new Promise<string>((resolve) => {
+      socket.on('data', (chunk: Buffer) => {
+        answer += chunk.toString('latin1')
+        if (answer.includes(`${FILE_SIZE} ${FILE_SIZE}`) || answer.includes('\r\n0\r\n')) resolve(answer)
+      })
+    })
+    await once(socket, 'connect')
+    const peeked = blobRead()
+    socket.write(
+      `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: ${peeksFirstStart.length + rest.length}\r\n\r\n`,
+    )
+    socket.write(peeksFirstStart)
+    await peeked
+    socket.write(rest)
+    expect({ answer: await answered, printed, bugs }).toEqual({
+      answer: expect.stringMatching(new RegExp(`^HTTP/1\\.1 200[\\s\\S]*${FILE_SIZE} ${FILE_SIZE}`)),
+      printed: [],
+      bugs: [],
+    })
+    socket.destroy()
+  },
+)
 
 /** A Fetch request of `kind` whose body gives `start`, then fails with `error` once `when` resolves. */
 function failingRequest(kind: keyof typeof kinds, start: Uint8Array, error: Error, when: Promise<void>): Request {
@@ -410,6 +454,83 @@ test.each(vias)(
     socket.destroy()
   },
 )
+
+test.each(vias)(
+  "a telefunction that starts reading its Blob and answers, its client then leaving: that read ends with the client's truncation (Telefunc given a %s)",
+  async (via) => {
+    recordErrors()
+    const readEnded: { now: string } = { now: 'pending' }
+    const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+    process.on('requestBody.telefunc:readEnded', onReadEnded)
+    onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+    const { socket, answered } = await startUpload('binary', readStartedStart, via)
+    expect(await answered).toBe(200)
+    socket.destroy()
+    await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
+    expect(readEnded.now).toBe(`failed: ${new StreamTruncatedError('client').message}`)
+  },
+)
+
+test("a telefunction that starts reading its Blob and answers, its client then leaving while the app's async transform of the Fetch body waits: that read ends with the client's truncation and the body is let go of", async () => {
+  recordErrors()
+  const readEnded: { now: string } = { now: 'pending' }
+  const onReadEnded = (outcome: string) => void (readEnded.now = outcome)
+  process.on('requestBody.telefunc:readEnded', onReadEnded)
+  onTestFinished(() => void process.off('requestBody.telefunc:readEnded', onReadEnded))
+  const gate = Promise.withResolvers<void>()
+  onTestFinished(() => gate.resolve())
+  const passed: { body: ReadableStream<Uint8Array> | null } = { body: null }
+  const server = createServer((req, res) => {
+    const original = frameworkRequest(req, `http://127.0.0.1${telefuncPath}`)
+    // The app's middleware checks each chunk, and waits on something of its own after the first.
+    const body = original.body?.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        async transform(chunk, controller) {
+          controller.enqueue(chunk)
+          await gate.promise
+        },
+      }),
+    )
+    const init: RequestInit & { duplex: 'half' } = {
+      method: 'POST',
+      headers: original.headers,
+      body,
+      signal: original.signal,
+      duplex: 'half',
+    }
+    const request = new Request(original.url, init)
+    passed.body = request.body
+    telefunc
+      .serve({ request })
+      .then(async (response) => {
+        res.writeHead(response?.status ?? 404)
+        res.end(await response?.text())
+      })
+      .catch(() => {})
+  })
+  server.listen(0, '127.0.0.1')
+  onTestFinished(() => void server.close())
+  await once(server, 'listening')
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('no port')
+  const socket = connect(address.port, '127.0.0.1')
+  socket.on('error', () => {})
+  const answered = new Promise<number>((resolve) => {
+    socket.once('data', (chunk: Buffer) => resolve(Number(chunk.toString('latin1').split(' ', 2)[1])))
+  })
+  await once(socket, 'connect')
+  socket.write(
+    `POST ${telefuncPath} HTTP/1.1\r\nHost: 127.0.0.1:${address.port}\r\nx-telefunc-request: bin\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\n\r\n`,
+  )
+  socket.write(readStartedStart)
+  expect(await answered).toBe(200)
+  socket.destroy()
+  await vi.waitFor(() => expect(readEnded.now).not.toBe('pending'))
+  expect({ readEnded: readEnded.now, locked: passed.body?.locked }).toEqual({
+    readEnded: `failed: ${new StreamTruncatedError('client').message}`,
+    locked: false,
+  })
+})
 
 test.each(vias)(
   'a Blob its telefunction keeps and reads once the call is answered and its body read off to the end: the Blob is read whole (Telefunc given a %s)',

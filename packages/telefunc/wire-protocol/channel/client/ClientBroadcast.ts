@@ -25,11 +25,13 @@ type ClientBroadcastOptions = ClientChannelOptions & { lossy?: boolean }
 class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
-  /** A newer publish replaces this page's own that no wire has taken yet: see `sendLossy`. */
+  /** A newer publish replaces this page's own that no wire has taken yet: see `replaceNewestLossy`. */
   private readonly lossy: boolean
+  /** The receipt of this page's newest lossy publish, which one that takes its place gets too. */
+  private newestReceipt: Promise<ChannelPublishAck> | null = null
 
   constructor(options: ClientBroadcastOptions) {
-    super(options)
+    super({ ...options, lossyBroadcast: options.lossy })
     this.lossy = options.lossy === true
     // Nothing waits on a publish's credit, so the page grants the largest window from the start.
     this.receiveCredit.widenByteWindow()
@@ -61,7 +63,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private sendPublish<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<ChannelPublishAck> {
     const start = (onQueued?: (seq: number) => void) =>
       this.sendAckReq<ChannelPublishAck, D>(encodeFrame, data, onQueued)
-    return this.lossy ? this.sendLossy(encodeFrame, data, start) : start()
+    if (!this.lossy) return start()
+    const newest = this.newestReceipt
+    if (newest !== null && this.replaceNewestLossy(encodeFrame, data) !== null) return newest
+    this.newestReceipt = this.startLossy(start)
+    return this.newestReceipt
   }
 
   subscribeBinary(callback: BroadcastBinaryListener, options: { signal?: AbortSignal } = {}): Unsubscribe {

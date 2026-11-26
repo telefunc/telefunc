@@ -1,6 +1,6 @@
 {
   "name": "telefunc",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "scripts": {
     "build": "rm -rf dist/ && tsc --build",
     "dev": "tsc --watch",
@@ -122,7 +122,6 @@
     "@babel/core": "7.29.0",
     "@babel/parser": "7.29.0",
     "@babel/types": "7.29.0",
-    "@brillout/release-me": "^0.4.18",
     "@cloudflare/workers-types": "^4.20260305.1",
     "@hono/node-server": "^1.19.19",
     "@nuxt/types": "^2.18.1",

@@ -75,6 +75,7 @@ type ClientChannelOptions = {
   ack?: boolean
   key?: string
   maxFrameBytes?: number
+  lossyBroadcast?: boolean
   connection: ConnectionOptions
 }
 
@@ -109,8 +110,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected receiveCredit: ReceiveCredit
   /** @internal Its credits as its connection drives them across wires. */
   readonly _attach: ChannelAttach
-  /** This page's newest lossy send, which may still wait to go, and what it settles with. */
-  private newestLossy: { seq: number; settled: Promise<any> } | null = null
+  /** The seq of this page's newest lossy send, which may still wait to go. */
+  private newestLossySeq: number | undefined
   /** Sends this page's lossy send that waits for the server to grant more credit; a newer one takes its place. */
   private heldLossy: (() => void) | null = null
 
@@ -119,6 +120,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     ack = false,
     key,
     maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
+    lossyBroadcast = false,
     connection,
   }: ClientChannelOptions) {
     this.id = channelId
@@ -148,6 +150,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       connectionKey: connection.connectionKey,
       headers: connection.headers,
       idleTimeout: connection.idleTimeout,
+      lossyBroadcast,
     })
   }
 
@@ -203,7 +206,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.text, serialized)
+      return this.sendNewest(encode.text, serialized, keepText)
     }
     this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
@@ -234,7 +237,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.stopped) throw this.lifecycle.sendRefusal()
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.binary, data)
+      return this.sendNewest(encode.binary, data, copyBytes)
     }
     this.flushLossy()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
@@ -308,7 +311,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private abortWith(reason: AbortReason, message?: string): void {
     this.lifecycle.endWith(createAbortError(reason.value, message), () => {
       // The newest lossy send, where it hasn't gone, is dropped.
-      this.connection.sendAbort(this, reason.serialized, this.newestLossy?.seq)
+      this.connection.sendAbort(this, reason.serialized, this.newestLossySeq)
     })
   }
 
@@ -519,56 +522,44 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.connection.sendAckRes(this, seq, answer)
   }
 
-  /** A send a newer one may replace: once the uplink is behind, the newest lossy send that still waits to go, with
-   *  nothing sent after it, takes `data` in its place, and both settle as it does; `replaced` gets the bytes that adds.
-   *  Else `start` sends it and tells its seq. */
-  protected sendLossy<D, R>(
-    encodeFrame: SequencedEncoder<D>,
-    data: D,
-    start: (onQueued: (seq: number) => void) => Promise<R>,
-    replaced?: (addedBytes: number) => void,
-  ): Promise<R> {
-    const newest = this.newestLossy
-    if (newest !== null) {
-      const added = this.connection.replaceWaiting(this, newest.seq, encodeFrame, data)
-      if (added !== null) {
-        replaced?.(added)
-        return newest.settled
-      }
-    }
+  /** Once the uplink is behind, the newest lossy send that still waits to go, with nothing sent after it, takes `data`
+   *  in its place: it tells the bytes that adds, or `null` where there is none to replace. */
+  protected replaceNewestLossy<D>(encodeFrame: SequencedEncoder<D>, data: D): number | null {
+    const seq = this.newestLossySeq
+    return seq === undefined ? null : this.connection.replaceWaiting(this, seq, encodeFrame, data)
+  }
+
+  /** `start` sends a lossy send, which becomes the newest, and tells its seq. */
+  protected startLossy<R>(start: (onQueued: (seq: number) => void) => R): R {
     let seq = 0
-    const settled = start((queued) => (seq = queued))
-    this.newestLossy = { seq, settled }
-    return settled
+    const sent = start((queued) => (seq = queued))
+    this.newestLossySeq = seq
+    return sent
   }
 
   /** A send of which only the newest matters. It goes, or takes the place of the newest that still waits for a link
    *  that is behind; while the server grants no more credit, it waits as the newest. */
-  private sendNewest<D extends string | Uint8Array>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
+  private sendNewest<D>(encodeFrame: SequencedEncoder<D>, data: D, keep: (data: D) => D): void {
     if (this.sendCredit.isOutOfCredit()) {
       // Too large, it throws here, and the one held stays.
       this.connection.assertFits(this, encodeFrame, data)
-      // The caller may write into its bytes once `sendBinary` returned.
-      const copy = (typeof data === 'string' ? data : new Uint8Array(data)) as D
-      this.heldLossy = () => void this.handLossy(encodeFrame, copy)
-      return Promise.resolve()
+      const kept = keep(data)
+      this.heldLossy = () => this.handLossy(encodeFrame, kept)
+      return
     }
     this.heldLossy = null
-    return this.handLossy(encodeFrame, data)
+    this.handLossy(encodeFrame, data)
   }
 
   /** Counts a lossy send against the server's credit, and nothing waits on that: a replacement counts the bytes it
    *  adds. */
-  private handLossy<D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<void> {
-    return this.sendLossy(
-      encodeFrame,
-      data,
-      (onQueued) => {
-        this.sendCredit.count(this.connection.sendSequenced(this, 'data', encodeFrame, data, onQueued))
-        return Promise.resolve()
-      },
-      (added) => this.sendCredit.refund(-added, 0),
-    )
+  private handLossy<D>(encodeFrame: SequencedEncoder<D>, data: D): void {
+    const added = this.replaceNewestLossy(encodeFrame, data)
+    if (added !== null) this.sendCredit.refund(-added, 0)
+    else
+      this.startLossy((onQueued) =>
+        this.sendCredit.count(this.connection.sendSequenced(this, 'data', encodeFrame, data, onQueued)),
+      )
   }
 
   /** The lossy send held for credit goes now, ahead of what the page sends next. */
@@ -627,4 +618,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
+}
+
+/** What a held lossy send keeps of its text: the string itself. */
+function keepText(text: string): string {
+  return text
+}
+
+/** What a held lossy send keeps of its bytes: a copy, as the caller may write into them once `sendBinary` returned. */
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
 }

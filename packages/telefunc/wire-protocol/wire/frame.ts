@@ -3,6 +3,7 @@ export {
   ERROR_REASON,
   encode,
   withTook,
+  stampWindowHold,
   tookOf,
   TOOK_TAGS,
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
@@ -24,6 +25,7 @@ export type {
   ChannelFrame,
   ChannelCtrlFrame,
   ChannelDataFrame,
+  SequencedFrame,
   PingEntry,
   PongEntry,
   PiecesAck,
@@ -31,7 +33,18 @@ export type {
   SequencedEncoder,
 }
 
-import { HEADER, SEQ_OFFSET, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 } from './header.js'
+import {
+  HEADER,
+  SEQ_OFFSET,
+  writeHeader,
+  writeU16,
+  writeU32,
+  writeU64,
+  readTag,
+  readU16,
+  readU32,
+  readU64,
+} from './header.js'
 import { TAG, isSequencedTag, isWireCtrlTag } from './tags.js'
 import {
   parseBarrierPayload,
@@ -55,6 +68,7 @@ import {
 } from './publishInfo.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
 import { textDecoder, textEncoder } from './envelope.js'
+import { assert } from '../../utils/assert.js'
 import { END_CAUSE } from '../channel/endCause.js'
 
 const PING_ENTRY_BYTES = 6
@@ -98,6 +112,7 @@ const ERROR_REASON = {
   UNCONFIRMED: END_CAUSE.unconfirmed.code,
   UNREADABLE: END_CAUSE.unreadable.code,
   RECEIVE_BUDGET: END_CAUSE.receiveBudget.code,
+  SEND_BUDGET: END_CAUSE.sendBudget.code,
   END_NOT_KEPT: END_CAUSE.endNotKept.code,
 }
 
@@ -126,7 +141,7 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.CLOSE_DONE; index: number; seq: number; lastSeq: number }
   | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
-  | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number }
+  | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number; heldMs: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.WANT; index: number; want: Want }
   | { tag: typeof TAG.WANTED; index: number; version: number }
@@ -315,15 +330,31 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (`lengthBytes`), in one message. */
-  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+  /** Writes the frames in order. A null slot takes the next publish index and sequence from `routes`. */
+  message(
+    frames: readonly (Uint8Array | null)[],
+    bytes: number,
+    routes?: readonly number[],
+    count = frames.length,
+  ): Uint8Array<ArrayBuffer> {
     const message = new Uint8Array(bytes)
-    const last = frames.length - 1
+    const last = count - 1
     let at = 0
+    let route = 0
     for (let i = 0; i <= last; i++) {
-      const frame = frames[i]!
-      if (i < last && lengthBytes(frame[0]!) > 0) {
-        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
+      const frame = frames[i]
+      if (frame === null) {
+        const index = routes?.[route++]
+        const seq = routes?.[route++]
+        assert(index !== undefined && seq !== undefined)
+        writeHeader(message, TAG.PUBLISH_TO, index, seq, at)
+        at += HEADER
+        continue
+      }
+      assert(frame !== undefined)
+      const tag = frame[0]
+      if (i < last && (tag === undefined || lengthBytes(tag) > 0)) {
+        writeHeader(message, TAG.LENGTH, 0, frame.byteLength, at)
         at += HEADER
       }
       message.set(frame, at)
@@ -350,12 +381,13 @@ const encode = {
     frame[HEADER] = reason
     return frame
   },
-  /** Wire: [header][u32 limit][u32 lastSeq] */
-  window(index: number, bytes: number, lastSeq: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 8)
+  /** Wire: [header][u32 limit][u32 lastSeq][u16 heldMs] */
+  window(index: number, bytes: number, lastSeq: number, heldMs = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 10)
     writeHeader(frame, TAG.WINDOW, index, 0)
     writeU32(frame, HEADER, bytes)
     writeU32(frame, HEADER + 4, lastSeq)
+    if (heldMs !== 0) writeWindowHold(frame, heldMs)
     return frame
   },
   msgWindow(index: number, count: number): Uint8Array<ArrayBuffer> {
@@ -405,6 +437,16 @@ const encode = {
   },
 }
 
+/** Stamps a WINDOW reporting a lossy arrival as it leaves this side. */
+function stampWindowHold(frame: Uint8Array<ArrayBuffer>, receivedAt?: number): Uint8Array<ArrayBuffer> {
+  if (receivedAt !== undefined) writeWindowHold(frame, performance.now() - receivedAt)
+  return frame
+}
+
+function writeWindowHold(frame: Uint8Array<ArrayBuffer>, heldMs: number): void {
+  writeU16(frame, HEADER + 8, Math.max(0, Math.min(0xffff, heldMs)))
+}
+
 /** Writes into `frame`, a PONG or a frame `tookOf` reads, that its sender took `bytes` of what its WebSocket carried
  *  (mod 2^32): it bounds the link's rate, and frees the peer's copies of what was taken. */
 function withTook(frame: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
@@ -417,7 +459,7 @@ const TOOK_TAGS: ReadonlySet<number> = new Set([TAG.PING, TAG.WINDOW, TAG.MSG_WI
 
 /** What the page took off its WebSocket, as `frame` says; null for a frame that doesn't say. */
 function tookOf(frame: Uint8Array): number | null {
-  return TOOK_TAGS.has(frame[0]!) ? readU32(frame, SEQ_OFFSET) : null
+  return TOOK_TAGS.has(readTag(frame)) ? readU32(frame, SEQ_OFFSET) : null
 }
 
 // ===== Decode =====
@@ -454,14 +496,14 @@ function lengthBytes(tag: number): number {
   return fixedBytes(tag) === 0 ? HEADER : 0
 }
 
-/** Whether a WebSocket `message` holds one frame. */
+/** Whether a transport message holds one frame. */
 function isOneFrame(message: Uint8Array): boolean {
   const bytes = fixedBytes(message[0]!)
   return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
 }
 
 /** The frames of a message of several, each a copy (a `Buffer`'s `slice` is a view), read only as it is taken. */
-function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>> {
+function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>, undefined> {
   const end = message.byteLength
   let at = 0
   for (;;) {
@@ -626,12 +668,13 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 1, 'ERROR payload too short')
       return { tag: TAG.ERROR, index, seq, reason: payload[0] as number }
     case TAG.WINDOW:
-      assertProtocol(payload.length >= 8, 'WINDOW payload too short')
+      assertProtocol(payload.length >= 10, 'WINDOW payload too short')
       return {
         tag: TAG.WINDOW,
         index,
         bytes: readU32(payload, 0),
         lastSeq: readU32(payload, 4),
+        heldMs: readU16(payload, 8),
       }
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')

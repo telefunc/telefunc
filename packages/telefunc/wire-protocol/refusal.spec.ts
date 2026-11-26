@@ -15,6 +15,7 @@ const rows: [RefusalCause, number | undefined][] = [
   ['frameRefused', 0xffff],
   ['unreadable', undefined],
   ['receiveBudget', undefined],
+  ['sendBudget', undefined],
 ]
 
 test.each(rows)(

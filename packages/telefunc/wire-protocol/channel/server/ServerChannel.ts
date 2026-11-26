@@ -1,5 +1,5 @@
 export { ATTACHABLE_NOW, Channel, ServerChannel }
-export type { CallPage }
+export type { CallPage, MuxChannel, ResponseChannel }
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -32,13 +32,6 @@ import { parse } from '@brillout/json-serializer/parse'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import {
   admitSend,
-  cancelWait,
-  joinLine,
-  parkWait,
-  releaseBehind,
-  reserveBehind,
-  takeWait,
-  waitForRoom,
   admit,
   fits,
   heldAnswerBytes,
@@ -48,9 +41,9 @@ import {
   holdsEnough,
   letGo,
   releaseHolder,
+  RoomWait,
   tryHold,
   type MemoryHolder,
-  type RoomWait,
 } from './channelMemory.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -130,8 +123,8 @@ type PendingAck<T> = { resolve: (result: ChannelAck<T>) => void; reject: (err: E
 type LossySend = { data: EntryData; held: number }
 /** A lossy send, and what it holds. */
 type LossyBehind = { tag: typeof TAG.TEXT | typeof TAG.BINARY; data: EntryData; bytes: number; held: number }
-/** A send that waits for room, how its promise settles if the channel ends first, and the lossy send behind it. */
-type WaitingSend = { wait: RoomWait; reject: (err: Error) => void; lossy: LossyBehind | null }
+/** A send that waits for room, with the lossy send behind it, and how its promise settles if the channel ends first. */
+type WaitingSend = { wait: RoomWait<LossyBehind>; reject: (err: Error) => void }
 
 /** The page that is to attach to a channel its call returned, as the channel's connect window waits for it: a browser
  *  attaches only once it has sent the call's whole body. */
@@ -145,6 +138,36 @@ type CallPage = {
 
 /** What a channel's registration takes where a page can attach at once: its call's upload, if any, has been sent. */
 const ATTACHABLE_NOW: CallPage = { lastSign: () => Number.NEGATIVE_INFINITY, neverCame: () => {} }
+
+type ChannelOptions = { ack?: boolean; id?: string }
+
+/** A channel as the mux and its wires hold it, whatever data it carries. */
+type MuxChannel = Pick<
+  ServerChannel,
+  | 'id'
+  | 'heldBytes'
+  | '_phase'
+  | '_callRequest'
+  | '_lastClientSeq'
+  | '_replayBuffer'
+  | '_registerChannel'
+  | '_applyCallWant'
+  | '_confirmWant'
+  | '_attachPeer'
+  | '_dispatchFrame'
+  | '_acknowledge'
+  | '_onPageAttach'
+  | '_onPageMoving'
+  | '_onPageClosed'
+  | '_onPeerDisconnect'
+  | '_onPeerGone'
+  | '_onPeerRecoveryFailure'
+  | '_onServerEnd'
+  | '_release'
+>
+
+/** A channel as a response carries it, whatever data it carries. */
+type ResponseChannel = MuxChannel & Pick<ServerChannel, '_validators' | '_setResponseAbort' | 'onClose'>
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>, ChannelLifecycleOwner, BufferedSender, MemoryHolder
@@ -234,7 +257,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  Each returns `true` on success or an error string — callers decide the action (drop, throw). */
   _validators: ShieldValidators = new Map()
 
-  constructor({ ack = false, id }: { ack?: boolean; id?: string } = {}) {
+  constructor({ ack = false, id }: ChannelOptions = {}) {
     // The control-frame cap counts each channel's id at this length (`WIRE_MAX_CTRL_FRAME_BYTES`).
     assertUsage(
       id === undefined || isChannelId(id),
@@ -393,20 +416,20 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Makes a lossy send admitted, or held from what it reserved. */
   private makeLossy({ tag, data, bytes, held }: LossyBehind): void | Promise<void> {
     if (!this.peer) return this.offlineBuffer.pushLossy(tag, data, bytes)
+    // Detached bytes read as empty: copying them throws before they take the place of the send that waits.
+    if (typeof data !== 'string' && data.byteLength === 0) new Uint8Array(data)
     this.lossyDelivery().send({ data, held })
   }
 
   /** Behind a send of its channel that waits for room, a lossy one waits too, as the newest, reserved in that one's turn:
    *  it goes right after it, so nothing passes it. */
-  private sendLossyBehind(waiting: WaitingSend, lossy: LossyBehind): void | Promise<void> {
+  private sendLossyBehind({ wait }: WaitingSend, lossy: LossyBehind): void | Promise<void> {
     // The two go together, so a lossy one they can't both fit in its channel is refused, leaving the other its turn.
-    if (waiting.wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
-    const replaced = waiting.lossy?.held ?? 0
-    if (lossy.held > replaced && !reserveBehind(waiting.wait, lossy.held - replaced))
-      return Promise.reject<void>(this.refuseSend(lossy.held - replaced, false))
-    if (lossy.held < replaced) releaseBehind(waiting.wait, replaced - lossy.held)
+    if (wait.bytes + lossy.held > holdsAtMost()) return Promise.reject<void>(this.refuseSend(lossy.held, false))
     // The caller may write into its bytes once `send` returned, as for a send that waits.
-    waiting.lossy = { ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) }
+    const keep = () => ({ ...lossy, data: typeof lossy.data === 'string' ? lossy.data : new Uint8Array(lossy.data) })
+    if (!wait.putBehind(lossy.held, keep))
+      return Promise.reject<void>(this.refuseSend(lossy.held - wait.behindBytes, false))
   }
 
   /** What its next lossy send takes the place of, by what that holds: with no page attached, the offline buffer's lossy
@@ -429,7 +452,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return {
       peer: () => this.peer,
       replay: () => this._replayBuffer,
-      hand: ({ data }) => this.handLossy(this.peer!, data),
+      hand: ({ data }) => {
+        assert(this.peer)
+        this.handLossy(this.peer, data)
+      },
       hold: (send) => {
         // The caller may write into its bytes once `sendBinary` returned.
         if (typeof send.data !== 'string') send.data = new Uint8Array(send.data)
@@ -495,28 +521,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     keep?.()
     return new Promise<unknown>((resolve, reject) => {
       const made = () => {
-        const lossy = this.roomWait?.lossy ?? null
         this.roomWait = null
         void settleMade(go(), resolve, reject)
-        if (lossy === null) return
-        releaseBehind(wait, lossy.held)
-        void this.makeLossy(lossy)
+        const lossy = wait.takeBehind()
+        if (lossy !== null) void this.makeLossy(lossy)
       }
-      const wait = this.didRegister ? waitForRoom(this, held, made) : parkWait(this, held, made)
-      this.roomWait = { wait, reject, lossy: null }
+      const wait = new RoomWait<LossyBehind>({ holder: this, bytes: held, go: made, inLine: this.didRegister })
+      this.roomWait = { wait, reject }
     })
   }
 
   /** Its send that waits for room goes now, ahead of its end, holding what it reserved, as the end holds what went
    *  before it; the lossy send behind it goes too, unless the end drops lossy sends. */
   private sendWaitingNow({ dropLossy }: { dropLossy: boolean }): void {
-    const waiting = this.roomWait
-    if (waiting === null) return
-    if (dropLossy && waiting.lossy !== null) {
-      releaseBehind(waiting.wait, waiting.lossy.held)
-      waiting.lossy = null
-    }
-    takeWait(waiting.wait)
+    const wait = this.roomWait?.wait
+    if (wait === undefined) return
+    if (dropLossy) wait.takeBehind()
+    wait.goNow()
   }
 
   /** A send that would hold `bytes` wasn't admitted. */
@@ -647,7 +668,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
     // Its send waiting for room joins the line behind them, or is refused where `maxMemory` has no room for it.
     const waiting = this.roomWait
-    if (waiting !== null && !joinLine(waiting.wait)) {
+    if (waiting !== null && !waiting.wait.joinLine()) {
       this.roomWait = null
       waiting.reject(this.refuseSend(waiting.wait.bytes))
     }
@@ -779,7 +800,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this.sendCredit.onPeerByteWindow(frame.bytes)
-        this.onPageHasThrough(frame.lastSeq)
+        this.onPageHasThrough(frame.lastSeq, frame.heldMs)
         return
       case TAG.MSG_WINDOW:
         this.sendCredit.onPeerMessageWindow(frame.count)
@@ -1032,13 +1053,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** As `onPageHas`, from the low 32 bits of `lastSeq` the wire carries. */
-  private onPageHasThrough(lastSeq: number): void {
-    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0))
+  private onPageHasThrough(lastSeq: number, heldMs?: number): void {
+    this.onPageHas(seqThrough(lastSeq, this._replayBuffer?.seq ?? 0), heldMs)
   }
 
   /** The page received this channel's frames through `lastSeq`, so the replay buffer lets them go. */
-  protected onPageHas(lastSeq: number): void {
-    this._replayBuffer?.acknowledge(lastSeq)
+  protected onPageHas(lastSeq: number, heldMs?: number): void {
+    this._replayBuffer?.acknowledge(lastSeq, heldMs)
     this.lossySends?.mayGo()
   }
 
@@ -1271,7 +1292,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const waiting = this.roomWait
     if (waiting === null) return
     this.roomWait = null
-    cancelWait(waiting.wait)
+    waiting.wait.cancel()
     waiting.reject(this.lifecycle.waitingSendOutcome ?? err ?? this.endError())
   }
 
@@ -1347,15 +1368,19 @@ type Channel<ClientToServer = unknown, ServerToClient = unknown, TDefault extend
 // `Channel` interface so internal `_method` members are hidden, and so the third generic
 // `TDefault` is inferred from `opts.ack` (gives `send()` the right ack-aware return type).
 const Channel = ServerChannel as unknown as {
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
-    ack?: false
-  }): Channel<ClientToServer, ServerToClient, false>
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts: {
-    ack: true
-  }): Channel<ClientToServer, ServerToClient, true>
-  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
-    ack?: boolean
-  }): Channel<ClientToServer, ServerToClient, false>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts?: ChannelOptions & {
+      ack?: false
+    },
+  ): Channel<ClientToServer, ServerToClient, false>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts: ChannelOptions & {
+      ack: true
+    },
+  ): Channel<ClientToServer, ServerToClient, true>
+  new <ClientToServer = unknown, ServerToClient = unknown>(
+    opts?: ChannelOptions,
+  ): Channel<ClientToServer, ServerToClient, false>
 }
 
 /** Settles a send that waited for room with the outcome of making it. */

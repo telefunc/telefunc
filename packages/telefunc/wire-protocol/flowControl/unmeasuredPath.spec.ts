@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames } from '../wire/frame.js'
+import { decodePiecesAck } from '../wire/decode.fixture.js'
+import { HEADER } from '../wire/header.js'
 import { TAG } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
 import { ServerHeadroom } from './server/ServerHeadroom.js'
@@ -15,16 +17,25 @@ const sleep = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 /** 125 kB/s, 1 Mbit/s. */
 const LINK_BYTES_PER_MS = 125
 
-/** A server wire to a page behind a slow link, through a socket that takes whatever it is handed and reports none of
- *  it buffered, as one whose kernel buffers hold it: the link carries what the socket took, in order, at its rate,
- *  `delayMs` each way. */
-function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}) {
+/** A server wire to a page behind a slow link, through a socket that reports what its link holds as buffered, as
+ *  Node's does once its kernel buffers are full, or, `buffersNothing`, none of it, as Bun's does while its kernel takes
+ *  all it is handed: the link carries what the socket took, in order, at its rate, `delayMs` each way. A page busy as it
+ *  starts reads at `startBytesPerMs` for its first `startMs`. The page sends nothing but its lone acknowledgements. */
+function wireBehindSlowLink({
+  bytesPerMs = LINK_BYTES_PER_MS,
+  delayMs = 0,
+  buffersNothing = false,
+  startMs = 0,
+  startBytesPerMs = 0,
+} = {}) {
   const link: Uint8Array<ArrayBuffer>[] = []
   let linkBytes = 0
+  /** When each data frame arrived whole at the page. */
+  const arrivals: number[] = []
   const receiver: ClientPieceReceiver = new ClientPieceReceiver({
     owner: {
       sendAck: (frame) => {
-        setTimeout(() => headroom.acknowledged(decode(frame) as PiecesAck), Math.max(20, delayMs))
+        setTimeout(() => headroom.acknowledged(decodePiecesAck(frame)), Math.max(20, delayMs))
       },
       carryAck: () => {},
     },
@@ -34,18 +45,23 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}
     for (const frame of isOneFrame(message) ? [message] : Array.from(messageFrames(message))) {
       const decoded = decode(frame)
       if (decoded.tag === TAG.ANNOUNCE) receiver.announce(decoded.bytes, at, decoded.floor)
-      else if (decoded.tag === TAG.PIECE) receiver.add(decoded.total, decoded.piece, at)
-      else receiver.arrived(decoded.tag, frame.byteLength, at, 'alone')
+      else if (decoded.tag === TAG.PIECE) {
+        if (receiver.add(decoded.total, decoded.piece, at)?.[0] === TAG.BINARY) arrivals.push(at)
+      } else {
+        receiver.arrived(decoded.tag, frame.byteLength, at, 'alone')
+        if (decoded.tag === TAG.BINARY) arrivals.push(at)
+      }
     }
   }
   let budget = 0
-  let last = performance.now()
+  const opened = performance.now()
+  let last = opened
   const timer = setInterval(() => {
     const now = performance.now()
-    budget += (now - last) * bytesPerMs
+    budget += (now - last) * (now - opened < startMs ? startBytesPerMs : bytesPerMs)
     last = now
-    while (link.length > 0 && link[0]!.byteLength <= budget) {
-      const message = link.shift()!
+    for (let message = link[0]; message !== undefined && message.byteLength <= budget; message = link[0]) {
+      link.shift()
       budget -= message.byteLength
       linkBytes -= message.byteLength
       if (delayMs === 0) take(message)
@@ -59,7 +75,9 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}
         link.push(message)
         linkBytes += message.byteLength
       },
-      bufferedAmount: 0,
+      get bufferedAmount() {
+        return buffersNothing ? 0 : linkBytes
+      },
       copiesOnSend: false,
     },
     pingInterval: 5_000,
@@ -69,8 +87,8 @@ function wireBehindSlowLink({ bytesPerMs = LINK_BYTES_PER_MS, delayMs = 0 } = {}
     send: (frame: (seq: number) => Uint8Array<ArrayBuffer>) => headroom.send(frame(++seq)),
     linkBytes: () => linkBytes,
     sentBytes: () => headroom.sender.transmittedBytes,
-    unconfirmed: () => headroom.sender.transmittedBytes - headroom.sender.confirmedBytes,
     window: () => headroom.window(),
+    arrivals,
     stop: () => clearInterval(timer),
   }
 }
@@ -92,24 +110,125 @@ describe('ServerHeadroom.headroom', () => {
     }
   })
 
-  it("once the page's acknowledgements measured the link, what it hasn't confirmed stays within the window and a message across it", async () => {
+  it("once the page's acknowledgements measured the link, the link holds no more than the window and a frame", async () => {
     const wire = wireBehindSlowLink()
     try {
       // 256 KiB queue on the link for 2 s, so their acknowledgements give its rate.
       const frame = new Uint8Array(16 * 1024)
       for (let n = 0; n < 16; n++) wire.send((seq) => encode.binary(1, frame, seq))
       await sleep(3_000)
-      // 125 B/ms over at most the queue delay, 37.5 kB, is less than two 64 KiB messages with their frames' 16 B each.
-      expect(wire.window()).toBe(131_104)
+      // 125 B/ms over four least round trips, each a frame's 131 ms on the link, its 5 ms tick and the page's 20 ms answer.
+      expect(wire.window()).toBeGreaterThanOrEqual(4 * 125 * 151)
+      expect(wire.window()).toBeLessThanOrEqual(4 * 125 * 161)
       for (let n = 0; n < 64; n++) wire.send((seq) => encode.binary(1, frame, seq))
       let most = 0
       for (let ms = 0; ms < 4_000; ms += 5) {
-        most = Math.max(most, wire.unconfirmed())
+        most = Math.max(most, wire.linkBytes())
         await sleep(5)
       }
-      // A message may cross the window, and does: the link holds the next while the page acknowledges the last.
-      expect(most).toBeGreaterThan(131_104)
-      expect(most).toBeLessThanOrEqual(131_104 + 65_552)
+      expect(most).toBeLessThanOrEqual(wire.window() + frame.byteLength + HEADER)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it("a large message's rest, released by its probe's answer, measures the link through a socket that reports nothing buffered", async () => {
+    const wire = wireBehindSlowLink({ buffersNothing: true })
+    try {
+      wire.send((seq) => encode.binary(1, new Uint8Array(1024 * 1024), seq))
+      // The probe's answer releases the rest a round trip in; its pieces after the first arrive as the link takes them.
+      await sleep(2_000)
+      expect(wire.window()).toBeLessThan(Number.POSITIVE_INFINITY)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('measures a large message still in flight when a small message is sent behind it', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 1_000, delayMs: 30, buffersNothing: true })
+    try {
+      wire.send((seq) => encode.binary(1, new Uint8Array(4 * 1024 * 1024), seq))
+      await sleep(100)
+      expect(wire.linkBytes()).toBeGreaterThan(64 * 1024)
+      wire.send((seq) => encode.text(1, 'answered behind the body', seq))
+      await sleep(4_500)
+      // Four round trips, including the first 64 KiB on the link and the 30 ms each way.
+      const window = wire.window()
+      expect(window).toBeGreaterThan(384 * 1024)
+      expect(window).toBeLessThan(640 * 1024)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('measures the pieces after the first when a large message goes out in one cut', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 1_000, delayMs: 30, buffersNothing: true })
+    try {
+      // Its probe and the rest measure pieces, but the rest crosses in too little time to set the window.
+      wire.send((seq) => encode.binary(1, new Uint8Array(96 * 1024), seq))
+      await sleep(500)
+      expect(wire.linkBytes()).toBe(0)
+      expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+
+      wire.send((seq) => encode.binary(1, new Uint8Array(512 * 1024), seq))
+      expect(wire.linkBytes()).toBeGreaterThan(512 * 1024)
+      await sleep(1_000)
+      expect(wire.window()).toBeLessThan(Number.POSITIVE_INFINITY)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('does not measure the rate of an app trickling messages on a faster link', async () => {
+    const wire = wireBehindSlowLink({ bytesPerMs: 10_000, delayMs: 50, buffersNothing: true })
+    try {
+      const frame = new Uint8Array(64 * 1024)
+      for (let n = 0; n < 20; n++) {
+        wire.send((seq) => encode.binary(1, frame, seq))
+        await sleep(50)
+        expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+      }
+      await sleep(200)
+      expect(wire.arrivals).toHaveLength(20)
+      expect(wire.window()).toBe(Number.POSITIVE_INFINITY)
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it('a measured link that frames wait for wakes its wire as the window frees what goes next, not every millisecond', async () => {
+    const wire = wireBehindSlowLink()
+    try {
+      const frame = new Uint8Array(16 * 1024)
+      for (let n = 0; n < 16; n++) wire.send((seq) => encode.binary(1, frame, seq))
+      await sleep(3_000)
+      for (let n = 0; n < 64; n++) wire.send((seq) => encode.binary(1, frame, seq))
+      const timers = vi.spyOn(globalThis, 'setTimeout')
+      await sleep(2_000)
+      // The link frees a 16 KiB frame's room in about 131 ms: the wire, the page's acknowledgements and their answers
+      // look a few times for each, far fewer than once a millisecond.
+      expect(timers.mock.calls.length).toBeLessThan(2_000 / 10)
+      timers.mockRestore()
+    } finally {
+      wire.stop()
+    }
+  })
+
+  it("a wire a page measured low as it started rises to the link's rate once the page reads at it", async () => {
+    // 32 MiB/s; the page reads 200 kB/s for its first 1.5 s, and the app publishes 8 MiB a second.
+    const wire = wireBehindSlowLink({ bytesPerMs: 32 * 1024, startMs: 1_500, startBytesPerMs: 200 })
+    try {
+      const publish = new Uint8Array(8 * 1024 * 1024)
+      const start = performance.now()
+      for (let n = 0; n < 10; n++) {
+        wire.send((seq) => encode.binary(1, publish, seq))
+        await sleep(1_000)
+      }
+      await sleep(500)
+      const tookMs = wire.arrivals.map((at, n) => at - start - n * 1_000)
+      expect(tookMs).toHaveLength(10)
+      // From the third, each publish takes the 256 ms the link takes for 8 MiB, not what the first rate allows.
+      expect(Math.max(...tookMs.slice(2))).toBeLessThan(2 * 256)
     } finally {
       wire.stop()
     }
@@ -129,5 +248,46 @@ describe('ServerHeadroom.headroom', () => {
       clearInterval(stream)
       wire.stop()
     }
+  })
+})
+
+describe('ServerHeadroom.heartbeat', () => {
+  it('a page that confirms small frames by heartbeat alone keeps the app-limited ranges bounded, and a later acknowledgement still drops the span they taint', () => {
+    let buffered = 0
+    const headroom = new ServerHeadroom({
+      socket: {
+        send: () => {},
+        get bufferedAmount() {
+          return buffered
+        },
+        copiesOnSend: false,
+      },
+      pingInterval: 5_000,
+    })
+    let seq = 0
+    const send = (frame: Uint8Array<ArrayBuffer>) => {
+      headroom.send(frame)
+      headroom.sender.flush()
+    }
+    // Small frames, each app-limited or behind what the socket holds by turns, each confirmed by the page's heartbeat.
+    for (let n = 0; n < 500; n++) {
+      buffered = n % 2 === 0 ? 0 : 1024 * 1024
+      send(encode.text(1, 'x', ++seq))
+      expect(headroom.heartbeat(headroom.sender.transmittedBytes, performance.now())).toBe(true)
+    }
+    expect(headroom['appLimited'].length).toBeLessThanOrEqual(2)
+    const ack = (spanMs: number) =>
+      headroom.acknowledged({ bytes: headroom.sender.transmittedBytes, heldMs: 0, spanUs: spanMs * 1000 })
+    // An acknowledgement whose span includes an app-limited send measures no rate, though a heartbeat confirmed it first.
+    buffered = 0
+    send(encode.binary(1, new Uint8Array(20 * 1024), ++seq))
+    expect(headroom.heartbeat(headroom.sender.transmittedBytes, performance.now())).toBe(true)
+    expect(ack(200)).toBe(true)
+    expect(headroom['drain'].rate).toBe(0)
+    // The next span, behind what the socket holds throughout, measures one.
+    buffered = 1024 * 1024
+    send(encode.binary(1, new Uint8Array(20 * 1024), ++seq))
+    expect(ack(200)).toBe(true)
+    expect(headroom['drain'].rate).toBeGreaterThan(0)
   })
 })

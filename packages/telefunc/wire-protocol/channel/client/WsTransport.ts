@@ -16,7 +16,15 @@ import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/clie
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
-import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
+import {
+  decode,
+  encode,
+  isOneFrame,
+  messageFrames,
+  stampWindowHold,
+  withTook,
+  type DecodedFrame,
+} from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import { readU16 } from '../../wire/header.js'
 import { pairPublishes } from './pairPublishes.js'
@@ -62,6 +70,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   /** The live wire's, set with it by `setupHandlers`: none before the first, nor once disposed. */
   private pieces: WirePieces | null = null
   private drainCallbacks: Array<() => void> = []
+  private firstPing: 'waiting' | { frame: Uint8Array<ArrayBuffer>; timer: ReturnType<typeof setTimeout> } | null = null
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -129,7 +138,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     try {
       ws = new WebSocket(this.wsUrl())
     } catch {
-      this.owner.onTransportClosed(this)
+      this.owner.onTransportClosed(this, { unopened: true })
       return
     }
     ws.binaryType = 'arraybuffer'
@@ -154,7 +163,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     socket.ws.onclose = socket.ws.onerror = null
     socket.pieces.headroom.close()
     this.connecting = null
-    this.owner.onTransportClosed(this)
+    this.owner.onTransportClosed(this, { unopened: true })
   }
 
   cancelAttempt(): void {
@@ -185,6 +194,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
 
   attachHeartbeat(heartbeat: Heartbeat): void {
     this.heartbeat = heartbeat
+    this.firstPing = 'waiting'
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
     heartbeat.expectFrom(() =>
       Math.max(this.pieces?.receiver.expectedBy(heartbeat.pongTimeoutMs) ?? 0, this.pieces?.sender.acknowledgedBy ?? 0),
@@ -194,6 +204,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   detachHeartbeat(): void {
     this.heartbeat?.stop()
     this.heartbeat = null
+    if (this.firstPing && this.firstPing !== 'waiting') clearTimeout(this.firstPing.timer)
+    this.firstPing = null
   }
 
   drained(): Promise<void> {
@@ -302,11 +314,15 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     return this.connecting !== null
   }
 
-  sendFrame(frame: OutboundFrame): void {
+  sendFrame({ kind, frame, receivedAt }: OutboundFrame): void {
     assert(this.ws && this.pieces)
     const { receiver } = this.pieces
-    if (frame.kind === 'acknowledgement') this.pieces.sender.carry(() => receiver.report(frame.frame))
-    else this.pieces.headroom.send(receiver.report(frame.frame))
+    if (kind === 'acknowledgement') {
+      this.pieces.sender.carry(() => receiver.report(stampWindowHold(frame, receivedAt)))
+    } else {
+      this.pieces.headroom.send(receiver.report(stampWindowHold(frame, receivedAt)))
+    }
+    if (this.firstPing && this.firstPing !== 'waiting') this.flushFirstPing()
   }
 
   /** Its frames wait behind the wire's queues, and for headroom that acknowledgements free. */
@@ -375,7 +391,22 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.pieces.sender.answered(performance.now())
   }
 
-  sendPing(frame: Uint8Array<ArrayBuffer>): void {
+  sendPing(frame: Uint8Array<ArrayBuffer>, now = false): void {
+    if (now) this.flushFirstPing()
+    if (now || this.firstPing !== 'waiting') return this.sendPingFrame(frame)
+    // The first heartbeat can share the controls queued with the first downlink frames.
+    this.firstPing = { frame, timer: setTimeout(this.flushFirstPing) }
+  }
+
+  private readonly flushFirstPing = (): void => {
+    const first = this.firstPing
+    if (first === null || first === 'waiting') return
+    clearTimeout(first.timer)
+    this.firstPing = null
+    this.sendPingFrame(first.frame)
+  }
+
+  private sendPingFrame(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.pieces)
     this.pieces.sender.send(this.pieces.receiver.report(frame), 0)

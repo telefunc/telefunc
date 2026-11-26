@@ -109,7 +109,7 @@ channel.send('Hello!')
 | `onClose(cb)` | Called when the channel closes. |
 | `opened` | Promise that resolves when the channel opens. |
 | `closed` | Promise that resolves when the channel has closed: with `null`, or with the error it ended with. |
-| `close()` | Close gracefully. |
+| `close()` | Close gracefully. Resolves with `null` once closed, or with the error it ended with. |
 | `abort(value?)` | Terminate immediately. |
 
 > `onOpen()` and `onClose()` return a function that removes the callback. `listen()`, `listenBinary()`, `onOpen()` and `onClose()` also accept `{ signal }` as their second argument: aborting it removes the callback.
@@ -375,7 +375,7 @@ broadcast.subscribe((n) => showToast(n))
 | Method | Description |
 |---|---|
 | `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
-| `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function, whose `opened` promise resolves once the subscription is in effect. |
+| `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function, whose `opened` promise resolves once the subscription is in effect, or once you remove it while the channel is open. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `messages({ signal })` | Receive text and binary messages, each with its `info`, in a `for await` loop. |
@@ -383,12 +383,14 @@ broadcast.subscribe((n) => showToast(n))
 | `onClose(cb)` | Called when the channel closes. |
 | `opened` | Promise that resolves when the channel opens. |
 | `closed` | Promise that resolves when the channel has closed: with `null`, or with the error it ended with. |
-| `close()` | Close gracefully. |
+| `close()` | Close gracefully. Resolves with `null` once closed, or with the error it ended with. |
 | `abort(abortValue?)` | Terminate immediately. |
 
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link href="#broadcast"><code>Broadcast.publish(key, data)</code></Link> / `Broadcast.subscribe(key, cb)` have no `onOpen` / `onClose` / `close` / `abort` since there's no instance to manage.
 
 > Where only the newest message matters, such as a price, use `new BroadcastChannel({ key, lossy: true })`: its client then skips to the newest message when it falls behind.
+
+> On Cloudflare, a subscription in effect reaches other locations' publishes once they see it, see <Link href="/stream/cloudflare#delivery-guarantees">delivery guarantees</Link>.
 
 
 ## `new BroadcastChannel()` VS `new Channel()`
@@ -427,9 +429,10 @@ Channels and broadcasts signal failure through these errors:
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A `send()` was refused — the server already holds too much for that client | **Open** | Only the refused `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | A reliable broadcast subscriber fell behind, or inbound sends exceeded the server's budget | Closed | Call the telefunction again to rejoin, read faster, or pass `lossy: true` to a `BroadcastChannel` |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `null`).
 
@@ -442,8 +445,7 @@ See also:
 
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
-- Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect.
+- On reconnect, Telefunc resends the reliable messages it kept for the other end, in order, including those buffered while the client was offline.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.

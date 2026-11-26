@@ -207,8 +207,9 @@ class PacedDirection {
       (this.bytesPerSecond * mostMs) / 1000,
     )
     this.last = now
-    while (this.allowance >= 1 && this.head < this.queue.length && this.queue[this.head]!.at <= now) {
-      const entry = this.queue[this.head]!
+    while (this.allowance >= 1) {
+      const entry = this.queue[this.head]
+      if (entry === undefined || entry.at > now) break
       const bytes = Math.min(entry.chunk.length, Math.floor(this.allowance))
       if (!entry.to.destroyed) entry.to.write(entry.chunk.subarray(0, bytes))
       this.allowance -= bytes
@@ -216,7 +217,8 @@ class PacedDirection {
       if (bytes === entry.chunk.length) this.head++
       else entry.chunk = entry.chunk.subarray(bytes)
     }
-    this.backlogged = this.head < this.queue.length && this.queue[this.head]!.at <= now
+    const next = this.queue[this.head]
+    this.backlogged = next !== undefined && next.at <= now
     if (this.head > 1024 && this.head * 2 > this.queue.length) {
       this.queue = this.queue.slice(this.head)
       this.head = 0

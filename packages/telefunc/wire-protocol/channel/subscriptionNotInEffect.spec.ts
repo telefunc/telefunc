@@ -19,6 +19,7 @@ import { decode, encode, type DecodedFrame } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { parseSseRequestMetadata } from '../wire/envelope.js'
 import { BodyReader } from '../wire/BodyReader.js'
+import { queueMemory } from './server/channelMemory.js'
 import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createDeferred } from '../../utils/createDeferred.js'
@@ -154,7 +155,7 @@ const SERVER_OPTIONS = {
 async function batchOf(body: unknown): Promise<{ streamResponse: boolean; frames: DecodedFrame[] }> {
   if (!(body instanceof Blob)) return { streamResponse: false, frames: [] }
   // A `Blob`'s stream doesn't fail.
-  const reader = new BodyReader(body.stream(), () => false)
+  const reader = new BodyReader(body.stream(), () => false, queueMemory)
   const metadata = await reader.readFrame(SSE_METADATA_MAX_BYTES)
   if (metadata === null) return { streamResponse: false, frames: [] }
   const { kind } = parseSseRequestMetadata(JSON.parse(new TextDecoder().decode(metadata)))

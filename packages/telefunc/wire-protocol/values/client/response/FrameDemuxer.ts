@@ -16,12 +16,12 @@ const STALL_WARNING_MS = 5_000
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
  *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
+ *  MAX_BUFFER_BYTES_PER_INDEX, resumes once that consumer drains or cancels. Active consumers (registered as
  *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
  *
  *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
- *  another consumer's drain restarts the read loop, and the next frame on the wire
- *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
+ *  its consumer's read of one chunk restarts the read loop, and the next frame on the wire
+ *  is for that same index. Each restart adds at most 1 frame of overshoot.
  *  This is the unavoidable cost of multiplexing over a single stream — we can't
  *  peek at the next frame's index without reading it.
  *
@@ -39,6 +39,8 @@ class FrameDemuxer {
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
   >()
   private reading = false
+  /** The index whose unread buffer stopped reading; reading only restarts once that consumer drains or cancels. */
+  private pausedByIndex: number | null = null
   private ended = false
   private streamError: unknown = null
   private cancelledIndices = new Set<number>()
@@ -65,6 +67,7 @@ class FrameDemuxer {
     // Drop buffered frames for this index. A finished one isn't counted as cancelled too: counted twice, it would cancel
     // the body under a stream still being read.
     this.pendingFrames.delete(index)
+    this.pendingBytes.delete(index)
     if (this.doneIndices.has(index)) return
     this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
@@ -72,9 +75,12 @@ class FrameDemuxer {
     if (waiter) {
       this.indexWaiters.delete(index)
       waiter.resolve(null)
+      // With no one left waiting, no warning is due.
+      if (this.indexWaiters.size === 0) this.clearStallTimer()
     }
     this.endUpstreamIfAllTerminal()
     // Reading may have stopped on this index's buffer, with another consumer waiting behind it.
+    this.resumeIfUnblocked(index)
     this.ensureReading()
   }
 
@@ -91,6 +97,7 @@ class FrameDemuxer {
     const buffered = this.pendingFrames.get(index)?.shift()
     if (buffered) {
       this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - buffered.byteLength)
+      this.resumeIfUnblocked(index)
       this.ensureReading()
       return buffered
     }
@@ -125,8 +132,13 @@ class FrameDemuxer {
 
   private async ensureReading() {
     if (this.reading) return
+    // Reading may have stopped while no consumer waited, so no warning is on its way for this one.
+    if (this.pausedByIndex !== null) {
+      if (this.stallTimer === undefined) this.warnIfStillStalledLater()
+      return
+    }
     this.reading = true
-    clearTimeout(this.stallTimer)
+    this.clearStallTimer()
     try {
       while (this.indexWaiters.size > 0) {
         const frame = await this.streamReader.readNextFrame()
@@ -176,11 +188,24 @@ class FrameDemuxer {
     const newBytes = (this.pendingBytes.get(index) ?? 0) + payload.byteLength
     this.pendingBytes.set(index, newBytes)
     // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-    return this.canStopReading && newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX
+    if (!this.canStopReading || newBytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) return false
+    this.pausedByIndex = index
+    return true
+  }
+
+  /** Lifts the pause once its index drained below the cap, unless an unfinished index's buffer is still full. */
+  private resumeIfUnblocked(index: number): void {
+    if (this.pausedByIndex !== index) return
+    this.pausedByIndex = null
+    for (const [other, bytes] of this.pendingBytes) {
+      if (bytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX || this.doneIndices.has(other)) continue
+      this.pausedByIndex = other
+      return
+    }
   }
 
   private failWaiters(err: unknown): void {
-    clearTimeout(this.stallTimer)
+    this.clearStallTimer()
     this.streamError ??= err
     for (const [, w] of this.indexWaiters) w.reject(err)
     this.indexWaiters.clear()
@@ -192,8 +217,14 @@ class FrameDemuxer {
     this.stallTimer = unrefTimer(setTimeout(() => this.warnStalled(), STALL_WARNING_MS))
   }
 
+  private clearStallTimer(): void {
+    clearTimeout(this.stallTimer)
+    this.stallTimer = undefined
+  }
+
   private warnStalled(): void {
     this.stallWarned = true
+    this.stallTimer = undefined
     assertWarning(
       false,
       `Reading what ${this.telefunctionName}() returned is waiting for a stream of it with 1 MiB unread: read all of the streams a call returned concurrently, or cancel the ones you don't want.`,

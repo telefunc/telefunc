@@ -5,9 +5,21 @@ import type { ClientReviverContext } from '../../types.js'
 test('a generator returned mid-iteration ends once: its stream is cancelled and its end callback runs one time', async () => {
   let cancels = 0
   const chunk = new TextEncoder().encode('1')
-  const context = {
-    receiveStream: () => ({ readNextChunk: async () => chunk, cancel: () => void cancels++, abort() {} }),
-  } as unknown as ClientReviverContext
+  const context: ClientReviverContext = {
+    createChannel: () => {
+      throw new Error('Unexpected channel')
+    },
+    createBroadcast: () => {
+      throw new Error('Unexpected broadcast')
+    },
+    receiveStream: () => ({
+      readNextChunk: async () => chunk,
+      bytes: async () => chunk,
+      stream: () => new ReadableStream(),
+      cancel: () => void cancels++,
+      abort() {},
+    }),
+  }
   const revived = asyncGeneratorReviver.revive({ __index: 0 }, context)
   let ends = 0
   revived.onEnd?.(() => void ends++)

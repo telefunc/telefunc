@@ -24,13 +24,16 @@ function binaryCall(name: string, size: number): Uint8Array<ArrayBuffer> {
   return body
 }
 
-async function post(kind: 'bin' | 'txt', body: BodyInit) {
-  const response = await fetch(`${getServerUrl()}/_telefunc`, {
-    method: 'POST',
-    headers: { 'x-telefunc-request': kind },
-    body,
-  })
-  return { status: response.status, text: await response.text() }
+/** `cookie` sends a call to the server instance that set it, behind the Docker lanes' sticky load balancer. */
+async function post(kind: 'bin' | 'txt', body: BodyInit, cookie?: string) {
+  const headers: Record<string, string> = { 'x-telefunc-request': kind }
+  if (cookie !== undefined) headers.cookie = cookie
+  const response = await fetch(`${getServerUrl()}/_telefunc`, { method: 'POST', headers, body })
+  return {
+    status: response.status,
+    text: await response.text(),
+    cookie: response.headers.get('set-cookie')?.split(';', 1)[0],
+  }
 }
 
 function testFileUpload() {
@@ -286,11 +289,16 @@ function testFileUpload() {
   })
 
   test('file upload: a File its telefunction keeps and reads once the call is answered and its body read off to the end is read whole', async () => {
-    expect((await post('bin', binaryCall('onKeepFile', 1000))).status).toBe(200)
+    const kept = await post('bin', binaryCall('onKeepFile', 1000))
+    expect(kept.status).toBe(200)
     // The whole body came with the call, so the read-off that follows its answer has read it to the end: the File keeps
     // its bytes past its call.
     await sleep(500)
-    const read = await post('txt', JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }))
+    const read = await post(
+      'txt',
+      JSON.stringify({ file: telefuncFile, name: 'onReadKeptFile', args: [] }),
+      kept.cookie,
+    )
     expect(read.text).toContain('read 1000 bytes')
   })
 

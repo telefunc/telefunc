@@ -1,10 +1,16 @@
 export { WireSender }
 
-import { LOSSY_CONFIRM_SLACK_MS, WIRE_QUEUE_DELAY_MS, WIRE_SEND_BACKLOG_BASE_BYTES } from '../../constants.js'
+import {
+  LOSSY_CONFIRM_SLACK_MS,
+  WIRE_PROBE_FIRST_BYTES,
+  WIRE_PROBE_PAIR_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+} from '../../constants.js'
 import { encode } from '../../wire/frame.js'
+import { HEADER, readTag } from '../../wire/header.js'
 import { TAG, passesData } from '../../wire/tags.js'
 import { assertProtocol } from '../../wire/protocolViolation.js'
-import type { ServerChannel } from './ServerChannel.js'
+import type { MuxChannel } from './ServerChannel.js'
 import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire } from './ChannelMux.js'
 import type { ChannelHandle } from './SessionRegistry.js'
@@ -21,6 +27,8 @@ import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
 import type { PieceReceiverOwner } from '../../flowControl/pieces.js'
 import { TransportSocket } from './TransportSocket.js'
+import { EventStream } from './EventStream.js'
+import { fits, hold, letGo, releaseHolder, tryHold, type MemoryHolder } from './channelMemory.js'
 
 type WireSenderOptions = {
   wire: Wire
@@ -31,11 +39,12 @@ type WireSenderOptions = {
   sseFlushThrottle: number
   /** What the wire delivered. */
   deliveries: Deliveries
-  /** The channels of the session the wire carries, which its headroom counts; undefined before its RECONCILED. */
+  /** The channels of the session the wire carries, which its backlog counts; undefined before its RECONCILED. */
   heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
-  /** The channels attaching to the wire in this turn, which its headroom counts too. */
-  attaching: ReadonlySet<ServerChannel>
-  /** The wire's backlog passed what its channels allow, in a frame the sender was handed: the owner ends the wire. */
+  /** The channels attaching to the wire in this turn, which its backlog counts too. */
+  attaching: ReadonlySet<MuxChannel>
+  /** The ledger refused the wire what it holds for its page beyond its channels, in a frame the sender was handed: the
+   *  owner ends the wire's session. */
   onPastBacklog: () => void
 }
 
@@ -43,8 +52,8 @@ type WireSenderOptions = {
 type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 /** Sends a wire's frames in call order, but for a RECONCILED and an attach probe's answer, which go ahead of what waits
- *  for the RECONCILED; has its owner end the wire once its backlog passes what its channels allow. The peers of its
- *  channels send through it, and once the wire closed it drops what they send. */
+ *  for the RECONCILED; has its owner end the wire once the ledger refuses it what it holds beyond its channels. The
+ *  peers of its channels send through it, and once the wire closed it drops what they send. */
 class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, WireQueue {
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
@@ -57,12 +66,14 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
   private readonly heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
-  private readonly attaching: ReadonlySet<ServerChannel>
+  private readonly attaching: ReadonlySet<MuxChannel>
   private readonly onPastBacklog: () => void
   /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
   private closed = false
-  /** What may be written before the backlog is read again against what its channels' flow control allows. */
-  private headroom = 0
+  /** What may be written before the backlog is measured again (`measureBacklogRoom`). */
+  private backlogRoom = 0
+  /** What the wire holds for its page that none of its channels holds, held in the ledger as of its last measure. */
+  private readonly memory: MemoryHolder = { heldBytes: 0 }
   /** The largest frame sent on the wire. */
   private largestSent = 0
   /** Its backlog passed that, and its owner ends the wire. */
@@ -74,6 +85,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly held: Uint8Array<ArrayBuffer>[] = []
   /** Their bytes, which the backlog counts as it does what the socket holds. */
   private heldBytes = 0
+  /** WebSocket attach probe answers waiting to ride the RECONCILED. */
+  private readonly probeAnswers: Uint8Array<ArrayBuffer>[] = []
   /** The channels' ends a close the server decides keeps for the transport, in their order (see `close`). */
   private readonly lastEnds: Uint8Array<ArrayBuffer>[] = []
 
@@ -89,18 +102,20 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
-    this.pieces = transport.wholeMessages
-      ? {
-          headroom: new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval }),
-          receiver: new ServerPieceReceiver({ owner: this }),
-        }
-      : null
-    this.wireQueue = this.pieces ? this.pieces.headroom : transport.queueOf!(wire)
+    if (transport.wholeMessages) {
+      const headroom = new ServerHeadroom({ socket: new TransportSocket({ transport, wire }), pingInterval })
+      this.pieces = { headroom, receiver: new ServerPieceReceiver({ owner: this }) }
+      this.wireQueue = headroom
+    } else {
+      this.pieces = null
+      this.wireQueue = transport.queueOf(wire)
+    }
     this.sseFlushThrottle = sseFlushThrottle
     this.deliveries = deliveries
     this.heldChannels = heldChannels
     this.attaching = attaching
     this.onPastBacklog = onPastBacklog
+    if (this.wireQueue instanceof EventStream) this.wireQueue.whenTaken(this.rebalanceMemory)
   }
 
   /** A WebSocket page's confirmation waits behind its wire's queues; an SSE page's waits for its POST's turn: the
@@ -117,27 +132,72 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     this.heldBytes += frame.byteLength
   }
 
+  sendPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
+    if (this.closed || this.pastBacklog) return
+    const bytes = HEADER + body.byteLength
+    if (!this.owed && bytes <= this.backlogRoom) {
+      const headroom = this.pieces?.headroom
+      if (headroom) {
+        const room = headroom.gatherRoom(bytes)
+        if (room !== undefined) {
+          this.handGatheredPublish(body.byteLength, bytes)
+          headroom.sender.gatherPublish(index, seq, body, room)
+          return
+        }
+      } else if (this.wireQueue instanceof EventStream && this.wireQueue.canGatherPublish(bytes)) {
+        this.handGatheredPublish(body.byteLength, bytes)
+        this.wireQueue.gatherPublish(index, seq, body)
+        return
+      }
+    }
+    this.send(encode.publishTo(index, seq))
+    this.send(body)
+  }
+
+  private handGatheredPublish(bodyBytes: number, bytes: number): void {
+    this.backlogRoom -= bytes
+    this.largestSent = Math.max(this.largestSent, HEADER, bodyBytes)
+    this.wait.handed(bytes, false, performance.now())
+  }
+
   /** A RECONCILE is answered: what is sent from now, its replay first, goes behind its RECONCILED (`sendReconciled`),
    *  so the page reads that first on every host and transport. A page has one RECONCILE out at a time. */
   owesReconciled(): void {
     assertProtocol(!this.owed, 'RECONCILE while its wire owes a RECONCILED')
     this.owed = true
     // What is held is measured from its first frame, on every host.
-    this.headroom = 0
+    this.backlogRoom = 0
   }
 
-  /** An attach probe's answer, which says no credit ran out and names no round trip: written ahead of what is held, since
-   *  a RECONCILED of many channels would read the path as slower than it is. On a WebSocket, the acknowledgements the
-   *  sender carries ride ahead of it in its message, as they do of any frame written. */
+  /** An attach probe's answer precedes the RECONCILED, which may take time to arrive in full. */
   answerProbe(ix: number, probe: number): void {
     const answer = encode.bdpPingAck(ix, probe, Infinity, Infinity)
-    if (this.admit(answer)) this.hand(answer)
+    if (!this.admit(answer)) return
+    if (!this.pieces) return this.hand(answer)
+    this.probeAnswers.push(answer)
+    this.heldBytes += answer.byteLength
   }
 
   /** The RECONCILED goes ahead of what was held, and that follows, in order. */
   sendReconciled(reconciled: Uint8Array<ArrayBuffer>): void {
     this.owed = false
-    if (this.admit(reconciled)) this.hand(reconciled)
+    if (this.admit(reconciled)) {
+      const first = this.probeAnswers[0]
+      if (first !== undefined) {
+        const bytes = first.byteLength * this.probeAnswers.length
+        // Keep a large group of replies out of the first message of an unmeasured link.
+        const carry = bytes <= WIRE_PROBE_FIRST_BYTES && bytes + reconciled.byteLength <= 2 * WIRE_PROBE_PAIR_BYTES
+        for (const answer of this.probeAnswers) {
+          if (carry) this.carry(answer)
+          else this.hand(answer)
+        }
+      }
+      this.hand(reconciled)
+      // A receipt can leave while a large reply waits behind data in pieces.
+      const sender = this.pieces?.headroom.sender
+      if (sender?.dataWaits) sender.flush()
+    }
+    this.probeAnswers.length = 0
     // `hand` gives the frame to the transport only, which sends nothing back through here meanwhile.
     for (const frame of this.held) this.hand(frame)
     this.held.length = 0
@@ -189,19 +249,19 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   /** Counts `frame` against what the wire may hold, whether it is handed now or held for a RECONCILED; false once the
-   *  wire's backlog passed that, and the owner is told, after the turn, to end the wire. */
+   *  ledger refused the wire its backlog, and the owner is told, after the turn, to end the wire's session. */
   private admit(frame: Uint8Array<ArrayBuffer>): boolean {
     if (this.closed || this.pastBacklog) return false
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
-    if (frame.byteLength > this.headroom) {
-      this.headroom = this.measureHeadroom()
-      if (this.headroom < 0) {
+    if (frame.byteLength > this.backlogRoom) {
+      this.backlogRoom = this.measureBacklogRoom()
+      if (this.backlogRoom < 0) {
         this.pastBacklog = true
         queueMicrotask(this.onPastBacklog)
         return false
       }
     }
-    this.headroom -= frame.byteLength
+    this.backlogRoom -= frame.byteLength
     return true
   }
 
@@ -210,7 +270,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     if (this.closed || this.pastBacklog) return
     if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
     const at = performance.now()
-    this.wait.handed(frame.byteLength, passesData(frame[0]!), at)
+    this.wait.handed(frame.byteLength, passesData(readTag(frame)), at)
     if (this.pieces) this.pieces.headroom.send(frame)
     else this.transport.sendNow(this.wire, frame)
   }
@@ -246,9 +306,21 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     else this.lastEnds.length = 0
     this.closed = true
     this.owed = false
+    this.probeAnswers.length = 0
     this.held.length = 0
     this.heldBytes = 0
     this.pieces?.headroom.close()
+    this.releaseMemory()
+  }
+
+  /** What the wire held for its page goes from the ledger once nothing holds it: at once, but for the events its stream
+   *  still holds, which stay in it till the stream lets go of them (`EventStream.whenLetGo`). */
+  private releaseMemory(): void {
+    if (!(this.wireQueue instanceof EventStream)) return releaseHolder(this.memory)
+    const more = this.wireQueue.copiedBytes - this.memory.heldBytes
+    if (more > 0) hold(this.memory, more)
+    else letGo(this.memory, -more)
+    this.wireQueue.whenLetGo(() => releaseHolder(this.memory))
   }
 
   /** Gives the transport the channels' ends `close('first')` kept, as they would have gone on the wire. */
@@ -282,20 +354,47 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
   }
 
-  /** What the wire may hold, less what it holds, in its socket and for a RECONCILED; `Infinity` if the runtime can't tell
-   *  the socket's while no RECONCILED is owed: what is held counts on every host, the socket's as nothing where unknown.
-   *  Its data is what its channels hold, so what passes this is what nothing else bounds: a page flooding it with what
-   *  it answers at once. */
-  private measureHeadroom(): number {
-    const socket = this.bufferedAmount()
-    if (socket === undefined && !this.owed) return Infinity
-    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES + this.largestSent
-    for (const channel of this.channels()) allowed += channel.heldBytes
-    return allowed - (socket ?? 0) - this.heldBytes
+  /** Its page took what it was sent: what the ledger holds for the wire and it no longer holds goes. A wire the ledger
+   *  holds nothing for has nothing to let go of. */
+  readonly rebalanceMemory = (): void => {
+    if (this.closed || this.memory.heldBytes === 0) return
+    this.backlogRoom = Math.max(0, this.measureBacklogRoom())
   }
 
-  /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
-  private channels(): Set<ServerChannel> {
+  /** What the wire may hold, less what it holds, in its socket, for a RECONCILED and as its events' copies: below 0 once
+   *  the ledger refuses the wire the part of that no channel holds. What it may hold is what its channels hold, room for one
+   *  largest frame, and what the ledger holds for the wire: what passes the first two is what nothing else bounds, the
+   *  answers to what its page sends and the copies of what its page doesn't take, which this takes to the ledger. Each
+   *  event counts as its frame and as its copy. `Infinity` if the runtime can't tell the socket's while no RECONCILED is
+   *  owed: what is held counts on every host, the socket's as nothing where unknown. */
+  private measureBacklogRoom(): number {
+    const socket = this.bufferedAmount()
+    let allowed = this.largestSent
+    for (const channel of this.channels()) allowed += channel.heldBytes
+    const holds = (socket ?? 0) + this.heldBytes + this.copiedBytes()
+    this.holdForWire(holds - allowed)
+    return socket === undefined && !this.owed ? Infinity : this.memory.heldBytes + allowed - holds
+  }
+
+  /** Has the ledger hold `bytes` for the wire, none where they are below 0, and as much again where that lets go of
+   *  nothing, so the wire measures again only once it holds about that much more. What the ledger refuses stays unheld. */
+  private holdForWire(bytes: number): void {
+    const need = Math.max(0, bytes)
+    const held = this.memory.heldBytes
+    if (need <= held) {
+      if (held > 2 * need) letGo(this.memory, held - 2 * need)
+      return
+    }
+    if (tryHold(this.memory, need - held) && fits(this.memory, need)) hold(this.memory, need)
+  }
+
+  /** What the wire's events take as copies of their frames: SSE's base64. */
+  private copiedBytes(): number {
+    return this.wireQueue instanceof EventStream ? this.wireQueue.copiedBytes : 0
+  }
+
+  /** The channels the wire's send backlog counts: its session's, and those attaching in this turn. */
+  private channels(): Set<MuxChannel> {
     const channels = new Set(this.attaching)
     for (const { channel } of this.heldChannels()?.values() ?? []) channels.add(channel)
     return channels

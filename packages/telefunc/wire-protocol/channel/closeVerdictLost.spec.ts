@@ -18,6 +18,7 @@ import { WsTransport } from './client/WsTransport.js'
 import { getChannelMux } from './server/ChannelMux.js'
 import { hold, letGo, queueMemory, releaseHolder, type MemoryHolder } from './server/channelMemory.js'
 import { TAG } from '../wire/tags.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import type { ChannelFrame } from '../wire/frame.js'
 
 serverConfig.channel = { transports: ['sse', 'ws'], pingInterval: 60_000, maxMemory: '2m' }
@@ -195,9 +196,10 @@ for (const transport of ['sse', 'ws'] as const) {
 
     test("an abort sent while memory had no room to keep it reaches the page back as the channel's end lost", async () => {
       const [channel, page] = await pair(transport)
-      const ledger = (globalThis as unknown as { _telefunc: Record<string, { total: number }> })._telefunc
+      // What this server's channels hold, on the ledger every channel shares.
+      const { total } = getGlobalObject('channelMemory.ts', { total: 0 })
       const filler: MemoryHolder = { heldBytes: 0 }
-      hold(filler, MAX_MEMORY - (ledger['channelMemory.ts']?.total ?? 0))
+      hold(filler, MAX_MEMORY - total)
       network.losing = true
       channel.abort('bye')
       const connections = dropConnections()

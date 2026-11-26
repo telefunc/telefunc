@@ -148,11 +148,13 @@ function testUpgrade(isDev: boolean) {
     { bytes: 4 * 1024 * 1024, what: 'starts arriving', bodyHeld: true },
   ]) {
     test(`${label}: a publish that ${what} before the page takes the new wire over reaches the page [${transports.join(',')}]`, async () => {
-      const context = await page.context().browser()!.newContext()
+      const browser = page.context().browser()
+      if (browser === null) throw new Error('no browser')
+      const context = await browser.newContext()
       const routed = await context.newPage()
       const acrossFlip = async () => {
-        const state = JSON.parse((await routed.textContent('#channel-state'))!) as UpgradeChannelState
-        return state.acrossFlip
+        const state: unknown = JSON.parse((await routed.textContent('#channel-state')) ?? 'null')
+        return typeof state === 'object' && state !== null && 'acrossFlip' in state ? state.acrossFlip : undefined
       }
       try {
         const gate = await holdFlip(routed, bytes / 2)
@@ -161,11 +163,17 @@ function testUpgrade(isDev: boolean) {
         await autoRetry(async () => expect(await acrossFlip()).not.toBe(null))
         await gate.committed
         gate.countFromHere()
-        await routed.evaluate((n) => (window as unknown as AcrossFlipPage).publishAcrossFlip(n), bytes)
-        void routed.evaluate(() => (window as unknown as AcrossFlipPage).sendAcrossFlip())
+        await routed.evaluate((n) => {
+          if (!window.publishAcrossFlip) throw new Error('no publishAcrossFlip')
+          return window.publishAcrossFlip(n)
+        }, bytes)
+        void routed.evaluate(() => {
+          if (!window.sendAcrossFlip) throw new Error('no sendAcrossFlip')
+          return window.sendAcrossFlip()
+        })
         await autoRetry(() => expect(gate.passedBytes()).greaterThan(bytes / 2))
         expect((await gate.flip()) > 0).toBe(bodyHeld)
-        await autoRetry(async () => expect((await acrossFlip())?.received).deep.equal([bytes]))
+        await autoRetry(async () => expect(await acrossFlip()).deep.equal({ received: [bytes] }))
       } finally {
         await context.close()
       }
@@ -197,11 +205,11 @@ async function holdFlip(target: Page, heldPast: number) {
     const server = ws.connectToServer()
     toPage = ws
     ws.onMessage((message) => {
-      if (Buffer.from(message as Buffer).includes('after-flip')) tookWire()
+      if (bytesOf(message).includes('after-flip')) tookWire()
       server.send(message)
     })
     server.onMessage((message) => {
-      const bytes = Buffer.from(message as Buffer)
+      const bytes = bytesOf(message)
       if (counted && passed > heldPast) return void held.push(bytes)
       if (counted) passed += bytes.length
       ws.send(message)
@@ -215,13 +223,24 @@ async function holdFlip(target: Page, heldPast: number) {
       allowFlip()
       await tookWireP
       counted = false
-      for (const message of held) toPage!.send(message)
+      if (toPage === undefined) throw new Error("the page's WebSocket wasn't routed")
+      for (const message of held) toPage.send(message)
       return held.length
     },
   }
 }
 
-type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
+declare global {
+  interface Window {
+    /** The across-flip row's publish of `bytes`, and its send once the page took the new wire. */
+    publishAcrossFlip?: (bytes: number) => Promise<unknown>
+    sendAcrossFlip?: () => Promise<unknown>
+  }
+}
+
+/** A routed WebSocket message's bytes, a copy of them. */
+const bytesOf = (message: string | Buffer) =>
+  typeof message === 'string' ? Buffer.from(message) : Buffer.from(message)
 
 type UpgradeChannelState = {
   connected: boolean

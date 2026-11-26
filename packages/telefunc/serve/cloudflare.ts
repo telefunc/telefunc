@@ -141,13 +141,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           // that time: its channels live in memory, and each wire's ping deadline is a timer (`armPingDeadline`).
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
-        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-        const httpResponse = await serveRuntimeRequest(
-          context ? { request, context } : { request },
-          noTransportEvidence,
-          request.signal,
-          upgradesTakenHere,
-        )
+        const context = getContext ? await getContext(request, this.env) : undefined
+        const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
+          clientLeft: noTransportEvidence,
+          clientGone: request.signal,
+          takesUpgrades: upgradesTakenHere,
+        })
         const headers = new Headers(httpResponse.headers)
         // The page names it from then on, so it reaches this Durable Object from any region.
         if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)
@@ -168,7 +167,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       )
     }
 
-    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
     /** crossws has no handler for a socket's error, so its wire ends here. */
     webSocketError(ws: WebSocket) {
       return broadcast.runInObject(this.instanceName, () =>

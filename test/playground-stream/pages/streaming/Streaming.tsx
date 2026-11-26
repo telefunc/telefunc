@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   onReturnReadableStream,
   onReturnAsyncGenerator,
+  onReadRequestUser,
   onReturnGeneratorWithMeta,
   onReturnEmptyGenerator,
   onReturnDelayedStream,
@@ -33,7 +34,14 @@ import {
   onGeneratorFinallyThrows,
   onReturnAsyncGenerator as onNextCall,
 } from './Streaming.telefunc'
-import { Abort as TelefuncAbort, ConnectionError, abort } from 'telefunc/client'
+import { Abort as TelefuncAbort, ConnectionError, abort, withContext } from 'telefunc/client'
+
+async function readRequestUser(user: string) {
+  const read = withContext(onReadRequestUser, { headers: { 'x-test-user': user } })
+  const users: (string | null)[] = []
+  for await (const value of read()) users.push(value)
+  return users
+}
 
 function Streaming() {
   const [result, setResult] = useState<string>('')
@@ -136,6 +144,17 @@ function Streaming() {
         }}
       >
         Empty generator
+      </button>
+
+      <button
+        id="test-request-context"
+        onClick={async () => {
+          setResult('')
+          const users = await Promise.all([readRequestUser('alice'), readRequestUser('bob')])
+          setResult(JSON.stringify(users))
+        }}
+      >
+        Concurrent request context
       </button>
 
       <pre id="streaming-result">{result}</pre>
@@ -490,7 +509,7 @@ function Streaming() {
           try {
             for await (const v of onGeneratorThrowsNonObject()) values.push(v)
             setResult(JSON.stringify({ error: false, values }))
-          } catch (e: any) {
+          } catch (e) {
             setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), values }))
           }
         }}
@@ -775,8 +794,8 @@ function Streaming() {
           abort(returned)
           try {
             setResult(JSON.stringify({ firstBytes: await firstDone }))
-          } catch (err: any) {
-            setResult(JSON.stringify({ error: err.message }))
+          } catch (err) {
+            setResult(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
           }
         }}
       >
@@ -793,7 +812,9 @@ function Streaming() {
           let secondBytes = 0
           for (let i = 0; i < 7; i++) {
             await new Promise((resolve) => setTimeout(resolve, 1000))
-            secondBytes += (await reader.read()).value!.byteLength
+            const { value } = await reader.read()
+            if (value === undefined) throw new Error('the second stream ended early')
+            secondBytes += value.byteLength
           }
           reader.releaseLock()
           secondBytes += await byteCount(second)
@@ -830,7 +851,11 @@ function Streaming() {
       </button>
       <button
         id="test-many-tiny-chunks-cancel"
-        onClick={() => (returnedRef.current as ReadableStreamDefaultReader).cancel()}
+        onClick={() => {
+          const reader = returnedRef.current
+          if (!(reader instanceof ReadableStreamDefaultReader)) throw new Error('no reader of tiny chunks')
+          void reader.cancel()
+        }}
       >
         Cancel the stream of tiny chunks
       </button>

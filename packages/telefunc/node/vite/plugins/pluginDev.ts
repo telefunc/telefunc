@@ -45,9 +45,10 @@ function pluginDev(): Plugin[] {
               // Skip for @cloudflare/vite-plugin: it runs the worker in its own
               // environment with a custom WS handler — registering the Node.js
               // upgrade listener would steal WS upgrades from Cloudflare's handler.
-              // The middleware reads a page's server off its request's socket, so this marks no request.
-              const { takeUpgrades } = await import('../../../serve/nodeUpgrades.js')
-              takeUpgrades(server.httpServer)
+              // Vite's Node middleware needs the upgrade listener, and Fetch middleware also needs the request mark.
+              // The mark applies only to Telefunc URLs and uses no async hooks.
+              const { Telefunc } = await import('../../../serve/node.js')
+              new Telefunc().installWebSocket(server.httpServer)
             }
           }
         },

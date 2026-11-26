@@ -33,12 +33,11 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
   // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
   const sockets = new WeakMap<Peer, BunSocket>()
   const ws = crossws(
     getTelefuncChannelOptions({
-      bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount(),
+      bufferedAmount: (peer) => sockets.get(peer)?.getBufferedAmount() ?? 0,
       copiesOnSend: true,
     }),
   )
@@ -62,21 +61,19 @@ function telefunc(): TelefuncServe {
         if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
         return ws.handleUpgrade(request, server) as Response | Promise<Response>
       }
-      // Bun cuts a response quiet for `idleTimeout` (10 s by default), as a stream or an SSE wire can be; telefunc ends
-      // its own responses.
-      server.timeout(request, 0)
-
       // Bun.serve aborts the signal of a request it made once its client disconnects, before the body's read fails. Once
       // the request is answered it leaves the signal be, and fails the read with an `AbortError` ("The connection was
       // closed.").
       const clientLeft = (err: unknown) =>
         request.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')
-      const httpResponse = await serveRuntimeRequest(
-        context ? { request, context } : { request },
+      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
         clientLeft,
-        request.signal,
-        upgradesTakenHere,
-      )
+        clientGone: request.signal,
+        takesUpgrades: upgradesTakenHere,
+        // Bun cuts a request quiet for `idleTimeout` (10 s by default): a body that stops short, and also a slow call, a
+        // stream or an SSE wire. Once the body is read, telefunc ends its own responses.
+        onBodyRead: () => server.timeout(request, 0),
+      })
       return toResponse(httpResponse)
     },
   }

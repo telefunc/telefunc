@@ -82,7 +82,15 @@ import {
   onChannelLateOpenAbort,
 } from './Channel.telefunc'
 
-type AcrossFlipPage = { publishAcrossFlip(bytes: number): Promise<void>; sendAcrossFlip(): Promise<void> }
+declare global {
+  interface Window {
+    /** The across-flip row's publish of `bytes`, and its send once the page took the new wire. */
+    publishAcrossFlip?: (bytes: number) => Promise<unknown>
+    sendAcrossFlip?: () => Promise<unknown>
+    /** Lets the send-order row go on. */
+    sendOrderGo?: (value: unknown) => void
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -314,6 +322,13 @@ async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 's
   await channel.close()
   close(remote)
   return result
+}
+
+/** Shows `text` in the page's element at `selector`. */
+function showResult(selector: string, text: string) {
+  const output = document.querySelector(selector)
+  if (!output) throw new Error(`Expected ${selector} on the page`)
+  output.textContent = text
 }
 
 function timestamp() {
@@ -998,7 +1013,7 @@ function ChannelDemo() {
     const first = await openChannel(() => onChannelSendOrder(id))
     await first.opened
     await new Promise((go) => {
-      ;(window as any).sendOrderGo = go
+      window.sendOrderGo = go
       setChannelState((s) => ({ ...s, sendOrder: { id, sent: false } }))
     })
     await onChannelSendOrder(id)
@@ -1248,13 +1263,15 @@ function ChannelDemo() {
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
     const outcome = await channel.closed
-    document.querySelector('#channel-late-abort-result')!.textContent =
-      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome)
+    showResult(
+      '#channel-late-abort-result',
+      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome),
+    )
   }, [])
 
   const testBudgets = useCallback(async () => {
     const { bytes } = await openChannel(onChannelBudgets)
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
+    showResult('#channel-budgets-result', JSON.stringify({ bytes: bytes.id }))
   }, [])
 
   const testAtLimit = useCallback(async () => {
@@ -1287,7 +1304,7 @@ function ChannelDemo() {
     )
     const next = await channel.send('next', { ack: true })
     const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify(result)
+    showResult('#channel-offline-budgets-result', JSON.stringify(result))
   }, [])
 
   const testCreditFailure = useCallback(async () => {
@@ -1457,9 +1474,8 @@ function ChannelDemo() {
       received.push(body.length)
       setChannelState((s) => ({ ...s, acrossFlip: { received: [...received] } }))
     })
-    const page = window as unknown as AcrossFlipPage
-    page.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
-    page.sendAcrossFlip = () => control.send('after-flip')
+    window.publishAcrossFlip = (bytes) => onPublishAcrossFlip(key, bytes)
+    window.sendAcrossFlip = () => control.send('after-flip')
     setChannelState((s) => ({ ...s, acrossFlip: { received } }))
   }, [])
 
@@ -1951,7 +1967,9 @@ function ChannelDemo() {
             id="channel-test-config-checks"
             onClick={async () => {
               const checks = await onChannelConfigChecks()
-              document.querySelector('#channel-config-checks-result')!.textContent = JSON.stringify(checks)
+              const result = document.querySelector('#channel-config-checks-result')
+              if (!result) throw new Error('no #channel-config-checks-result')
+              result.textContent = JSON.stringify(checks)
             }}
           >
             Test what config.channel refuses
