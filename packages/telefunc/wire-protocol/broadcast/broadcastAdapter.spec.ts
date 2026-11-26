@@ -272,7 +272,7 @@ describe('in-memory publishes in answer', () => {
     unsubscribe()
     expect(errors).toHaveLength(1)
     expect(errors[0]).toBeInstanceOf(ChannelOverflowError)
-    expect((errors[0] as Error).message).toContain("past Telefunc's limit on nested publishes")
+    expect(errors[0]).toHaveProperty('message', expect.stringContaining("past Telefunc's limit on nested publishes"))
   }, 60_000)
 })
 

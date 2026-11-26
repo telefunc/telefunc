@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { addWireCopies, dropWireCopies } from '../channel/server/channelMemory.js'
 import { CHANNEL_PING_INTERVAL_MS, CHANNEL_TRANSPORT, WIRE_SEND_AHEAD_MIN_BYTES } from '../constants.js'
 import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
-import { HEADER, readU16 } from '../wire/header.js'
+import { decodePiecesAck } from '../wire/decode.fixture.js'
+import { HEADER, readTag, readU16 } from '../wire/header.js'
+import { defined } from '../../utils/defined.fixture.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { TAG, isPublishBody, isSequencedTag } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
@@ -46,7 +48,7 @@ function wireTo(
   const delivered: number[] = []
   let heldReplies: Uint8Array<ArrayBuffer>[] | null = null
   const sendAck = (frame: Uint8Array<ArrayBuffer>) =>
-    void setTimeout(() => headroom.acknowledged(decode(frame) as PiecesAck), shape.delayMs)
+    void setTimeout(() => headroom.acknowledged(decodePiecesAck(frame)), shape.delayMs)
   const receiver = new ClientPieceReceiver({
     owner: {
       sendAck: (frame) => {
@@ -58,16 +60,16 @@ function wireTo(
     },
   })
   const got = (frame: Uint8Array, at: number) => {
-    const tag = frame[0]!
+    const tag = readTag(frame)
     arrivals.push({ tag, ix: isSequencedTag(tag) && !isPublishBody(tag) ? readU16(frame, 1) : -1, at })
   }
   const take = (message: Uint8Array<ArrayBuffer>) => {
     const at = performance.now()
     delivered.push(at)
     const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-    const own = frames.pop()!
+    const own = defined(frames.pop(), "a message's own frame")
     for (const each of frames) {
-      receiver.arrived(each[0]!, each.byteLength, at, 'riding')
+      receiver.arrived(readTag(each), each.byteLength, at, 'riding')
       got(each, at)
     }
     const frame = decode(own)
@@ -86,8 +88,8 @@ function wireTo(
     const now = performance.now()
     budget += (now - last) * shape.bytesPerMs
     last = now
-    while (link.length > 0 && link[0]!.byteLength <= budget) {
-      const message = link.shift()!
+    for (let message = link[0]; message !== undefined && message.byteLength <= budget; message = link[0]) {
+      link.shift()
       budget -= message.byteLength
       linkBytes -= message.byteLength
       setTimeout(() => take(message), shape.delayMs)
@@ -128,7 +130,7 @@ function wireTo(
     delivered,
     /** When the first frame of `tag` arrived, of channel `ix` where it has one, past `since`. */
     arrived: (tag: number, ix = -1, since = 0) =>
-      arrivals.find((a) => a.tag === tag && a.ix === ix && a.at >= since)?.at,
+      defined(arrivals.find((a) => a.tag === tag && a.ix === ix && a.at >= since)?.at, `a frame of tag ${tag}`),
     stop: () => {
       clearInterval(timer)
       headroom.close()
@@ -150,15 +152,15 @@ function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: numb
   let delivered = 0
   const receiver = new ClientPieceReceiver({
     owner: {
-      sendAck: (frame) => void toServer.push({ ack: decode(frame) as PiecesAck, due: performance.now() + delayMs }),
+      sendAck: (frame) => void toServer.push({ ack: decodePiecesAck(frame), due: performance.now() + delayMs }),
       carryAck: () => {},
     },
   })
   const take = (message: Uint8Array<ArrayBuffer>, at: number) => {
     delivered += message.byteLength
     const frames = isOneFrame(message) ? [message] : Array.from(messageFrames(message))
-    const own = frames.pop()!
-    for (const each of frames) receiver.arrived(each[0]!, each.byteLength, at, 'riding')
+    const own = defined(frames.pop(), "a message's own frame")
+    for (const each of frames) receiver.arrived(readTag(each), each.byteLength, at, 'riding')
     const frame = decode(own)
     if (frame.tag === TAG.ANNOUNCE) receiver.announce(frame.bytes, at, frame.floor)
     else if (frame.tag === TAG.PIECE) receiver.add(frame.total, frame.piece, at)
@@ -183,8 +185,14 @@ function stepWireTo({ bytesPerMs, delayMs }: { bytesPerMs: number; delayMs: numb
     async step() {
       await vi.advanceTimersByTimeAsync(STEP_MS)
       const now = performance.now()
-      while (toPage.length > 0 && toPage[0]!.due <= now) take(toPage.shift()!.message, now)
-      while (toServer.length > 0 && toServer[0]!.due <= now) headroom.acknowledged(toServer.shift()!.ack)
+      for (let next = toPage[0]; next !== undefined && next.due <= now; next = toPage[0]) {
+        toPage.shift()
+        take(next.message, now)
+      }
+      for (let next = toServer[0]; next !== undefined && next.due <= now; next = toServer[0]) {
+        toServer.shift()
+        headroom.acknowledged(next.ack)
+      }
     },
     stop: () => headroom.close(),
   }
@@ -493,9 +501,12 @@ async function downloadFor(wire: Wire, ms: number, during: (t: number) => void =
     await sleep(50)
   }
   await sleep(Math.ceil(wire.linkBytes() / SLOW.bytesPerMs) + 60_000)
-  const times = [at, ...wire.delivered.filter((t) => t >= at)]
   let quiet = 0
-  for (let i = 1; i < times.length; i++) quiet = Math.max(quiet, times[i]! - times[i - 1]!)
+  let previous = at
+  for (const t of wire.delivered.filter((t) => t >= at)) {
+    quiet = Math.max(quiet, t - previous)
+    previous = t
+  }
   const got = wire.arrivals.filter((a) => a.tag === TAG.BINARY && a.ix === 1 && a.at >= at).length
   return { quiet, frames, got }
 }
@@ -559,8 +570,8 @@ describe("the wire's control frames", () => {
       expect([...wire.headroom.sender.waitingFrames]).toContain(reconciled)
       await sleep(30_000)
       // Behind the 1 MB it would have waited out 20 s of the link.
-      expect(wire.arrived(TAG.RECONCILED)! - at).toBeLessThan(5_000)
-      expect(wire.arrived(TAG.RECONCILED)!).toBeLessThan(wire.arrived(TAG.BINARY, 1)!)
+      expect(wire.arrived(TAG.RECONCILED) - at).toBeLessThan(5_000)
+      expect(wire.arrived(TAG.RECONCILED)).toBeLessThan(wire.arrived(TAG.BINARY, 1))
     } finally {
       wire.stop()
     }
@@ -574,7 +585,7 @@ describe("the wire's control frames", () => {
       wire.send(() => reconciled)
       expect([...wire.headroom.sender.waitingFrames]).not.toContain(reconciled)
       await sleep(30_000)
-      expect(wire.arrived(TAG.RECONCILED)!).toBeLessThan(wire.arrived(TAG.BINARY, 1)!)
+      expect(wire.arrived(TAG.RECONCILED)).toBeLessThan(wire.arrived(TAG.BINARY, 1))
     } finally {
       wire.stop()
     }

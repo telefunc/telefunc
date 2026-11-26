@@ -3,21 +3,13 @@ import { defined } from '../../../utils/defined.fixture.js'
 import { channelLedger } from './channelMemory.fixture.js'
 
 import { parse } from '@brillout/json-serializer/parse'
+import { decodeChannelFrame, parseString } from '../../wire/decode.fixture.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { Abort } from '../../../shared/Abort.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_TRANSPORT, CREDIT_WINDOW_INITIAL_BYTES, WIRE_VERSION } from '../../constants.js'
 import { encodeSseRequest } from '../../wire/envelope.js'
-import {
-  ERROR_REASON,
-  decode,
-  encode,
-  isOneFrame,
-  isSequencedFrame,
-  messageFrames,
-  type ChannelFrame,
-  type DecodedFrame,
-} from '../../wire/frame.js'
+import { ERROR_REASON, decode, encode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
@@ -61,7 +53,7 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
   const pair = pairPublishes()
   const out: Sent[] = []
   for (const frame of frames) {
-    const decoded = pair(decode(frame) as DecodedFrame)
+    const decoded = pair(decode(frame))
     if (decoded === null || !isSequencedFrame(decoded)) continue
     const { index, seq } = decoded
     if (
@@ -70,7 +62,7 @@ function sent(frames: Iterable<Uint8Array>): Sent[] {
       decoded.tag === TAG.TEXT_ACK_REQ ||
       decoded.tag === TAG.ACK_RES
     )
-      out.push({ index, seq, label: `${index}:${(parse(decoded.text) as string).slice(0, 2)}` })
+      out.push({ index, seq, label: `${index}:${parseString(decoded.text).slice(0, 2)}` })
     if (decoded.tag === TAG.PUBLISH_BINARY || decoded.tag === TAG.BINARY)
       out.push({ index, seq, label: `${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}` })
     if (decoded.tag === TAG.CLOSE) out.push({ index, seq, label: `${index}:CLOSE` })
@@ -136,7 +128,9 @@ async function overSse(channels: ServerChannel[]) {
     noUpgrades,
   )
   await Promise.all(channels.map((channel) => channel.opened))
-  const reader = (opened.body as ReadableStream<Uint8Array>).getReader()
+  const { body: stream } = opened
+  if (!(stream instanceof ReadableStream)) throw new Error('Expected a streamed response body')
+  const reader = stream.getReader()
   const events = new SseEvents()
   const frames: Uint8Array[] = []
   return {
@@ -322,7 +316,7 @@ test("on SSE, after the page's abort nothing of that channel waits for the strea
 
 /** The page sends `frame` on channel 0, its first. */
 function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void {
-  channel._dispatchFrame(decode(frame) as ChannelFrame)
+  channel._dispatchFrame(decodeChannelFrame(frame))
 }
 
 /** The seq of the last frame `channel` sent its page: what a page that read all of it tells in its close's frames. */

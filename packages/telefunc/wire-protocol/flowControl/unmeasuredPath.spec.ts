@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { decode, encode, isOneFrame, messageFrames, type PiecesAck } from '../wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames } from '../wire/frame.js'
+import { decodePiecesAck } from '../wire/decode.fixture.js'
 import { HEADER } from '../wire/header.js'
 import { TAG } from '../wire/tags.js'
 import { ClientPieceReceiver } from './client/ClientPieceReceiver.js'
@@ -34,7 +35,7 @@ function wireBehindSlowLink({
   const receiver: ClientPieceReceiver = new ClientPieceReceiver({
     owner: {
       sendAck: (frame) => {
-        setTimeout(() => headroom.acknowledged(decode(frame) as PiecesAck), Math.max(20, delayMs))
+        setTimeout(() => headroom.acknowledged(decodePiecesAck(frame)), Math.max(20, delayMs))
       },
       carryAck: () => {},
     },
@@ -59,8 +60,8 @@ function wireBehindSlowLink({
     const now = performance.now()
     budget += (now - last) * (now - opened < startMs ? startBytesPerMs : bytesPerMs)
     last = now
-    while (link.length > 0 && link[0]!.byteLength <= budget) {
-      const message = link.shift()!
+    for (let message = link[0]; message !== undefined && message.byteLength <= budget; message = link[0]) {
+      link.shift()
       budget -= message.byteLength
       linkBytes -= message.byteLength
       if (delayMs === 0) take(message)

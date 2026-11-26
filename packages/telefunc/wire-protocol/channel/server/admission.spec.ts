@@ -5,19 +5,11 @@ import { channelLedger } from './channelMemory.fixture.js'
 import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 
-import { parse } from '@brillout/json-serializer/parse'
+import { decodeChannelFrame, parseString } from '../../wire/decode.fixture.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { config, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { CREDIT_WINDOW_INITIAL_BYTES } from '../../constants.js'
-import {
-  decode,
-  encode,
-  isOneFrame,
-  isSequencedFrame,
-  messageFrames,
-  type ChannelFrame,
-  type DecodedFrame,
-} from '../../wire/frame.js'
+import { decode, encode, isOneFrame, isSequencedFrame, messageFrames } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { ClientPieceReceiver } from '../../flowControl/client/ClientPieceReceiver.js'
 import { ServerHeadroom } from '../../flowControl/server/ServerHeadroom.js'
@@ -124,13 +116,13 @@ function reads(frames: Iterable<Uint8Array>): string[] {
   const newestSeq = new Map<number, number>()
   const out: string[] = []
   for (const frame of frames) {
-    const decoded = pair(decode(frame) as DecodedFrame)
+    const decoded = pair(decode(frame))
     if (decoded === null || !isSequencedFrame(decoded)) continue
     const { index, seq } = decoded
     if (seq <= (newestSeq.get(index) ?? 0)) continue
     newestSeq.set(index, seq)
     if (decoded.tag === TAG.PUBLISH || decoded.tag === TAG.TEXT || decoded.tag === TAG.TEXT_ACK_REQ)
-      out.push(`${index}:${(parse(decoded.text) as string).slice(0, 2)}`)
+      out.push(`${index}:${parseString(decoded.text).slice(0, 2)}`)
     if (decoded.tag === TAG.PUBLISH_BINARY || decoded.tag === TAG.BINARY || decoded.tag === TAG.BINARY_ACK_REQ)
       out.push(`${index}:${new TextDecoder().decode(decoded.data.subarray(0, 2))}`)
     if (decoded.tag === TAG.ABORT) out.push(`${index}:ABORT`)
@@ -141,7 +133,7 @@ function reads(frames: Iterable<Uint8Array>): string[] {
 
 /** The page sends `frame` on `channel`. */
 function fromPage(channel: ServerChannel, frame: Uint8Array<ArrayBuffer>): void {
-  channel._dispatchFrame(decode(frame) as ChannelFrame)
+  channel._dispatchFrame(decodeChannelFrame(frame))
 }
 
 /** The seq of the last frame `channel` sent its page. */

@@ -8,7 +8,8 @@ import { shield } from './shield.js'
 import { Abort } from './Abort.js'
 import { Channel, ServerChannel } from '../../wire-protocol/channel/server/ServerChannel.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
-import { TAG } from '../../wire-protocol/wire/tags.js'
+import { encode } from '../../wire-protocol/wire/frame.js'
+import { decodeChannelFrame } from '../../wire-protocol/wire/decode.fixture.js'
 import { holdsAtMost } from '../../wire-protocol/channel/server/channelMemory.js'
 
 /** Each request's lifecycle, as `runTelefunc` creates it: how often its `onClose()` callbacks ran, and its `signal`. */
@@ -57,7 +58,7 @@ function circular() {
   value.self = value
   return value
 }
-const telefunctions: Record<string, (...args: any[]) => Promise<unknown>> = {
+const telefunctions: Record<string, (...args: never[]) => Promise<unknown>> = {
   onSuccess: async () => 42,
   onThrow: async () => {
     throw new Error('the telefunction fails, as the test means it to')
@@ -328,7 +329,7 @@ describe('a request ends its lifecycle once, however the call ends', () => {
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(opened.cancelled).toBe(cancelledBefore)
       // The page's message makes the control channel's listener throw `Abort()`, which aborts the response.
-      control._dispatchFrame({ tag: TAG.TEXT, index: 1, seq: 1, text: 'null', bytes: 4 } as any)
+      control._dispatchFrame(decodeChannelFrame(encode.text(1, 'null', 1)))
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(opened.cancelled).toBe(cancelledBefore + 1)
       expect(request.closed).toBe(1)

@@ -13,7 +13,8 @@ import {
   droppingPublishes,
 } from '../../wire-protocol/flowControl/server/waitingPublishes.js'
 import { pairPublishes } from '../../wire-protocol/channel/client/pairPublishes.js'
-import { decode, encode, isOneFrame, messageFrames, type DecodedFrame } from '../../wire-protocol/wire/frame.js'
+import { decode, encode, isOneFrame, messageFrames } from '../../wire-protocol/wire/frame.js'
+import { decodeChannelFrame } from '../../wire-protocol/wire/decode.fixture.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
 import { WireSender } from '../../wire-protocol/channel/server/WireSender.js'
@@ -42,7 +43,7 @@ type Page = { lastSeq: number; read: string[]; consumed: number }
  *  what waits; `close()` drops what is sent from then on, as a closed wire does. `behindAfter`: how long a lossy send may
  *  wait, or how that follows from the least confirmation time. */
 function wire(
-  channel: ServerChannel<never, string>,
+  channel: ServerChannel<never, unknown>,
   page: Page,
   { behindAfter = Number.POSITIVE_INFINITY }: { behindAfter?: number | ((leastConfirmMs: number) => number) } = {},
 ) {
@@ -51,7 +52,7 @@ function wire(
   let closed = false
   const pair = pairPublishes()
   const read = (frame: Uint8Array) => {
-    const decoded = pair(decode(frame) as DecodedFrame)
+    const decoded = pair(decode(frame))
     if (decoded === null || !('seq' in decoded) || decoded.seq <= page.lastSeq) return
     page.lastSeq = decoded.seq
     if (decoded.tag === TAG.TEXT) {
@@ -109,7 +110,7 @@ function wire(
     },
     /** The page's `WINDOW`: it has everything through its last seq. */
     confirm() {
-      channel._dispatchFrame({ tag: TAG.WINDOW, index: 7, bytes: 1 << 30, lastSeq: page.lastSeq } as any)
+      channel._dispatchFrame(decodeChannelFrame(encode.window(7, 1 << 30, page.lastSeq)))
     },
     close() {
       closed = true
@@ -123,17 +124,17 @@ function newPage(): Page {
 
 /** What the channel counted against its page's credit and the page hasn't consumed. */
 function owed(channel: ServerChannel<never, string>, page: Page): number {
-  return (channel as any).sendCredit.sentBytes - page.consumed
+  return channel['sendCredit']['sentBytes'] - page.consumed
 }
 
 /** How many of 200 more lossy sends, each confirmed as it goes, the page reads once it granted 100 messages past those it
  *  read: 100 where the channel counted against the page's credit exactly the messages the page read. */
 function spareMessages(channel: ServerChannel<never, string>, page: Page): number {
   const read = page.read.length
-  channel._dispatchFrame({ tag: TAG.MSG_WINDOW, index: 7, count: read + 100 } as any)
+  channel._dispatchFrame(decodeChannelFrame(encode.msgWindow(7, read + 100)))
   for (let i = 0; i < 200; i++) {
     void channel.send(`C${i}`, { lossy: true })
-    channel._dispatchFrame({ tag: TAG.WINDOW, index: 7, bytes: 1 << 30, lastSeq: page.lastSeq } as any)
+    channel._dispatchFrame(decodeChannelFrame(encode.window(7, 1 << 30, page.lastSeq)))
   }
   return page.read.length - read
 }
@@ -292,7 +293,7 @@ describe('a lossy send to an attached page', () => {
     for (let i = 0; i < 100; i++) void channel.send(`${i}`, { lossy: true })
     send(channel, 'L1 L2')
     expect(page.read.length).toBe(100)
-    channel._dispatchFrame({ tag: TAG.MSG_WINDOW, index: 7, count: 200 } as any)
+    channel._dispatchFrame(decodeChannelFrame(encode.msgWindow(7, 200)))
     expect(page.read.at(-1)).toBe('~L2')
     expect(page.read.length).toBe(101)
   })
@@ -330,31 +331,29 @@ describe('a lossy send to an attached page', () => {
 
 describe('bytes given to `send()` and `publish()`', () => {
   test('are a usage error naming `sendBinary()`, and nothing goes', () => {
-    const channel = new Channel()
+    const channel = new ServerChannel<never>()
     expect(() => channel.send(new Uint8Array([1, 2, 255]))).toThrow('Bytes go through `sendBinary()`')
     expect(() => channel.send(Buffer.from('hi'), { ack: true })).toThrow('turns this `Buffer` into a plain object')
     expect(() => channel.send(new DataView(new ArrayBuffer(2)), { lossy: true })).toThrow('this `DataView`')
     expect(() => channel.send(new ArrayBuffer(4), { ack: false })).toThrow('this `ArrayBuffer`')
     void channel.send('R')
-    const server = channel as unknown as ServerChannel<never, string>
-    server._registerChannel(ATTACHABLE_NOW)
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
-    wire(server, page).attach()
+    wire(channel, page).attach()
     expect(page.read).toEqual(['R'])
   })
 
   test('nested at any depth, are a usage error naming `sendBinary()` and where they are, and nothing goes', () => {
-    const channel = new Channel()
+    const channel = new ServerChannel<never>()
     expect(() => channel.send({ b: new Uint8Array([1, 2, 255]) })).toThrow('turns the `Uint8Array` at `b` into')
     expect(() => channel.send({ a: { b: { c: Buffer.from('hi') } } }, { ack: true })).toThrow('the `Buffer` at `a.b.c`')
     expect(() => channel.send(['x', new ArrayBuffer(2)], { lossy: true })).toThrow('the `ArrayBuffer` at `[1]`')
     expect(() => channel.send({ b: [new DataView(new ArrayBuffer(1))] })).toThrow('Bytes go through `sendBinary()`')
     expect(() => channel.send(new Map([['m', new Uint8Array(1)]]))).toThrow('turns a `Uint8Array` in it into')
     void channel.send('R')
-    const server = channel as unknown as ServerChannel<never, string>
-    server._registerChannel(ATTACHABLE_NOW)
+    channel._registerChannel(ATTACHABLE_NOW)
     const page = newPage()
-    wire(server, page).attach()
+    wire(channel, page).attach()
     expect(page.read).toEqual(['R'])
   })
 
@@ -489,8 +488,7 @@ describe('a page away for 5 s, with 30 lossy sends and one plain send a second',
       void channel.send(`L${i}`, { lossy: true })
       if (i % 30 === 0) void channel.send(`R${i / 30}`)
       // The page confirms within 50 ms of what it reads, while it is there.
-      if (i < 30 || i >= 6 * 30)
-        channel._dispatchFrame({ tag: TAG.WINDOW, index: 7, bytes: 1 << 30, lastSeq: page.lastSeq } as any)
+      if (i < 30 || i >= 6 * 30) channel._dispatchFrame(decodeChannelFrame(encode.window(7, 1 << 30, page.lastSeq)))
     }
     const after = page.read.slice(back)
     return { read: [...page.read], after, owed: owed(channel, page), spare: spareMessages(channel, page) }
