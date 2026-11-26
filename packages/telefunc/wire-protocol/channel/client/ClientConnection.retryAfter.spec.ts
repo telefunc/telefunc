@@ -46,6 +46,37 @@ test("a stalled channel's data refused with a 503 goes again only once the answe
   expect(dataStatuses()).toEqual([0, 503, 200])
 })
 
+test('an SSE upload waits out Retry-After before retrying a stalled channel after a 503', async () => {
+  serveSse()
+  world.uploadScripts = [{ tag: 'held' }, { tag: 'taken', ack: 'held' }]
+  const page = openChannel(['sse'])
+  await advance(500)
+  await page.channel.opened
+  world.server.cuts.add(0)
+  void page.channel.send('first').catch(() => {})
+  await advance(300)
+  world.server.cuts.delete(0)
+  world.postAnswers = [{ tag: 'refused', status: 503, retryAfter: 6 }]
+  await advance(1_000)
+  expect(dataStatuses()).toEqual([0, 503])
+
+  const [acknowledge] = world.heldAcks
+  if (!acknowledge) throw new Error('no upload to acknowledge')
+  acknowledge()
+  void page.channel.send('second').catch(() => {})
+  await advance(100)
+  expect(world.uploaded).toEqual([])
+  await advance(4_000)
+  expect([dataStatuses(), world.uploaded]).toEqual([[0, 503], []])
+
+  await advance(2_000)
+  expect(dataStatuses()).toEqual([0, 503])
+  expect(world.uploaded.map(({ upload, seq }) => [upload, seq])).toEqual([
+    [2, 1],
+    [2, 2],
+  ])
+})
+
 test("a batch refused with a 413 goes again, split, only once the answer's Retry-After is out", async () => {
   serveSse()
   const page = openChannel(['sse'])

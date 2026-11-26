@@ -52,6 +52,8 @@ type Hook = {
   held?: true
   /** The request waits this long before it reaches the server, as on a slow link. */
   delayMs?: number
+  /** The proxy's answer to a request it doesn't forward. */
+  refusal?: Response
 }
 const world: {
   hooks: Hook[]
@@ -176,7 +178,7 @@ async function proxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise
   if (hooked !== null) world.hooked.push(hooked)
   if (hook.held) return heldAnswer(realFetch(target, { ...init, body: sent, signal: null }), init?.signal)
   if (hook.delayMs !== undefined) await delay(hook.delayMs)
-  const response = await realFetch(target, { ...init, body: sent })
+  const response = hook.refusal ?? (await realFetch(target, { ...init, body: sent }))
   if (hooked !== null) hooked.status = response.status
   const contentType = response.headers.get('content-type')
   world.requests.push({ kind, bytes: bytes?.byteLength ?? 0, status: response.status, contentType })
