@@ -850,3 +850,32 @@ test('on a WebSocket, a binary lossy send made while a send of its channel waits
     free()
   }
 })
+
+for (const replacing of [false, true])
+  test(`on a WebSocket, a binary lossy send of detached bytes${replacing ? ' in place of a larger one' : ''} behind a send of its channel waiting for room throws, leaving what waits as it was`, async () => {
+    const channel = new ServerChannel()
+    const other = new ServerChannel()
+    const page = overWebSocket([channel, other])
+    const free = leaveRoomUnderMax(64 * 1024)
+    try {
+      const waiting = channel.send('a1' + 'x'.repeat(100 * 1024))
+      expect(await settledIn(waiting, 5)).toBe('pending')
+      if (replacing) void channel.send('l2' + 'x'.repeat(60 * 1024), { lossy: true })
+      const reserved = channelLedger().reserved
+      const detached = new Uint8Array(1024)
+      structuredClone(detached.buffer, { transfer: [detached.buffer] })
+      expect(() => channel.sendBinary(detached, { lossy: true })).toThrow(TypeError)
+      expect(channelLedger().reserved).toBe(reserved)
+      const room = getChannelConfig().maxMemory - channelLedger().total - reserved
+      expect(await settledIn(other.sendBinary(new Uint8Array(room)), 5)).toBe('overflow')
+      free()
+      expect(await settledIn(waiting)).toBe('resolved')
+      expect((await page.readAll()).filter((read) => read.startsWith('0:'))).toEqual(
+        replacing ? ['0:a1', '0:l2'] : ['0:a1'],
+      )
+    } finally {
+      channel.abort()
+      other.abort()
+      free()
+    }
+  })

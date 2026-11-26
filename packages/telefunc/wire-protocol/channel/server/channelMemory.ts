@@ -128,12 +128,11 @@ class RoomWait<Behind = unknown> {
    *  only then. It goes in this one's turn, never ahead of an older wait. */
   putBehind(bytes: number, makeSend: () => Behind): boolean {
     const added = bytes - this.behindBytes
-    if (!this.parked && added > 0) {
-      if (!hasRoomFor(added)) return false
-      memory.reserved += added
-    }
+    if (!this.parked && added > 0 && !hasRoomFor(added)) return false
+    const send = makeSend()
+    if (!this.parked && added > 0) memory.reserved += added
     if (!this.parked && added < 0) unreserve(-added)
-    this.behind = { send: makeSend(), bytes }
+    this.behind = { send, bytes }
     return true
   }
 
