@@ -109,17 +109,48 @@ class RoomSessionSubscriptions {
     args: OperationArgs['join'],
     options: Pick<CallOptions, 'deadline' | 'wanted'>,
   ): Promise<OperationWire<OperationValue['join']>> {
-    const { roomId, inc } = attempt.route
-    const wire = await this.writeRoute(
+    const { roomId } = attempt.route
+    const callOptions = {
+      ...options,
+      wanted: () => attempt.state() !== 'closed' && options.wanted?.() !== false,
+      paused: true,
+    }
+    const wire = await this.grants.send(
       roomId,
-      (authority, order) => {
-        attempt.sending()
-        return authority.runJoinWithInbox(inc, args, { route: attempt.route, order })
-      },
-      { ...options, wanted: () => attempt.state() !== 'closed' && options.wanted?.() !== false, paused: true },
+      () => this.grantHere(roomId, callOptions),
+      (order) => this.carry(attempt, args, order, callOptions),
     )
     if (wire.kind === 'done' && wire.registered === true) attempt.registeredBy()
     return wire
+  }
+
+  /** Sends the operation that carries `attempt`'s route under `order`, and again under the same order where a sent one
+   *  failed as Cloudflare says to retry (`TransientRetry`): the authority answers a copy as it answered the operation,
+   *  if that came, and applies it once, so an operation whose answer was lost learns what it did. */
+  private async carry(
+    attempt: CloudflareRoomAttempt,
+    args: OperationArgs['join'],
+    order: Promise<LeaseOrder>,
+    options: CallOptions,
+  ): Promise<OperationWire<OperationValue['join']> | 'regrant'> {
+    const { roomId, inc } = attempt.route
+    const retry = new TransientRetry()
+    for (;;) {
+      let sent = false
+      const send = order.then((order) => (authority: CloudflareRoomAuthorityStub) => {
+        sent = true
+        attempt.sending()
+        return authority.runJoinWithInbox(inc, args, { route: attempt.route, order })
+      })
+      try {
+        return await this.callAuthority(roomId, send, options)
+      } catch (error) {
+        const reason = retry.reasonFor(error)
+        const delay = sent ? retry.delayAfter(error) : null
+        if (delay === null) throw reason
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+    }
   }
 
   /** Calls the room's authority through the ordered stub this session keeps for it, so a room's commits and route calls
@@ -146,7 +177,7 @@ class RoomSessionSubscriptions {
   ): Promise<T> {
     return this.grants.send(
       roomId,
-      () => this.callAuthority(roomId, (authority) => authority.grantHolder(this.id), options),
+      () => this.grantHere(roomId, options),
       (order) =>
         this.callAuthority(
           roomId,
@@ -154,6 +185,11 @@ class RoomSessionSubscriptions {
           options,
         ),
     )
+  }
+
+  /** A grant for this session's writes of routes at the room's authority. */
+  private grantHere(roomId: string, options: CallOptions): Promise<number> {
+    return this.callAuthority(roomId, (authority) => authority.grantHolder(this.id), options)
   }
 
   /** Removes `route` at its room's authority, as many times as it takes, whoever waits for it. */
@@ -215,6 +251,8 @@ class RoomSessionSubscriptions {
       if (again.length > 0) this.renewAfterPause(roomId, again)
       return
     }
+    // The room counts a renewal it renewed as this session's activity, which keeps its grant there.
+    if (results.includes('renewed')) this.grants.counted(roomId, sentAt)
     // The authority answers each route in turn.
     attempts.forEach((attempt, index) => {
       const result = results[index]

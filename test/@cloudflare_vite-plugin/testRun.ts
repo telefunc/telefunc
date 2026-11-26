@@ -519,7 +519,10 @@ function testLapsedPresence() {
     await page.waitForTimeout(95_000)
     await page.click('#publish-during')
     await autoRetry(async () => {
-      expect((await state()).published).toBe('during')
+      const { published, received, reported } = await state()
+      expect(published).toBe('during')
+      expect(received).not.toContain('during')
+      expect(reported).deep.equal([])
     })
     expect((await state()).reported).deep.equal([])
     // Then one of the two outcomes the design allows, whichever comes first, waited on as state:
@@ -531,15 +534,17 @@ function testLapsedPresence() {
       async () => {
         await page.click('#read')
         const { rerecorded, evicted } = await state()
-        expect(rerecorded || evicted).toBe(true)
-        return evicted ? 'evicted' : 'recorded again'
+        expect(rerecorded === true || evicted === true).toBe(true)
+        return evicted === true ? 'evicted' : 'recorded again'
       },
       { timeout: recordedAgainBy - Date.now() },
     )
     if (outcome === 'evicted') {
       await page.click('#subscribe')
       await autoRetry(async () => {
-        expect((await state()).received).deep.equal(['before'])
+        const { received, evicted } = await state()
+        expect(evicted).toBe(false)
+        expect(received).deep.equal(['before'])
       })
     }
     await page.click('#publish-after')
@@ -577,7 +582,12 @@ function testRefusedDelivery() {
     const publish = async (message: string) => {
       const query = new URLSearchParams({ key, message })
       const response = await fetch(`${getServerUrl()}/__refused-delivery-publish?${query}`)
-      return fieldOf(await jsonOf(response), 'rejected')
+      const answer = await jsonOf(response)
+      return {
+        rejected: fieldOf(answer, 'rejected'),
+        cause: fieldOf(answer, 'cause'),
+        causeRemote: fieldOf(answer, 'causeRemote'),
+      }
     }
     const received = async () =>
       await Promise.all(
@@ -594,11 +604,15 @@ function testRefusedDelivery() {
       },
       { timeout: 10_000 },
     )
-    expect(await publish('refused')).toContain('lost to 1/2 Durable Objects')
+    const refused = await publish('refused')
+    expect(refused.rejected).toContain('lost to 1/2 Durable Objects')
+    // And why: the refusing session's own error, as its coordinator caught it, marks included.
+    expect(refused.cause).toBe('Error: Test: the session refused the delivery')
+    expect(refused.causeRemote).toBe(true)
     await autoRetry(async () => {
       expect((await received()).map((got) => got.includes('refused')).sort()).deep.equal([false, true])
     })
-    expect(await publish('after')).toBe(null)
+    expect(await publish('after')).deep.equal({ rejected: null, cause: null, causeRemote: null })
     await autoRetry(async () => {
       for (const got of await received()) expect(got).toContain('after')
     })

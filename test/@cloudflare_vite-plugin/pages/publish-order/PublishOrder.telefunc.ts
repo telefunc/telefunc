@@ -2,7 +2,14 @@ export { onPublishLoop }
 
 import { Broadcast } from 'telefunc'
 
-const isAscending = (values: number[]) => values.every((value, i) => i === 0 || value > values[i - 1]!)
+function isAscending(values: number[]): boolean {
+  let previous = -Infinity
+  for (const value of values) {
+    if (value <= previous) return false
+    previous = value
+  }
+  return true
+}
 
 /** An unawaited loop of publishes to one key, every other one large, with a subscriber in this Durable Object. */
 async function onPublishLoop() {

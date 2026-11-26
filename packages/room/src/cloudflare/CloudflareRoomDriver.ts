@@ -36,14 +36,18 @@ import type { BackendReceiver, CloudflarePlaneKit, DriverAttempt, OrderingInfo }
 import {
   CLOUDFLARE_BUCKETS,
   ChannelOverflowError,
-  LEASE_CALL_DEADLINE_MS,
   currentCloudflareHostKey,
   currentCloudflareMember,
   markHandled,
 } from 'telefunc/__internal'
 import type { AcceptedCommitWire, OperationWire } from './RoomAuthority.js'
 import { currentRoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
-import { openRegionDirectory, openRoomAuthority, type CloudflareRoomAuthorityStub } from './objects.js'
+import {
+  ROOM_JOIN_DEADLINE_MS,
+  openRegionDirectory,
+  openRoomAuthority,
+  type CloudflareRoomAuthorityStub,
+} from './objects.js'
 import { operationRequest, type RoomOperationRequest } from '../server/store/roomOperations.js'
 import { compareCodePoints } from '../utils/SortedIds.js'
 import { assert } from '../utils/assert.js'
@@ -151,7 +155,7 @@ class CloudflareRoomDriver implements RoomDriver {
       await beforeOperation(options)
       return this.sentOperation(roomId, inc, operationRequest(join, args))
     }
-    const deadline = Date.now() + LEASE_CALL_DEADLINE_MS
+    const deadline = Date.now() + ROOM_JOIN_DEADLINE_MS
     return operationResult(
       'join',
       await rowLimited(session.runCarrying(inbox, args, { deadline, wanted: options.wanted })),

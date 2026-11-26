@@ -96,14 +96,12 @@ export {
   renewsAfterPause,
   grantHolder,
   initLeaseSchema,
-  leaseAnswer,
   leaseRegistered,
   liveLeases,
   nextLeaseSweep,
   registerLease,
   removeLease,
   renewLease,
-  setLeaseAnswer,
   sweepLeases,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
 export type {
@@ -112,6 +110,21 @@ export type {
   LeaseRemoved,
   LeaseWritten,
 } from '../../wire-protocol/adapter/cloudflare/leases.js'
+export {
+  blobColumn,
+  integerColumn,
+  nullableIntegerColumn,
+  nullableTextColumn,
+  textColumn,
+} from '../../wire-protocol/adapter/cloudflare/sqlStorage.js'
+export type {
+  DurableStorage,
+  SqlBinding,
+  SqlCursor,
+  SqlRow,
+  SqlStore,
+  SqlValue,
+} from '../../wire-protocol/adapter/cloudflare/sqlStorage.js'
 
 import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/ClientBroadcast.js'

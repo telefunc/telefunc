@@ -7,7 +7,7 @@ import { getContext, PROVIDED_CONTEXT } from '../../../node/server/context/getCo
 import { ChannelMux } from '../../channel/server/ChannelMux.js'
 import { ServerChannel } from '../../channel/server/ServerChannel.js'
 import { TAG } from '../../wire/tags.js'
-import { CloudflareBroadcast } from './broadcast.js'
+import { CloudflareBroadcast } from './CloudflareBroadcast.js'
 import { OrderedStubs } from './OrderedStubs.js'
 import { cloudflareSession, withCloudflareSession } from './session.js'
 

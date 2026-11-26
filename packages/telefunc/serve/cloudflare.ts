@@ -14,10 +14,8 @@ import { noTransportEvidence } from '../node/server/runTelefunc/clientLeft.js'
 import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import { preloadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
-import {
-  CloudflareBroadcastAuthorityState,
-  CloudflareBroadcast,
-} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+import { CloudflareBroadcastAuthorityState } from '../wire-protocol/adapter/cloudflare/CloudflareBroadcastAuthorityState.js'
+import { CloudflareBroadcast } from '../wire-protocol/adapter/cloudflare/CloudflareBroadcast.js'
 import type {
   BroadcastCalls,
   BroadcastForwardRequest,
@@ -25,7 +23,7 @@ import type {
   BroadcastLeaseRequest,
   BroadcastReleaseRequest,
   BroadcastPublishRequest,
-} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcastRpc.js'
 import { OrderedStubs } from '../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
@@ -121,7 +119,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     ...getTelefuncChannelOptions({ copiesOnSend: true }),
   })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
-    const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
+    // The binding is named at runtime, by `bindingName`, and the app's `Env` has no index signature: no type reaches it.
+    const namespace = (env as Record<string, TelefuncDurableObjectNamespace | undefined>)[bindingName]
+    assertUsage(namespace, `Missing Cloudflare Durable Object binding "${bindingName}". Add it to your wrangler.jsonc.`)
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
   }
   const cloudflareBackend = installBackend(
@@ -249,8 +249,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     /** An extension's `durableObject` schedules its alarms; a Broadcast key's authority, which belongs to no extension,
      *  its sweep. */
     async alarm(): Promise<void> {
-      const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
-      if (name === undefined) return this.authorityState.alarm()
+      const name: unknown = await this.ctx.storage.get(EXTENSION_STORAGE_KEY)
+      if (typeof name !== 'string') return this.authorityState.alarm()
       this.storedExtension = name
       await this.#durableObject(name).alarm?.()
     }
@@ -268,9 +268,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use ` +
           `Telefunc's Vite plugin?`,
       )
-      const regions = { forward: broadcast.forward.bind(broadcast, this.broadcastCalls) }
+      const regions = broadcast.regions(this.broadcastCalls)
       const getNamespace = () => telefuncNamespace(this.env)
-      const durableObject = extension.durableObject(this.ctx as never, this.env as never, { regions, getNamespace })
+      const durableObject = extension.durableObject(this.ctx, { regions, getNamespace })
       this.durableObjects.set(name, durableObject)
       return durableObject
     }
@@ -313,7 +313,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         url.searchParams.get('home'),
       )
 
-      const forwardedHeaders = new Headers(request.headers as Headers)
+      const forwardedHeaders = new Headers(request.headers)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
@@ -324,10 +324,4 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     },
     TelefuncDurableObject,
   }
-}
-
-function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
-  const binding = (env as Record<string, T | undefined>)[name]
-  assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
-  return binding
 }

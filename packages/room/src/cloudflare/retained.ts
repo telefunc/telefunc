@@ -1,20 +1,25 @@
-/// <reference types="@cloudflare/workers-types" />
 export { installRetained, readRetained, retainedOwner, listRetained, deleteRetained }
 
 import type { LaneId, RetainedFrame, RetainedOf } from '../backend/contract.js'
 import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../backend/laneKey.js'
-import type { OrderingInfo } from 'telefunc/__internal'
+import {
+  blobColumn,
+  integerColumn,
+  nullableTextColumn,
+  textColumn,
+  type OrderingInfo,
+  type SqlCursor,
+  type SqlStore,
+} from 'telefunc/__internal'
 import { keyRange } from './storage.js'
 
 /** Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap. */
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
-type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
-
 /** Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back. `owner` is the
  *  member the frame is from. */
 function installRetained(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
@@ -40,45 +45,44 @@ function installRetained(
   )
 }
 
-function readRetained(sql: SqlStorage, inc: string, lane: LaneId): RetainedFrame | null {
+function readRetained(sql: SqlStore, inc: string, lane: LaneId): RetainedFrame | null {
   const key = encodeLaneKey(lane)
   const manifest = sql
-    .exec<ManifestRow>('SELECT * FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
+    .exec('SELECT size, seq, ts FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
     .toArray()[0]
   if (manifest === undefined) return null
-  const chunks = sql
-    .exec<{ bytes: ArrayBuffer }>('SELECT bytes FROM rt_chunk WHERE inc = ? AND lane_key = ? ORDER BY i', inc, key)
-    .toArray()
-  const payload = new Uint8Array(manifest.size)
+  const chunks = sql.exec('SELECT bytes FROM rt_chunk WHERE inc = ? AND lane_key = ? ORDER BY i', inc, key).toArray()
+  const payload = new Uint8Array(integerColumn(manifest, 'size'))
   let offset = 0
   for (const chunk of chunks) {
-    const bytes = new Uint8Array(chunk.bytes)
+    const bytes = new Uint8Array(blobColumn(chunk, 'bytes'))
     payload.set(bytes, offset)
     offset += bytes.byteLength
   }
-  return { payload, seq: manifest.seq, timestamp: manifest.ts }
+  return { payload, seq: integerColumn(manifest, 'seq'), timestamp: integerColumn(manifest, 'ts') }
 }
 
 /** The member `lane`'s retained frame is from, null for none or a frame no member sent. */
-function retainedOwner(sql: SqlStorage, inc: string, lane: LaneId): string | null {
+function retainedOwner(sql: SqlStore, inc: string, lane: LaneId): string | null {
   const query = 'SELECT owner FROM rt_manifest WHERE inc = ? AND lane_key = ?'
-  return sql.exec<{ owner: string | null }>(query, inc, encodeLaneKey(lane)).toArray()[0]?.owner ?? null
+  const row = sql.exec(query, inc, encodeLaneKey(lane)).toArray()[0]
+  return row === undefined ? null : nullableTextColumn(row, 'owner')
 }
 
 /** A member's lanes are a primary-key range: their keys share its prefix. A track's are an rt_manifest_track range. */
-function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
+function listRetained(sql: SqlStore, inc: string, of?: RetainedOf): LaneId[] {
   const query = 'SELECT lane_key FROM rt_manifest WHERE inc = ?'
-  let rows: SqlStorageCursor<Pick<ManifestRow, 'lane_key'>>
+  let rows: SqlCursor
   if (of === undefined) rows = sql.exec(query, inc)
   else if ('track' in of) rows = sql.exec(`${query} AND track = ?`, inc, of.track)
   else {
     const range = keyRange('lane_key', binaryLaneKeyPrefix(of.member))
     rows = sql.exec(`${query} AND ${range.where}`, inc, ...range.args)
   }
-  return rows.toArray().map((row) => decodeLaneKey(row.lane_key))
+  return rows.toArray().map((row) => decodeLaneKey(textColumn(row, 'lane_key')))
 }
 
-function deleteRetained(sql: SqlStorage, inc: string, lane: LaneId): void {
+function deleteRetained(sql: SqlStore, inc: string, lane: LaneId): void {
   const key = encodeLaneKey(lane)
   sql.exec('DELETE FROM rt_manifest WHERE inc = ? AND lane_key = ?', inc, key)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)

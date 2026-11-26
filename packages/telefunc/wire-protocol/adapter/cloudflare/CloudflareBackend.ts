@@ -10,7 +10,7 @@ import type {
   PlaneServer,
   PublishResult,
 } from '../../backend/driver.js'
-import type { CloudflareBroadcast } from './broadcast.js'
+import type { CloudflareBroadcast } from './CloudflareBroadcast.js'
 import { currentCloudflareHostKey, getCloudflareExtensionPlanes, type CloudflarePlaneKit } from './extensions.js'
 import { currentCloudflareSession } from './session.js'
 import { assert } from '../../../utils/assert.js'

@@ -1,10 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { isChannelOverflowError, type TelefuncExtensionNamespace } from 'telefunc/__internal'
+import { isChannelOverflowError, type CloudflareMember, type TelefuncExtensionNamespace } from 'telefunc/__internal'
 import { RoomStore } from '../backend/RoomStore.js'
 import { Room } from '../index.js'
+import { JOIN } from '../server/store/members.js'
 import { CloudflareRoomDriver } from './CloudflareRoomDriver.js'
+import { RoomSessionSubscriptions } from './RoomSessionSubscriptions.js'
 
-afterEach(() => vi.restoreAllMocks())
+/** The session DO the driver's calls are made in, where a test sets one: none otherwise. */
+const inSession = vi.hoisted((): { subscriptions: RoomSessionSubscriptions | null } => ({ subscriptions: null }))
+vi.mock('./RoomSessionSubscriptions.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./RoomSessionSubscriptions.js')>()),
+  currentRoomSessionSubscriptions: () => inSession.subscriptions,
+}))
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+  inSession.subscriptions = null
+})
 
 /** A driver whose room authority rejects every call with `refusal`. */
 function refusingDriver(refusal: Error): CloudflareRoomDriver {
@@ -131,5 +144,55 @@ describe('CloudflareRoomDriver: its size rule, as a call checks it before it wri
       listed: 1,
     })
     await Room.close(id)
+  })
+})
+
+describe("CloudflareRoomDriver: a member's join from a session DO, to a room whose authority doesn't answer it", () => {
+  /** 'resolved', or the message it rejected with. */
+  const outcome = (settled: Promise<unknown>) =>
+    settled.then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+
+  // The authority may wait 60 s for a commit's owed hand-on before it applies the join.
+  it("rejects once 70 s passed: the authority's 60 s for an owed hand-on, then a call's own 10 s", async () => {
+    vi.useFakeTimers()
+    const namespace: TelefuncExtensionNamespace = {
+      idFromName: (name) => name,
+      idFromString: (id) => id,
+      get: () => ({
+        telefuncDurableObjectCall: (_extension, method) =>
+          method === 'grantHolder' ? Promise.resolve(1) : new Promise<never>(() => {}),
+      }),
+    }
+    const driver = new CloudflareRoomDriver({ getNamespace: () => namespace, locationFallback: 'weur' })
+    const member: CloudflareMember = { bucket: 'weur', hostKey: 'host', subscribeLocal: () => () => {} }
+    inSession.subscriptions = new RoomSessionSubscriptions({ sessionId: 'session', member, driver })
+    const lane = { kind: 'inbox', member: 'm' } as const
+    inSession.subscriptions.subscribe(
+      { roomId: 'room', inc: 'inc', lane, registeredBy: 'operation' },
+      { deliver: () => {} },
+    )
+    const joined = outcome(
+      driver.runJoin(
+        'room',
+        'inc',
+        JOIN,
+        {
+          lease: { id: 'server', created: false },
+          hold: null,
+          id: 'm',
+          record: { joinedAt: 0, metaSeq: 0, metaGen: 0 },
+          meta: {},
+          join: { __r: 'join', id: 'm', meta: {}, joinedAt: 0 },
+        },
+        { inbox: { member: 'm', ready: Promise.resolve() } },
+      ),
+    )
+    await vi.advanceTimersByTimeAsync(69_000)
+    expect(await Promise.race([joined, 'pending'])).toBe('pending')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await joined).toMatch(/didn't answer a call before its deadline/)
   })
 })

@@ -1,19 +1,19 @@
-export { TransientRetry, isOverloaded }
+export { CLOUDFLARE_RETRY_WINDOW_MS, TransientRetry, isOverloaded }
 
 import { CallNotSent } from './OrderedStubs.js'
 
 /** As Cloudflare's error-handling page shows: 3 attempts, the waits between them drawn as `100 ms × random × 2^n`. */
 const TRANSIENT_ATTEMPTS = 3
 const TRANSIENT_BACKOFF_BASE_MS = 100
-/** The runtime starts none of a call's own retries more than 10 s after the call; a retry of ours starts none later
- *  either, from the first attempt. */
-const TRANSIENT_WINDOW_MS = 10_000
+/** Cloudflare's runtime starts none of a call's own retries more than 10 s after the call. A retry of ours starts none
+ *  later either, from the first attempt; an overload pause and a lease write's deadline last as long. */
+const CLOUDFLARE_RETRY_WINDOW_MS = 10_000
 
 /** A Durable Object call that is made again where it failed as Cloudflare says to retry, from its first attempt on. */
 class TransientRetry {
   private readonly startedAt = Date.now()
   /** When an attempt's call stops being waited for: the window's end. */
-  readonly deadline = this.startedAt + TRANSIENT_WINDOW_MS
+  readonly deadline = this.startedAt + CLOUDFLARE_RETRY_WINDOW_MS
   private failures = 0
   private lastError: unknown = undefined
   private expired = false
@@ -21,7 +21,7 @@ class TransientRetry {
   /** Makes an attempt's call, where it is made: one that would start past the window isn't, and rejects with the last
    *  failure. */
   attempt<T>(call: () => Promise<T>): Promise<T> {
-    if (this.failures === 0 || Date.now() - this.startedAt < TRANSIENT_WINDOW_MS) return call()
+    if (this.failures === 0 || Date.now() - this.startedAt < CLOUDFLARE_RETRY_WINDOW_MS) return call()
     this.expired = true
     return Promise.reject(this.lastError)
   }

@@ -6,7 +6,7 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObject } from '../../../utils/isObject.js'
 import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/ChannelMux.js'
 import { setRequestScope } from '../../channel/server/requestScope.js'
-import type { CloudflareBroadcastMember } from './broadcast.js'
+import type { CloudflareBroadcastMember } from './CloudflareBroadcastMember.js'
 
 /** What a session DO lends the code it runs: its Broadcast membership and its channels, both of which end with this
  *  incarnation of the DO. */

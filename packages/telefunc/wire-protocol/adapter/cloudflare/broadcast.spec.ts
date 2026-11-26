@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   DEFAULT_BROADCAST_BUCKETS,
@@ -6,18 +6,24 @@ import {
   getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   resolveCloudflareLocationHint,
+  readForwardedTarget,
   resolveSessionRoutingTarget,
 } from './routing.js'
-import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadcast.js'
+import { CloudflareBroadcastAuthorityState } from './CloudflareBroadcastAuthorityState.js'
+import { CloudflareBroadcast } from './CloudflareBroadcast.js'
 import type {
   BroadcastCalls,
   BroadcastForwardRequest,
   BroadcastHoldRequest,
   BroadcastLeaseRequest,
+  BroadcastNamespace,
   BroadcastReleaseRequest,
-} from './broadcast.js'
+  ForwardLoss,
+  TelefuncBroadcastStub,
+} from './broadcastRpc.js'
 import { OrderedStubs } from './OrderedStubs.js'
-import type { TelefuncDurableObjectNamespace } from './namespace.js'
+import { integerColumn } from './sqlStorage.js'
+import type { TelefuncExtensionNamespace } from './extensions.js'
 import type { BroadcastRoute } from '../../backend/driver.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
@@ -38,9 +44,7 @@ onBug((bug) => bugs.push(bug))
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
 function createCloudflareRequest({ colo, continent }: { colo?: string; continent?: string } = {}): CloudflareRequest {
-  const request = new Request('https://telefunc.test') as CloudflareRequest
-  request.cf = { colo, continent }
-  return request
+  return Object.assign(new Request('https://telefunc.test'), { cf: { colo, continent } })
 }
 
 function createAuthorityState() {
@@ -54,13 +58,14 @@ type PresenceCall =
   | ({ op: 'renew' } & BroadcastLeaseRequest)
   | ({ op: 'release' } & BroadcastReleaseRequest)
 
-/** The key's authority, as `call` reaches it. */
-function applyPresence(authority: CloudflareBroadcastAuthorityState, call: PresenceCall): unknown {
-  if (call.op === 'grant') return authority.grant(call.member)
-  if (call.op === 'hold') return authority.hold(call)
-  if (call.op === 'renew') return authority.renew(call)
-  return authority.release(call)
-}
+/** What a presence call does at the key's authority, once it reaches it. */
+type ApplyPresence<Answer> = (authority: CloudflareBroadcastAuthorityState) => Promise<Answer>
+
+/** A handler of the stub method `Method`, on the Durable Object named `id.name`. */
+type StubHandler<Method extends keyof TelefuncBroadcastStub> = (
+  id: { name: string },
+  ...args: Parameters<TelefuncBroadcastStub[Method]>
+) => ReturnType<TelefuncBroadcastStub[Method]>
 
 /** `member`'s presence on the text route of `key`, recorded at `authority` in `bucket`. */
 async function recordPresence(
@@ -79,47 +84,45 @@ async function flushMicrotasks(turns = 6): Promise<void> {
   }
 }
 
+/** The Telefunc Durable Object binding, by DO name: each Broadcast call goes to the handler `overrides` gives it, and
+ *  is answered at once otherwise. A presence call's handler gets what the call does at the key's authority. */
 function createBasicBinding(
   overrides?: Partial<{
-    onPublish: (id: { name: string }, request: any) => any
-    onForward: (id: { name: string }, request: BroadcastForwardRequest) => Promise<number>
-    onDeliver: (id: { name: string }, request: any) => any
-    onPresence: (id: { name: string }, call: PresenceCall) => Promise<unknown>
+    onPublish: StubHandler<'telefuncBroadcastPublish'>
+    onForward: StubHandler<'telefuncBroadcastForward'>
+    onDeliver: StubHandler<'telefuncBroadcastDeliver'>
+    onPresence: <Answer>(id: { name: string }, call: PresenceCall, apply: ApplyPresence<Answer>) => Promise<Answer>
   }>,
-) {
+): BroadcastNamespace & TelefuncExtensionNamespace {
+  const named = (id: unknown): { name: string } => {
+    if (typeof id !== 'string') throw new Error('The spec names each Durable Object by a string')
+    return { name: id }
+  }
   return {
-    idFromName(name: string) {
-      return { name }
-    },
-    idFromString(id: string) {
-      return { name: id }
-    },
-    get(id: { name: string }) {
+    idFromName: (name: string) => name,
+    idFromString: (id: string) => id,
+    get(key: unknown) {
+      const id = named(key)
+      const presence = <Answer>(call: PresenceCall, apply: ApplyPresence<Answer>, otherwise: Answer) =>
+        overrides?.onPresence?.(id, call, apply) ?? Promise.resolve(otherwise)
       return {
-        telefuncBroadcastPublish(request: any) {
-          return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
-        },
-        telefuncBroadcastForward(request: BroadcastForwardRequest) {
-          return overrides?.onForward?.(id, request) ?? Promise.resolve(0)
-        },
-        telefuncBroadcastDeliver(request: any) {
-          return overrides?.onDeliver?.(id, request) ?? Promise.resolve(0)
-        },
-        telefuncBroadcastGrant(member: string) {
-          return overrides?.onPresence?.(id, { op: 'grant', member }) ?? Promise.resolve(1)
-        },
-        telefuncBroadcastHold(request: BroadcastHoldRequest) {
-          return overrides?.onPresence?.(id, { op: 'hold', ...request }) ?? Promise.resolve('registered')
-        },
-        telefuncBroadcastRenew(request: BroadcastLeaseRequest) {
-          return overrides?.onPresence?.(id, { op: 'renew', ...request }) ?? Promise.resolve('renewed')
-        },
-        telefuncBroadcastRelease(request: BroadcastReleaseRequest) {
-          return overrides?.onPresence?.(id, { op: 'release', ...request }) ?? Promise.resolve('removed')
-        },
+        telefuncBroadcastPublish: (request) =>
+          overrides?.onPublish?.(id, request) ??
+          Promise.resolve({ kind: 'published', info: { seq: 1, timestamp: Date.now() } }),
+        telefuncBroadcastForward: (request) => overrides?.onForward?.(id, request) ?? Promise.resolve(null),
+        telefuncBroadcastDeliver: (delivery) => overrides?.onDeliver?.(id, delivery) ?? Promise.resolve(0),
+        telefuncBroadcastGrant: (member) =>
+          presence({ op: 'grant', member }, (authority) => authority.grant(member), 1),
+        telefuncBroadcastHold: (request) =>
+          presence({ op: 'hold', ...request }, (authority) => authority.hold(request), 'registered'),
+        telefuncBroadcastRenew: (request) =>
+          presence({ op: 'renew', ...request }, async (authority) => authority.renew(request), 'renewed'),
+        telefuncBroadcastRelease: (request) =>
+          presence({ op: 'release', ...request }, (authority) => authority.release(request), 'removed'),
+        telefuncDurableObjectCall: () => Promise.reject(new Error("The spec's binding serves no extension call")),
       }
     },
-  } as unknown as TelefuncDurableObjectNamespace
+  }
 }
 
 function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
@@ -134,6 +137,18 @@ function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
 describe('cloudflare broadcast routing', () => {
   it('uses the six default canonical buckets for mapped Cloudflare locations', () => {
     expect(DEFAULT_BROADCAST_BUCKETS).toEqual(['wnam', 'enam', 'weur', 'eeur', 'apac', 'oc'])
+  })
+
+  it('reads a request the Worker forwarded to a session Durable Object as its shard and bucket, and one whose bucket header names no bucket as a bug', () => {
+    const forwarded = (bucket: string) =>
+      new Request('https://telefunc.test/_telefunc', {
+        headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': bucket },
+      })
+    expect(readForwardedTarget(forwarded('weur'))).toEqual({
+      sessionInstanceName: 'telefunc-shard-weur-1',
+      locationBucket: 'weur',
+    })
+    expect(() => readForwardedTarget(forwarded('mars'))).toThrow('Invalid Broadcast location bucket "mars"')
   })
 
   it('stores direct session-placement buckets for colos', () => {
@@ -275,7 +290,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
       }),
     )
@@ -301,10 +316,10 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onForward(id) {
           coordinators.push(id.name)
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
         // The key's authority, as a member's presence reaches it.
-        onPresence: (_id, call) => Promise.resolve(applyPresence(authorityState, call)),
+        onPresence: (_id, _call, apply) => apply(authorityState),
       }),
     )
     const member = broadcast.member('telefunc-shard-weur-0', new OrderedStubs())
@@ -328,7 +343,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onDeliver(id) {
           deliveredTo.push(id.name)
-          return Promise.resolve()
+          return Promise.resolve(0)
         },
       }),
     )
@@ -343,17 +358,43 @@ describe('cloudflare broadcast routing', () => {
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
   })
 
+  it("a publish its bucket's coordinator couldn't hand to a member rejects with that member's error as its cause", async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const authorityState = createAuthorityState()
+    // As the coordinator catches it: Workers RPC marks an error thrown across it.
+    const refused = Object.assign(new Error('The member Durable Object refused the delivery'), { remote: true })
+    // An answer returned across Workers RPC is a copy: an error in it keeps its cause and loses its own properties.
+    const returned = <Answer>(answer: Answer) => structuredClone(answer)
+    const broadcast: CloudflareBroadcast = createBroadcast(
+      createBasicBinding({
+        // The key's authority and the bucket's coordinator, as `telefuncBroadcastPublish` and `telefuncBroadcastForward`
+        // answer.
+        onPublish: async (_id, request) =>
+          returned(await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), request)),
+        onForward: async (_id, request) => returned(await broadcast.forwardToBucket(new OrderedStubs(), request)),
+        onDeliver: (id) => (id.name === 'telefunc-shard-weur-1' ? Promise.reject(refused) : Promise.resolve(0)),
+      }),
+    )
+    await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-0', 'weur')
+    await recordPresence(authorityState, 'room:test', 'telefunc-shard-weur-1', 'weur')
+    await expect(broadcast.publish({ key: 'room:test', kind: 'text' }, '"hello"')).rejects.toMatchObject({
+      message: "Cloudflare Broadcast delivery of 'room:test' lost to 1/2 Durable Objects",
+      cause: { message: 'The member Durable Object refused the delivery', remote: true },
+    })
+    logged.mockRestore()
+  })
+
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorPublishes: string[] = []
-    const firstRemotePublish = Promise.withResolvers<number>()
+    const firstRemotePublish = Promise.withResolvers<ForwardLoss | null>()
     const broadcast = createBroadcast(
       createBasicBinding({
         onForward(id, { payload: text }) {
           coordinatorPublishes.push(`${id.name}:${text}`)
           if (id.name.includes(':broadcast:apac:') && text === '{"text":"first"}') return firstRemotePublish.promise
-          return Promise.resolve(0)
+          return Promise.resolve(null)
         },
       }),
     )
@@ -378,12 +419,62 @@ describe('cloudflare broadcast routing', () => {
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
 
-    firstRemotePublish.resolve(0)
+    firstRemotePublish.resolve(null)
     await Promise.all([firstPublish, secondPublish])
 
     expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
     expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
+
+  it("a key's authority keeps no lease or holder row of a member Durable Object that left, once its alarm fires 90 s after the member's release", async () => {
+    vi.useFakeTimers()
+    onTestFinished(() => void vi.useRealTimers())
+    const { storage } = sqliteStorage()
+    const authority = new CloudflareBroadcastAuthorityState({ storage })
+    const rows = (table: string) => integerColumn(storage.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one(), 'n')
+    const member = 'telefunc-shard-weur-0'
+    const grant = await authority.grant(member)
+    const route: BroadcastLeaseRequest = { key: 'room:test', kind: 'text', member, lease: crypto.randomUUID() }
+    await authority.hold({ ...route, bucket: 'weur', order: { grant, seq: 1 } })
+    await authority.release({ ...route, order: { grant, seq: 2 } })
+    const releasedAt = Date.now()
+    expect({ alarm: await storage.getAlarm(), holders: rows('telefunc_lease_holder') }).toEqual({
+      alarm: releasedAt + 90_000,
+      holders: 1,
+    })
+    vi.setSystemTime(releasedAt + 90_000)
+    // The runtime clears an alarm as it runs it.
+    await storage.deleteAlarm()
+    await authority.alarm()
+    expect({
+      leases: rows('telefunc_lease'),
+      holders: rows('telefunc_lease_holder'),
+      alarm: await storage.getAlarm(),
+    }).toEqual({ leases: 0, holders: 0, alarm: null })
+  })
+
+  // A Cloudflare alarm can run late: it is retried with backoff when it throws.
+  for (const granted of [false, true]) {
+    it(`a key's authority refuses a write under the grant of a member Durable Object that has held nothing for 90 s, while its alarm hasn't run${granted ? ', after another member asked for a grant' : ''}`, async () => {
+      vi.useFakeTimers()
+      onTestFinished(() => void vi.useRealTimers())
+      const authority = createAuthorityState()
+      const member = 'telefunc-shard-weur-0'
+      const grant = await authority.grant(member)
+      const route: BroadcastLeaseRequest = { key: 'room:test', kind: 'text', member, lease: crypto.randomUUID() }
+      await authority.hold({ ...route, bucket: 'weur', order: { grant, seq: 1 } })
+      await authority.release({ ...route, order: { grant, seq: 2 } })
+      vi.setSystemTime(Date.now() + 90_000)
+      if (granted) await authority.grant('telefunc-shard-weur-1')
+      const late: BroadcastHoldRequest = {
+        ...route,
+        lease: crypto.randomUUID(),
+        bucket: 'weur',
+        order: { grant, seq: 3 },
+      }
+      expect(await authority.hold(late)).toBe('regrant')
+    })
+  }
 })
 
 // What a subscriber's `ready` says, on a Worker without AsyncLocalStorage: the REAL ServerBroadcast on the REAL
@@ -413,19 +504,24 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     } = { refuse: false }
     /** The writes of presence that reached the authority, not counting the grants each member asked for first. */
     const presences: Exclude<PresenceCall, { op: 'grant' }>[] = []
+    /** How many grants the members asked the authority for. */
+    const grants = { asked: 0 }
     const binding = createBasicBinding({
-      onPresence(_id, call) {
-        if (call.op === 'grant') return Promise.resolve(applyPresence(authority, call))
+      onPresence(_id, call, apply) {
+        if (call.op === 'grant') {
+          grants.asked++
+          return apply(authority)
+        }
         if (state.throwAtOnce) throw state.throwAtOnce
         const { refuse, held } = state
         const fail = state.failOnly === undefined || state.failOnly === call.op ? state.fail : undefined
         presences.push(call)
         // The authority applies the calls one stub carries in the order they come, whenever its answer reaches the member.
-        const answer = refuse || fail ? null : applyPresence(authority, call)
+        const refusal = refuse ? new Error(REFUSAL) : fail
+        const answer = refusal === undefined ? apply(authority) : null
         return (async () => {
           await held
-          if (refuse) throw new Error(REFUSAL)
-          if (fail) throw fail
+          if (answer === null) throw refusal
           return answer
         })()
       },
@@ -462,6 +558,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
     return {
       state,
       presences,
+      grants,
       /** The members the authority holds a live presence of for the key's text route. */
       present: (key: string) => authority.livePresence(broadcastRouteKey({ key, kind: 'text' }), Date.now()),
       inObject: <T>(run: () => T, session = sessions.first) => withCloudflareSession(session, run),
@@ -470,11 +567,10 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       delivering,
       /** A sender's delivery of `routes` to the named member DOs, through the coordinators, as Room's fanout sends it. */
       forward: (routes: BroadcastRoute[], members: string[], owed: boolean) =>
-        broadcast.forward(
-          new OrderedStubs(),
+        broadcast.regions(new OrderedStubs()).forward(
           'room:test',
           { routes, payload: 'frame', info: { seq: 1, timestamp: 1 }, ...(owed ? { owed: true } : {}) },
-          members.map((member) => ({ member, bucket: 'weur' as const })),
+          members.map((member) => ({ member, bucket: 'weur' })),
         ),
     }
   }
@@ -570,6 +666,20 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       remove()
     })
 
+    it("a subscriber's presence is renewed every 30 s and stays at the key's authority for as long as it is subscribed", async () => {
+      vi.useFakeTimers()
+      const { inObject, present, presences } = worker()
+      const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      await vi.advanceTimersByTimeAsync(0)
+      await subscriber.opened
+      await vi.advanceTimersByTimeAsync(300_000)
+      expect({
+        present: present('room:test').map(({ member }) => member),
+        renewals: presences.filter((call) => call.op === 'renew').length,
+      }).toEqual({ present: ['telefunc-shard-weur-0'], renewals: 10 })
+      subscriber()
+    })
+
     // A private message's sender learns that it was lost where a Durable Object it went to had no receiver for it.
     describe('a delivery whose sender is owed every receiver', () => {
       const route: BroadcastRoute = { key: 'room:lane', kind: 'text' }
@@ -615,26 +725,74 @@ describe("a subscriber's `ready` on Cloudflare", () => {
       subscriber()
     })
 
+    it("a subscriber's `ready`, whose first presence write waits behind a publish the key's authority never answers, settles within 10 s", async () => {
+      vi.useFakeTimers()
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const { state, inObject } = worker()
+      vi.spyOn(CloudflareBroadcast.prototype, 'publishToSubscribers').mockReturnValue(new Promise(() => {}))
+      void Promise.resolve(inObject(() => Broadcast.publish('room:test', 'hello'))).catch(() => {})
+      // The presence write fails as one Cloudflare says to retry: the stub it went through may be broken.
+      state.fail = Object.assign(new Error('reset'), { retryable: true })
+      state.failOnly = 'hold'
+      const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
+      const ready = outcome(subscriber.opened)
+      await vi.advanceTimersByTimeAsync(0)
+      state.fail = undefined
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await Promise.race([ready, 'pending'])).toBe('reset')
+      subscriber()
+    })
+
+    // A key's text and binary routes share its authority, which issues a grant in a round trip of its own.
+    it("a Durable Object's text and binary subscriptions to one key, made at once, wait for one grant", async () => {
+      const { grants, presences, inObject } = worker()
+      const [text, binary] = inObject(() => [
+        Broadcast.subscribe('room:test', () => {}),
+        Broadcast.subscribeBinary('room:test', () => {}),
+      ])
+      await Promise.all([text.opened, binary.opened])
+      expect({ grants: grants.asked, holds: presences.filter(({ op }) => op === 'hold').length }).toEqual({
+        grants: 1,
+        holds: 2,
+      })
+      text()
+      binary()
+    })
+
     // A presence the authority refuses to store is a subscription that failed, as a refused one is on any other backend.
     describe("where the key's authority refuses the presence write", () => {
       it("a subscriber's `ready` rejects with the authority's error, the subscriber is removed, and a later one of the same Durable Object registers again", async () => {
-        const { state, presences, inObject } = worker()
+        vi.useFakeTimers()
+        const { state, presences, inObject, present } = worker()
         state.refuse = true
         const first = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(first.opened)).toBe(REFUSAL)
-        await new Promise((resolve) => setTimeout(resolve, 0))
+        const firstOpened = outcome(first.opened)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await firstOpened).toBe(REFUSAL)
         // Each refused first write is released after, which the authority refuses too until it takes it.
         const holds = () => presences.filter(({ op }) => op === 'hold')
         expect(holds()).toHaveLength(1)
         const second = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(second.opened)).toBe(REFUSAL)
+        const secondOpened = outcome(second.opened)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await secondOpened).toBe(REFUSAL)
         expect(holds()).toHaveLength(2)
         first()
         second()
         state.refuse = false
         const third = inObject(() => Broadcast.subscribe('room:test', () => {}))
-        expect(await outcome(third.opened)).toBe('resolved')
+        const thirdOpened = outcome(third.opened)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(await thirdOpened).toBe('resolved')
         third()
+        // Each release is made again until the authority takes it, at most 5 s after the last: none goes on past this row.
+        await vi.advanceTimersByTimeAsync(5_000)
+        const calls = presences.length
+        await vi.advanceTimersByTimeAsync(5_000)
+        expect({ present: present('room:test'), callsSince: presences.length - calls }).toEqual({
+          present: [],
+          callsSince: 0,
+        })
       })
 
       // Cloudflare marks a transient failure `.retryable`, and one it says not to retry `.overloaded`. Neither appeared on
@@ -770,10 +928,11 @@ describe("a subscriber's `ready` on Cloudflare", () => {
 
       it('a held presence whose refresh falls in a pause a publish answered overloaded caused is not reported lost, is tried no more while the pause lasts, and is refreshed once it ends', async () => {
         vi.useFakeTimers()
-        const tried = vi.spyOn(OrderedStubs.prototype, 'call')
         const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
         const lost = () => reported.mock.calls.filter(([error]) => String(error).includes('presence for')).length
-        const { inObject, present, presences } = worker()
+        const { inObject, present, presences, sessions } = worker()
+        // This Durable Object's calls, which are all a spy on the prototype counts only while no other row's go on.
+        const tried = vi.spyOn(sessions.first.broadcast.calls, 'call')
         const renewals = () => presences.filter((call) => call.op === 'renew').length
         const subscriber = inObject(() => Broadcast.subscribe('room:test', () => {}))
         await vi.advanceTimersByTimeAsync(0)
@@ -962,7 +1121,7 @@ describe("a subscriber's `ready` on Cloudflare", () => {
         await first.opened
         first()
         await vi.advanceTimersByTimeAsync(100_000)
-        // Another Durable Object subscribes: its grant drops the first one's.
+        // Another Durable Object subscribes. The first one's grant ended 90 s after it left, and it asks for another.
         const other = inObject(() => Broadcast.subscribe('room:test', () => {}), sessions.second)
         await vi.advanceTimersByTimeAsync(0)
         await other.opened

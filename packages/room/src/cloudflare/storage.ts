@@ -1,4 +1,3 @@
-/// <reference types="@cloudflare/workers-types" />
 export {
   initSchema,
   listWithHead,
@@ -29,9 +28,13 @@ export {
   storeHandoff,
   listHandoffs,
   deleteHandoff,
+  storeAnswer,
+  readStoredAnswer,
+  recordAnswerLoss,
+  deleteExpiredAnswers,
 }
 
-export type { CellPage, Handoff, ListingPlace }
+export type { CellPage, Handoff, ListingPlace, AnswerKey, KeptAnswer }
 
 // Room-DO `transactionSync` makes head exchanges, cell batches, and order advance atomic under authority time.
 
@@ -50,7 +53,19 @@ import {
   type StaleIncarnation,
   type DirectoryEntry,
 } from '../backend/contract.js'
-import { dropLeaseScopes, initLeaseSchema, nextLeaseSweep } from 'telefunc/__internal'
+import {
+  blobColumn,
+  dropLeaseScopes,
+  initLeaseSchema,
+  integerColumn,
+  nextLeaseSweep,
+  nullableIntegerColumn,
+  nullableTextColumn,
+  textColumn,
+  type LeaseOrder,
+  type SqlRow,
+  type SqlStore,
+} from 'telefunc/__internal'
 import { incarnationScopes } from './routes.js'
 import {
   countCell,
@@ -70,18 +85,7 @@ import { assert } from '../utils/assert.js'
 /** A head exchange's result, with the stored head: the authority hands out its public view. */
 type HeadExchangeOutcome = { kind: 'committed'; head: StoredHead } | { kind: 'conflict'; current: StoredHead | null }
 
-/** The `head` row as SQLite hands it back: its BLOB column arrives as an ArrayBuffer. */
-type HeadRow = {
-  rev: string
-  inc: string | null
-  state: string
-  config: ArrayBuffer
-  lease_id: string | null
-  lease_until: number | null
-  expires_at: number | null
-}
-
-function initSchema(sql: SqlStorage): void {
+function initSchema(sql: SqlStore): void {
   // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version. `listing`
   // is the room's listing, one row or none.
   sql.exec(`
@@ -107,6 +111,11 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS handoff
       (inc TEXT NOT NULL, seq INTEGER NOT NULL, lane_key TEXT NOT NULL, ts INTEGER NOT NULL, payload BLOB NOT NULL,
        resume_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, seq));
+    CREATE TABLE IF NOT EXISTS stored_answer
+      (scope TEXT NOT NULL, holder TEXT NOT NULL, grant_id INTEGER NOT NULL, seq INTEGER NOT NULL, inc TEXT NOT NULL,
+       commit_seq INTEGER, answer BLOB NOT NULL, lost TEXT, kept_until INTEGER NOT NULL,
+       PRIMARY KEY (scope, holder, grant_id, seq));
+    CREATE INDEX IF NOT EXISTS stored_answer_kept_until ON stored_answer(kept_until);
     CREATE TABLE IF NOT EXISTS listing
       (id INTEGER PRIMARY KEY CHECK (id = 1), room_id TEXT NOT NULL, inc_tag TEXT, bucket TEXT NOT NULL,
        version INTEGER NOT NULL, due_at INTEGER);
@@ -122,16 +131,20 @@ type Listing = { roomId: string; incTag: string | null; bucket: string; version:
  *  for good, as the authority itself never moves. */
 type ListingPlace = { roomId: string; bucket: string }
 
-type ListingRow = { room_id: string; inc_tag: string | null; bucket: string; version: number; due_at: number | null }
-
-function readListingRow(sql: SqlStorage): Listing | null {
-  const row = sql.exec<ListingRow>('SELECT * FROM listing WHERE id = 1').toArray()[0]
+function readListingRow(sql: SqlStore): Listing | null {
+  const row = sql.exec('SELECT room_id, inc_tag, bucket, version, due_at FROM listing WHERE id = 1').toArray()[0]
   if (row === undefined) return null
-  return { roomId: row.room_id, incTag: row.inc_tag, bucket: row.bucket, version: row.version, dueAt: row.due_at }
+  return {
+    roomId: textColumn(row, 'room_id'),
+    incTag: nullableTextColumn(row, 'inc_tag'),
+    bucket: textColumn(row, 'bucket'),
+    version: integerColumn(row, 'version'),
+    dueAt: nullableIntegerColumn(row, 'due_at'),
+  }
 }
 
 /** Lists what `head` lists, an open or closing incarnation, or nothing: a change is a new version, due `now`. */
-function listWithHead(sql: SqlStorage, head: StoredHead | null, now: number, place?: ListingPlace): void {
+function listWithHead(sql: SqlStore, head: StoredHead | null, now: number, place?: ListingPlace): void {
   const incTag = head !== null && head.state !== 'closed' ? head.currentInc : null
   const listing = readListingRow(sql)
   if ((listing?.incTag ?? null) === incTag) return
@@ -149,12 +162,12 @@ function listWithHead(sql: SqlStorage, head: StoredHead | null, now: number, pla
 }
 
 /** What the alarm lists once a head lapsed. */
-function settleListing(sql: SqlStorage, now: number): void {
+function settleListing(sql: SqlStore, now: number): void {
   listWithHead(sql, readLiveHead(sql, now), now)
 }
 
 /** The incarnation the listing names, at its version. */
-function readListedEntry(sql: SqlStorage): Omit<DirectoryEntry, 'roomId'> | undefined {
+function readListedEntry(sql: SqlStore): Omit<DirectoryEntry, 'roomId'> | undefined {
   const listing = readListingRow(sql)
   return listing === null || listing.incTag === null
     ? undefined
@@ -162,19 +175,19 @@ function readListedEntry(sql: SqlStorage): Omit<DirectoryEntry, 'roomId'> | unde
 }
 
 /** The listing while its directory may not have its version: the alarm sends it at `dueAt`, any send before. */
-function readUnsentListing(sql: SqlStorage): Listing | null {
+function readUnsentListing(sql: SqlStore): Listing | null {
   const listing = readListingRow(sql)
   return listing !== null && listing.dueAt !== null ? listing : null
 }
 
 /** `version` is due again at `dueAt`, or never (null) once the directory has it; a newer version stays due. */
-function resendListing(sql: SqlStorage, version: number, dueAt: number | null): void {
+function resendListing(sql: SqlStore, version: number, dueAt: number | null): void {
   sql.exec('UPDATE listing SET due_at = ? WHERE id = 1 AND version = ?', dueAt, version)
 }
 
 /** A new version of a listing the directory has, due `now`, unless it is at `readVersion`: the directory was found
  *  showing that version, which the listing moved past, as after a call delivered later than its successors. */
-function relistOver(sql: SqlStorage, readVersion: number, now: number): void {
+function relistOver(sql: SqlStore, readVersion: number, now: number): void {
   sql.exec(
     'UPDATE listing SET version = version + 1, due_at = ? WHERE id = 1 AND due_at IS NULL AND version IS NOT ?',
     now,
@@ -207,62 +220,73 @@ function prefixEnd(prefix: string): string | null {
 }
 
 /** A lapsed tombstone reads absent; `now` is authority time. */
-function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
-  const row = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()[0]
+function readLiveHead(sql: SqlStore, now: number): StoredHead | null {
+  const row = sql
+    .exec('SELECT rev, inc, state, config, lease_id, lease_until, expires_at FROM head WHERE id = 1')
+    .toArray()[0]
   if (row === undefined) return null
-  if (row.expires_at !== null && row.expires_at <= now) return null
-  const { state } = row
-  assert(state === 'open' || state === 'closing' || state === 'closed')
+  const expiresAt = nullableIntegerColumn(row, 'expires_at')
+  if (expiresAt !== null && expiresAt <= now) return null
   const head: StoredHead = {
-    rev: row.rev,
-    currentInc: row.inc,
-    state,
-    config: new Uint8Array(row.config),
-    expiresAt: row.expires_at,
+    rev: textColumn(row, 'rev'),
+    currentInc: nullableTextColumn(row, 'inc'),
+    state: headState(row),
+    config: new Uint8Array(blobColumn(row, 'config')),
+    expiresAt,
   }
-  if (row.lease_id !== null && row.lease_until !== null) head.closeLease = { id: row.lease_id, until: row.lease_until }
+  const leaseId = nullableTextColumn(row, 'lease_id')
+  const leaseUntil = nullableIntegerColumn(row, 'lease_until')
+  if (leaseId !== null && leaseUntil !== null) head.closeLease = { id: leaseId, until: leaseUntil }
   return head
 }
 
+function headState(row: SqlRow): StoredHead['state'] {
+  const state = textColumn(row, 'state')
+  if (state === 'open' || state === 'closing' || state === 'closed') return state
+  throw new Error(`The head row holds the state '${state}', which no head has`)
+}
+
 /** A lapsed head is reclaimed here: this backend has no native head TTL. */
-function deleteLapsedHead(sql: SqlStorage, now: number): void {
+function deleteLapsedHead(sql: SqlStore, now: number): void {
   sql.exec('DELETE FROM head WHERE id = 1 AND expires_at IS NOT NULL AND expires_at <= ?', now)
 }
 
 /** Installed incarnations other than `currentInc`. */
-function listOrphanIncarnations(sql: SqlStorage, currentInc: string | null): string[] {
+function listOrphanIncarnations(sql: SqlStore, currentInc: string | null): string[] {
   return sql
-    .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
+    .exec('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
-    .map((row) => row.inc)
+    .map((row) => textColumn(row, 'inc'))
 }
 
 /** Whether `inc`'s incarnation is stored: `dropIncarnationRows` deletes it with its routes. */
-function hasIncarnation(sql: SqlStorage, inc: string): boolean {
+function hasIncarnation(sql: SqlStore, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head or
- *  an expiring cell, the listing's next send, or when a route's session DO may be dropped, or null for none. */
-function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, an
+ *  expiring cell or a stored answer, the listing's next send, or when a route's session DO may be dropped, or null for
+ *  none. */
+function nextMaintenanceDeadline(sql: SqlStore, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
-  const deadline = sql
-    .exec<{
-      deadline: number | null
-    }>(
-      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
-        'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
-        'UNION ALL SELECT MIN(resume_at) FROM handoff)',
-    )
-    .one().deadline
+  const deadline = nullableIntegerColumn(
+    sql
+      .exec(
+        'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
+          'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
+          'UNION ALL SELECT MIN(resume_at) FROM handoff UNION ALL SELECT MIN(kept_until) FROM stored_answer)',
+      )
+      .one(),
+    'deadline',
+  )
   const sweep = nextLeaseSweep(sql)
   return deadline === null || sweep === null ? (deadline ?? sweep) : Math.min(deadline, sweep)
 }
 
 /** Called inside `transactionSync`; a lost race returns the current head. */
 function compareExchangeHead(
-  sql: SqlStorage,
+  sql: SqlStore,
   expected: HeadExpectation,
   next: HeadNext,
   now: number,
@@ -272,7 +296,7 @@ function compareExchangeHead(
   return { kind: 'committed', head: storeHead(sql, next, now) }
 }
 
-function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
+function storeHead(sql: SqlStore, next: HeadNext, now: number): StoredHead {
   const head = materializeHead(next, now)
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) ' +
@@ -301,14 +325,25 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
   return head
 }
 
-/** `lapses_at`: the authority time a cell written with `lapsesInMs` lapses at. */
-type CellRow = { key: string; bytes: ArrayBuffer; version: number; lapses_at: number | null }
+/** `lapsesAt`: the authority time a cell written with `lapsesInMs` lapses at. */
+type CellRow = { key: string; bytes: ArrayBuffer; version: number; lapsesAt: number | null }
+
+const CELL_COLUMNS = 'key, bytes, version, lapses_at'
+
+function cellRecord(row: SqlRow): CellRow {
+  return {
+    key: textColumn(row, 'key'),
+    bytes: blobColumn(row, 'bytes'),
+    version: integerColumn(row, 'version'),
+    lapsesAt: nullableIntegerColumn(row, 'lapses_at'),
+  }
+}
 
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
 type CellPage = (Extract<CellsRead, { kind: 'read' }> & { cursor?: string }) | StaleIncarnation
 
 function cellPage(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   rows: CellRow[],
   now: number,
@@ -328,7 +363,7 @@ function cellPage(
 /** By the key of each row under `beside.of` whose reference is there, the cell it names, `null` where it is absent or
  *  lapsed. */
 function cellsBeside(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   rows: CellRow[],
   beside: CellsBeside,
@@ -348,60 +383,51 @@ function cellsBeside(
 const referenceDecoder = new TextDecoder()
 
 function rowLapsed(row: CellRow, now: number): boolean {
-  return hasLapsed(row.lapses_at ?? undefined, now)
+  return hasLapsed(row.lapsesAt ?? undefined, now)
 }
 
-function cellRow(sql: SqlStorage, inc: string, key: string): CellRow | undefined {
-  return sql
-    .exec<CellRow>('SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND key = ?', inc, key)
-    .toArray()[0]
+function cellRow(sql: SqlStore, inc: string, key: string): CellRow | undefined {
+  const row = sql.exec(`SELECT ${CELL_COLUMNS} FROM cell WHERE inc = ? AND key = ?`, inc, key).toArray()[0]
+  return row === undefined ? undefined : cellRecord(row)
 }
 
 /** The cell `key` as a commit's check of its required cells finds it (`unheldRequiredCell()`). */
-function heldCell(sql: SqlStorage, inc: string, key: string, now: number): HeldCell | undefined {
+function heldCell(sql: SqlStore, inc: string, key: string, now: number): HeldCell | undefined {
   const row = cellRow(sql, inc, key)
   return row && { bytes: new Uint8Array(row.bytes), lapsed: rowLapsed(row, now) }
 }
 
-function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
+function selectCellRows(sql: SqlStore, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel) return sel.keys.flatMap((key) => cellRow(sql, inc, key) ?? [])
   const range = keyRange('key', sel.prefix)
   return sql
-    .exec<CellRow>(
-      `SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND ${range.where}`,
-      inc,
-      ...range.args,
-    )
+    .exec(`SELECT ${CELL_COLUMNS} FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
     .toArray()
+    .map(cellRecord)
 }
 
 /** Reads stay available while closing; a stale incarnation is one the head is absent for or doesn't name. */
-function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
+function readCells(sql: SqlStore, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   return cellPage(sql, inc, selectCellRows(sql, inc, sel), now, sel.beside)
 }
 
 /** The expiring cells of `keys` that haven't expired; the alarm deletes the others. */
-function readExpiringCells(sql: SqlStorage, inc: string, keys: readonly string[], now: number): ExpiringCellsRead {
+function readExpiringCells(sql: SqlStore, inc: string, keys: readonly string[], now: number): ExpiringCellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const cells = new Map<string, Uint8Array>()
   for (const key of keys) {
     const row = sql
-      .exec<{ bytes: ArrayBuffer }>(
-        'SELECT bytes FROM expiring_cell WHERE inc = ? AND key = ? AND expires_at > ?',
-        inc,
-        key,
-        now,
-      )
+      .exec('SELECT bytes FROM expiring_cell WHERE inc = ? AND key = ? AND expires_at > ?', inc, key, now)
       .toArray()[0]
-    if (row !== undefined) cells.set(key, new Uint8Array(row.bytes))
+    if (row !== undefined) cells.set(key, new Uint8Array(blobColumn(row, 'bytes')))
   }
   return { kind: 'read', cells }
 }
 
-function writeExpiringCell(sql: SqlStorage, inc: string, { key, bytes, ttlMs }: ExpiringCell, now: number): void {
+function writeExpiringCell(sql: SqlStore, inc: string, { key, bytes, ttlMs }: ExpiringCell, now: number): void {
   sql.exec(
     'INSERT OR REPLACE INTO expiring_cell (inc, key, bytes, expires_at) VALUES (?, ?, ?, ?)',
     inc,
@@ -411,12 +437,12 @@ function writeExpiringCell(sql: SqlStorage, inc: string, { key, bytes, ttlMs }: 
   )
 }
 
-function deleteExpiredCells(sql: SqlStorage, now: number): void {
+function deleteExpiredCells(sql: SqlStore, now: number): void {
   sql.exec('DELETE FROM expiring_cell WHERE expires_at <= ?', now)
 }
 
 function readCellPage(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   prefix: string,
   cursor: string | undefined,
@@ -427,32 +453,33 @@ function readCellPage(
   if (head === null || head.currentInc !== inc) return { kind: 'stale-incarnation' }
   const range = keyRange('key', prefix, cursor)
   const rows = sql
-    .exec<CellRow>(
-      `SELECT key, bytes, version, lapses_at FROM cell WHERE inc = ? AND ${range.where} ORDER BY key LIMIT ?`,
+    .exec(
+      `SELECT ${CELL_COLUMNS} FROM cell WHERE inc = ? AND ${range.where} ORDER BY key LIMIT ?`,
       inc,
       ...range.args,
       CELL_PAGE_SIZE,
     )
     .toArray()
+    .map(cellRecord)
   const page = cellPage(sql, inc, rows, now, beside)
-  const last = rows.at(-1)
-  if (last !== undefined && rows.length === CELL_PAGE_SIZE) page.cursor = last.key
+  const last = rows[CELL_PAGE_SIZE - 1]
+  if (last !== undefined) page.cursor = last.key
   return page
 }
 
-function readRevision(sql: SqlStorage, inc: string): number {
-  const row = sql.exec<{ revision: number }>('SELECT revision FROM gen WHERE inc = ?', inc).toArray()[0]
-  return row?.revision ?? 0
+function readRevision(sql: SqlStore, inc: string): number {
+  const row = sql.exec('SELECT revision FROM gen WHERE inc = ?', inc).toArray()[0]
+  return row === undefined ? 0 : integerColumn(row, 'revision')
 }
 
-function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
-  const row = sql.exec<{ version: number }>('SELECT version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray()[0]
-  return row === undefined ? null : String(row.version)
+function cellVersion(sql: SqlStore, inc: string, key: string): string | null {
+  const row = sql.exec('SELECT version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray()[0]
+  return row === undefined ? null : String(integerColumn(row, 'version'))
 }
 
 /** `lapsesAt`: null for a cell that never lapses. */
 function writeCell(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   key: string,
   bytes: Uint8Array | null,
@@ -473,13 +500,13 @@ function writeCell(
 }
 
 /** Deletes the incarnation's cells under `prefix`. */
-function dropCellPrefix(sql: SqlStorage, inc: string, prefix: string): void {
+function dropCellPrefix(sql: SqlStore, inc: string, prefix: string): void {
   const range = keyRange('key', prefix)
   sql.exec(`DELETE FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
 }
 
 /** Cell writes are all-or-nothing while every expected cell is at its version, and require an open head. */
-function compareExchangeCells(sql: SqlStorage, inc: string, exchange: CellsExchange, now: number): CellsExchangeResult {
+function compareExchangeCells(sql: SqlStore, inc: string, exchange: CellsExchange, now: number): CellsExchangeResult {
   const head = readLiveHead(sql, now)
   if (!isOpenIncarnation(head, inc)) return { kind: 'stale-incarnation' }
   if (exchange.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return { kind: 'conflict' }
@@ -499,15 +526,13 @@ function compareExchangeCells(sql: SqlStorage, inc: string, exchange: CellsExcha
   return { kind: 'committed', counters }
 }
 
-function readOrder(sql: SqlStorage, inc: string, domain: string): OrderingInfo | null {
-  const row = sql
-    .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
-    .toArray()[0]
-  return row === undefined ? null : { seq: row.seq, timestamp: row.ts }
+function readOrder(sql: SqlStore, inc: string, domain: string): OrderingInfo | null {
+  const row = sql.exec('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain).toArray()[0]
+  return row === undefined ? null : { seq: integerColumn(row, 'seq'), timestamp: integerColumn(row, 'ts') }
 }
 
 /** `seq` strictly increases for the lifetime of a domain instance. */
-function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
+function advanceOrder(sql: SqlStore, inc: string, domain: string, now: number): OrderingInfo {
   const mark = nextOrdering(readOrder(sql, inc, domain) ?? undefined, now)
   sql.exec(
     'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
@@ -520,7 +545,7 @@ function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number)
 }
 
 /** A member's binary lanes are a primary-key range: their keys share its prefix. */
-function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
+function dropLaneOrderRows(sql: SqlStore, inc: string, member: string): void {
   const range = keyRange('domain', binaryLaneKeyPrefix(member))
   sql.exec(
     `DELETE FROM ord WHERE inc = ? AND (domain = ? OR (${range.where}))`,
@@ -530,7 +555,7 @@ function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
   )
 }
 
-function dropIncarnationRows(sql: SqlStorage, inc: string): void {
+function dropIncarnationRows(sql: SqlStore, inc: string): void {
   for (const table of ['cell', 'expiring_cell', 'ord', 'rt_manifest', 'rt_chunk', 'gen', 'handoff']) {
     sql.exec(`DELETE FROM ${table} WHERE inc = ?`, inc)
   }
@@ -540,7 +565,7 @@ function dropIncarnationRows(sql: SqlStorage, inc: string): void {
 /** A commit stored with its transaction until it was handed on, so a restart in between hands it on still. */
 type Handoff = { inc: string; laneKey: string; seq: number; timestamp: number; payload: Uint8Array }
 
-function storeHandoff(sql: SqlStorage, { inc, laneKey, seq, timestamp, payload }: Handoff, resumeAt: number): void {
+function storeHandoff(sql: SqlStore, { inc, laneKey, seq, timestamp, payload }: Handoff, resumeAt: number): void {
   sql.exec(
     'INSERT INTO handoff (inc, seq, lane_key, ts, payload, resume_at) VALUES (?, ?, ?, ?, ?, ?)',
     inc,
@@ -553,21 +578,70 @@ function storeHandoff(sql: SqlStorage, { inc, laneKey, seq, timestamp, payload }
 }
 
 /** Every commit not yet handed on, in the order it was committed. */
-function listHandoffs(sql: SqlStorage): Handoff[] {
+function listHandoffs(sql: SqlStore): Handoff[] {
   return sql
-    .exec<{ inc: string; seq: number; lane_key: string; ts: number; payload: ArrayBuffer }>(
-      'SELECT inc, seq, lane_key, ts, payload FROM handoff ORDER BY inc, lane_key, seq',
-    )
+    .exec('SELECT inc, seq, lane_key, ts, payload FROM handoff ORDER BY inc, lane_key, seq')
     .toArray()
-    .map(({ inc, seq, lane_key, ts, payload }) => ({
-      inc,
-      laneKey: lane_key,
-      seq,
-      timestamp: ts,
-      payload: new Uint8Array(payload),
+    .map((row) => ({
+      inc: textColumn(row, 'inc'),
+      laneKey: textColumn(row, 'lane_key'),
+      seq: integerColumn(row, 'seq'),
+      timestamp: integerColumn(row, 'ts'),
+      payload: new Uint8Array(blobColumn(row, 'payload')),
     }))
 }
 
-function deleteHandoff(sql: SqlStorage, { inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): void {
+function deleteHandoff(sql: SqlStore, { inc, laneKey, seq }: Pick<Handoff, 'inc' | 'laneKey' | 'seq'>): void {
   sql.exec('DELETE FROM handoff WHERE inc = ? AND lane_key = ? AND seq = ?', inc, laneKey, seq)
+}
+
+/** The write that registered an inbox lease in an operation's transaction: the lease's scope and holder, and the order
+ *  the holder sent it under. */
+type AnswerKey = { scope: string; holder: string; order: LeaseOrder }
+/** What that operation answered, its commit's `seq` if it committed, and why the commit's hand-on lost it, if it did. */
+type KeptAnswer = { answer: Uint8Array; lost: string | null }
+
+function storeAnswer(
+  sql: SqlStore,
+  { scope, holder, order }: AnswerKey,
+  inc: string,
+  { answer, commitSeq }: { answer: Uint8Array; commitSeq: number | null },
+  keptUntil: number,
+): void {
+  sql.exec(
+    'INSERT INTO stored_answer (scope, holder, grant_id, seq, inc, commit_seq, answer, kept_until) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    scope,
+    holder,
+    order.grant,
+    order.seq,
+    inc,
+    commitSeq,
+    answer,
+    keptUntil,
+  )
+}
+
+function readStoredAnswer(sql: SqlStore, { scope, holder, order }: AnswerKey): KeptAnswer | null {
+  const row = sql
+    .exec(
+      'SELECT answer, lost FROM stored_answer WHERE scope = ? AND holder = ? AND grant_id = ? AND seq = ?',
+      scope,
+      holder,
+      order.grant,
+      order.seq,
+    )
+    .toArray()[0]
+  return row === undefined
+    ? null
+    : { answer: new Uint8Array(blobColumn(row, 'answer')), lost: nullableTextColumn(row, 'lost') }
+}
+
+/** The hand-on of `inc`'s commit `commitSeq` lost it: the answer of the operation that committed it says so. */
+function recordAnswerLoss(sql: SqlStore, inc: string, commitSeq: number, lost: string): void {
+  sql.exec('UPDATE stored_answer SET lost = ? WHERE inc = ? AND commit_seq = ?', lost, inc, commitSeq)
+}
+
+function deleteExpiredAnswers(sql: SqlStore, now: number): void {
+  sql.exec('DELETE FROM stored_answer WHERE kept_until <= ?', now)
 }

@@ -1,4 +1,3 @@
-/// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
 export type { AcceptedCommitWire, CommitWire, InboxLease, OperationWire, RegisterWire, RenewWire }
 
@@ -27,19 +26,18 @@ import {
   LEASE_CALL_DEADLINE_MS,
   OrderedStubs,
   grantHolder,
-  leaseAnswer,
   leaseRegistered,
   liveLeases,
   registerLease,
   removeLease,
   renewLease,
-  setLeaseAnswer,
   sweepLeases,
   type CloudflareExtensionKit,
+  type DurableStorage,
+  type SqlStore,
   type LeaseOrder,
   type LeaseRegistered,
   type LeaseRemoved,
-  type LeaseWritten,
   type OrderingInfo,
   type TelefuncExtensionNamespace,
 } from 'telefunc/__internal'
@@ -59,7 +57,7 @@ import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead, unheldRequiredCell } from '../backend/semantics.js'
 import { Fanout } from './Fanout.js'
-import { openRegionDirectory, type RegionDirectoryStub } from './objects.js'
+import { ROOM_JOIN_DEADLINE_MS, openRegionDirectory, type RegionDirectoryStub } from './objects.js'
 import { deleteRetained, installRetained, listRetained, readRetained, retainedOwner } from './retained.js'
 import { routeLease, routeScope, type RouteInstallation } from './routes.js'
 import {
@@ -94,6 +92,10 @@ import {
   listHandoffs,
   deleteHandoff,
   type Handoff,
+  storeAnswer,
+  readStoredAnswer,
+  recordAnswerLoss,
+  deleteExpiredAnswers,
 } from './storage.js'
 
 /** An inbox or control commit replies once its delivery was handed off, with why it was lost, if it was. */
@@ -105,6 +107,7 @@ type AcceptedCommitWire = {
 }
 /** A session DO subscribed to a lane, and the bucket it is in. */
 type RouteHolder = { holder: string; bucket: string }
+const routeHolder = (holder: string, bucket: string): RouteHolder => ({ holder, bucket })
 /** A commit the transaction accepted: its order, the lanes it reaches, and the session DOs subscribed to them then. */
 type AcceptedCommit = { kind: 'accepted'; mark: OrderingInfo; laneKeys: string[]; routes: RouteHolder[] }
 type CommitWire = AcceptedCommitWire | StaleCommit
@@ -123,7 +126,8 @@ type OperationWire<Value> =
   | { kind: 'overtaken' }
 /** A member's exact inbox lease, which a join registers in its own transaction, under the session's `order`. */
 type InboxLease = { route: RouteInstallation; order: LeaseOrder }
-/** What a join that registered its inbox lease answered, kept with that lease for a copy of it that comes again. */
+/** What a join that registered its inbox lease answered, kept by the lease's order for a copy of it that comes
+ *  again. */
 type StoredAnswer<Value> = {
   value: Value
   counters: Map<string, CellCounter>
@@ -169,6 +173,9 @@ type RegisterWire = LeaseRegistered | 'dropped'
 type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
+/** How long a join's answer is kept for a copy of it: a copy that comes past the join's deadline has no caller waiting
+ *  for it. */
+const ANSWER_KEPT_MS = ROOM_JOIN_DEADLINE_MS
 /** When the alarm hands on a stored commit whose hand-on this run of the object hasn't settled. */
 const ROOM_HANDOFF_RESUME_MS = 10_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
@@ -176,7 +183,7 @@ const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
 /** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
  *  created on first use. */
 class RoomAuthority {
-  private readonly ctx: DurableObjectState
+  private readonly ctx: { storage: DurableStorage }
   private readonly getNamespace: () => TelefuncExtensionNamespace
   private readonly fanout: Fanout
   /** Its calls to its listing's region directory, which reach it in the order the listing changed. */
@@ -192,7 +199,7 @@ class RoomAuthority {
   private resumed = false
   private schema = false
 
-  constructor(ctx: DurableObjectState, { regions, getNamespace }: CloudflareExtensionKit) {
+  constructor(ctx: { storage: DurableStorage }, { regions, getNamespace }: CloudflareExtensionKit) {
     this.ctx = ctx
     this.getNamespace = getNamespace
     this.fanout = new Fanout({ regions })
@@ -271,8 +278,8 @@ class RoomAuthority {
   }
 
   /** Runs a join as `runOperation()` does, and the same transaction registers the member's exact inbox lease, and
-   *  keeps the answer with it: a copy of the call that comes again answers it and changes nothing. A join that writes
-   *  nothing registers nothing. */
+   *  keeps the answer by the lease's order: a copy of the call that comes within the call's deadline is answered as
+   *  the call was, its commit's loss included, and changes nothing. A join that writes nothing registers nothing. */
   async runJoinWithInbox(
     inc: string,
     args: OperationArgs['join'],
@@ -288,22 +295,24 @@ class RoomAuthority {
   ): Promise<OperationWire<OperationValue[N]> | 'regrant'> {
     assert(Object.hasOwn(ROOM_OPERATIONS, request.name))
     const now = Date.now()
-    const lease = inbox === undefined ? null : routeLease(inbox.lease.route)
+    // The inbox lease it registers, and the order the session sent it under, by which its answer is kept.
+    const lease = inbox === undefined ? null : { ...routeLease(inbox.lease.route), order: inbox.lease.order }
     // The value of a plan that wrote nothing, whose transaction then rolls back the inbox lease it registered.
     const unwritten: { plan: { value: OperationValue[N] } | null } = { plan: null }
     let outcome: OperationOutcome<OperationValue[N]>
     try {
       outcome = this.transaction((sql): OperationOutcome<OperationValue[N]> => {
+        // A copy is answered as the operation was, whatever was written since.
+        const kept = lease === null ? null : readStoredAnswer(sql, lease)
+        if (kept !== null && inbox !== undefined) {
+          return { kind: 'repeated', answer: storedAnswerOf(kept.answer, inbox.valueOf), lost: kept.lost }
+        }
         if (!isOpenIncarnation(readLiveHead(sql, now), inc)) return { kind: 'stale-incarnation' }
-        if (inbox !== undefined && lease !== null) {
-          const written: LeaseWritten = registerLease(sql, lease, inbox.lease.order, now)
+        if (lease !== null) {
+          const written = registerLease(sql, lease, lease.order, now)
           if (written === 'regrant') return { kind: 'regrant' }
-          if (written === 'stale') return { kind: 'overtaken' }
-          if (written === 'repeated') {
-            const answer = leaseAnswer(sql, lease.scope, lease.holder)
-            assert(answer !== null) // only an operation registers under its own order, and stores its answer with it
-            return { kind: 'repeated', answer: storedAnswerOf(answer, inbox.valueOf) }
-          }
+          // A later write of the session's on the inbox came first, or this copy came once its answer's time was over.
+          if (written !== 'registered') return { kind: 'overtaken' }
         }
         const { value, writes } = recordRequest(request, {
           now,
@@ -315,10 +324,11 @@ class RoomAuthority {
           throw new NothingWritten()
         }
         const done = applyOperation(sql, inc, value, writes, now)
-        if (inbox !== undefined && lease !== null) {
+        if (lease !== null) {
           const answer: StoredAnswer<OperationValue[N]> = { value, counters: done.counters }
           if (done.handoff !== null) answer.commit = { seq: done.handoff.seq, timestamp: done.handoff.timestamp }
-          setLeaseAnswer(sql, lease.scope, lease.holder, inbox.lease.order, encodeRoomRecord(answer))
+          const stored = { answer: encodeRoomRecord(answer), commitSeq: done.handoff?.seq ?? null }
+          storeAnswer(sql, lease, inc, stored, now + ANSWER_KEPT_MS)
         }
         return done
       })
@@ -327,28 +337,35 @@ class RoomAuthority {
       return { kind: 'done', value: unwritten.plan.value, counters: new Map() }
     }
     if (outcome.kind === 'regrant') return 'regrant'
-    if (outcome.kind !== 'done' && outcome.kind !== 'repeated') return outcome
-    if (outcome.kind === 'repeated') {
-      const { value, counters, commit } = outcome.answer
-      if (commit === undefined) return { kind: 'done', value, counters, registered: true }
-      this.resumeHandoffs()
-      const handing = this.handingOn.get(
-        handoffKey({ inc, laneKey: encodeLaneKey(OPERATION_COMMIT_LANE), seq: commit.seq }),
-      )
-      // One this run isn't handing on was handed on before.
-      const receipt = await receiptOf(commit, handing ?? Promise.resolve(null))
-      return { kind: 'done', value, counters, commit: receipt, registered: true }
-    }
+    if (outcome.kind === 'repeated') return this.answerAgain(inc, outcome.answer, outcome.lost)
+    if (outcome.kind !== 'done') return outcome
     const { value, counters, handoff } = outcome
     // In this turn, so it leaves before anything committed after it.
     const handing = handoff === null ? null : this.handOn(handoff)
-    // The alarm deletes the expiring cells, as no server may be on the room by then, and hands on a commit whose
-    // hand-on didn't settle.
-    if (outcome.expiring || handoff !== null) await this.scheduleMaintenanceIfNeeded()
+    // The alarm deletes the expiring cells and the stored answer, as no server may be on the room by then, and hands on
+    // a commit whose hand-on didn't settle.
+    if (outcome.expiring || handoff !== null || lease !== null) await this.scheduleMaintenanceIfNeeded()
     const done: OperationWire<OperationValue[N]> = { kind: 'done', value, counters }
     if (inbox !== undefined) done.registered = true
     if (handoff !== null && handing !== null) done.commit = await receiptOf(handoff, handing)
     return done
+  }
+
+  /** A copy of an operation that registered its inbox lease: answered as the operation was, its commit's loss
+   *  included, once its hand-on settled. */
+  private async answerAgain<Value>(
+    inc: string,
+    { value, counters, commit }: StoredAnswer<Value>,
+    lost: string | null,
+  ): Promise<OperationWire<Value>> {
+    if (commit === undefined) return { kind: 'done', value, counters, registered: true }
+    this.resumeHandoffs()
+    const handing = this.handingOn.get(
+      handoffKey({ inc, laneKey: encodeLaneKey(OPERATION_COMMIT_LANE), seq: commit.seq }),
+    )
+    // One this run isn't handing on was handed on before, as its answer says.
+    const receipt = await receiptOf(commit, handing ?? Promise.resolve(lost))
+    return { kind: 'done', value, counters, commit: receipt, registered: true }
   }
 
   /** Hands every commit an earlier run of the object stored and didn't hand on, in commit order, before anything this
@@ -367,15 +384,23 @@ class RoomAuthority {
     const handing = this.handingOn.get(key)
     if (handing !== undefined) return handing
     const { inc, laneKey, seq, timestamp, payload } = handoff
-    const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now())
+    const routes = liveLeases(this.sql(), [routeScope(inc, laneKey)], Date.now(), routeHolder)
     const delivery = this.fanout.send(inc, [laneKey], routes, payload, { seq, timestamp }, true)
-    const handed = lostReason(delivery).then((lost) => {
-      this.transaction((sql) => deleteHandoff(sql, handoff))
-      this.handingOn.delete(key)
-      return lost
-    })
+    const handed = this.settleHandOn(handoff, delivery)
     this.handingOn.set(key, handed)
     return handed
+  }
+
+  /** Once `handoff`'s hand-on settled, its row goes, and the answer of the operation that committed it keeps why it was
+   *  lost, if it was, in the same transaction. */
+  private async settleHandOn(handoff: Handoff, delivery: Promise<void>): Promise<string | null> {
+    const lost = await lostReason(delivery)
+    this.transaction((sql) => {
+      deleteHandoff(sql, handoff)
+      if (lost !== null) recordAnswerLoss(sql, handoff.inc, handoff.seq, lost)
+    })
+    this.handingOn.delete(handoffKey(handoff))
+    return lost
   }
 
   /** Fans a commit out; an inbox or control commit's receipt waits for its handoff. */
@@ -501,6 +526,7 @@ class RoomAuthority {
       deleteLapsedHead(sql, now)
       sweepLeases(sql, now)
       deleteExpiredCells(sql, now)
+      deleteExpiredAnswers(sql, now)
       for (const inc of listOrphanIncarnations(sql, currentInc)) dropIncarnationRows(sql, inc)
     })
   }
@@ -532,12 +558,12 @@ class RoomAuthority {
   }
 
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */
-  private transaction<T>(fn: (sql: SqlStorage) => T): T {
+  private transaction<T>(fn: (sql: SqlStore) => T): T {
     const sql = this.sql()
     return this.ctx.storage.transactionSync(() => fn(sql))
   }
 
-  private sql(): SqlStorage {
+  private sql(): SqlStore {
     if (!this.schema) {
       initSchema(this.ctx.storage.sql)
       this.schema = true
@@ -567,7 +593,7 @@ class RoomAuthority {
 
 /** Orders a commit on `lane` in a transaction that found the incarnation open, and retains it with `retain`. */
 function commitIn(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
@@ -584,6 +610,7 @@ function commitIn(
     sql,
     laneKeys.map((laneKey) => routeScope(inc, laneKey)),
     now,
+    routeHolder,
   )
   return { kind: 'accepted', mark, laneKeys, routes }
 }
@@ -594,7 +621,7 @@ type OperationOutcome<Value> =
   | { kind: 'stale-incarnation' }
   | { kind: 'overtaken' }
   | { kind: 'regrant' }
-  | { kind: 'repeated'; answer: StoredAnswer<Value> }
+  | { kind: 'repeated'; answer: StoredAnswer<Value>; lost: string | null }
 type OperationApplied<Value> = {
   kind: 'done'
   value: Value
@@ -613,7 +640,7 @@ function writesNothing({ prefixes, members, mutations, counts, expiring, commit 
 
 /** Applies a plan's writes in a transaction that found `inc` open; its commit is stored until handed on. */
 function applyOperation<Value>(
-  sql: SqlStorage,
+  sql: SqlStore,
   inc: string,
   value: Value,
   writes: OperationWrites,

@@ -2,8 +2,9 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
+import type { LeaseRegistered } from 'telefunc/__internal'
 import { authorityCalls, authorityClocks } from './pages/room/authorityCalls'
-import { LAPSED_PRESENCE_REFUSED_FOR_MS, rerecordedPresences } from './pages/lapsed-presence/presenceRecords'
+import { LAPSED_PRESENCE_REFUSED_FOR_MS, lapsedPresences } from './pages/lapsed-presence/presenceRecords'
 import { present, textAt } from '../checked'
 
 const tf = new Telefunc({ scale: 5 })
@@ -24,15 +25,20 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
       refusedPresences.add(request.key)
       throw new Error('Test: the authority refused the presence')
     }
-    // A `lapsed-presence:` key's hold after its first records the presence again, once the refusals end.
-    const recordingAgain = request.key.startsWith('lapsed-presence:') && lapsedPresences.has(request.key)
-    refuseLapsedPresenceRefresh(request)
     const held = await super.telefuncBroadcastHold(request)
-    if (recordingAgain && held === 'registered') rerecordedPresences.add(request.key)
+    if (held !== 'registered' || !request.key.startsWith('lapsed-presence:')) return held
+    const { key, lease } = request
+    const first = lapsedPresences.get(key)
+    if (first === undefined) lapsedPresences.set(key, { lease, recordedAt: Date.now(), rerecorded: false })
+    else if (first.lease === lease) first.rerecorded = true
     return held
   }
+
   override async telefuncBroadcastRenew(request: PresenceRequest) {
-    refuseLapsedPresenceRefresh(request)
+    const first = lapsedPresences.get(request.key)
+    if (first?.lease === request.lease && Date.now() - first.recordedAt < LAPSED_PRESENCE_REFUSED_FOR_MS) {
+      throw new Error('Test: the authority refused the refresh')
+    }
     return super.telefuncBroadcastRenew(request)
   }
 
@@ -83,16 +89,18 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
 export { TodoListDurableObject } from './database/todoItems'
 
 // The Durable Object's Broadcast RPCs and extension Durable Object RPCs, which its public type doesn't name.
-type PresenceRequest = { key: string }
+type PresenceRequest = { key: string; lease: string }
 type DeliveryRequest = { routes: { key: string }[]; payload: string | Uint8Array }
 type TelefuncDurableObjectWithPresence = new (
   ctx: DurableObjectState,
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
   fetch(request: Request): Promise<Response>
-  telefuncBroadcastHold(request: PresenceRequest): Promise<string>
+  telefuncBroadcastHold(request: PresenceRequest): Promise<LeaseRegistered>
   telefuncBroadcastRenew(request: PresenceRequest): Promise<string>
-  telefuncBroadcastForward(request: DeliveryRequest & { members: string[] }): Promise<void>
+  telefuncBroadcastForward(
+    request: DeliveryRequest & { members: string[] },
+  ): Promise<{ lost: number; reason: unknown } | null>
   telefuncBroadcastDeliver(request: DeliveryRequest): Promise<void>
   telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
@@ -109,16 +117,6 @@ async function withClockAhead<T>(ms: number, work: () => Promise<T>): Promise<T>
   }
 }
 const refusedPresences = new Set<string>()
-const lapsedPresences = new Map<string, number>()
-
-/** Test-only: the key's authority refuses a `lapsed-presence:` key's refreshes for `LAPSED_PRESENCE_REFUSED_FOR_MS`. */
-function refuseLapsedPresenceRefresh({ key }: PresenceRequest): void {
-  if (!key.startsWith('lapsed-presence:')) return
-  const recordedAt = lapsedPresences.get(key)
-  if (recordedAt === undefined) lapsedPresences.set(key, Date.now())
-  else if (Date.now() - recordedAt < LAPSED_PRESENCE_REFUSED_FOR_MS)
-    throw new Error('Test: the authority refused the refresh')
-}
 const refusedDeliveries = new Set<string>()
 let roomCalls: { object: string | null; method: string; room: unknown }[] | null = null
 
@@ -149,15 +147,20 @@ app.all('/__broadcast-publish-from-worker', async (c) => {
   await Broadcast.publish('worker-publish', { from: 'worker' })
   return c.body(null, 204)
 })
-// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what.
+// Test-only: publishes `?message=` to `?key=` from the Worker, and says whether publish() rejected, with what and why,
+// and whether the cause has the mark Workers RPC gave the error where the session threw it.
 app.all('/__refused-delivery-publish', async (c) => {
-  const rejected = await Promise.resolve(
-    Broadcast.publish(present(c.req.query('key'), 'a key'), present(c.req.query('message'), 'a message')),
-  ).then(
-    () => null,
-    (error: unknown) => String(error),
-  )
-  return c.json({ rejected })
+  const key = c.req.query('key')
+  const message = c.req.query('message')
+  if (key === undefined || message === undefined) return c.text('Pass a key and a message', 400)
+  try {
+    await Broadcast.publish(key, message)
+    return c.json({ rejected: null, cause: null, causeRemote: null })
+  } catch (error) {
+    const cause = error instanceof Error ? error.cause : undefined
+    const causeRemote = typeof cause === 'object' && cause !== null && 'remote' in cause ? cause.remote : null
+    return c.json({ rejected: String(error), cause: String(cause), causeRemote })
+  }
 })
 app.all('/__broadcast-subscribe-from-worker', (c) => {
   try {
