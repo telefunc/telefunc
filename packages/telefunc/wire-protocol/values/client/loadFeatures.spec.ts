@@ -4,6 +4,8 @@ import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/e
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import type { ClientReplacerContext } from '../types.js'
 
+type ClientChannelModule = typeof import('../../channel/client/ClientChannel.js')
+
 // A page's first call that carries a value loads that value's code: each chunk's load is held here till a test lets it
 // finish, or fails, as the chunk's request would.
 const FEATURES = ['streams', 'channels', 'broadcasts'] as const
@@ -294,6 +296,51 @@ test('a callback call sends the values its invocation read', async () => {
   await pending
   expect(posts).toHaveLength(1)
   expect(JSON.parse(posts[0] ?? '').args[0].read).toBe(10)
+})
+
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
+/** A callback, an upload and plain data: what a call carries over channels of their own, and beside them. */
+const carried = () => [{ n: 1, callback() {} }, new ReadableStream(), '!TelefuncFunction:app']
+
+test("a cold callback and upload call sends the body a page with channels' code sends, but for the channel ids", async () => {
+  const { call } = await page()
+  respond = text(1)
+  const cold = call(carried())
+  gates.channels.open()
+  await cold
+  await call(carried())
+  expect(imported).toEqual(['channels'])
+  const [coldBody = '', warmBody = ''] = posts
+  expect(coldBody.match(UUID)).toHaveLength(2)
+  expect(coldBody.replace(UUID, 'id')).toBe(warmBody.replace(UUID, 'id'))
+})
+
+test('the channel a cold call opens is the one its tag names', async () => {
+  const opened: string[] = []
+  vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
+    const original = await importOriginal()
+    class RecordedChannel<A = unknown, B = unknown> extends original.ClientChannel<A, B> {
+      constructor(options: ConstructorParameters<typeof original.ClientChannel>[0]) {
+        super(options)
+        opened.push(this.id)
+      }
+    }
+    return { ...original, ClientChannel: RecordedChannel }
+  })
+  try {
+    const { call } = await page()
+    respond = text(1)
+    const pending = call(carried())
+    gates.channels.open()
+    await pending
+    const [callback, upload] = JSON.parse(posts[0] ?? '').args
+    const tagged = [callback.callback, upload].map(
+      (tag: string) => JSON.parse(tag.slice(tag.indexOf(':') + 1)).channelId,
+    )
+    expect(opened.toSorted()).toEqual(tagged.toSorted())
+  } finally {
+    vi.doUnmock('../../channel/client/ClientChannel.js')
+  }
 })
 
 test('a held callback preserves an extension tag that shares the replay prefix', async () => {
