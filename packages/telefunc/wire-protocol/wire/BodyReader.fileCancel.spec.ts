@@ -5,7 +5,8 @@
 
 import { Readable } from 'node:stream'
 import { expect, test } from 'vitest'
-import { BodyReader, StreamTruncatedError } from './BodyReader.js'
+import { BodyReader } from './BodyReader.js'
+import { StreamTruncatedError } from './StreamTruncatedError.js'
 
 type Kind = 'node' | 'web'
 type Outcome = { state: 'pending' } | { state: 'done'; value: string } | { state: 'failed'; error: string }

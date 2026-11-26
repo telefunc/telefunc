@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
-import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
+import { StreamTruncatedError } from '../wire-protocol/wire/StreamTruncatedError.js'
 import { WIRE_VERSION } from '../wire-protocol/constants.js'
 import { frameworkRequest } from './frameworkRequest.fixture.js'
 

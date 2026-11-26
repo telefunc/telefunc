@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { Telefunc } from './node.js'
 import { config } from '../node/server/serverConfig.js'
 import { onBug } from '../node/server/runTelefunc/onBug.js'
-import { StreamTruncatedError } from '../wire-protocol/wire/BodyReader.js'
+import { StreamTruncatedError } from '../wire-protocol/wire/StreamTruncatedError.js'
 
 // Development, where Telefunc also prints a malformed request: set before Telefunc first reads it, which it keeps.
 vi.hoisted(() => vi.stubEnv('NODE_ENV', 'development'))
