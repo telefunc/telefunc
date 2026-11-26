@@ -87,4 +87,19 @@ for (const kind of ['node', 'web'] as const) {
       second: B,
     })
   })
+
+  // Each file's bytes are copied out of the chunk they share: what the app keeps holds only its own bytes.
+  test(`${kind}: 32 files of 1 KiB in one chunk, every chunk kept: the kept buffers hold 32 KiB`, async () => {
+    const files = await setup(
+      kind,
+      [META + 'a'.repeat(32 * 1024)],
+      Array.from({ length: 32 }, () => 1024),
+    )
+    const kept = new Set<ArrayBuffer>()
+    for (const file of files) {
+      const reader = file.stream().getReader()
+      for (let read = await reader.read(); !read.done; read = await reader.read()) kept.add(read.value.buffer)
+    }
+    expect([...kept].reduce((sum, buffer) => sum + buffer.byteLength, 0)).toBe(32 * 1024)
+  })
 }

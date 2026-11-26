@@ -374,17 +374,17 @@ class BodyReader {
     }
   }
 
-  /** The first `left` bytes of `bytes`, for the file, and the rest kept to be read. The rest is the reader's own copy:
-   *  a file's bytes may be handed on with their buffer transferred (`postMessage(chunk, [chunk.buffer])`), which would
-   *  detach every other view of that buffer. Only a chunk that spans a file's end is copied, its part after the end. */
+  /** The first `left` bytes of `bytes`, for the file, and the rest kept to be read as a view. What the file gets owns its
+   *  whole buffer: it may be handed on with its buffer transferred (`postMessage(chunk, [chunk.buffer])`), which detaches
+   *  every other view of that buffer, and it may be kept, which keeps its whole buffer. So a source chunk read whole is
+   *  handed on as it is, and any other part of one is copied. */
   private handOut(bytes: Uint8Array<ArrayBuffer>, left: number): Uint8Array<ArrayBuffer> {
-    if (bytes.length <= left) {
-      this.buffer = EMPTY
-      return bytes
+    if (bytes.length > left) {
+      this.buffer = bytes.subarray(left)
+      return new Uint8Array(bytes.subarray(0, left))
     }
-    // A copy: on a Node `Buffer`, `slice` is a view of the same buffer.
-    this.buffer = new Uint8Array(bytes.subarray(left))
-    return bytes.subarray(0, left)
+    this.buffer = EMPTY
+    return bytes.byteLength === bytes.buffer.byteLength ? bytes : new Uint8Array(bytes)
   }
 
   /** The oldest piece read ahead for `file`, handed to its stream, which closes at its last piece; the reads waiting
