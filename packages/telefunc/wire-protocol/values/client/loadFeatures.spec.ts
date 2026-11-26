@@ -95,7 +95,7 @@ const text = (ret: unknown) => () => new Response(JSON.stringify({ ret }))
 /** A streamed response whose stream 0 sends `42` and stays open; a fetch that is aborted errors it, as browsers do. */
 function streamed(
   ret: Record<string, string>,
-  { sse = false, frames = [encodeIndexedFrame(0, textEncoder.encode('42'))] } = {},
+  { sse = false, frames = [encodeIndexedFrame(0, textEncoder.encode('42'))], onCancel = () => {} } = {},
 ) {
   return (signal: AbortSignal | undefined) => {
     const metadata = textEncoder.encode(JSON.stringify({ ret }))
@@ -112,6 +112,7 @@ function streamed(
       },
       cancel() {
         cancelled++
+        onCancel()
       },
     })
     return new Response(body, { headers: { 'content-type': sse ? 'text/event-stream' : 'application/octet-stream' } })
@@ -181,7 +182,9 @@ test.each([false, true])(
       encodeIndexedFrame(0, new Uint8Array()),
       encodeU32(0),
     ]
-    const response = streamed({ gen: GENERATOR }, { sse, frames })(undefined)
+    // Counted for this response alone: an earlier test's body may be cancelled as its values are collected.
+    let ownCancels = 0
+    const response = streamed({ gen: GENERATOR }, { sse, frames, onCancel: () => ownCancels++ })(undefined)
     respond = () => response
     const ret = await call([])
     assertHas(ret, 'gen')
@@ -191,7 +194,7 @@ test.each([false, true])(
     expect(response.body.locked).toBe(false)
     await close(ret)
     expect(response.body.locked).toBe(false)
-    expect(cancelled).toBe(0)
+    expect(ownCancels).toBe(0)
   },
 )
 
