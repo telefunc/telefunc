@@ -67,9 +67,11 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
       if (getTelefuncRequestUrl(input.request) === null) return undefined
       const httpResponse = await serveRuntimeRequest(
         input.context ? { request: input.request, context: input.context } : { request: input.request },
-        noTransportEvidence,
-        input.request.signal,
-        upgradesOfRequest(input.request),
+        {
+          clientLeft: noTransportEvidence,
+          clientGone: input.request.signal,
+          takesUpgrades: upgradesOfRequest(input.request),
+        },
       )
       return toResponse(httpResponse)
     }

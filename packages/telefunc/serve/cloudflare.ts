@@ -142,12 +142,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
         const context = getContext ? await getContext(request, this.env) : undefined
-        const httpResponse = await serveRuntimeRequest(
-          context ? { request, context } : { request },
-          noTransportEvidence,
-          request.signal,
-          upgradesTakenHere,
-        )
+        const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
+          clientLeft: noTransportEvidence,
+          clientGone: request.signal,
+          takesUpgrades: upgradesTakenHere,
+        })
         const headers = new Headers(httpResponse.headers)
         // The page names it from then on, so it reaches this Durable Object from any region.
         if (target) headers.set(SESSION_HOME_HEADER, target.locationBucket)

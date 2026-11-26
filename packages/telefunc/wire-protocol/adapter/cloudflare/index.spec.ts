@@ -286,9 +286,7 @@ describe('cloudflare adapter entrypoint', () => {
     // The Durable Object answers the upgrade itself, so its pages are offered WebSocket.
     expect(mocks.telefuncMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.anything(),
-      expect.any(AbortSignal),
-      upgradesTakenHere,
+      expect.objectContaining({ clientGone: expect.any(AbortSignal), takesUpgrades: upgradesTakenHere }),
     )
     expect(response.headers.get('x-telefunc-home')).toBe('weur')
     expect(mocks.transportInstances[0]?.attachIsolateInfo).toHaveBeenCalledWith('weur')

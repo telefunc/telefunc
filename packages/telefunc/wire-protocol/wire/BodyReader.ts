@@ -123,6 +123,8 @@ class BodyReader {
   private clientLeft: (err: unknown) => boolean | null
   /** Called for each chunk the source yields. */
   onChunk?: () => void
+  /** Called once the source ends, read to its end. */
+  onEnd?: () => void
 
   constructor(
     source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
@@ -549,7 +551,11 @@ class BodyReader {
     try {
       const { value, done } = await this.reading
       if (done) {
-        this.stop ??= { why: 'ended' }
+        // A Node body let go of with a read under way ends that read as at its end.
+        if (this.stop === null) {
+          this.stop = { why: 'ended' }
+          this.onEnd?.()
+        }
         this.source.letGo()
         return null
       }

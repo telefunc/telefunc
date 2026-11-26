@@ -84,12 +84,14 @@ class SseServerTransport {
   }
 
   /** `clientLeft` says whether a failed read of the upload is its client leaving, as the server that received it does,
-   *  or null where it can't say; `takesUpgrades`, whether that server takes WebSocket upgrades. */
+   *  or null where it can't say; `takesUpgrades`, whether that server takes WebSocket upgrades; `onBodyRead`, what it
+   *  does once the body is read. */
   async handleRequest(
     request: Request,
     readable: Readable | undefined,
     clientLeft: (err: unknown) => boolean | null,
     takesUpgrades: TakesUpgrades,
+    onBodyRead?: () => void,
   ): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return refuse(REFUSED.notServed)
     if (request.method !== 'POST') return refuse(REFUSED.notPost)
@@ -113,6 +115,9 @@ class SseServerTransport {
       throw err
     }
     const { connId } = metadata
+    // The page's streaming upload lasts as long as its wire, whose ping deadline watches it; every other body ends.
+    if (metadata.kind === 'streamRequest') onBodyRead?.()
+    else reader.onEnd = onBodyRead
     try {
       switch (metadata.kind) {
         case 'streamResponse':
@@ -496,7 +501,8 @@ async function handleSseChannelRequest(
   readable: Readable | undefined,
   clientLeft: (err: unknown) => boolean | null,
   takesUpgrades: TakesUpgrades,
+  onBodyRead?: () => void,
 ): Promise<SseChannelHttpResponse> {
   globalObject.sseTransport ??= new SseServerTransport()
-  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, takesUpgrades)
+  return globalObject.sseTransport.handleRequest(request, readable, clientLeft, takesUpgrades, onBodyRead)
 }

@@ -68,12 +68,11 @@ function telefunc(): TelefuncServe {
       // with `--unstable-no-legacy-abort`, at every response's end: the response ends only once the call's body is over,
       // where the signal stops counting (`runTelefunc`), so that abort is never taken for the client leaving. A read
       // under way may fail only once the response ends.
-      const httpResponse = await serveRuntimeRequest(
-        context ? { request, context } : { request },
+      const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
         clientLeft,
-        request.signal,
-        upgradesTakenHere,
-      )
+        clientGone: request.signal,
+        takesUpgrades: upgradesTakenHere,
+      })
       return toResponse(httpResponse)
     },
   }

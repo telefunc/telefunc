@@ -294,6 +294,7 @@ async function runTelefunc_(
     clientLeft,
     clientGone,
     takesUpgrades,
+    onBodyRead,
   }: {
     request: Request
     readable?: StreamReadableNode
@@ -301,6 +302,7 @@ async function runTelefunc_(
     clientLeft: ClientLeft
     clientGone: AbortSignal
     takesUpgrades: TakesUpgrades
+    onBodyRead?: () => void
   },
   requestContext: RequestContext,
 ): Promise<HttpResponseParts> {
@@ -315,6 +317,7 @@ async function runTelefunc_(
       clientLeft,
       clientGone,
       takesUpgrades,
+      onBodyRead,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,

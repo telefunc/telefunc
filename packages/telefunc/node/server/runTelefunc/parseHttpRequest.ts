@@ -43,6 +43,8 @@ type RunContext = {
   clientGone: AbortSignal
   /** Whether the server that received the request takes WebSocket upgrades, as its adapter says. */
   takesUpgrades: TakesUpgrades
+  /** The adapter's, called once the body is read: `HttpRequestResolved['onBodyRead']`. */
+  onBodyRead?: () => void
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -80,7 +82,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, readable, clientLeft, takesUpgrades, requestContext, serverConfig } = runContext
+  const { request, readable, clientLeft, takesUpgrades, onBodyRead, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.INVALID) {
@@ -91,7 +93,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     return { isMalformedRequest: true, refusal: REQUEST_KIND_REFUSAL }
   }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades)
+    const sseResponse = await handleSseChannelRequest(request, readable, clientLeft, takesUpgrades, onBodyRead)
     return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
@@ -204,6 +206,7 @@ async function readBody(
     const source = readable ?? request.body
     if (!source) return refuseEndedEnvelope(runContext)
     const reader = new BodyReader(source, clientLeft, queueMemory)
+    reader.onEnd = runContext.onBodyRead
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
     const clientGone = holdUploadResponse(runContext, reader.restRead)
@@ -257,9 +260,11 @@ async function readBody(
       registerFile: (i, s) => reader.registerFile(i, s),
     }
   }
+  const text = await readText(request, clientLeft)
+  runContext.onBodyRead?.()
   return {
     isMalformedRequest: false,
-    text: await readText(request, clientLeft),
+    text,
     registerFile: () => ({
       stream: () =>
         new ReadableStream<Uint8Array<ArrayBuffer>>({
