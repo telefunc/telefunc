@@ -238,7 +238,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     for (const { listener } of listeners) {
       if (!listener) continue
       decoded ??= {
-        data: parse(serialized) as ChannelData<T>,
+        data: decodePublish<T>(serialized),
         info: makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp),
       }
       if (this.callListener(listener, decoded.data, decoded.info)) return
@@ -840,7 +840,7 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     if (options?.signal?.aborted) return unsubscribeOf(() => {})
     const listening = adapter.subscribe(key, (serialized, info) => {
-      const data = parse(serialized) as ChannelData<U>
+      const data = decodePublish<U>(serialized)
       callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
     return removedOnAbort(listening, options?.signal)
@@ -862,6 +862,11 @@ const Broadcast = {
 }
 
 /** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
+/** A text publish's data, as its publisher's `stringifyValue()` gave it: typed by the key's subscriber. */
+function decodePublish<T>(serialized: string): ChannelData<T> {
+  return parse(serialized) as ChannelData<T>
+}
+
 function callStaticListener<D>(
   callback: (data: D, info: ChannelPublishInfo) => unknown,
   data: D,
