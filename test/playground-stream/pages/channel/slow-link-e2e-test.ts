@@ -3,7 +3,15 @@
 export { testSlowLink }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, withPacedLink, getResult, countConnections, serverArrayBuffers, sleep } from '../../e2e-utils'
+import {
+  navigate,
+  withPacedLink,
+  getResult,
+  countConnections,
+  serverArrayBuffers,
+  sleep,
+  defined,
+} from '../../e2e-utils'
 import { withNetworkConditions } from '../../../utils'
 import { parseChannelTransports } from '../../channelTransports'
 import { onSlowLink } from '../../slowLinkCard'
@@ -40,20 +48,16 @@ function testSlowLink(isDev: boolean) {
       async () => {
         const connections = upgrades ? null : countConnections()
         await page.click('#channel-test-link-share')
-        let linkShare: SlowLinkState['linkShare'] = null
-        await autoRetry(
-          async () => {
-            linkShare = (await getResult<SlowLinkState>('#channel-state')).linkShare
-            expect(linkShare).not.toBe(null)
-          },
+        const linkShare = await autoRetry(
+          async () => defined((await getResult<SlowLinkState>('#channel-state')).linkShare, 'the link-share row'),
           { timeout: 50_000 },
         )
         if (upgrades) {
           // The last send goes after the move: ~2 s where the window went back to a WebSocket's, ~7.5 s where it stayed.
-          expect(linkShare!.pingMs.at(-1)).lessThan(5500)
+          expect(linkShare.pingMs.at(-1)).lessThan(5500)
         } else {
-          for (const ms of linkShare!.pingMs) expect(ms).lessThan(20_000)
-          expect(connections!.stop()).toBe(1)
+          for (const ms of linkShare.pingMs) expect(ms).lessThan(20_000)
+          expect(defined(connections, 'the connection count').stop()).toBe(1)
         }
       },
     )
@@ -122,20 +126,17 @@ function testSlowLink(isDev: boolean) {
       { downBytesPerSecond: 1_000_000, upBytesPerSecond: 1_000_000, queueBytes: 64 * 1024 },
       async () => {
         await page.click('#channel-test-publishes-behind')
-        let behind: SlowLinkState['publishesBehind'] = null
-        await autoRetry(
-          async () => {
-            behind = (await getResult<SlowLinkState>('#channel-state')).publishesBehind
-            expect(behind).not.toBe(null)
-          },
+        const behind = await autoRetry(
+          async () =>
+            defined((await getResult<SlowLinkState>('#channel-state')).publishesBehind, 'the publishes-behind row'),
           { timeout: 55_000 },
         )
         // An event goes whole: 4 MiB in base64 takes about 5.6 s here.
         const upToMs = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).includes('sse')
           ? 14_000
           : 4000
-        expect(behind!.pingMs).lessThan(upToMs)
-        expect(behind!.publishesAhead).toBe(1)
+        expect(behind.pingMs).lessThan(upToMs)
+        expect(behind.publishesAhead).toBe(1)
         // The abort comes behind the three publishes made before it, as the close does.
         expect(behind).deep.include({
           closed: 'clean',
@@ -152,17 +153,13 @@ function testSlowLink(isDev: boolean) {
   test('channel: on a 125 kB/s link, a lossy broadcast faster than the link replaces what waits, so the newest stays recent and the last arrives', async () => {
     await withPacedLink({ downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 }, async () => {
       await page.click('#channel-test-lossy-ticker')
-      let ticker: SlowLinkState['lossyTicker'] = null
-      await autoRetry(
-        async () => {
-          ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
-          expect(ticker).not.toBe(null)
-        },
+      const ticker = await autoRetry(
+        async () => defined((await getResult<SlowLinkState>('#channel-state')).lossyTicker, 'the lossy-ticker row'),
         { timeout: 40_000 },
       )
-      expect(ticker!.last).toBe(299)
-      expect(ticker!.received).lessThan(300)
-      expect(ticker!.worstMs).lessThan(3000)
+      expect(ticker.last).toBe(299)
+      expect(ticker.received).lessThan(300)
+      expect(ticker.worstMs).lessThan(3000)
     })
   })
 
@@ -172,15 +169,11 @@ function testSlowLink(isDev: boolean) {
       { downBytesPerSecond: 125_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024, delayMs: 25 },
       async () => {
         await page.click('#channel-test-lossy-ticker-close')
-        let ticker: SlowLinkState['lossyTicker'] = null
-        await autoRetry(
-          async () => {
-            ticker = (await getResult<SlowLinkState>('#channel-state')).lossyTicker
-            expect(ticker).not.toBe(null)
-          },
+        const ticker = await autoRetry(
+          async () => defined((await getResult<SlowLinkState>('#channel-state')).lossyTicker, 'the lossy-ticker row'),
           { timeout: 40_000 },
         )
-        expect(ticker).deep.equal({ ...ticker!, last: 119, closed: 'none' })
+        expect(ticker).deep.equal({ ...ticker, last: 119, closed: 'none' })
       },
     )
   })

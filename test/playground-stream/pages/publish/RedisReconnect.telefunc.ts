@@ -24,12 +24,13 @@ async function onBinaryBroadcastAcrossReconnect() {
 async function onRedisSubscribeFailure() {
   const { RedisTransport } = await import('@telefunc/redis')
   const user = `subscribe-test-${crypto.randomUUID()}`
-  await redis!.acl('SETUSER', user, 'on', '>test', '~*', '&*', '+@all', '-subscribe')
+  if (!redis) throw new Error('Expected the server to run with Redis')
+  await redis.acl('SETUSER', user, 'on', '>test', '~*', '&*', '+@all', '-subscribe')
   // From here on, a failure still removes the user and its connections.
   let publisher: ReturnType<NonNullable<typeof redis>['duplicate']> | undefined
   let stop = () => {}
   try {
-    publisher = redis!.duplicate({ username: user, password: 'test', retryStrategy: () => null })
+    publisher = redis.duplicate({ username: user, password: 'test', retryStrategy: () => null })
     const transport = new RedisTransport({ redis: publisher })
     await publisher.ping()
     const received: string[] = []
@@ -39,7 +40,7 @@ async function onRedisSubscribeFailure() {
       transport.sendBinary(user, new Uint8Array(1)),
     ])
     const later = await Promise.allSettled([transport.send(user, 'later')])
-    await redis!.acl('SETUSER', user, '+subscribe')
+    await redis.acl('SETUSER', user, '+subscribe')
     // Dragonfly applies an ACL change to an open connection a moment after it answers, so a new subscription may still
     // be refused.
     let delivered: Promise<void>
@@ -69,7 +70,7 @@ async function onRedisSubscribeFailure() {
     stop()
     publisher?.disconnect()
     // Also closes the transport's subscriber connection, which runs as `user` too.
-    await redis!.acl('DELUSER', user)
+    await redis.acl('DELUSER', user)
   }
 }
 

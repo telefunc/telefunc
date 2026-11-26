@@ -126,7 +126,8 @@ function WireDemo() {
     })
   }, [])
   const endClose = useCallback(async (opts?: { timeout: number }) => {
-    const close = (await endChannel.current!.close(opts))?.name ?? 'clean'
+    if (!endChannel.current) throw new Error("Open the end card's channel first")
+    const close = (await endChannel.current.close(opts))?.name ?? 'clean'
     setState((s) => ({ ...s, end: { ...s.end!, close } }))
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])

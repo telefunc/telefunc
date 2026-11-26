@@ -424,7 +424,7 @@ function testRefusedPresence() {
     await page.click('#subscribe')
     // KV refused the presence: the subscription's `opened` rejected, and the publish made meanwhile settled.
     await autoRetry(async () => {
-      const { openedRejected, published } = JSON.parse((await page.textContent('#refused-presence-state'))!)
+      const { openedRejected, published } = JSON.parse((await page.textContent('#refused-presence-state')) ?? 'null')
       expect({ openedRejected, published }).deep.equal({ openedRejected: true, published: true })
     })
     // Each try publishes again: the presence is written at its next refresh, within 30 s.

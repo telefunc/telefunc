@@ -501,7 +501,7 @@ function Streaming() {
           try {
             for await (const v of onGeneratorThrowsNonObject()) values.push(v)
             setResult(JSON.stringify({ error: false, values }))
-          } catch (e: any) {
+          } catch (e) {
             setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), values }))
           }
         }}
@@ -786,8 +786,8 @@ function Streaming() {
           abort(returned)
           try {
             setResult(JSON.stringify({ firstBytes: await firstDone }))
-          } catch (err: any) {
-            setResult(JSON.stringify({ error: err.message }))
+          } catch (err) {
+            setResult(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
           }
         }}
       >

@@ -35,10 +35,10 @@ function Page() {
       <button type="button" id="backlog-open" onClick={open}>
         Open
       </button>
-      <button type="button" id="backlog-run-1500" onClick={() => channelRef.current!.send(1500)}>
+      <button type="button" id="backlog-run-1500" onClick={() => channelRef.current?.send(1500)}>
         Send 24 MiB, unawaited
       </button>
-      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current!.send(6000)}>
+      <button type="button" id="backlog-run-6000" onClick={() => channelRef.current?.send(6000)}>
         Send 96 MiB, unawaited
       </button>
     </div>

@@ -23,6 +23,7 @@ import {
   refuseNextSsePost,
   releaseHeldSsePosts,
   sleep,
+  defined,
 } from '../../e2e-utils'
 import { cardOf } from './upload-refusal-e2e-test'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
@@ -132,10 +133,10 @@ function testWire(isDev: boolean) {
       await end(channelId, 'close')
       await autoRetry(async () => {
         const state = await getResult<WireState>('#wire-state')
-        expect(state.end!.received).deep.equal(received('onClose:none'))
+        expect(state.end?.received).deep.equal(received('onClose:none'))
         const ss = await getCleanupState()
         expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
-        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end!.close).toBe('clean')
+        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : state.end?.close).toBe('clean')
       })
     })
 
@@ -159,7 +160,7 @@ function testWire(isDev: boolean) {
       await page.click('#wire-end-close-timeout')
       await autoRetry(async () => {
         const { end } = await getResult<WireState>('#wire-state')
-        expect(end!.close).toBe('ChannelClosedError')
+        expect(end?.close).toBe('ChannelClosedError')
       })
       await cutWire()
       await page.context().setOffline(false)
@@ -418,11 +419,10 @@ function testWire(isDev: boolean) {
     test(`channel: the server lets go of a channel the page closed ${when}`, async () => {
       await navigate(`${getServerUrl()}/channel`)
       await page.click(`#${button}`)
-      let channelId = ''
-      await autoRetry(async () => {
+      const channelId = await autoRetry(async () => {
         const { release } = await getResult<WireState>('#wire-state')
-        expect(release!.close).toBe('clean')
-        channelId = release!.channelId
+        expect(release?.close).toBe('clean')
+        return defined(release, 'the release row').channelId
       })
       // Well within reconnectTimeout (60 s), which the server waits for a page that is away.
       await autoRetry(

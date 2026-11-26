@@ -1024,7 +1024,7 @@ async function onChannelsQueuedBeforeReturn() {
         await channel.sendBinary(new Uint8Array(1024 * 1024))
         return 'delivered'
       } catch (err) {
-        return (err as Error).name
+        return err instanceof Error ? err.name : String(err)
       }
     }
     const queued = queuedOutcome()
@@ -1168,7 +1168,7 @@ async function onChannelConfigChecks() {
       config.channel = { pingInterval: 1000, ...channel }
       return null
     } catch (err) {
-      return (err as Error).message
+      return err instanceof Error ? err.message : String(err)
     }
   }
   return {
@@ -1210,7 +1210,7 @@ async function onChannelAwaitedFromOffline() {
         await ch.sendBinary(new Uint8Array(bytes))
         sends.push('sent')
       } catch (err) {
-        sends.push((err as Error).message)
+        sends.push(err instanceof Error ? err.message : String(err))
       }
     }
     cleanupState[`awaitedFromOffline_${ch.id}`] = JSON.stringify(sends)
@@ -1239,7 +1239,7 @@ async function onChannelAtLimit(kind: keyof typeof atLimitTexts, over: boolean) 
       await ch.send(over ? `${atLimitTexts[kind]}x` : atLimitTexts[kind], { ack: true })
     } catch (err) {
       // The page has no listener to answer the send that went.
-      if ((err as Error).name === 'ChannelOverflowError') cleanupState[name] = (err as Error).message
+      if (err instanceof Error && err.name === 'ChannelOverflowError') cleanupState[name] = err.message
     }
     ch.close()
   })

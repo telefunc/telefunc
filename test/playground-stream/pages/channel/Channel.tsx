@@ -324,6 +324,13 @@ async function runIteratorAck(iteratorCase: IteratorAckOptions & { direction: 's
   return result
 }
 
+/** Shows `text` in the page's element at `selector`. */
+function showResult(selector: string, text: string) {
+  const output = document.querySelector(selector)
+  if (!output) throw new Error(`Expected ${selector} on the page`)
+  output.textContent = text
+}
+
 function timestamp() {
   return new Date().toLocaleTimeString('en-US', { hour12: false, fractionalSecondDigits: 3 })
 }
@@ -1256,13 +1263,15 @@ function ChannelDemo() {
   const testLateOpenAbort = useCallback(async () => {
     const { channel } = await openChannel(onChannelLateOpenAbort)
     const outcome = await channel.closed
-    document.querySelector('#channel-late-abort-result')!.textContent =
-      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome)
+    showResult(
+      '#channel-late-abort-result',
+      outcome instanceof TelefuncAbort ? String(outcome.abortValue) : String(outcome),
+    )
   }, [])
 
   const testBudgets = useCallback(async () => {
     const { bytes } = await openChannel(onChannelBudgets)
-    document.querySelector('#channel-budgets-result')!.textContent = JSON.stringify({ bytes: bytes.id })
+    showResult('#channel-budgets-result', JSON.stringify({ bytes: bytes.id }))
   }, [])
 
   const testAtLimit = useCallback(async () => {
@@ -1295,7 +1304,7 @@ function ChannelDemo() {
     )
     const next = await channel.send('next', { ack: true })
     const result = { id: channel.id, refused, next, isClosed: channel.isClosed }
-    document.querySelector('#channel-offline-budgets-result')!.textContent = JSON.stringify(result)
+    showResult('#channel-offline-budgets-result', JSON.stringify(result))
   }, [])
 
   const testCreditFailure = useCallback(async () => {

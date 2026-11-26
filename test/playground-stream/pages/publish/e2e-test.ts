@@ -99,7 +99,7 @@ function testPublish(isDev: boolean, inDocker = false) {
       await navigate(`${getServerUrl()}/publish`)
       await page.click('#test-broadcast-burst-then-close')
       await autoRetry(async () => {
-        const result = await getResult<any>('#publish-result')
+        const result = await getResult<{ error: string; received: number }>('#publish-result')
         expect(result.error).toBe('ChannelOverflowError')
         expect(result.received).lessThan(1000)
       })

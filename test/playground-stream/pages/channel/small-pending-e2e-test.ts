@@ -1,7 +1,7 @@
 export { testSmallPending }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState, reconnectAtFullDelay } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, reconnectAtFullDelay, defined } from '../../e2e-utils'
 import { sendRefusedWarning } from '../../../utils'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
 
@@ -33,12 +33,6 @@ type SmallPendingState = {
     pastMemory: { seqsAhead: number[]; closeErr: string }
     across: { publish: string; received: number; closeErr: string }
   } | null
-}
-
-/** `value`, once the page has shown it: `what` says what it is. */
-function defined<T>(value: T | null | undefined, what: string): T {
-  if (value === null || value === undefined) throw new Error(`Expected ${what}`)
-  return value
 }
 
 /** The channel page's state. */
