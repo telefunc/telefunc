@@ -227,7 +227,7 @@ async function readBody(
       else clientGone.addEventListener('abort', leftByClient, { once: true })
     }
     // While the call runs, the file reads end as the client leaves, once a read of the body under way took its failure.
-    const leftDuringCall = () => void reader.readSettled().then(() => reader.clientGaveUp())
+    const leftDuringCall = () => void giveUpOnceReadSettled(reader)
     clientGone.addEventListener('abort', leftDuringCall, { once: true })
     runContext.requestContext.onAnswered(() => {
       reader.keepRest()
@@ -276,6 +276,12 @@ async function readBody(
       onGone: (callback) => callback(),
     }),
   }
+}
+
+/** Ends the file reads of `reader`, whose client left, once the read of the body under way took its failure. */
+async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
+  await reader.readSettled()
+  reader.clientGaveUp()
 }
 
 /** Deno can stall reads when the response ends, and its legacy signal aborts at that point. Keep the response

@@ -12,16 +12,17 @@ import {
 } from './shared.js'
 
 /** One end of a channel whose peer is the test: `deliver` hands its listener a message, and its `close()` ends once
- *  the test says the peer acknowledged it (`end()`), as a graceful close waits for its acknowledgement. */
+ *  the test says the peer acknowledged it (`end()`), as a graceful close waits for its acknowledgement. As a real
+ *  channel, it is closed, taking no more sends, from the call of `close()` on. */
 class FakeChannel<T> implements WireChannel<T> {
   sent: T[] = []
   private listener: Parameters<WireChannel<T>['listen']>[0] | null = null
   private closeCallbacks: Parameters<WireChannel<T>['onClose']>[0][] = []
-  private ended = false
+  private stopped = false
   private acknowledge: (() => void) | null = null
 
   get isClosed(): boolean {
-    return this.ended
+    return this.stopped
   }
   async send(data: T): Promise<void> {
     this.sent.push(data)
@@ -33,6 +34,7 @@ class FakeChannel<T> implements WireChannel<T> {
     this.closeCallbacks.push(callback)
   }
   close(): Promise<0> {
+    this.stopped = true
     return new Promise((resolve) => {
       this.acknowledge = () => resolve(0)
     })
@@ -45,7 +47,7 @@ class FakeChannel<T> implements WireChannel<T> {
   }
   /** The peer acknowledged the close: the channel ends, and its close callbacks run. */
   end(): void {
-    this.ended = true
+    this.stopped = true
     this.acknowledge?.()
     for (const callback of this.closeCallbacks) callback(null)
   }
@@ -93,7 +95,7 @@ describe('after `close()` was called, until the close ends', () => {
     expect(channel.sent).toEqual([{ t: MSG.SUBSCRIBE }])
   })
 
-  test('an observable the app passed sends no further value, and still sends its end', () => {
+  test('an observable the app passed sends nothing further: no value, and no end, which its page has from the close', () => {
     const channel = new FakeChannel<ObservableMessage>()
     const source = new Subject<unknown>()
     const wire = wireSourceObservable(source, channel)
@@ -103,9 +105,6 @@ describe('after `close()` was called, until the close ends', () => {
     source.next(2)
     channel.deliver({ t: OBS_MSG.SUBSCRIBE, id: 1 })
     source.complete()
-    expect(channel.sent).toEqual([
-      { t: OBS_MSG.NEXT, id: 0, v: 1 },
-      { t: OBS_MSG.COMPLETE, id: 0 },
-    ])
+    expect(channel.sent).toEqual([{ t: OBS_MSG.NEXT, id: 0, v: 1 }])
   })
 })

@@ -396,10 +396,14 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       () => {},
     )
     this.presenceOperations.set(presence, settled)
-    void settled.then(() => {
-      if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
-    })
+    void this.forgetPresenceOperation(presence, settled)
     return done
+  }
+
+  /** Drops `presence`'s queue once `settled`, its last operation, has settled, unless another one joined it meanwhile. */
+  private async forgetPresenceOperation(presence: string, settled: Promise<void>): Promise<void> {
+    await settled
+    if (this.presenceOperations.get(presence) === settled) this.presenceOperations.delete(presence)
   }
 
   private warnRefusedPresence(key: string, write: Promise<void>): Promise<boolean> {
@@ -600,7 +604,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
-      activeBuckets.map((activeBucket) => {
+      Array.from(presenceByBucket, ([activeBucket, doNames]) => {
         const coordinator = this.getBucketCoordinatorName(key, activeBucket)
         return authorityState.broadcastCalls.call(
           coordinator,
@@ -612,7 +616,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
               binaryData,
               forwarded: true,
               locationBucket: activeBucket,
-              doNames: presenceByBucket.get(activeBucket)!,
+              doNames,
               info,
             }),
         )

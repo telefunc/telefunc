@@ -233,7 +233,7 @@ function wireSubject(subject: Subject<unknown>, channel: WireChannel<SubjectMess
  */
 function wireSourceObservable(observable: Observable<unknown>, channel: WireChannel<ObservableMessage>) {
   const subscriptions = new Map<number, Subscription>()
-  /** From the call of `close()` on, no value goes and no subscription starts; an end still goes. */
+  /** From the call of `close()` on, no value goes and no subscription starts. */
   let closing = false
 
   const unsubAll = () => {

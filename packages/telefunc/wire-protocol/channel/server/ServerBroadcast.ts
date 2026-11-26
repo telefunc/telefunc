@@ -233,12 +233,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
     delivery: BroadcastDelivery | undefined,
     listeners: Iterable<Registration<BroadcastListener<T>>>,
   ): void {
-    let info: ChannelPublishInfo | undefined
-    const data = parse(serialized) as ChannelData<T>
+    // Decoded once, for the first server listener: the pages are sent the wire body as it came.
+    let decoded: { data: ChannelData<T>; info: ChannelPublishInfo } | undefined
     for (const { listener } of listeners) {
       if (!listener) continue
-      info ??= makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-      if (this.callListener(listener, data, info)) return
+      decoded ??= {
+        data: parse(serialized) as ChannelData<T>,
+        info: makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp),
+      }
+      if (this.callListener(listener, decoded.data, decoded.info)) return
     }
     if (!this.takesPublish(this.pageWant.text)) return this.endOverflowed()
     const body = bodyOf(encode.publish, serialized, rawInfo, delivery, this.owner, this.replaceIn)

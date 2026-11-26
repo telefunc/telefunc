@@ -282,8 +282,13 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
     requestContext.markComplete()
   }
   const hold = requestContext.responseHold
-  if (hold) void hold.over.then(hold.unheld)
+  if (hold) void unholdOnceOver(hold)
   return createHttpResponse(response, hold)
+}
+
+async function unholdOnceOver(hold: NonNullable<RequestContext['responseHold']>): Promise<void> {
+  await hold.over
+  hold.unheld()
 }
 
 async function runTelefunc_(

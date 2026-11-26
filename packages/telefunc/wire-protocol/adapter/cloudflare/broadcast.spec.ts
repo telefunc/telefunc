@@ -1141,6 +1141,8 @@ describe('cloudflare broadcast routing', () => {
     const previousTransport = getBroadcastAdapter()
     _resetBroadcastAdapterForTesting(transport)
     type DeliveringObject = { telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void }
+    const isDeliveringObject = (object: object): object is DeliveringObject =>
+      'telefuncBroadcastDeliver' in object && typeof object.telefuncBroadcastDeliver === 'function'
     const objects = new Map<string, DeliveringObject>()
     let deliveringIn: string | null = null
     const binding = createBasicBinding({
@@ -1156,10 +1158,9 @@ describe('cloudflare broadcast routing', () => {
     const { TelefuncDurableObject } = new Telefunc({ scale: 5 })
     for (const name of ['telefunc-shard-weur-0', 'telefunc-shard-weur-1']) {
       const ctx = { id: { name }, storage: {} } as unknown as DurableObjectState
-      objects.set(
-        name,
-        new TelefuncDurableObject(ctx, env) as InstanceType<typeof TelefuncDurableObject> & DeliveringObject,
-      )
+      const object = new TelefuncDurableObject(ctx, env)
+      if (!isDeliveringObject(object)) throw new Error('Expected a Durable Object that takes Broadcast deliveries')
+      objects.set(name, object)
     }
     transport.attachIsolateInfo('weur')
 

@@ -173,8 +173,13 @@ async function* iterateMessages<M extends Message<unknown>>(
 
 // A pending close promise keeps its callbacks; their scope must release the iterator when it returns.
 function observeClose(closed: Promise<Error | null>, callback?: (err?: unknown) => void): () => void {
-  void closed.then((outcome) => callback?.(outcome ?? undefined))
+  void callOnClose()
   return () => {
     callback = undefined
+  }
+
+  async function callOnClose(): Promise<void> {
+    const outcome = await closed
+    callback?.(outcome ?? undefined)
   }
 }
