@@ -2,8 +2,8 @@
 // goes to each binary request on Deno whose `clientGone` is its own `request.signal`, a `node:http` framework's
 // `Request` too, whose response then ends only once its upload is over, as a browser's answer does anyway; a raw
 // `node:http` `serve({ readable })` passes its socket's signal, and is never held.
-// - In both signal modes, a read of the body pending as a streamed response ends never settles, nor does any later
-//   read: a held streamed response ends only once the upload is over.
+// - In both signal modes, a streamed response that ends before the upload is over can stall the body's pending read
+//   and every later one (the issue below): a held streamed response ends only once the upload is over.
 // - Unless Deno runs with `--unstable-no-legacy-abort`, `request.signal`, the only sign its client left, also aborts at
 //   the response's end: once the upload is over, or a string answer went out, its aborts stop counting, and a failed
 //   read of the body says the client left.

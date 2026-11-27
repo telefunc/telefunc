@@ -69,7 +69,8 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly attaching: ReadonlySet<ServerChannel>
   private readonly onPastBacklog: () => void
   /** `'pastBacklog'`: the ledger refused the wire its backlog, and its owner ends the wire: it hands nothing more.
-   *  `'closed'`: the wire closed: it sends nothing more, holds nothing and delivered nothing. */
+   *  `'closed'`: the wire closed: it takes no new sends and holds nothing but the channels' ends kept in `lastEnds`,
+   *  which go to the socket ahead of its close. */
   private state: 'open' | 'pastBacklog' | 'closed' = 'open'
   /** What may be written before the backlog is measured again (`measureBacklogRoom`). */
   private backlogRoom = 0

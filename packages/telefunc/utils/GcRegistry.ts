@@ -85,7 +85,7 @@ class GcRegistry {
   }
 }
 
-/** The process's one registry, which every copy of Telefunc in the process shares. */
+/** The realm's one registry, which every copy of Telefunc in the same JavaScript realm shares. */
 function getGcRegistry(): GcRegistry {
   return getGlobalObject('utils/GcRegistry.ts', () => ({ gcRegistry: new GcRegistry() })).gcRegistry
 }
