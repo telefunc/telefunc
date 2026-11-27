@@ -541,11 +541,7 @@ class AttachExchange {
     record.replay.acknowledge(lastSeq)
     const missed = record.replay.getAfter(lastSeq, throughSeq)
     if (missed !== null)
-      return missed.frames.map(({ kind, frame }, i) => {
-        const handed = missed.handed[i]
-        assert(handed !== undefined)
-        return { frame: { kind, frame, released: true }, handed }
-      })
+      return missed.map(({ kind, frame, handed }) => ({ frame: { kind, frame, released: true }, handed }))
     // One the server ended needs nothing more.
     if (record.state.tag === 'closed' && record.state.delivered) return []
     return [{ frame: this.loseChannel(record), handed: 0 }]

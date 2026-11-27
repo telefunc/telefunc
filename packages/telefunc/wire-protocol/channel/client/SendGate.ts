@@ -60,6 +60,8 @@ class SendGate {
   private waitingForHeadroomBytes = 0
   /** Channels whose held and waiting frames are dropped, all in one pass at the next read (see `dropQueues`). */
   private droppedQueues = new Set<number>()
+  /** The sequenced frames handed to the transport, across the connection's channels: the order a replay keeps. */
+  private handed = 0
 
   constructor({ owner, channels }: SendGateOptions) {
     this.owner = owner
@@ -86,7 +88,7 @@ class SendGate {
     this.sendWaiting()
     const { transport } = this.owner
     if (this.waitingForHeadroom.length === 0 && transport.headroom() > 0) {
-      record.replay.push(seq, frame, kind)
+      record.replay.push(seq, frame, kind, ++this.handed)
       transport.sendFrame({ kind, frame })
       return
     }
@@ -210,7 +212,7 @@ class SendGate {
       const { frame, kind, channelIx, seq } = held
       this.waitingForHeadroomBytes -= frame.byteLength
       headroom -= frame.byteLength
-      this.channels.get(channelIx)?.replay.push(seq, frame, kind)
+      this.channels.get(channelIx)?.replay.push(seq, frame, kind, ++this.handed)
       transport.sendFrame({ kind, frame, released: true })
     }
   }
@@ -261,7 +263,7 @@ class SendGate {
           continue
         }
         headroom -= frame.byteLength
-        this.channels.get(channelIx)?.replay.push(seq, frame, kind)
+        this.channels.get(channelIx)?.replay.push(seq, frame, kind, ++this.handed)
       }
       frames.push({ kind, frame, released: true, receivedAt })
     }
