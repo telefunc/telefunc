@@ -433,15 +433,26 @@ const onReturnManyTinyChunks = async (chunks: number) => {
   })
 }
 
-/** The page has neither until the file's bytes have arrived, so it can't read the stream to make way for them. */
 const onReturnFileBesideLargeStream = async () => {
-  return {
-    stream: byteStream(32),
-    file: new File(
-      Array.from({ length: 32 }, () => new Uint8Array(64 * 1024)),
-      'large.bin',
-    ),
-  }
+  let pulled = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled === 512) return controller.close()
+      pulled++
+      controller.enqueue(new Uint8Array(64 * 1024))
+    },
+  })
+  const file = new File([new Uint8Array([7])], 'slow.bin')
+  file.stream = () =>
+    new ReadableStream({
+      async pull(controller) {
+        await sleep(700)
+        cleanupState.fileBesideStreamPulls = String(pulled)
+        controller.enqueue(new Uint8Array([7]))
+        controller.close()
+      },
+    })
+  return { stream, file }
 }
 
 function filledStream(byte: number) {

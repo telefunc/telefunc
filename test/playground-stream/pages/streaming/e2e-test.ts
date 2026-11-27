@@ -422,14 +422,15 @@ function testStreaming(inDocker = false) {
       expect(() => expectLog(stallWarning)).throw()
     })
 
-    test("streaming: a stream beside a returned file doesn't stop the file the call waits for", async () => {
+    test('streaming: a large stream stays bounded while the call waits for a slow file beside it', async () => {
       await navigate(`${getServerUrl()}/streaming`)
       await page.click('#test-file-beside-large-stream')
       await autoRetry(async () => {
         expect(await getResult('#streaming-result')).deep.equal({
-          fileBytes: 2 * 1024 * 1024,
-          streamBytes: 2 * 1024 * 1024,
+          fileBytes: [7],
+          streamBytes: 32 * 1024 * 1024,
         })
+        expect(Number((await getCleanupState()).fileBesideStreamPulls)).at.most(64)
       })
     })
   }

@@ -144,7 +144,7 @@ class ResponseValues {
     this.stage({ channel })
   }
 
-  private readonly sendStream = (createProducer: () => StreamingProducer) => {
+  private readonly sendStream: ServerReplacerContext['sendStream'] = (createProducer, options) => {
     // Taken as it's serialized: a stream that can't be read fails the serialization, which ends what the response carries.
     const producer = producerInContext(createProducer(), this.run.context)
     const stream = {
@@ -160,7 +160,7 @@ class ResponseValues {
     }
     this.inline ??= []
     const index = this.inline.length
-    this.inline.push({ producer, index })
+    this.inline.push({ producer, index, eager: options?.eager === true })
     return { metadata: { __index: index }, ...stream }
   }
 

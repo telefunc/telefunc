@@ -132,43 +132,51 @@ function buildInlineResponseBody(runContext: {
     }
   }
 
-  async function mergeProducers() {
-    for (const entry of producers) void pullNext(entry)
-
-    // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
-    // so don't break between the length and its payload.
-    const metadataBytes = textEncoder.encode(metadataSerialized)
-    await emit(encodeFrame(encodeU32(metadataBytes.length)))
-    await emit(encodeFrame(metadataBytes))
-
-    // ── Multiplexed merge loop ──
-    // Each producer keeps one in-flight `.next()`, and gets the next one once its frame went out, so a fast
-    // producer doesn't starve the others.
-    let open = producers.length
+  // Each active producer keeps one in-flight next(), and gets the next one once its frame went out.
+  async function merge(open: number): Promise<void> {
     while (open > 0) {
       if (settled.length === 0 && !cancelled) await new Promise<void>((resolve) => (wakeMerge = resolve))
-      // Consumer is gone: bail before emitting a "this producer is done" frame
-      // — would also be misleading for cancelled producers returning done.
       if (cancelled) return
       const next = settled.shift()
       assert(next)
       if ('err' in next) throw next.err
       const { entry, result } = next
       if (result.done) {
-        // Empty-payload frame so the client knows this index is done
-        // without waiting for the global terminator.
+        // An empty payload marks the end of this index.
         await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
         open--
         continue
       }
-      // An empty frame means this index is done, and an empty chunk has no bytes to send.
       if (result.value.byteLength > 0) {
         await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value)))
       }
-      void pullNext(entry)
+      if (!producersStopped) void pullNext(entry)
     }
-    // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
-    // the terminator frame at all when there's no one to receive it.
+  }
+
+  async function mergeProducers() {
+    // The client drains eager values before it can hand the lazy ones to the caller.
+    const eager = producers.filter((entry) => entry.eager)
+    const first = eager.length === 0 ? producers : eager
+    for (const entry of first) void pullNext(entry)
+
+    const metadataBytes = textEncoder.encode(metadataSerialized)
+    await emit(encodeFrame(encodeU32(metadataBytes.length)))
+    await emit(encodeFrame(metadataBytes))
+
+    await merge(first.length)
+    if (cancelled) return
+    if (first.length < producers.length) {
+      if (producersStopped) {
+        const next = settled.shift()
+        assert(next && 'err' in next)
+        throw next.err
+      }
+      for (const entry of producers) {
+        if (!entry.eager) void pullNext(entry)
+      }
+      await merge(producers.length - first.length)
+    }
     if (cancelled) return
     await emit(encodeFrame(encodeU32(0)))
   }

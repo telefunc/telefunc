@@ -826,10 +826,11 @@ function Streaming() {
         onClick={async () => {
           setResult('')
           const { file, stream } = await onReturnFileBesideLargeStream()
-          setResult(JSON.stringify({ fileBytes: file.size, streamBytes: await byteCount(stream) }))
+          const fileBytes = Array.from(new Uint8Array(await file.arrayBuffer()))
+          setResult(JSON.stringify({ fileBytes, streamBytes: await byteCount(stream) }))
         }}
       >
-        A large file beside a large stream
+        A slow file beside a large stream
       </button>
 
       <button
