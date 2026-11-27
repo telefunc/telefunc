@@ -115,7 +115,6 @@ class SseTransport implements UpgradeSource {
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
-  private flushing = false
   /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
   private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
@@ -123,8 +122,12 @@ class SseTransport implements UpgradeSource {
   private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
-  /** The body of the batch POST out, 0 with none. */
-  private postOutBytes = 0
+  /** The body of the batch POST out, 0 till it is encoded; null with none out. */
+  private postOutBytes: number | null = null
+  /** A batch POST is out. */
+  private get flushing(): boolean {
+    return this.postOutBytes !== null
+  }
   /** The frames in `outbox`. */
   private outboxBytes = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
@@ -681,7 +684,7 @@ class SseTransport implements UpgradeSource {
     if (!this.hasWire() || this.openPending || this.flushing || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
-    this.flushing = true
+    this.postOutBytes = 0
     const now = performance.now()
     // Every POST starts the throttle, whatever made it go: the next waits for it.
     this.lastPostStartedAt = now
@@ -697,8 +700,7 @@ class SseTransport implements UpgradeSource {
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
       this.settlePost(answer, { queued, bytes: body.size, startedAt: now, reconcile })
     } finally {
-      this.flushing = false
-      this.postOutBytes = 0
+      this.postOutBytes = null
       if (this.barrierTurn) this.barrierTurn()
       else {
         this.moveToUpload()
@@ -844,7 +846,7 @@ class SseTransport implements UpgradeSource {
   }
 
   headroom(): number {
-    return this.streamRequest.tag === 'active' ? Infinity : this.postBytes - this.postOutBytes - this.outboxBytes
+    return this.streamRequest.tag === 'active' ? Infinity : this.postBytes - (this.postOutBytes ?? 0) - this.outboxBytes
   }
 
   /** A batch POST out past its deadline is given up, as a wire that missed its pong: its wire reconnects, resending what
