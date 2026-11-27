@@ -30,7 +30,6 @@ function getTelefuncChannelOptions({
   wireRequest?: (peer: Peer) => Request | undefined
   copiesOnSend?: boolean
 } = {}) {
-  const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     /** Persistent bidirectional WebSocket: no out-of-band POSTs to route, so no need for a
      *  connId-based reverse lookup. */
@@ -73,6 +72,7 @@ function getTelefuncChannelOptions({
     }
   }
 
+  // The mux per call: a Cloudflare session DO hosts its own channels, and these hooks serve every one in the isolate.
   const hooks = defineHooks({
     // The one place that reads a handshake: `open` acts on what it decided.
     upgrade: (request) => {
@@ -91,19 +91,20 @@ function getTelefuncChannelOptions({
       // A page on another version reloads: none of its frames could be read. Told after the 101, as a close code: a page
       // learns nothing from a refused handshake.
       if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
-      mux.onWireOpen(peer, transport, upgradesTakenHere)
+      getChannelMux().onWireOpen(peer, transport, upgradesTakenHere)
     }, terminate),
     message: guard(
-      (peer, message: Message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
-      (peer) => mux.endFault(peer, { scope: 'loss' }),
+      // crossws types a message's bytes over any buffer; a WebSocket message's are never a SharedArrayBuffer's.
+      (peer, message: Message) => getChannelMux().onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+      (peer) => getChannelMux().endFault(peer, { scope: 'loss' }),
     ),
     // Where the server decided the close, the mux forgot the peer as it decided it, and finds nothing here.
     close: guard(
       (peer, details: Parameters<Hooks['close']>[1]) =>
-        mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
+        getChannelMux().onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
       null,
     ),
-    error: guard((peer) => mux.onWireClosed(peer, 'transient'), null),
+    error: guard((peer) => getChannelMux().onWireClosed(peer, 'transient'), null),
   })
   return {
     hooks,
