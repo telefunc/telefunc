@@ -427,6 +427,29 @@ test('a callback call sends the values its invocation read', async () => {
   expect(JSON.parse(posts[0] ?? '').args[0].read).toBe(10)
 })
 
+test.each(['headers', 'httpHeaders'] as const)(
+  "a cold callback call and the wire its channel opens send the config.%s of the call's invocation",
+  async (option) => {
+    const { config, call } = await page()
+    const sent: string[] = []
+    config.fetch = async (_url, init) => {
+      sent.push(new Headers(init?.headers).get('x-workspace') ?? 'none')
+      const body = init?.body
+      if (typeof body === 'string' && body.includes('"file"')) return text(1)()
+      return new Promise<Response>(() => {})
+    }
+    respond = text(1)
+    const headers = { 'x-workspace': 'before' }
+    config[option] = headers
+    const pending = call([{ callback() {} }])
+    headers['x-workspace'] = 'after'
+    gates.channels.open()
+    await pending
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThanOrEqual(2))
+    expect(new Set(sent)).toEqual(new Set(['before']))
+  },
+)
+
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
 /** A callback, an upload and plain data: what a call carries over channels of their own, and beside them. */
 const carried = () => [{ n: 1, callback() {} }, new ReadableStream(), '!TelefuncFunction:app']

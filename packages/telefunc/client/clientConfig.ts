@@ -122,9 +122,11 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   },
 })
 
+/** The config of a call, read at its invocation: an app's later change, to `config.headers` too, is the next call's. */
 function resolveClientConfig(): ConfigResolved {
+  const headers = configState.headers ?? configState.httpHeaders
   return {
-    headers: configState.headers ?? configState.httpHeaders ?? null,
+    headers: headers ? { ...headers } : null,
     telefuncUrl: configState.telefuncUrl || '/_telefunc',
     fetch: configState.fetch ?? globalThis.fetch,
     stream: configState.stream.transport ? { ...configState.stream } : undefined,
