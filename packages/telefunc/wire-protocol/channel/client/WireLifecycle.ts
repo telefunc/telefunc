@@ -354,7 +354,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     return !this.closed && this.nextIndex <= 0xffff
   }
 
-  register(channel: MuxChannel, lossyBroadcast = false): void {
+  register(channel: MuxChannel): void {
     // A new wire's RECONCILE lists closed channels too, so at the limit the oldest closed one the server has in full
     // makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
@@ -369,7 +369,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
     this.stopIdle()
-    this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES), lossyBroadcast)
+    this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES))
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {

@@ -92,6 +92,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly ack: boolean
   readonly key: string | undefined
   readonly _maxFrameBytes: number
+  readonly _lossyBroadcast: boolean
   protected connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
@@ -127,6 +128,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
+    this._lossyBroadcast = lossyBroadcast
     // Built before the connection: registering the channel fits its credits to the replay buffers.
     const owner: CreditOwner = {
       // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
@@ -150,7 +152,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       connectionKey: connection.connectionKey,
       headers: connection.headers,
       idleTimeout: connection.idleTimeout,
-      lossyBroadcast,
     })
   }
 

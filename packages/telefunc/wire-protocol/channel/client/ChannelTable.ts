@@ -142,11 +142,11 @@ class ChannelTable {
 
   // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
-  add(ix: number, channel: MuxChannel, replay: ReplayBuffer, lossyBroadcast = false): ChannelRecord {
+  add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
     const record: ChannelRecord = {
       ix,
       channel,
-      lossyBroadcast,
+      lossyBroadcast: channel._lossyBroadcast,
       state: { tag: 'pending' },
       replay,
       lastSeq: 0,

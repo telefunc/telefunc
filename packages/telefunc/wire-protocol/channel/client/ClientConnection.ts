@@ -40,6 +40,8 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame the server accepts from this channel on a WebSocket. */
   readonly _maxFrameBytes: number
+  /** A lossy broadcast: every value the server sends it is lossy. */
+  readonly _lossyBroadcast: boolean
   /** The channel is open on `uplink`'s wire; called again with the same `uplink`, that wire lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
@@ -95,7 +97,6 @@ interface MuxConnection {
 }
 
 type ClientConnectionOptions = {
-  lossyBroadcast?: boolean
   transports: ChannelTransports
   fetchImpl: typeof fetch
   /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
@@ -169,7 +170,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
       connection = new ClientConnection({ telefuncUrl, options, cacheKey: key })
       globalObject.connections.set(key, connection)
     }
-    connection.lifecycle.register(channel, options.lossyBroadcast)
+    connection.lifecycle.register(channel)
     return connection
   }
 
