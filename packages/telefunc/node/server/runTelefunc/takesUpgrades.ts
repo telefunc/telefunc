@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import type { TakesUpgrades } from '../../../wire-protocol/channel/server/ChannelMux.js'
-import { type CallbackInFront, isInFront } from '../../../workarounds/nodeShouldUpgradeCallback.js'
+import type { CallbackInFront } from '../../../workarounds/nodeShouldUpgradeCallback.js'
 
 /** A `Request` handed over without its server, as Bun's and Deno's generic `serve({ request })` and the primitives form
  *  get it: its page is offered SSE, which works, and never an upgrade that fails. */
@@ -44,7 +44,7 @@ function upgradesOfServer(server: object): TakesUpgrades {
 function telefuncsUpgradesOn(server: object): 'nothing' | 'listener' | 'listener and callback' {
   const taken = upgradeServers.get(server)
   if (taken === undefined || taken.server.listenerCount('upgrade', taken.listener) === 0) return 'nothing'
-  if (taken.wrapped !== null && !isInFront(taken.server, taken.wrapped)) return 'listener'
+  if (taken.wrapped !== null && taken.server.shouldUpgradeCallback !== taken.wrapped.callback) return 'listener'
   return 'listener and callback'
 }
 

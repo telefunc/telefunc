@@ -3,7 +3,7 @@
 // Telefunc's callback in front of it, Telefunc's listener makes the server upgrade every request with `Upgrade`, and an
 // app's own route that answers them as plain HTTP breaks (serve/node.upgradeOthers.spec.ts).
 // TODO: remove once Node supports per-listener upgrade negotiation (https://github.com/nodejs/node/issues/6339; see https://github.com/nodejs/node/pull/59824).
-export { upgradeOthersOnlyForTheirListeners, putBackOwnCallback, isInFront }
+export { upgradeOthersOnlyForTheirListeners, putBackOwnCallback }
 export type { CallbackInFront }
 
 import type { IncomingMessage, Server } from 'node:http'
@@ -48,10 +48,5 @@ function upgradeOthersOnlyForTheirListeners(
 /** Puts the server's own callback back where Telefunc's is still the server's: one the app set since stays. */
 function putBackOwnCallback(server: Server | Http2SecureServer, inFront: CallbackInFront | null): void {
   if (inFront === null || !hasProp(server, 'shouldUpgradeCallback', 'function')) return
-  if (isInFront(server, inFront)) server.shouldUpgradeCallback = inFront.own
-}
-
-/** Whether Telefunc's callback is still the server's: the app may have set its own since. */
-function isInFront(server: { shouldUpgradeCallback?: unknown }, inFront: CallbackInFront): boolean {
-  return server.shouldUpgradeCallback === inFront.callback
+  if (server.shouldUpgradeCallback === inFront.callback) server.shouldUpgradeCallback = inFront.own
 }
