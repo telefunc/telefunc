@@ -1642,39 +1642,41 @@ async function serverFaults(): Promise<string[]> {
 
 /** What the page does with refusals of its SSE requests, and with a server that closes its connections. */
 function testSseRefusals(isDev: boolean, inDocker = false) {
-  test("channel: a 409 that isn't Telefunc's to a batch POST is a loss the channel goes on after, and Telefunc's own 409 ends it as a server that was updated", async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    const id = await openCounted(['sse'])
-    for (const answer of ['plain', 'marked'] as const) {
-      let refused = 0
-      const refuseOnce: Parameters<Page['route']>[1] = async (route) => {
-        if (refused > 0 || !isSseRequest(route.request(), 'posts')) return route.fallback()
-        refused++
-        await route.fulfill(
-          answer === 'plain'
-            ? { status: 409, contentType: 'text/plain', body: 'Conflict' }
-            : {
-                status: 409,
-                contentType:
-                  'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
-                body: 'The server runs another wire version: reload the page.',
-              },
-        )
-      }
-      await withRoute(isSseUrl, refuseOnce, async () => {
-        if (answer === 'plain') {
-          expect(await sendCounted('past a plain 409')).toBe('ack:past a plain 409')
-          expect(refused).toBe(1)
-          expect(await countedOf(id)).deep.equal(['past a plain 409'])
-        } else {
-          void sendCounted('refused with a marked 409')
-          expect(await page.evaluate(() => window.countedEnd!())).toMatch(/server was updated since this page loaded/)
-          expect(refused).toBe(1)
+  // Over HTTP/2 (Caddy TLS in Docker), SSE sends on its streaming upload POST rather than batch POSTs.
+  if (!inDocker)
+    test("channel: a 409 that isn't Telefunc's to a batch POST is a loss the channel goes on after, and Telefunc's own 409 ends it as a server that was updated", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const id = await openCounted(['sse'])
+      for (const answer of ['plain', 'marked'] as const) {
+        let refused = 0
+        const refuseOnce: Parameters<Page['route']>[1] = async (route) => {
+          if (refused > 0 || !isSseRequest(route.request(), 'posts')) return route.fallback()
+          refused++
+          await route.fulfill(
+            answer === 'plain'
+              ? { status: 409, contentType: 'text/plain', body: 'Conflict' }
+              : {
+                  status: 409,
+                  contentType:
+                    'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+                  body: 'The server runs another wire version: reload the page.',
+                },
+          )
         }
-      })
-    }
-    expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
-  })
+        await withRoute(isSseUrl, refuseOnce, async () => {
+          if (answer === 'plain') {
+            expect(await sendCounted('past a plain 409')).toBe('ack:past a plain 409')
+            expect(refused).toBe(1)
+            expect(await countedOf(id)).deep.equal(['past a plain 409'])
+          } else {
+            void sendCounted('refused with a marked 409')
+            expect(await page.evaluate(() => window.countedEnd!())).toMatch(/server was updated since this page loaded/)
+            expect(refused).toBe(1)
+          }
+        })
+      }
+      expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
+    })
 
   test("channel: behind a proxy that drops `x-telefunc-request`, a page with ['sse', 'ws'] is refused `route` and moves to a WebSocket at once, and its messages arrive", async () => {
     await navigate(`${getServerUrl()}/channel`)
