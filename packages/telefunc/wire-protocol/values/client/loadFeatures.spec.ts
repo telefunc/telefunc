@@ -1,7 +1,8 @@
-import { afterEach, assert, beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, assert, beforeEach, expect, onTestFinished, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { concat, encodeIndexedFrame, encodeU32, textEncoder } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
+import { MAX_CHANNELS_PER_CONNECTION } from '../../constants.js'
 import type { ClientReplacerContext } from '../types.js'
 
 type ClientChannelModule = typeof import('../../channel/client/ClientChannel.js')
@@ -819,6 +820,38 @@ test('serialization failure at invocation cancels the upload an earlier argument
     secondReader.releaseLock()
   }
 })
+
+test.each([
+  ['cold', [1, 1, 1]],
+  ['warm', [1, 1, 0]],
+] as const)(
+  "a %s call whose connection refuses an upload's channel sends nothing and cancels each upload it claimed",
+  async (mode, cancelCounts) => {
+    const { call, withContext } = await page()
+    // There is no server: the wires the page's connections would start once their channels registered stay unstarted.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    respond = text(1)
+    gates.channels.open()
+    if (mode === 'warm') await call([() => {}])
+    posts = []
+    const cancels = [vi.fn(), vi.fn(), vi.fn()]
+    const uploads = cancels.map((cancel) => new ReadableStream({ cancel }))
+    // The first upload and the callbacks take every channel the connection has: the second upload's open is refused.
+    const callbacks = Array.from({ length: MAX_CHANNELS_PER_CONNECTION - 1 }, () => () => {})
+    const send = () =>
+      withContext(call, { channel: { connectionKey: 'full' } })([uploads[0], ...callbacks, uploads[1], uploads[2]])
+    const refused = /too many channels on one connection/i
+
+    if (mode === 'warm') expect(send).toThrow(refused)
+    else await expect(send()).rejects.toThrow(refused)
+    expect(posts).toEqual([])
+    expect(cancels.map((cancel) => cancel.mock.calls.length)).toEqual(cancelCounts)
+    expect(uploads.map((upload) => upload.locked)).toEqual([false, false, false])
+  },
+)
 
 test("a cold upload whose source's cancel throws leaves no unhandled rejection", async () => {
   const { call, withContext } = await page()

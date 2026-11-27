@@ -82,8 +82,18 @@ function serializeTelefunctionArguments(callContext: CallContext): CallRequest {
     (replaced) => attach(request, callContext, replaced),
     (value, claim) => {
       const { channels } = loadedFeatures()
-      if (channels) attach(request, callContext, { value, ...claim.open(channels, connection) })
-      else (claimed ??= []).push({ value, claim })
+      if (!channels) {
+        claimed ??= []
+        claimed.push({ value, claim })
+        return
+      }
+      // Till it is attached, the call's own cleanup doesn't reach the claim.
+      try {
+        attach(request, callContext, { value, ...claim.open(channels, connection) })
+      } catch (err) {
+        claim.release(err)
+        throw err
+      }
     },
     callContext.extensionRequestTypes,
   )
@@ -109,13 +119,15 @@ function channelsPreparation(
     try {
       await loadFeatures(['channels'], callContext)
       throwIfAborted(callContext)
+      const { channels } = loadedFeatures()
+      assert(channels)
+      for (const { value, claim } of claimed) {
+        attach(request, callContext, { value, ...claim.open(channels, connection) })
+      }
     } catch (err) {
       cancelUnsentCall(callContext, claimed, err)
       throw err
     }
-    const { channels } = loadedFeatures()
-    assert(channels)
-    for (const { value, claim } of claimed) attach(request, callContext, { value, ...claim.open(channels, connection) })
   }
 }
 
