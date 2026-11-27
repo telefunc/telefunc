@@ -15,9 +15,10 @@ const STALL_WARNING_MS = 5_000
 
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
- *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_BYTES_PER_INDEX, resumes once that consumer drains or cancels. Active consumers (registered as
- *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
+ *  Best-effort backpressure, once the call's values are handed out: stops reading when an idle consumer's buffer hits
+ *  MAX_BUFFER_BYTES_PER_INDEX, resumes once that consumer drains or cancels. Before then, the page can't read a stream
+ *  yet, so reading goes on past the cap: the call's returned Files and Blobs can't otherwise arrive. Active consumers
+ *  (registered as waiters) receive frames via direct dispatch — zero buffering, zero delay.
  *
  *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
  *  its consumer's read of one chunk restarts the read loop, and the next frame on the wire
@@ -29,7 +30,7 @@ const STALL_WARNING_MS = 5_000
  *  as cancelled and drops future frames for it. Other consumers continue normally.
  *  Once every consumer is terminal, the upstream reader is cancelled if one cancelled, else released. */
 class FrameDemuxer {
-  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
+  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MiB
   private streamReader: BaseStreamReader
   private telefunctionName: string
   private pendingFrames = new Map<number, Fifo<Uint8Array<ArrayBuffer>>>()
