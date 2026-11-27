@@ -8,6 +8,7 @@ import { ProtocolViolationError } from './protocolViolation.js'
 import { Fifo } from '../../utils/Fifo.js'
 import type { QueueMemory } from '../channel/channelMessages.js'
 import type { RequestFile } from '../values/types.js'
+import { releaseOrCancel } from '../../workarounds/workerdReaderReleaseLock.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -137,15 +138,7 @@ class BodyReader {
       const reader = source.getReader()
       this.source = {
         next: () => reader.read(),
-        // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
-        // did before 2022, so that read would end only at the body's next chunk: the cancel ends it now.
-        letGo: () => {
-          try {
-            reader.releaseLock()
-          } catch {
-            reader.cancel().catch(() => {})
-          }
-        },
+        letGo: () => releaseOrCancel(reader),
       }
     } else {
       // Read as a Node `Readable` is, which bypasses Node's webstreams `dequeueValue` overhead: that is why we accept

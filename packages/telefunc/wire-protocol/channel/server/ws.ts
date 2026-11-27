@@ -2,7 +2,6 @@ export { getTelefuncChannelOptions }
 
 import { defineHooks, type Hooks, type Message, type Peer } from 'crossws'
 import { upgradesTakenHere } from '../../../node/server/runTelefunc/takesUpgrades.js'
-import { handleError } from '../../../node/server/runTelefunc/handleError.js'
 import { assert } from '../../../utils/assert.js'
 import { readRequestUrl } from '../../../utils/getUrlPathname.js'
 import { CHANNEL_TRANSPORT, WS_CLOSE_PAGE_LEFT, WS_CLOSE_REFUSED, WS_CLOSE_WIRE_VERSION } from '../../constants.js'
@@ -11,6 +10,7 @@ import { namesWireVersion } from '../../wire/requestKind.js'
 import { getChannelMux } from './ChannelMux.js'
 import type { ServerTransport } from './ChannelMux.js'
 import { upgradeRefusal } from './upgradeOrigin.js'
+import { guardCrosswsHook, getCrosswsNamespace } from '../../../workarounds/crosswsHooks.js'
 
 /** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's: `undefined` on workerd, whose
  *  WebSocket has none. `wireRequest` is the request the upgrade hook got, which crossws's peer carries as `peer.request`
@@ -51,28 +51,9 @@ function getTelefuncChannelOptions({
   /** Whether each handshake the upgrade hook let through names this server's wire version, by its request. */
   const sameVersion = new WeakMap<Request, boolean>()
 
-  /** crossws calls a hook with no catch: on Node a hook's throw would end the process. A throw is printed as a call's
-   *  error is, and `ends` the hook's peer where it isn't ending already: the mux's peer goes as a loss, through the
-   *  mux's one close, so that it can't cut an end already going. The upgrade hook has no guard: neither
-   *  `readableHost()` nor `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context. */
-  function guard<Args extends unknown[]>(
-    hook: (peer: Peer, ...args: Args) => unknown,
-    ends: ((peer: Peer) => void) | null,
-  ) {
-    const onError = (peer: Peer, err: unknown) => {
-      handleError(err)
-      ends?.(peer)
-    }
-    return (peer: Peer, ...args: Args): void => {
-      try {
-        const result = hook(peer, ...args)
-        if (result instanceof Promise) result.catch((err: unknown) => onError(peer, err))
-      } catch (err) {
-        onError(peer, err)
-      }
-    }
-  }
-
+  // A hook's throw `ends` its peer where it isn't ending already: the mux's peer goes as a loss, through the mux's one
+  // close, so that it can't cut an end already going. The upgrade hook has no guard: neither `readableHost()` nor
+  // `upgradeRefusal()` throws, and the adapters' own `upgrade` builds the peer's context.
   const hooks = defineHooks({
     // The one place that reads a handshake: `open` acts on what it decided.
     upgrade: (request) => {
@@ -84,7 +65,7 @@ function getTelefuncChannelOptions({
       return upgrade?.(request)
     },
     // A throw in `open` comes before the mux has the peer, where nothing else would close it.
-    open: guard((peer) => {
+    open: guardCrosswsHook((peer) => {
       const request = wireRequest(peer)
       const named = request && sameVersion.get(request)
       assert(request && named !== undefined)
@@ -93,23 +74,21 @@ function getTelefuncChannelOptions({
       if (!named) return peer.close(WS_CLOSE_WIRE_VERSION, 'reload the page')
       mux.onWireOpen(peer, transport, upgradesTakenHere, request)
     }, terminate),
-    message: guard(
+    message: guardCrosswsHook(
       (peer, message: Message) => mux.onWireMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
       (peer) => mux.endFault(peer, { scope: 'loss' }),
     ),
     // Where the server decided the close, the mux forgot the peer as it decided it, and finds nothing here.
-    close: guard(
+    close: guardCrosswsHook(
       (peer, details: Parameters<Hooks['close']>[1]) =>
         mux.onWireClosed(peer, details?.code === WS_CLOSE_PAGE_LEFT ? 'pageLeft' : 'transient'),
       null,
     ),
-    error: guard((peer) => mux.onWireClosed(peer, 'transient'), null),
+    error: guardCrosswsHook((peer) => mux.onWireClosed(peer, 'transient'), null),
   })
   return {
     hooks,
-    // One namespace for every wire. crossws would take it from `new URL(request.url)`, which throws before the upgrade
-    // hook runs on the path alone that Bun gives a request whose `Host` it can't read.
-    getNamespace: () => 'telefunc',
+    getNamespace: getCrosswsNamespace,
   }
 }
 

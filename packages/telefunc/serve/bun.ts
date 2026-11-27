@@ -1,7 +1,6 @@
 export { Telefunc }
 
 import crossws from 'crossws/adapters/bun'
-import type { Peer } from 'crossws'
 import { serveRuntimeRequest } from '../node/server/telefunc.js'
 import { upgradesTakenHere } from '../node/server/runTelefunc/takesUpgrades.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
@@ -9,6 +8,7 @@ import { getServerConfig } from '../node/server/serverConfig.js'
 import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { getTelefuncRequestUrl, toResponse } from './shared.js'
+import { bunSockets } from '../workarounds/crosswsBun.js'
 
 type BunWs = ReturnType<typeof crossws>
 type BunServer = Parameters<BunWs['handleUpgrade']>[1]
@@ -33,14 +33,8 @@ class Telefunc {
 }
 
 function telefunc(): TelefuncServe {
-  // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
-  const sockets = new WeakMap<Peer, BunSocket>()
-  const ws = crossws(
-    getTelefuncChannelOptions({
-      bufferedAmount: (peer) => sockets.get(peer)?.getBufferedAmount() ?? 0,
-      copiesOnSend: true,
-    }),
-  )
+  const sockets = bunSockets()
+  const ws = crossws(getTelefuncChannelOptions({ bufferedAmount: sockets.bufferedAmount, copiesOnSend: true }))
 
   return {
     websocket: {
@@ -51,7 +45,7 @@ function telefunc(): TelefuncServe {
       maxPayloadLength: WIRE_MAX_RAW_FRAME_BYTES,
       open(socket: BunSocket) {
         ws.websocket.open!(socket)
-        sockets.set(socket.data.peer!, socket)
+        sockets.opened(socket)
       },
     },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {

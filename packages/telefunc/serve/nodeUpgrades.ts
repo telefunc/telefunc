@@ -8,13 +8,13 @@ import { getTelefuncChannelOptions } from '../wire-protocol/channel/server/ws.js
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { readRequestUrl } from '../utils/getUrlPathname.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import { hasProp } from '../utils/hasProp.js'
 import type { IncomingMessage, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 import type { Duplex } from 'node:stream'
 import type { Peer } from 'crossws'
 import { assert } from '../utils/assert.js'
 import { markRequestsOfServer } from './requestServer.js'
+import { putBackOwnCallback, upgradeOthersOnlyForTheirListeners } from '../workarounds/nodeShouldUpgradeCallback.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -58,41 +58,11 @@ const { handshakes } = getGlobalObject('serve/nodeUpgrades.ts', {
   handshakes: new WeakMap<IncomingMessage, Handshake>(),
 })
 
-/** Telefunc's `shouldUpgradeCallback` (Node 22.21, 24.9 and later) upgrades its handshake and leaves every other
- *  request to the server's own, which sees a `listenerCount` without Telefunc's listener. */
-function upgradeOthersOnlyForTheirListeners(server: HttpServer, taken: TakenServer): void {
-  if (!hasProp(server, 'shouldUpgradeCallback', 'function')) return
-  const own = server.shouldUpgradeCallback
-  const callback = (req: IncomingMessage) => {
-    const handshake = readHandshake(req)
-    handshakes.set(req, handshake)
-    if (handshake.url?.pathname === handshake.config.telefuncUrl) return true
-    const before = Object.getOwnPropertyDescriptor(server, 'listenerCount')
-    const count = server.listenerCount
-    const withoutTelefunc = (...args: [event: string | symbol, listener?: (...args: never[]) => void]) => {
-      const [event, listener] = args
-      if (event !== 'upgrade' || (listener !== undefined && listener !== taken.listener))
-        return count.call(server, ...args)
-      if (listener === taken.listener) return 0
-      return count.call(server, 'upgrade') - count.call(server, 'upgrade', taken.listener)
-    }
-    Object.defineProperty(server, 'listenerCount', { value: withoutTelefunc, configurable: true, writable: true })
-    try {
-      return Boolean(own.call(server, req))
-    } finally {
-      if (before === undefined) Reflect.deleteProperty(server, 'listenerCount')
-      else Object.defineProperty(server, 'listenerCount', before)
-    }
-  }
-  server.shouldUpgradeCallback = callback
-  taken.callback = callback
-  taken.own = own
-}
-
-/** Puts the server's own callback back where Telefunc's is still the server's: one the app set since stays. */
-function putBackOwnCallback(server: HttpServer, taken: TakenServer): void {
-  if (taken.own === undefined || !hasProp(server, 'shouldUpgradeCallback', 'function')) return
-  if (server.shouldUpgradeCallback === taken.callback) server.shouldUpgradeCallback = taken.own
+/** Whether `req` is Telefunc's handshake, read once for the `upgrade` listener. */
+function isTelefuncHandshake(req: IncomingMessage): boolean {
+  const handshake = readHandshake(req)
+  handshakes.set(req, handshake)
+  return handshake.url?.pathname === handshake.config.telefuncUrl
 }
 
 /** `serve({ req, res })`'s take, of a server no copy of Telefunc took before: one whose listener the app removed, or
@@ -115,7 +85,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   const on = telefuncsUpgradesOn(httpServer)
   if (before !== undefined && on !== 'nothing') {
     // The app put its own `shouldUpgradeCallback` in place of Telefunc's: Telefunc's goes in front of it again.
-    if (on === 'listener') upgradeOthersOnlyForTheirListeners(httpServer, before)
+    if (on === 'listener') upgradeOthersOnlyForTheirListeners(httpServer, before, isTelefuncHandshake)
     return
   }
   // 0.3.1's listener is there.
@@ -156,7 +126,7 @@ function takeUpgrades(httpServer: HttpServer): void {
   }
   registeredServers.add(httpServer)
   httpServer.on('upgrade', onUpgrade)
-  upgradeOthersOnlyForTheirListeners(httpServer, taken)
+  upgradeOthersOnlyForTheirListeners(httpServer, taken, isTelefuncHandshake)
   upgradeServers.set(httpServer, taken)
   // The removal gives the server its own callback back and frees 0.3.1's registry; the next install covers one unseen.
   const onRemoved = (event: string | symbol, removed: unknown) => {

@@ -38,6 +38,7 @@ import { createRequestContext, type RequestContext } from './context/requestCont
 import type { ClientLeft } from './runTelefunc/clientLeft.js'
 import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
+import { heldResponseBody, unholdOnceOver, type ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -91,14 +92,10 @@ type HttpResponseParts = {
  *  string as it is, which `hold.unheld` is told of. */
 function createHttpResponse(
   { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
-  hold: { over: Promise<void>; unheld: () => void } | null,
+  hold: ResponseHold | null,
 ): HttpResponse {
   const sent = (): ResponseBody =>
-    hold === null
-      ? responseBody
-      : getStreamReadableWeb(responseBody).pipeThrough(
-          new TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>({ flush: () => hold.over }),
-        )
+    hold === null ? responseBody : heldResponseBody(getStreamReadableWeb(responseBody), hold)
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -284,11 +281,6 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   const hold = requestContext.responseHold
   if (hold) void unholdOnceOver(hold)
   return createHttpResponse(response, hold)
-}
-
-async function unholdOnceOver(hold: NonNullable<RequestContext['responseHold']>): Promise<void> {
-  await hold.over
-  hold.unheld()
 }
 
 async function runTelefunc_(

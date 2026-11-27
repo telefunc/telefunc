@@ -2,6 +2,7 @@ export { GcRegistry, getGcRegistry }
 
 import { getGlobalObject } from './getGlobalObject.js'
 import { unrefTimer } from './unrefTimer.js'
+import { isNavigatedAwayRealm } from '../workarounds/chrome158IframeFinalization.js'
 
 type CloseFn = () => void | Promise<void>
 
@@ -35,8 +36,7 @@ class GcRegistry {
 
   constructor(private readonly periodicScanMs = 5000) {
     this.finalReg = new FinalizationRegistry<Entry>((entry) => {
-      // Chrome 158 runs it once an iframe navigated, if its parent kept the old realm: it cleared the new page's timer.
-      if (typeof document === 'undefined' || document.defaultView !== null) this.fireCleanup(entry)
+      if (!isNavigatedAwayRealm()) this.fireCleanup(entry)
     })
   }
 

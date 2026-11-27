@@ -30,6 +30,8 @@ import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
 import { handleTelefunctionBug } from './validateTelefunctionError.js'
+import { holdUploadResponse } from '../../../workarounds/denoUploadResponseHold.js'
+import { node22AbortSignalLag } from '../../../workarounds/node22AbortSignalLag.js'
 
 type RunContext = {
   request: Request
@@ -209,7 +211,8 @@ async function readBody(
     reader.onEnd = runContext.onBodyRead
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
     // the rest of the body is read now, and kept for the call's files within what the channels' memory allows.
-    const clientGone = holdUploadResponse(runContext, reader.restRead)
+    const { hold, clientGone } = holdUploadResponse(request, runContext.clientGone, reader.restRead)
+    runContext.requestContext.responseHold = hold
     // A page attaches to a channel the call returns once its upload is over: until then, each byte of it says the page
     // is on its way. An upload that stops, at its end or as its client goes silent, leaves its last byte as the sign;
     // one that stopped short for a whole connect window is given up on, with its files.
@@ -284,22 +287,6 @@ async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
   reader.clientGaveUp()
 }
 
-/** Deno can stall reads when the response ends, and its legacy signal aborts at that point. Keep the response
- *  open until the upload ends or the client leaves. A string answer releases the hold itself. */
-function holdUploadResponse({ request, clientGone, requestContext }: RunContext, restRead: Promise<void>): AbortSignal {
-  // A Node adapter's socket signal stays valid after the response, including under Deno's node:http.
-  if (!hasProp(globalThis, 'Deno', 'object') || clientGone !== request.signal) return clientGone
-  const gone = new AbortController()
-  const abort = () => gone.abort(clientGone.reason)
-  if (clientGone.aborted) abort()
-  else clientGone.addEventListener('abort', abort, { once: true })
-  requestContext.responseHold = {
-    over: Promise.race([restRead, aborted(gone.signal)]),
-    unheld: () => clientGone.removeEventListener('abort', abort),
-  }
-  return gone.signal
-}
-
 /** A binary request whose body ends before its envelope is complete: no body (a Web `Request`'s `null`), an empty one, or
  *  one whose own end cuts its metadata. No Telefunc client sends one, so it is malformed. */
 function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true } {
@@ -315,7 +302,7 @@ function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true
 async function readOffBody(reader: BodyReader, signal: AbortSignal, watchClient: () => void): Promise<void> {
   // A client that left (on Node 22.0, `signal` says so a microtask late) fails the read under way, which settles first to
   // keep its own failure; an answered call's read may wait on the client, so it isn't awaited.
-  if (!signal.aborted) await Promise.resolve()
+  if (!signal.aborted) await node22AbortSignalLag()
   if (signal.aborted) await reader.readSettled()
   watchClient()
   try {
@@ -440,10 +427,4 @@ function logParseError(errMsg: string, runContext: { logMalformedRequests: boole
     errMsg = `Malformed request in development. ${errMsg} This is unexpected since, in development, all requests are expected to originate from the Telefunc Client and should therefore be properly structured.`
   }
   console.error(getProjectError(errMsg))
-}
-
-/** Settles once `signal` aborts. */
-function aborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve()
-  return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
 }

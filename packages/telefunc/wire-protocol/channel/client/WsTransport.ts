@@ -35,6 +35,7 @@ import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
 import { endOfWire } from './readAnswer.js'
+import { onUnopenedEnd } from '../../../workarounds/node22UndiciWebSocketError.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -146,8 +147,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.connecting = socket
     this.pieces = socket.pieces
     ws.onopen = () => this.adopt(socket)
-    // Its first `error` or `close`: Node 22's undici 6 fires no `close` before the upgrade (nodejs/undici#3506).
-    ws.onclose = ws.onerror = () => this.connectFailed(socket)
+    onUnopenedEnd(ws, () => this.connectFailed(socket))
   }
 
   private adopt(socket: Connecting): void {

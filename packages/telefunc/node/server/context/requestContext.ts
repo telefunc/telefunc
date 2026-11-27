@@ -8,6 +8,7 @@ import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { ATTACHABLE_NOW, type CallPage } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import type { ResponseHold } from '../../../workarounds/denoUploadResponseHold.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -44,7 +45,7 @@ type RequestContext = {
    *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
   /** On Deno, keeps the response open until the call's binary upload ends. */
-  responseHold: { over: Promise<void>; unheld: () => void } | null
+  responseHold: ResponseHold | null
   /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
    *  is on its way, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
   page: CallPage
