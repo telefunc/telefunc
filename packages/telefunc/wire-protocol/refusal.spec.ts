@@ -50,7 +50,7 @@ test.each([
 })
 
 /** What the server never writes, after `kind=frames; `: a scope its cause isn't written with, a cause no refusal names,
- *  a channel empty, valueless or named twice, a quote left open (the review of b06824dee, R2.1). */
+ *  a channel empty, valueless or named twice, a quote left open. */
 const unwritten = [
   'cause=6',
   'channel=3; cause=8',

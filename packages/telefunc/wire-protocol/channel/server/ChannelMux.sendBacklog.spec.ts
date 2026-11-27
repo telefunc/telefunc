@@ -1,5 +1,5 @@
 // What a wire holds while its RECONCILED is owed is bounded by the limit on what waits on its socket or stream, whatever
-// keeps the hold on (decisions/516-sse-carrier.md msg44, the review's R1.1): the wire's share of `maxMemory`; a
+// keeps the hold on: the wire's share of `maxMemory`; a
 // channel's replay is its own, not the limit's. The real SSE handler and ChannelMux run.
 
 import { expect, test, vi } from 'vitest'

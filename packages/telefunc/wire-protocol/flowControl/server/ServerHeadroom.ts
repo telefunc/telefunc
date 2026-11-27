@@ -109,7 +109,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return cut.count()
   }
 
-  /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands, as on main. */
+  /** What the path takes past what it holds. Unmeasured, the kernel's TCP paces what the app hands. */
   headroom(): number {
     return this.window() - this.pathHolds(performance.now())
   }
