@@ -85,13 +85,16 @@ function takeUpgrades(httpServer: HttpServer): void {
   const on = telefuncsUpgradesOn(httpServer)
   if (before !== undefined && on !== 'nothing') {
     // The app put its own `shouldUpgradeCallback` in place of Telefunc's: Telefunc's goes in front of it again.
-    if (on === 'listener') upgradeOthersOnlyForTheirListeners(httpServer, before, isTelefuncHandshake)
+    if (on === 'listener') {
+      const inFront = upgradeOthersOnlyForTheirListeners(httpServer, before.listener, isTelefuncHandshake)
+      if (inFront !== null) before.wrapped = inFront
+    }
     return
   }
   // 0.3.1's listener is there.
   if (inLegacyRegistry(httpServer) && !before?.holdsRegistry) return
   // What a removal Telefunc didn't see left: its callback, still in front of the server's own.
-  if (before !== undefined) putBackOwnCallback(httpServer, before)
+  if (before !== undefined) putBackOwnCallback(httpServer, before.wrapped)
   const adapter = webSocketAdapter()
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -125,13 +128,13 @@ function takeUpgrades(httpServer: HttpServer): void {
   }
   recordInLegacyRegistry(httpServer)
   httpServer.on('upgrade', onUpgrade)
-  upgradeOthersOnlyForTheirListeners(httpServer, taken, isTelefuncHandshake)
+  taken.wrapped = upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade, isTelefuncHandshake)
   upgradeServers.set(httpServer, taken)
   // The removal gives the server its own callback back and frees 0.3.1's registry; the next install covers one unseen.
   const onRemoved = (event: string | symbol, removed: unknown) => {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)
-    putBackOwnCallback(httpServer, taken)
+    putBackOwnCallback(httpServer, taken.wrapped)
     taken.holdsRegistry = false
     // An install from a `removeListener` listener that ran before this one took the server again: the registry is its.
     if (upgradeServers.get(httpServer) === taken) releaseLegacyRegistry(httpServer)
