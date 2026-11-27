@@ -35,12 +35,13 @@ async function soleAnswer<T, A extends unknown[]>(
   return answer
 }
 
-/** `soleAnswer`, serialized: null once two listeners answered. The refusal of an answer JSON can't hold propagates: bytes
- *  in it, which it would turn into an object. */
+/** `soleAnswer`, as `serialize` writes it: null once two listeners answered. What `serialize` throws propagates: by
+ *  default, the refusal of bytes in the answer, which JSON would turn into an object. */
 async function listenerAnswer<T>(
   listeners: readonly Registration<(data: T) => unknown>[],
   data: T,
+  serialize: (answer: unknown) => string = (answer) => stringifyValue(answer, 'answer'),
 ): Promise<string | null> {
   const answer = await soleAnswer(listeners, data)
-  return answer === TWO_ANSWERS ? null : stringifyValue(answer, 'answer')
+  return answer === TWO_ANSWERS ? null : serialize(answer)
 }

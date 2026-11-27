@@ -1244,7 +1244,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<void> {
     let answer: string | null
     try {
-      answer = await listenerAnswer(listeners, data)
+      answer = await listenerAnswer(listeners, data, (value) => this.serializeAnswer(value))
     } catch (err) {
       return this.answerFailed(seq, err)
     }
@@ -1252,6 +1252,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return this.sendAckRes(seq, 'Only one channel listener may return an acknowledgement value', ACK_STATUS.ERROR)
     }
     this.sendAckRes(seq, answer)
+  }
+
+  /** A listener's answer, as its page reads it: bytes in it are refused, which JSON would turn into an object. */
+  protected serializeAnswer(answer: unknown): string {
+    return stringifyValue(answer, 'answer')
   }
 
   /** Whether the code running now runs on the object its page's wire is on: only that object can write to its page. A

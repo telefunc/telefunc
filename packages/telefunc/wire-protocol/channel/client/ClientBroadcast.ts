@@ -101,10 +101,18 @@ class ClientBroadcast<T = unknown, Publish = T> extends ClientChannel {
     return reportingUnexpected(this.sendPublish(encode.publishAckReq, payload, lossy ? 'text' : EVERY_STREAM, lossy))
   }
 
-  /** @internal A publish that leaves reporting its rejection to the caller. Its answer is what the add-on's own end
-   *  of the channel answers it with, which only the add-on reads. */
+  /** @internal An add-on's publish, which leaves reporting its rejection to the caller. Its answer is what the
+   *  add-on's own end of the channel answers it with, which only the add-on reads. The serializer holds it whole, bytes
+   *  included. */
   _publishUnreported(data: ChannelData<Publish>): Promise<unknown> {
-    return this.sendPublish(encode.publishAckReq, stringifyValue(data, 'publish'), null, false)
+    return this.sendPublish(encode.publishAckReq, stringify(data), null, false)
+  }
+
+  /** @internal An add-on's request, which its own end of the channel answers. The serializer holds the request and its
+   *  answer whole, bytes included. */
+  _sendRequest(data: unknown): Promise<unknown> {
+    if (this.stopped) throw this.lifecycle.sendRefusal()
+    return this.sendAckReq<unknown, string>(encode.textAckReq, stringify(data))
   }
 
   override messages(options?: { signal?: AbortSignal }) {

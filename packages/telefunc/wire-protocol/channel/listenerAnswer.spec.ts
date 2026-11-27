@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'
+import { parse } from '@brillout/json-serializer/parse'
 import { Telefunc } from '../../serve/node.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { onBug } from '../../node/server/runTelefunc/onBug.js'
 import { ServerChannel, ATTACHABLE_NOW } from './server/ServerChannel.js'
 import { ClientChannel } from './client/ClientChannel.js'
+import { ClientBroadcast } from './client/ClientBroadcast.js'
+import { ServerBroadcastEnd } from './server/ServerBroadcastEnd.js'
 import { getChannelMux } from './server/ChannelMux.js'
 
 serverConfig.channel = { transports: ['ws'], pingInterval: 60_000 }
@@ -91,3 +94,38 @@ for (const [answering, { senderGets }] of Object.entries(ENDS)) {
     })
   }
 }
+
+// An add-on's own protocol, as Room's joins, meta writes and messages: what the page sends and what the server answers
+// keep their bytes.
+test("an add-on's request and publish on a page's broadcast, and their answers, keep the bytes in them", async () => {
+  const published: unknown[] = []
+  const end = new ServerBroadcastEnd()
+  end.setOwner({
+    _onPagePublish(serialized) {
+      published.push(parse(serialized))
+      return { thumbnail: new Uint8Array([11]) }
+    },
+    _onPagePublishBinary() {},
+  })
+  getChannelMux().registerChannel(end, ATTACHABLE_NOW)
+  const page = new ClientBroadcast({
+    channelId: end.id,
+    key: 'room',
+    connection: { telefuncUrl, transports: ['ws'], idleTimeout: 0 },
+  })
+  await Promise.all([end.opened, page.opened])
+  const received: unknown[] = []
+  end.listen((request) => {
+    received.push(request)
+    return { meta: { avatar: new Uint8Array([9, 10]) } }
+  })
+  try {
+    const answer = await page._sendRequest({ meta: { avatar: new Uint8Array([7, 8]) } })
+    expect(received).toEqual([{ meta: { avatar: new Uint8Array([7, 8]) } }])
+    expect(answer).toEqual({ meta: { avatar: new Uint8Array([9, 10]) } })
+    expect(await page._publishUnreported({ data: new Uint8Array([12]) })).toEqual({ thumbnail: new Uint8Array([11]) })
+    expect(published).toEqual([{ data: new Uint8Array([12]) }])
+  } finally {
+    await end.close({ timeout: 100 })
+  }
+})

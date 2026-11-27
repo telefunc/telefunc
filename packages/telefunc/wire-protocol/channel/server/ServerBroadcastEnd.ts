@@ -2,6 +2,7 @@ export { ServerBroadcastEnd }
 export type { BroadcastEndOwner }
 
 import { ServerChannel } from './ServerChannel.js'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { fitsPublish, hold, letGo, maxPendingBytesOf, nearBudget, type MemoryHolder } from './channelMemory.js'
@@ -400,6 +401,11 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
     return this.answerHeld(seq, 0, () =>
       this.answerRequest(seq, [{ listener: (d: Uint8Array) => owner._onPagePublishBinary(d) }], data),
     )
+  }
+
+  /** What it answers is its add-on's, whose page reads it whole: the serializer holds it, bytes included. */
+  protected override serializeAnswer(answer: unknown): string {
+    return stringify(answer)
   }
 
   /** A full buffer or a shield failure answers with the status its page's `publish()` rejects with. */

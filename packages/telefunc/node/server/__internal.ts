@@ -153,6 +153,7 @@ type ClientBroadcast<T = unknown, Publish = T> = Pick<
   ClientBroadcastClass<T, Publish>,
   | '_publishUnreported'
   | '_publishBinaryUnreported'
+  | '_sendRequest'
   | '_setSubscribed'
   | '_setWantParts'
   | '_sendReply'
@@ -160,7 +161,6 @@ type ClientBroadcast<T = unknown, Publish = T> = Pick<
   | '_confirmSoon'
   | 'isClosed'
   | 'isConnected'
-  | 'send'
   | 'onOpen'
   | 'onClose'
   | 'onDisconnect'

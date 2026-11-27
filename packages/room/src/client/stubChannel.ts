@@ -33,9 +33,7 @@ function deliverDm(end: Pick<ClientBroadcast, '_sendReply'>, participant: Client
 type PageRequest = Exclude<RoomStubRequest | ParticipantStubRequest, { __r: 'dm-reply' }>
 
 /** A channel a page's requests go out on, each answered. */
-type AckedChannel = {
-  send(req: PageRequest, opts: { ack: true }): Promise<unknown>
-}
+type AckedChannel = Pick<ClientBroadcast, '_sendRequest'>
 
 /** A page's channel to a Room stub, a room's or a lone participant's: it relays `Notice` on its text lane and takes
  *  `Publish` as a text publish. The stub answers a publish with a `RoomResult`, which core leaves unknown, so the
@@ -86,7 +84,7 @@ async function request<Kind extends PageRequest['__r']>(
   req: PageRequest & { __r: Kind },
 ): Promise<RequestAnswers[Kind]> {
   const answer = ANSWERS[req.__r]
-  return answer(await roomResultValue(end.send(req, { ack: true })))
+  return answer(await roomResultValue(end._sendRequest(req)))
 }
 
 /** A join's answer: the member it made. */

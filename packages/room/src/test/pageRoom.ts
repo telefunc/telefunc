@@ -61,7 +61,7 @@ function stubChannel<Notice>(answers: Answers) {
   const end = {
     isClosed: false,
     isConnected: true,
-    send: async (req: PageRequest) => {
+    _sendRequest: async (req: PageRequest) => {
       requests.push(req)
       if (req.__r === 'req-join')
         return { ok: true, value: 'join' in answers ? answers.join : { id: 'me', joinedAt: 0 } }
