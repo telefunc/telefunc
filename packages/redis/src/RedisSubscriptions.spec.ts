@@ -914,8 +914,7 @@ describe('a receiver that throws, ahead of another on the same channel', () => {
   })
 })
 
-// c6 probes (finality-436-redis-order round 6): a holder's lane across a handoff, not part of the product.
-describe('c6: a lane its holder hands from one route to another', () => {
+describe('a lane its holder hands from one route to another', () => {
   const EVERY = TEXT
   const TRACK = `${TEXT}:t`
   const fanIn = { fanIn: true, placed: false, text: true, lanesEndWithMembers: false }
@@ -925,7 +924,7 @@ describe('c6: a lane its holder hands from one route to another', () => {
     starts: new Map([[laneKey, { place, id }]]),
   })
 
-  it('P6a: delivers the new history’s commit only the old route brought, where the new route’s read answers first', async () => {
+  it('delivers the new history’s commit only the old route brought, where the new route’s read answers first', async () => {
     const { listen, publish, delivered, missed } = setup()
     let everyRead = Promise.resolve(at(10, 'a', 't'))
     const every = listen(EVERY, () => everyRead, fanIn, 'room')
@@ -945,7 +944,7 @@ describe('c6: a lane its holder hands from one route to another', () => {
     expect(missed).toEqual([null])
   })
 
-  it('P6b: delivers a commit the new route’s start covers that the lane never delivered, on one history', async () => {
+  it('delivers a commit the new route’s start covers that the lane never delivered, on one history', async () => {
     const { listen, publish, delivered, missed } = setup()
     const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
     await expect.poll(() => every.state()).toBe('ready')
@@ -963,7 +962,7 @@ describe('c6: a lane its holder hands from one route to another', () => {
     expect(missed).toEqual([])
   })
 
-  it('P6c: keeps what the old route parked once it leaves, and tells the hole', async () => {
+  it('keeps what the old route parked once it leaves, and tells the hole', async () => {
     const { listen, publish, delivered, missed } = setup()
     const every = listen(EVERY, async () => at(10, 'a', 't'), fanIn, 'room')
     await expect.poll(() => every.state()).toBe('ready')
@@ -976,7 +975,7 @@ describe('c6: a lane its holder hands from one route to another', () => {
     expect(missed).toEqual([1])
   })
 
-  it('P6d: tells a failover once where a stale read of the left history follows the new one', async () => {
+  it('tells a failover once where a stale read of the left history follows the new one', async () => {
     const { listen, publish, delivered, missed } = setup()
     let everyRead = Promise.resolve(at(10, 'a', 't'))
     let trackRead = Promise.resolve(at(10, 'a', ''))
@@ -999,7 +998,7 @@ describe('c6: a lane its holder hands from one route to another', () => {
     expect(delivered).toEqual(['x11', 'y11'])
   })
 
-  it('P6e: tells a later failover after a stale read of the left history', async () => {
+  it('tells a later failover after a stale read of the left history', async () => {
     const { listen, publish, missed } = setup()
     let everyRead = Promise.resolve(at(10, 'a', 't'))
     let trackRead = Promise.resolve(at(10, 'a', ''))
