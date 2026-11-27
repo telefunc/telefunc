@@ -60,6 +60,5 @@ test("TypeScript under the browser condition resolves the server half's types, t
     "import type { TELEFUNC_SHIELDS } from 'telefunc/__internal'\nexport type Shielded = { [TELEFUNC_SHIELDS]: true }\n",
   )
   const tsc = join(packageDir, 'node_modules/.bin/tsc')
-  const { stdout } = await run(tsc, ['-p', app]).catch((err: { stdout: string }) => err)
-  expect(stdout).toBe('')
+  await run(tsc, ['-p', app])
 })

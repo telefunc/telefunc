@@ -566,6 +566,39 @@ test("without config.fetch, a cold upload's call and the wire its channel opens 
   expect(used).toContain('before:call')
 })
 
+test.each(['config.channel.transports', 'withContext()'] as const)(
+  "a cold upload's channel opens on the transports its invocation read from %s, though the app then changes that list in place",
+  async (source) => {
+    const { config, call, withContext } = await page()
+    const used: string[] = []
+    config.fetch = recordingFetch('page', used)
+    let sockets = 0
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        constructor() {
+          sockets++
+          throw new Error('No server')
+        }
+      },
+    )
+    respond = text(1)
+    const transports: ('sse' | 'ws')[] = ['sse']
+    let pending: Promise<unknown>
+    if (source === 'config.channel.transports') {
+      config.channel = { transports }
+      pending = call([new ReadableStream()])
+    } else {
+      pending = withContext(call, { channel: { transports } })([new ReadableStream()])
+    }
+    transports.splice(0, 1, 'ws')
+    gates.channels.open()
+    await pending
+    await vi.waitFor(() => expect(used).toContain('page:wire'))
+    expect(sockets).toBe(0)
+  },
+)
+
 test("a second client module instance's channels open with its own fetch", async () => {
   const first = await page()
   respond = text(1)

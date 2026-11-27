@@ -162,9 +162,12 @@ function onDemandCode(pageId: string): Set<string> {
   const entry = `virtual:vike:page-entry:client:${pageId}`
   const scripts = closure([entry])
   const features = chunk(entry).dynamicImports ?? []
-  expect(features.map((key) => key.replace(/.*\/wire-protocol\/values\/client\//, '')).join(' ')).toBe(
-    'streams.js channels.js broadcasts.js',
-  )
+  expect(
+    features
+      .map((key) => key.replace(/.*\/wire-protocol\/values\/client\//, ''))
+      .sort()
+      .join(' '),
+  ).toBe('broadcasts.js channels.js streams.js')
   for (const feature of features) expect(scripts.has(`/${chunk(feature).file}`)).toBe(false)
   return new Set([...closure(features)].filter((script) => !scripts.has(script)))
 }

@@ -112,7 +112,7 @@ function responseType(wire: string, extensions: ClientResponseType[]): TagType |
   }
 }
 
-/** `prefix` starts with the stem, as no name `Object.prototype` has does. */
+/** `prefix` is empty or starts with the stem, neither a name `Object.prototype` has. */
 function isBuiltInPrefix(prefix: string): prefix is BuiltInPrefix {
   return prefix in FEATURE_OF_PREFIX
 }
