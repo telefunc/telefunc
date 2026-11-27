@@ -80,6 +80,9 @@ class BodyReader {
   /** The parts of the frame `readExact` collects, on the reader so that `discardRest` lets go of them while it waits. */
   private collected: Uint8Array<ArrayBuffer>[] = []
   private readonly fileSizes = new Map<number, number>()
+  /** The bytes the source yielded, and where in them the files begin. */
+  private bytesRead = 0
+  private filesStart = 0
   /** The files whose bytes a File can still read: neither read to their end, cancelled or failed, nor let go of. Each
    *  one's callbacks run once it leaves. */
   private readonly unread = new Map<number, Array<() => void>>()
@@ -191,8 +194,9 @@ class BodyReader {
   /** Reads the rest of the body from now on, at the answer of a call that a value it returned still holds, or at the
    *  call's end (`endCall`): the client's upload ends, so that a browser, which delivers an answer only once it has sent
    *  the whole body, gets it. While a file is left to read, each chunk is kept on the reader's memory for the file reads,
-   *  which take them in order as they read; a chunk it refuses is dropped, and so is every one after it: a file read that
-   *  reaches them fails, saying why. What is kept goes once no file is left to read. */
+   *  which take them in order as they read; a chunk it refuses is dropped, with what it kept of that chunk's file, and so
+   *  is every one after it: a file read that reaches them fails, saying why. What is kept goes once no file is left to
+   *  read. */
   keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
     if (this.unread.size > 0) this.kept = { memory: this.memory(), chunks: [], phase: 'reading', more: null }
@@ -230,8 +234,27 @@ class BodyReader {
     const kept = this.kept
     if (kept === null || kept.phase !== 'reading') return
     if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
-    else kept.phase = 'refused'
+    else this.refuseKept(kept, this.bytesRead - chunk.length)
     wakeKept(kept)
+  }
+
+  /** The read-off keeps no more from `end`, the body's offset where it stopped: what it keeps of the file there goes, as
+   *  no read of that file can reach its end. The files it keeps whole stay to be read. */
+  private refuseKept(kept: Kept, end: number): void {
+    kept.phase = 'refused'
+    let partial = end - this.filesStart
+    for (let index = 0; partial >= (this.fileSizes.get(index) ?? Infinity); index++) {
+      partial -= this.fileSizes.get(index) ?? 0
+    }
+    while (partial > 0) {
+      const last = kept.chunks.pop()
+      if (last === undefined) return
+      const cut = Math.min(partial, last.length)
+      kept.memory.letGo(cut)
+      // Copied, so that the bytes cut go with their buffer.
+      if (cut < last.length) kept.chunks.push(new Uint8Array(last.subarray(0, last.length - cut)))
+      partial -= cut
+    }
   }
 
   /** The read-off's next chunk, for `by`'s read: null where it drops what it reads, as at the body's end; at the end of
@@ -286,6 +309,7 @@ class BodyReader {
   /** Registers a file's size, as the call's metadata declares it, while the call is revived: the file, as its File reads
    *  it. */
   registerFile(index: number, size: number): RequestFile {
+    if (this.fileSizes.size === 0) this.filesStart = this.bytesRead - this.buffer.length
     this.fileSizes.set(index, size)
     this.unread.set(index, [])
     return {
@@ -546,6 +570,7 @@ class BodyReader {
         this.source.letGo()
         return null
       }
+      this.bytesRead += value.length
       this.onChunk?.()
       return value
     } catch (error) {
