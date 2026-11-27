@@ -290,6 +290,17 @@ describe('a command whose reply Redis holds', () => {
     })
   })
 
+  it("a subscriber connection waits for its replies with no deadline, whatever the app's client says", async () => {
+    const subscribers = await Promise.all(
+      [{}, { commandTimeout: 200 }].map((options) => installed(client(options)).openSubscriberSocket()),
+    )
+    for (const subscriber of subscribers) subscriber.disconnect()
+    expect(subscribers).toMatchObject([
+      { options: { commandTimeout: undefined } },
+      { options: { commandTimeout: undefined } },
+    ])
+  })
+
   it("a Cluster's nodes wait 15 s, or as long as the redisOptions of the app's Cluster say", () => {
     const of = (redisOptions: { commandTimeout?: number }) => {
       const cluster = new Cluster([{ host: '127.0.0.1', port: 7001 }], { lazyConnect: true, redisOptions })

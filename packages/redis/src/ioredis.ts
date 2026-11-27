@@ -475,6 +475,8 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     autoResubscribe: false,
     lazyConnect: true,
     retryStrategy: () => null,
+    // Its unanswered pings find a silent connection (`RedisSubscriptions.ping()`), which a command deadline would end.
+    commandTimeout: undefined,
   })
 }
 
