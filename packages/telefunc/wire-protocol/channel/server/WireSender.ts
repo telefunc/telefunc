@@ -68,16 +68,15 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   private readonly heldChannels: () => ReadonlyMap<number, ChannelHandle> | undefined
   private readonly attaching: ReadonlySet<MuxChannel>
   private readonly onPastBacklog: () => void
-  /** The wire closed: it sends nothing more, holds nothing and delivered nothing. */
-  private closed = false
+  /** `'pastBacklog'`: the ledger refused the wire its backlog, and its owner ends the wire: it hands nothing more.
+   *  `'closed'`: the wire closed: it sends nothing more, holds nothing and delivered nothing. */
+  private state: 'open' | 'pastBacklog' | 'closed' = 'open'
   /** What may be written before the backlog is measured again (`measureBacklogRoom`). */
   private backlogRoom = 0
   /** What the wire holds for its page that none of its channels holds, held in the ledger as of its last measure. */
   private readonly memory: MemoryHolder = { heldBytes: 0 }
   /** The largest frame sent on the wire. */
   private largestSent = 0
-  /** Its backlog passed that, and its owner ends the wire. */
-  private pastBacklog = false
   /** A RECONCILED is owed: what is sent meanwhile is held behind it. */
   private owed = false
   /** What was sent while a RECONCILED was owed, in order: channels' frames, which their replay also keeps, and the
@@ -133,7 +132,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   sendPublish(index: number, seq: number, body: Uint8Array<ArrayBuffer>): void {
-    if (this.closed || this.pastBacklog) return
+    if (this.state !== 'open') return
     const bytes = HEADER + body.byteLength
     if (!this.owed && bytes <= this.backlogRoom) {
       const headroom = this.pieces?.headroom
@@ -251,12 +250,12 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   /** Counts `frame` against what the wire may hold, whether it is handed now or held for a RECONCILED; false once the
    *  ledger refused the wire its backlog, and the owner is told, after the turn, to end the wire's session. */
   private admit(frame: Uint8Array<ArrayBuffer>): boolean {
-    if (this.closed || this.pastBacklog) return false
+    if (this.state !== 'open') return false
     if (frame.byteLength > this.largestSent) this.largestSent = frame.byteLength
     if (frame.byteLength > this.backlogRoom) {
       this.backlogRoom = this.measureBacklogRoom()
       if (this.backlogRoom < 0) {
-        this.pastBacklog = true
+        this.state = 'pastBacklog'
         queueMicrotask(this.onPastBacklog)
         return false
       }
@@ -267,7 +266,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
 
   /** Gives an admitted frame to the transport. */
   private hand(frame: Uint8Array<ArrayBuffer>): void {
-    if (this.closed || this.pastBacklog) return
+    if (this.state !== 'open') return
     if (frame[0] === TAG.ACK_RES) this.pieces?.receiver.answering()
     const at = performance.now()
     this.wait.handed(frame.byteLength, passesData(readTag(frame)), at)
@@ -294,7 +293,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   }
 
   deliveredBefore(ms: number): number {
-    return this.closed ? 0 : this.deliveries.beforeHandled(ms)
+    return this.state === 'closed' ? 0 : this.deliveries.beforeHandled(ms)
   }
 
   /** The wire closed: drops what is sent from now on, and stops its headroom. `ends: 'first'`, at an end the server
@@ -304,7 +303,7 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
   close(ends: 'first' | 'dropped' = 'dropped'): void {
     if (ends === 'first') this.lastEnds.push(...this.ungivenEnds())
     else this.lastEnds.length = 0
-    this.closed = true
+    this.state = 'closed'
     this.owed = false
     this.probeAnswers.length = 0
     this.held.length = 0
@@ -343,21 +342,21 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number | undefined {
-    if (this.closed) return 0
+    if (this.state === 'closed') return 0
     const socket = this.transport.bufferedAmount(this.wire)
     return socket === undefined ? undefined : socket + (this.pieces?.headroom.sender.unhandedBytes ?? 0)
   }
 
   /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
   queuedAhead(): number | undefined {
-    if (this.closed) return 0
+    if (this.state === 'closed') return 0
     return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
   }
 
   /** Its page took what it was sent: what the ledger holds for the wire and it no longer holds goes. A wire the ledger
    *  holds nothing for has nothing to let go of. */
   readonly rebalanceMemory = (): void => {
-    if (this.closed || this.memory.heldBytes === 0) return
+    if (this.state === 'closed' || this.memory.heldBytes === 0) return
     this.backlogRoom = Math.max(0, this.measureBacklogRoom())
   }
 
