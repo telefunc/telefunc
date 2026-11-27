@@ -3204,7 +3204,7 @@ function Room() {
         // The room's own channel: its handle holds it, as its state's owner. Its connection lists a stream's newest lossy
         // frame until the server confirms it.
         const end = roomEnd(view)
-        const channels = fieldOf(fieldOf(end, 'connection'), 'channels')
+        const channels = fieldOf(fieldOf(fieldOf(end, 'connection'), 'lifecycle'), 'channels')
         if (!isChannelTable(channels)) throw new Error("The room's connection has no table of its channels")
         const replaceable = optionalFieldOf(channels.of(end), 'replaceable')
         const receiptSeqs = new Set(receipts.map((receipt) => receipt.seq))
