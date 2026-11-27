@@ -46,9 +46,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   /** Ranges whose acknowledgement spans may include time spent waiting on the app. */
   private readonly appLimited = new Fifo<{ start: number; end: number }>()
   private lastAppLimited: { start: number; end: number } | null = null
-  /** Whether the sender is sending what waited for headroom, and whether it handed data of it yet. */
-  private releasing = false
-  private releasedData = false
+  /** Whether the sender is sending what waited for headroom (`sendWaiting`), and whether it handed data of it yet. */
+  private release: 'none' | 'started' | 'handedData' = 'none'
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it. */
@@ -144,8 +143,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const end = this.sender.transmittedBytes
     // Unmeasured, what waits in the sender waits for the probe's answer or for copy room, not for the path: a release's
     // first data arrives after that wait, and only what follows it arrives as the path takes it.
-    const pathHeld = this.drain.rate > 0 ? this.releasing || this.sender.dataWaits : this.releasedData
-    if (this.releasing) this.releasedData = true
+    const { release } = this
+    const pathHeld = this.drain.rate > 0 ? release !== 'none' || this.sender.dataWaits : release === 'handedData'
+    if (release !== 'none') this.release = 'handedData'
     if (!pathHeld && this.socket.bufferedAmount <= this.handedSinceData) {
       const start = end - bytes
       this.markAppLimited(start, start + firstBytes)
@@ -312,10 +312,9 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private readonly sendWaiting = (): void => {
     this.awaitsCopyRoom = false
     if (this.sender.dataWaits) {
-      this.releasing = true
+      this.release = 'started'
       this.sender.sendWaiting(this.headroom())
-      this.releasing = false
-      this.releasedData = false
+      this.release = 'none'
     }
     this.pace()
   }
