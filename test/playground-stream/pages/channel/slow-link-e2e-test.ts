@@ -12,6 +12,7 @@ import {
   sleep,
   defined,
   cutWire,
+  canCutWire,
   getCleanupState,
 } from '../../e2e-utils'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
@@ -71,7 +72,8 @@ function testSlowLink(isDev: boolean) {
   if (upgrades) return
 
   // Over SSE the page's next open may go on a connection it already has, which `delayFirstByte` leaves on time.
-  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws') testLateAnswers()
+  if (canCutWire() && parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'ws')
+    testLateAnswers()
 
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse')
     test('channel: SSE wires the page gave up on hold nothing of the 32 MiB waiting for it, and all of it arrives', async () => {

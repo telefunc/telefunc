@@ -467,7 +467,7 @@ function testWire(isDev: boolean) {
     )
   })
 
-  if (!isDev && ['sse', 'ws'].includes(parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join()))
+  if (canCutWire() && ['sse', 'ws'].includes(parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join()))
     testWireFrozenPage()
 
   if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
