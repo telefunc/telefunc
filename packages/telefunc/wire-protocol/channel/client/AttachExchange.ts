@@ -25,6 +25,19 @@ type ReconcileOutcome = {
   reconcileComplete: boolean
 }
 
+/** The wait for the RECONCILED of the RECONCILE out. */
+type ReconciledWait = {
+  /** On a WebSocket, a RECONCILE's deadline runs from its receipt, the server's RECONCILE_TAKEN: `'awaited'` till it
+   *  comes, while the deadline runs from the last time the server took more of the page's bytes, then `'taken'`.
+   *  `'none'` for a RECONCILE on SSE and a BARRIER, whose deadline runs from the start. */
+  receipt: 'none' | 'awaited' | 'taken'
+  /** The deadline, from its start or the answer to the request that carried it. */
+  timeoutMs: number
+  timer: ReturnType<typeof setTimeout>
+  /** A later RECONCILE's batch POST is out unanswered: what the event stream delivers meanwhile doesn't excuse it. */
+  carrierOut: boolean
+}
+
 /** The RECONCILE in flight. */
 type ReconcileInFlight = {
   /** The channels it lists, and whether as `initial`. */
@@ -69,19 +82,10 @@ class AttachExchange {
   private readonly owner: AttachExchangeOwner
   private readonly channels: ChannelTable
   private readonly gate: SendGate
-  /** A RECONCILE is out and its RECONCILED hasn't come. On SSE it is set while connecting too: the open POST's body
-   *  carries the first RECONCILE. Only `enterReconciling` and `exitReconciling` write it, so its deadline
-   *  (`reconcileTimer`) never outlives it. */
-  private isReconciling = false
-  /** On a WebSocket, a RECONCILE's deadline runs from its receipt, the server's RECONCILE_TAKEN: `'awaited'` till it
-   *  comes, while the deadline runs from the last time the server took more of the page's bytes, then `'taken'`.
-   *  `'none'` for a RECONCILE on SSE and a BARRIER, whose deadline runs from the start. */
-  private receipt: 'none' | 'awaited' | 'taken' = 'none'
-  private reconcileTimer: ReturnType<typeof setTimeout> | null = null
-  /** The RECONCILE's deadline, from its start or the answer to the request that carried it. */
-  private reconcileTimeoutMs = RECONCILE_TIMEOUT_MS
-  /** A later RECONCILE's batch POST is out unanswered: what the event stream delivers meanwhile doesn't excuse it. */
-  private carrierOut = false
+  /** Set while a RECONCILE is out and its RECONCILED hasn't come. On SSE it is set while connecting too: the open
+   *  POST's body carries the first RECONCILE. Only `enterReconciling` and `exitReconciling` write it, so its deadline
+   *  never outlives it. */
+  private reconciledWait: ReconciledWait | null = null
   /** Resolved once no RECONCILE is in flight. */
   private reconcileSettledWaiters: (() => void)[] = []
   private inFlight = reconcileInFlight()
@@ -107,7 +111,7 @@ class AttachExchange {
   }
 
   get reconciling(): boolean {
-    return this.isReconciling
+    return this.reconciledWait !== null
   }
 
   get reconcileOwed(): boolean {
@@ -151,13 +155,13 @@ class AttachExchange {
 
   /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
   get boundsWire(): boolean {
-    return this.isReconciling && this.reconciledWire !== this.owner.wire
+    return this.reconciledWait !== null && this.reconciledWire !== this.owner.wire
   }
 
   /** Whether that deadline runs from the start, so the heartbeat leaves the wire to it. A RECONCILE with a receipt
    *  waits on the heartbeat until the receipt: its server answers the page's PINGs while the page's bytes arrive. */
   get timesWire(): boolean {
-    return this.boundsWire && this.receipt === 'none'
+    return this.boundsWire && this.reconciledWait?.receipt === 'none'
   }
 
   /** Coalesces sync-burst registrations into one RECONCILE round-trip. */
@@ -178,7 +182,7 @@ class AttachExchange {
   }
 
   reconcileSettled(signal: AbortSignal): Promise<void> {
-    if (!this.isReconciling) return Promise.resolve()
+    if (this.reconciledWait === null) return Promise.resolve()
     return settledOrAborted(new Promise<void>((resolve) => this.reconcileSettledWaiters.push(resolve)), signal)
   }
 
@@ -360,53 +364,61 @@ class AttachExchange {
   /** Opens the wait for a new RECONCILE's RECONCILED and arms its deadline, which, where `receipted`, runs till the
    *  receipt from what the server takes. A follow-up RECONCILE for late registrations opens it again, restarting it. */
   private enterReconciling(receipted: boolean): void {
-    this.isReconciling = true
     this.inFlight = reconcileInFlight()
-    this.receipt = receipted ? 'awaited' : 'none'
-    this.reconcileTimeoutMs = RECONCILE_TIMEOUT_MS
-    this.carrierOut = false
-    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    if (this.reconciledWait !== null) clearTimeout(this.reconciledWait.timer)
+    this.reconciledWait = {
+      receipt: receipted ? 'awaited' : 'none',
+      timeoutMs: RECONCILE_TIMEOUT_MS,
+      timer: this.reconcileDeadlineIn(RECONCILE_TIMEOUT_MS),
+      carrierOut: false,
+    }
   }
 
   /** The RECONCILE's deadline runs from now: the server answered the request that carried it. */
   restartReconcileDeadline(): void {
-    this.carrierOut = false
-    if (this.isReconciling && this.receipt === 'none') this.armReconcileDeadline(this.reconcileTimeoutMs)
+    const wait = this.reconciledWait
+    if (wait === null) return
+    wait.carrierOut = false
+    if (wait.receipt === 'none') this.armReconcileDeadline(wait, wait.timeoutMs)
   }
 
   /** A later RECONCILE went in a batch POST of `bytes`: its deadline runs from now, with the time that POST takes. */
   reconcileCarried(bytes: number): void {
-    if (!this.isReconciling || this.receipt !== 'none' || this.boundsWire) return
-    this.carrierOut = true
-    this.reconcileTimeoutMs = RECONCILE_TIMEOUT_MS + (2 * bytes) / RECONCILE_FLOOR_BYTES_PER_MS
-    this.armReconcileDeadline(this.reconcileTimeoutMs)
+    const wait = this.reconciledWait
+    if (wait === null || wait.receipt !== 'none' || this.boundsWire) return
+    wait.carrierOut = true
+    wait.timeoutMs = RECONCILE_TIMEOUT_MS + (2 * bytes) / RECONCILE_FLOOR_BYTES_PER_MS
+    this.armReconcileDeadline(wait, wait.timeoutMs)
   }
 
   /** The server took the RECONCILE whole: its RECONCILED comes within the deadline. */
   takeReceipt(): void {
-    if (!this.isReconciling || this.receipt !== 'awaited') return
-    this.receipt = 'taken'
-    this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    const wait = this.reconciledWait
+    if (wait === null || wait.receipt !== 'awaited') return
+    wait.receipt = 'taken'
+    this.armReconcileDeadline(wait, RECONCILE_TIMEOUT_MS)
   }
 
   /** A piece of the RECONCILED came: the rest comes within the deadline. */
   reconciledPieceArrived(): void {
-    if (this.isReconciling && this.receipt === 'taken') this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
+    const wait = this.reconciledWait
+    if (wait !== null && wait.receipt === 'taken') this.armReconcileDeadline(wait, RECONCILE_TIMEOUT_MS)
   }
 
-  private armReconcileDeadline(ms: number): void {
-    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
-    this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), ms)
+  private armReconcileDeadline(wait: ReconciledWait, ms: number): void {
+    clearTimeout(wait.timer)
+    wait.timer = this.reconcileDeadlineIn(ms)
+  }
+
+  private reconcileDeadlineIn(ms: number): ReturnType<typeof setTimeout> {
+    return setTimeout(() => this.onReconcileTimeout(), ms)
   }
 
   /** Closes the wait: the RECONCILED settled, the wire was lost, or the connection was disposed. */
   private exitReconciling(): void {
-    this.isReconciling = false
-    this.receipt = 'none'
-    this.carrierOut = false
-    if (this.reconcileTimer) {
-      clearTimeout(this.reconcileTimer)
-      this.reconcileTimer = null
+    if (this.reconciledWait !== null) {
+      clearTimeout(this.reconciledWait.timer)
+      this.reconciledWait = null
     }
     for (const resolve of this.reconcileSettledWaiters.splice(0)) resolve()
   }
@@ -416,15 +428,16 @@ class AttachExchange {
    *  is dropped as on a missed pong, and `handleTransportLoss` reconnects. A wire's first RECONCILE has nothing of the
    *  page's ahead of it, so what else the wire says (an SSE comment, a PONG) doesn't answer it. */
   private onReconcileTimeout(): void {
-    if (!this.isReconciling) return
+    const wait = this.reconciledWait
+    if (wait === null) return
     const { transport } = this.owner
     const { heartbeat } = transport
     // A later one waits behind what the page sent before: the wire is dead once it delivered nothing for the deadline.
     let quiet =
-      this.receipt === 'none' && !this.boundsWire && !this.carrierOut ? (heartbeat?.quietFor() ?? Infinity) : Infinity
+      wait.receipt === 'none' && !this.boundsWire && !wait.carrierOut ? (heartbeat?.quietFor() ?? Infinity) : Infinity
     // Till its receipt, it crosses while the server takes more of the page's bytes.
-    if (this.receipt === 'awaited') quiet = heartbeat?.unconfirmedFor() ?? Infinity
-    if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
+    if (wait.receipt === 'awaited') quiet = heartbeat?.unconfirmedFor() ?? Infinity
+    if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(wait, RECONCILE_TIMEOUT_MS - quiet)
     this.owner.onReconcileLate(transport)
   }
 
@@ -447,9 +460,10 @@ class AttachExchange {
     else reconcile.attempt = this.nextAttempt()
     const frame = encode.reconcile(reconcile)
     // With no receipt, nothing says how far it crossed: it has the time it and its RECONCILED take at the floor too.
-    if (this.receipt === 'none') {
-      this.reconcileTimeoutMs = RECONCILE_TIMEOUT_MS + (2 * frame.byteLength) / RECONCILE_FLOOR_BYTES_PER_MS
-      this.armReconcileDeadline(this.reconcileTimeoutMs)
+    const wait = this.reconciledWait
+    if (wait !== null && wait.receipt === 'none') {
+      wait.timeoutMs = RECONCILE_TIMEOUT_MS + (2 * frame.byteLength) / RECONCILE_FLOOR_BYTES_PER_MS
+      this.armReconcileDeadline(wait, wait.timeoutMs)
     }
     return { kind: 'reconcile', frame }
   }
