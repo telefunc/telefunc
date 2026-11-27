@@ -7,6 +7,7 @@ export { bunClientLeft }
 
 import type { ClientLeft } from '../node/server/runTelefunc/clientLeft.js'
 
+// TODO: remove once https://github.com/oven-sh/bun/issues/49647 is released.
 /** Whether `request`'s failed body read is its client leaving, before its answer or after it. */
 function bunClientLeft(request: Request): ClientLeft {
   return (err) => request.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')

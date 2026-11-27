@@ -7,6 +7,7 @@ export { guardCrosswsHook, getCrosswsNamespace }
 import type { Peer } from 'crossws'
 import { handleError } from '../node/server/runTelefunc/handleError.js'
 
+// TODO: remove once https://github.com/h3js/crossws/issues/228 is released.
 /** `hook`, whose throw is printed as a call's error is, and `ends` the hook's peer where it isn't ending already. */
 function guardCrosswsHook<Args extends unknown[]>(
   hook: (peer: Peer, ...args: Args) => unknown,
@@ -26,6 +27,7 @@ function guardCrosswsHook<Args extends unknown[]>(
   }
 }
 
+// TODO: remove once https://github.com/h3js/crossws/issues/229 is released.
 /** One namespace for every wire, read off no URL. */
 function getCrosswsNamespace(): string {
   return 'telefunc'

@@ -22,6 +22,7 @@ function echoClientClose(ws: WebSocket, code: number, reason: string, wasClean: 
   else if (wasClean) ws.close(code, reason)
 }
 
+// TODO: remove once https://github.com/h3js/crossws/issues/227 is released.
 /** Ends the wire of `ws`, whose socket erred, as crossws ends one at an abnormal close. */
 function closeOnDurableError(
   adapter: DurableAdapter,
