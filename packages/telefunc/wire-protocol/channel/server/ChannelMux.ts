@@ -201,9 +201,8 @@ function getChannelMux(): ChannelMux {
  *  through `onWireOpen` and name it by identity from then on; a deployment with several instances relies on sticky
  *  sessions at its load balancer. */
 class ChannelMux implements UpgradeStagesOwner {
-  private readonly channels = new Map<string, ServerChannel>()
-  /** The session of the call that carried a channel, by its id: only that session's calls change what its page wants. */
-  private readonly callSessions = new Map<string, string>()
+  /** Only calls from the session that carried a channel can change what its page wants. */
+  private readonly channels = new Map<string, { channel: ServerChannel; session?: string }>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry({
@@ -249,8 +248,7 @@ class ChannelMux implements UpgradeStagesOwner {
   registerChannel(channel: ServerChannel<any, any>, page: CallPage, session?: string): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(page, this)
-    this.channels.set(channel.id, channel)
-    if (session !== undefined) this.callSessions.set(channel.id, session)
+    this.channels.set(channel.id, { channel, session })
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)
     for (const awaited of this.registrationWaits.take(channel.id)) {
@@ -266,9 +264,9 @@ class ChannelMux implements UpgradeStagesOwner {
     const session = getSessionToken(call)
     const pending: Promise<void>[] = []
     for (const want of wants) {
-      const channel = this.channels.get(want.channel)
-      if (!channel || session === undefined || this.callSessions.get(want.channel) !== session) continue
-      const inEffect = channel._applyCallWant(want, call.signal, this.options.connectTtl)
+      const entry = this.channels.get(want.channel)
+      if (!entry || session === undefined || entry.session !== session) continue
+      const inEffect = entry.channel._applyCallWant(want, call.signal, this.options.connectTtl)
       if (inEffect) pending.push(inEffect)
     }
     return pending.length === 0 ? undefined : Promise.all(pending)
@@ -276,7 +274,6 @@ class ChannelMux implements UpgradeStagesOwner {
 
   private unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
-    this.callSessions.delete(channelId)
     this.sessions.removeChannel(channelId)
   }
 
@@ -292,7 +289,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Lets go of the ended channel `id`, kept for its page, where the memory ledger needs the room. */
   letGoEnded(id: string): void {
-    const channel = this.channels.get(id)
+    const channel = this.channels.get(id)?.channel
     assert(channel)
     this.ended.release(channel)
   }
@@ -796,7 +793,7 @@ class ChannelMux implements UpgradeStagesOwner {
    *  server has ends now, and an initial one it hasn't registered yet ends as it registers, within `connectTtl`. */
   private refuseNamed(open: ReconcileOpenEntry[], entry: WireEntry, cause: SessionCause): void {
     for (const each of open) {
-      const channel = this.channels.get(each.id)
+      const channel = this.channels.get(each.id)?.channel
       if (channel) channel._onServerEnd(cause)
       // One refused wait per channel, however many reopens name it: the first refusal stands, its deadline too.
       else if (each.initial && !this.registrationWaits.refuses(each.id)) {
@@ -1056,7 +1053,7 @@ class ChannelMux implements UpgradeStagesOwner {
       awaited.open = open
       if (awaited.phase !== 'attached') return null
     }
-    const existing = this.channels.get(open.id)
+    const existing = this.channels.get(open.id)?.channel
     if (existing) {
       entry.state.attaching.add(existing)
       return this.attachChannel(existing, open, entry, replay)
