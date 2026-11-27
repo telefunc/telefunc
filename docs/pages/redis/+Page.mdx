@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance, <Link href="/channel#delivery">at most once</Link>. <Link href="/room">Rooms</Link> work across instances too.
+Use Redis to share <Link href="/channel#broadcast">broadcasts</Link> and <Link href="/room">rooms</Link> across your Telefunc servers: a `publish()` on one server reaches every `subscribe()` on every other server.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -15,7 +15,7 @@ Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across ser
 npm install @telefunc/redis ioredis
 ```
 
-Requires Redis 5 or later, and Redis 7 or later for a <Link href="#a-redis-user-of-its-own">Redis user whose ACL doesn't allow every command</Link>.
+Point every Telefunc server at the same Redis 5 or later:
 
 ```ts
 // Environment: server
@@ -27,7 +27,9 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first.
+That single call installs the Redis backend for both Broadcast and Room. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first.
+
+> Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
 
 ### Sharing an existing client
 
@@ -43,25 +45,29 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc. To rotate credentials, call `installRedis()` again with a client of the same Redis that has the new ones: Telefunc moves its connections to it.
+You can keep using the client you pass to Telefunc. To rotate credentials, call `installRedis()` again with a client that uses the new credentials for the same Redis.
 
-To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
+To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })` (default: `tf:`). Keep the keys under that prefix to Telefunc.
 
 ### A Redis user of its own
 
-To give Telefunc a Redis user that may do only what it needs, create it with this [ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/) rule, with your prefix in place of `tf:`:
+To give Telefunc a Redis user that may do only what it needs, create it on Redis 7 or later with this [ACL](https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/) rule, with your prefix in place of `tf:`:
 
+```bash
+redis-cli ACL SETUSER telefunc on '>your-password' '~tf:*' resetchannels '&tf:*' +evalsha +eval +get +set +del +unlink +exists +type +incr +pexpireat +time +hget +hmget +hset +hdel +hexists +hlen +hkeys +hscan +sadd +srem +scard +smembers +sscan +zadd +zrem +zrangebylex +zrangebyscore +publish +subscribe +unsubscribe +ping +info +client\|setname +cluster\|slots +cluster\|info +asking
 ```
-ACL SETUSER telefunc on >your-password ~tf:* resetchannels &tf:* +evalsha +eval +get +set +del +unlink +exists +type +incr +pexpireat +time +hget +hmget +hset +hdel +hexists +hlen +hkeys +hscan +sadd +srem +scard +smembers +sscan +zadd +zrem +zrangebylex +zrangebyscore +publish +subscribe +unsubscribe +ping +info +client|setname +cluster|slots +cluster|info +asking
+
+Then connect as that user, with the same prefix:
+
+```ts
+// Environment: server
+
+import IORedis from 'ioredis'
+import { installRedis } from '@telefunc/redis'
+
+const redis = new IORedis('redis://telefunc:your-password@localhost:6379')
+installRedis(redis, { prefix: 'tf:' })
 ```
-
-On Redis 7.2 and later and on Valkey, adding `+client|setinfo` lets the client library report its name and version. Without it, the server can log refused `CLIENT SETINFO` commands in its ACL log, and nothing else changes.
-
-Such a user needs Redis 7 or later: there, a `publish()` or a room change that Redis refuses leaves nothing behind.
-
-Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
-
-Telefunc's Redis backend takes a message of 28 MiB at most: a `publish()` or `publishBinary()` over that rejects with `ChannelOverflowError`. Telefunc chose this ceiling because, at its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection of a server it sends a larger message (measured on Redis 7.4). Raising those limits doesn't lift the ceiling.
 
 ## Errors
 
@@ -84,35 +90,35 @@ try {
 
 | `code` | When | What to do |
 |---|---|---|
-| `'unreachable'` | The connection to Redis failed or closed | Call again once Redis is reachable |
+| `'unreachable'` | The connection to Redis failed or closed, or Redis didn't answer within 15 s (or the `commandTimeout` of the client you pass) | Call again once Redis is reachable |
 | `'unavailable'` | Redis can't serve it now, and a later call may succeed: it is loading its data, busy, out of memory, a replica, or its replicas are behind | Call again later. If it lasts, see the message: out of memory, Redis needs a higher `maxmemory`; for a replica, give `installRedis()` a client of the primary |
 | `'denied'` | Redis refuses it until you change its ACL, the password, or a command its operator disabled | Change that, then call again |
 | `'failed'` | Redis failed it otherwise | See the message |
 
-`outcome` is `'not-run'` when the call changed nothing: Redis refused it before running it, Telefunc never sent it because the connection was down, or a key under Telefunc's prefix holds what Telefunc didn't write, which Telefunc checks before it writes (`code` is then `'failed'`: keep the prefix to Telefunc). Calling again is safe.
+If `err.outcome` is `'not-run'`, the call changed nothing: you can call it again once you've corrected the cause.
 
 It is `'may-have-run'` when the call may have taken effect, for example when the connection dropped before Redis answered:
 
 | Call | After `'may-have-run'` |
 |---|---|
 | `Broadcast.publish()`, `Room.publish()`, `Room.send()`, a participant's `publish()` and `send()` | Publishing again can deliver the message twice |
-| `Room.create()` | Call `Room.get()`: a second `Room.create()` rejects with `Room already exists` if the first took effect. Or use `Room.getOrCreate()` |
+| `Room.create()` | Call `Room.get()`: a second `Room.create()` rejects with `ROOM_EXISTS` if the first took effect. Or use `Room.getOrCreate()` |
 | `Room.close()`, `Room.setMeta()`, `Room.updateMeta()`, a participant's `setMeta()`, `updateMeta()` and `leave()` | Call it again: two calls end as one does |
-| `Room.removeParticipant()` | Call it again. With `{ identity }`, two calls end as one does. With `{ id }`, a second call that rejects with an error other than a `BackendError` means the participant is no longer in the room: the first call removed them, they left, or the room closed |
-| `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join, at once or at its next heartbeat |
-| `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: a read is safe to call again whatever its `outcome` says. It says `'may-have-run'` only when it found a participant or a room that had lapsed, and the cleanup it started may have taken effect |
+| `Room.removeParticipant()` | Call it again. With `{ identity }`, two calls end as one does. With `{ id }`, a second call that rejects with `PARTICIPANT_NOT_FOUND` or `ROOM_NOT_FOUND` means the participant is no longer in the room |
+| `Room.join()`, `room.join()` | Join again: Telefunc removes the participant of the failed join |
+| `Room.get()`, `Room.list()`, `Room.getParticipants()` | Call it again: you can retry a read regardless of `outcome` |
+
+## Subscriptions
 
 While Redis is unreachable, a new subscription's `opened` waits until Redis is back. A subscription already in effect stays, and its callback receives what is published once Redis is back (see <Link href="/channel#delivery">Delivery</Link> for what it missed).
 
-When a replica takes over as the primary, the rooms on every server catch up to what the new primary holds. Redis replicates asynchronously, so a write the old primary acknowledged can be lost, such as a `Room.updateMeta()` that resolved just before the failover.
+A subscription fails when Redis refuses it, for example when its ACL denies a channel the subscription needs. Restore the access, then subscribe again; your server's log and <Link href="/onBug">`onBug()`</Link> say what Redis refused.
 
-A subscription fails when Redis refuses it: its ACL denies a command, key or channel the subscription needs, it refuses the login (a wrong username or password), or it doesn't run a command the subscription needs, as its operator disabled or renamed it. That can happen when it starts, and also when Telefunc subscribes again after the connection to Redis dropped. The server reports the refusal through <Link href="/onBug">`onBug()`</Link> and its log. Telefunc isn't told when Redis allows it again, so subscribe again once you have restored the access. While the server is a replica (`READONLY`), as during a failover, a subscription waits until a primary serves it again.
+> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes: on the client, the callback you pass to `onClose()` gets a `ChannelClosedError`. Call its telefunction again and subscribe to the broadcast it returns.
 
-> A <Link href="/channel#new-broadcastchannel">`BroadcastChannel`</Link> closes. On the server, its error is a `BackendError`, whose message says what Redis refused, with Redis's error code, such as `NOPERM`. On the client, the callback you pass to `onClose()` gets a `ChannelClosedError`, and `opened` rejects with one if it hadn't resolved. Call its telefunction again and subscribe to the broadcast it returns.
+> A `Broadcast.subscribe()` is removed: if its `opened` hadn't resolved, it rejects with a `BackendError`. Call `Broadcast.subscribe()` again.
 
-> A `Broadcast.subscribe()` is removed, and its callback receives nothing more. If its `opened` hadn't resolved, it rejects with a `BackendError`, whose message says what Redis refused. Call `Broadcast.subscribe()` again.
-
-When a publish must wait for a subscription to be active, await its `opened`:
+Await `opened` before you depend on that listener receiving a publish:
 
 ```ts
 // Chat.telefunc.ts
@@ -124,13 +130,18 @@ const subscription = Broadcast.subscribe(key, listener)
 await subscription.opened
 ```
 
-> A `publish()` the server makes to a key while its subscription to that key's text messages is new waits for it, and fails with the subscription's refusal where Redis refuses it: the server's own subscribers would miss it. A failed `Broadcast.subscribeBinary()` does the same to `publishBinary()`. A publish made once the failed subscription is over goes out, and so do publishes of the key's other kind and to other keys.
-
 ## Channels
 
 `Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/stream/scale" />.
+
+## Limitations
+
+- A message is 28 MiB at most: a `publish()` or `publishBinary()` over that rejects with `ChannelOverflowError`. At its default [output buffer limits](https://redis.io/docs/latest/develop/reference/clients/#output-buffer-limits), Redis closes the connection that receives a larger message. For a larger payload, publish a reference to it, such as a URL.
+- Redis replicates asynchronously, so a failover can lose a write the old primary acknowledged, such as a `Room.updateMeta()` that resolved just before it. The rooms on every server then catch up to what the new primary holds.
+- Telefunc follows a failover through Redis Sentinel or Redis Cluster. A `FAILOVER` of a standalone Redis without Sentinel gives no new primary to follow: use Sentinel or Cluster for automatic failover.
 
 ## See also
 
 - <Link href="/stream/scale" />
 - <Link href="/channel" />
+- <Link href="/room" />

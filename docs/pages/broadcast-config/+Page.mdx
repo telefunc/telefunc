@@ -5,6 +5,8 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
+Set how <Link href="/channel#broadcast">Broadcast</Link> reaches subscribers on your other servers.
+
 ```ts
 // Environment: server
 
@@ -12,9 +14,17 @@ import { config } from 'telefunc'
 
 config.broadcast = {
   transport: myTransport, // A BroadcastTransport that carries Broadcast across servers
-  onDeliveryLost: (lost) => monitor.report(lost), // { key, reason } of messages a subscribed server never got; by default logged
+  onDeliveryLost: ({ key, reason }) => monitor.report(key, reason), // Messages of `key` a subscribed server never got; by default logged
 }
 ```
+
+> Broadcast uses your installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>), or reaches subscribers on the same server by default. Set `transport` to use a broker of your own.
+
+> `onDeliveryLost` is called on the server that missed the messages, and they aren't sent again. Use it to report missed messages with Redis or Cloudflare: `reason` is a string saying how many it missed, when that's known (see <Link href="/channel#delivery">Delivery</Link>). With a custom transport, report loss from the transport.
+
+<ConfigWhereServer />
+
+## Custom transports
 
 `transport` is a `BroadcastTransport`:
 
@@ -28,44 +38,43 @@ type BroadcastTransport = {
 type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
 ```
 
-> Without a `transport`, Broadcast uses the installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>) or, with none installed, stays in memory and reaches only subscribers on the same server. A configured `transport` takes precedence over both.
-
 > `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair, which <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers receive as `info`. A key's `seq` increases with each message, across all servers and for text and binary together; `timestamp` is like `Date.now()`.
 
-> `onMessage` gets each `payload` as `send()` or `sendBinary()` got it, byte for byte: it carries whether the publish is `lossy`.
+> Forward each `payload` to `onMessage` unchanged.
 
 > `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener. When a key's last subscriber on a server leaves, Telefunc stops its listener there, and calls `listen()` again for the key's next subscriber.
 
-> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }`. Resolve `opened` once the broker has confirmed the subscription. A message any server sends after `opened` resolved must reach that listener. Reject `opened` if the broker refuses the subscription. The <Link href="/channel#chat-example">`opened`</Link> of the server's subscribers to the key resolves with yours. If yours rejects, theirs rejects with an error whose `cause` is what yours rejected with, and a `BroadcastChannel` closes: on the server with that error, and on the client with a `ChannelClosedError`. If yours rejects with `undefined` or `null`, that `cause` is an `Error` saying that the transport refused the listener with no error. A `listen()` that throws fails the subscription the same way.
-
-> Telefunc calls `unsubscribe()` once for every `listen()` that returned: when it stops the listener, or once `opened` rejects. If `listen()` throws, release what it acquired before it throws, as Telefunc has no `unsubscribe()` to call.
-
-> `unsubscribe()` may return a promise. Telefunc doesn't wait for it, and logs what `unsubscribe()` throws or what that promise rejects with. Telefunc may call `listen()` for the same key before an earlier `unsubscribe()` finished. With `telefunc/cloudflare`, Telefunc calls `unsubscribe()` on the Durable Object that holds the subscription. A cleanup that must go on after that Durable Object's handler returns passes its promise to `waitUntil()`, imported from `cloudflare:workers`. What keeps the Durable Object alive until then is in Cloudflare's [Durable Object state](https://developers.cloudflare.com/durable-objects/api/state/#waituntil) docs, and depends on the [`durable_object_io_tasks_prevent_eviction`](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#durable-object-io-tasks-prevent-eviction) compatibility flag.
+> If your broker confirms a subscription only after `listen()` returns, return `{ unsubscribe, opened }`. Resolve `opened` when the broker confirms the subscription; from then on, a message any server sends must reach that listener. Reject it with the broker's error if the subscription fails: the subscribers' <Link href="/channel#chat-example">`opened`</Link> then rejects too.
 
 ```ts
 // server/broadcastTransport.ts
 // Environment: server
 
-import type { BroadcastTransport } from 'telefunc'
-import { broker } from './broker'
+import { config, type BroadcastTransport } from 'telefunc'
+import { broker } from './broker' // Your broker's client
 
 const listen: BroadcastTransport['listen'] = (key, onMessage) => {
   // Your broker's subscribe() resolves once the broker confirmed the subscription
   const subscribing = broker.subscribe(`text:${key}`, (message) => onMessage(message.payload, message.info))
   return {
-    unsubscribe: () => void subscribing.then((subscription) => subscription.unsubscribe()).catch(() => {}),
+    // Nothing to clean up if subscribing failed
+    unsubscribe: () => subscribing.then((subscription) => subscription.unsubscribe(), () => {}),
     opened: subscribing.then(() => {}),
   }
 }
+
+config.broadcast = {
+  transport: { send, listen, sendBinary, listenBinary }, // send(), sendBinary() and listenBinary() written for your broker
+}
 ```
 
-> When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given. A transport has no way to end a listener once `listen()` returned a function or once `opened` resolved.
+> Telefunc calls `unsubscribe()` once for every `listen()` that returned: when it stops the listener, or once `opened` rejects. If `listen()` throws, release what it acquired before it throws.
+
+> `unsubscribe()` may return a promise: Telefunc logs what it rejects with. A new listener for the same key may start while the earlier one is cleaning up. With `telefunc/cloudflare`, pass a cleanup that must finish after the handler returns to `waitUntil()`, imported from `cloudflare:workers`.
+
+> When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
 
 > A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
-
-> `onDeliveryLost` is called on the server (on Cloudflare, in the Durable Object) that missed the messages, and they aren't sent again. With `@telefunc/redis`, `reason` says how many it missed, or that it doesn't know how many (see <Link href="/channel#delivery">Delivery</Link>); on Cloudflare, that it may have missed some. Telefunc doesn't call it for a `BroadcastTransport`, as only the transport knows what it lost: have your transport report that itself.
-
-<ConfigWhereServer />
 
 
 ## See also

@@ -39,7 +39,7 @@ backend telefunc
   server app2 app2:3000 check cookie app2
 ```
 
-> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. With all app instances healthy, if two consecutive requests carry different values, the load balancer isn't configured for sticky sessions.
+> Sanity check: after deploying, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same `SERVERID` cookie. If two consecutive requests carry different values, HAProxy isn't configured for sticky sessions.
 
 ### Caddy — `lb_policy cookie`
 
@@ -65,25 +65,23 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 In a single-instance setup, the default in-memory backend is enough. In a multi-instance setup, install a backend that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link> — or configure a broadcast transport.
 
-> A broadcast transport (NATS, Kafka, RabbitMQ, …) provides cross-instance Broadcast only. <Link href="/room">Rooms</Link> require a shipped full backend such as <Link href="/redis"><code>@telefunc/redis</code></Link> or the Cloudflare adapter.
+> A broadcast transport (NATS, Kafka, RabbitMQ, …) carries Broadcast only. For <Link href="/room">rooms</Link>, use <Link href="/redis"><code>@telefunc/redis</code></Link> or the Cloudflare adapter.
 
 > For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
 
 ### `BroadcastTransport`
 
-Implement `BroadcastTransport` and assign it to `config.broadcast.transport`:
+For other brokers (NATS, Kafka, …), implement a `BroadcastTransport` and assign it to `config.broadcast.transport`:
 
-```ts ts-only
-type BroadcastTransport = {
-  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
-  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): BroadcastUnsubscribe
-}
-type BroadcastUnsubscribe = (() => void) | { unsubscribe: () => void; opened: Promise<void> }
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.broadcast = { transport: myTransport }
 ```
 
-The rules a transport follows are in <Link href="/broadcast-config">`config.broadcast`</Link>.
+What a transport implements is in <Link href="/broadcast-config#custom-transports" />.
 
 ## Cloudflare
 

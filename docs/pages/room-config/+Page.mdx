@@ -5,22 +5,25 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
+Set how long a <Link href="/room">room</Link> stays open once nobody uses it.
+
 ```ts
+// /server/index.ts
 // Environment: server
 
 import { roomConfig } from '@telefunc/room'
 
-roomConfig.emptyTimeout = 300_000    // A room nobody joined closes this long after no page has it open (ms)
-roomConfig.departureTimeout = 20_000 // A room someone joined closes this long after nobody is in it and no page has it open (ms)
+roomConfig.emptyTimeout = 300_000    // Close a room that nobody joined yet, once no page has it open (ms)
+roomConfig.departureTimeout = 20_000 // Close a room after the last participant leaves and no page has it open (ms)
 ```
 
-> These are the defaults of every <Link href="/room">`Room`</Link>. The options of the same names to `Room.create()` and `Room.getOrCreate()` override them for the room they create. A room keeps the timeouts it was created with.
+> Set them at your server entry, before your server creates rooms.
 
-> `Infinity` keeps a room open until `Room.close()`.
+> Pass either timeout to `Room.create()` or `Room.getOrCreate()` to set it for one room, such as `Room.create('match-42', { emptyTimeout: Infinity, departureTimeout: Infinity })`. A room keeps the timeouts it was created with.
+
+> `Infinity` keeps a room open until `Room.close()`. Set both to keep a room open before and after its first participant joins.
 
 > For when a room closes, see <Link href="/room#close-a-room" />.
-
-> You usually set them at your server entry.
 
 
 ## See also
