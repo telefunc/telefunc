@@ -7,6 +7,7 @@ import type { ClientReviverContext, ReviverType, TypeContract } from '../../type
 import { setAbortController } from '../../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import {
+  abortable,
   makeAbortError,
   throwAbortError,
   throwBugError,
@@ -105,17 +106,12 @@ async function parseStreamedResponse(
 /** A text body, read as `response.text()` reads it, but that the call's abort cancels: an app's `config.fetch` may
  *  return a body the call's signal doesn't end. */
 async function readText(response: Response, callContext: CallContext): Promise<string> {
-  const { signal } = callContext.abortController
   const { body } = response
-  // Fetch polyfills (`whatwg-fetch`, React Native) give no body stream.
-  if (!body) {
-    const text = await response.text().catch((err: unknown) => {
-      if (!signal.aborted) throw err
-      return ''
-    })
-    throwIfAborted(callContext)
-    return text
-  }
+  // `whatwg-fetch` and other Fetch polyfills give no body stream to cancel: an abort ends the wait for their `.text()`.
+  if (!body) return abortable(callContext, () => response.text())
+  // A reader checks only the lock, where `.text()` also refuses a body read before.
+  if (response.bodyUsed) throw new TypeError('Body has already been used')
+  const { signal } = callContext.abortController
   const reader = body.getReader()
   const cancel = () => {
     reader.cancel().catch(() => {})
@@ -132,8 +128,11 @@ async function readText(response: Response, callContext: CallContext): Promise<s
       text += decoder.decode(value, { stream: true })
     }
   } catch (err) {
-    // A body that the abort errored, as a fetch's own does, ends the call as aborted.
-    if (!signal.aborted) throw err
+    // A body that the abort errored, as a fetch's own does, ends the call as aborted; another failure lets the source go.
+    if (!signal.aborted) {
+      cancel()
+      throw err
+    }
   } finally {
     signal.removeEventListener('abort', cancel)
     reader.releaseLock()

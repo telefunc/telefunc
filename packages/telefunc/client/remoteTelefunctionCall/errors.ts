@@ -1,4 +1,4 @@
-export { throwAbortError, throwIfAborted, makeAbortError, throwBugError, makeBugError }
+export { throwAbortError, throwIfAborted, abortable, makeAbortError, throwBugError, makeBugError }
 
 import { createAbortError } from '../../shared/Abort.js'
 import { callOnAbortListeners } from './onAbort.js'
@@ -24,6 +24,35 @@ function throwIfAborted(call: {
   telefuncFilePath: string
 }) {
   if (call.abortController.signal.aborted) throwAbortError(call.telefunctionName, call.telefuncFilePath, undefined)
+}
+
+const ABORTED = Symbol('ABORTED')
+
+/** Waits for what `start()` returns unless the call is aborted: an abort rejects at once, and an aborted call starts
+ *  nothing. */
+async function abortable<T>(
+  call: { abortController: AbortController; telefunctionName: string; telefuncFilePath: string },
+  start: () => Promise<T>,
+): Promise<Awaited<T>> {
+  throwIfAborted(call)
+  const { signal } = call.abortController
+  let onAbort = () => {}
+  const aborted = new Promise<typeof ABORTED>((resolve) => {
+    onAbort = () => resolve(ABORTED)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  let result: Awaited<T> | typeof ABORTED
+  try {
+    result = await Promise.race([start(), aborted])
+  } catch (err) {
+    // A rejection that the abort caused ends the call as aborted.
+    if (!signal.aborted) throw err
+    result = ABORTED
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+  if (result === ABORTED) throwAbortError(call.telefunctionName, call.telefuncFilePath, undefined)
+  return result
 }
 
 function getAbortMessage(messageOrContext?: string | { telefunctionName: string; telefuncFilePath: string }) {

@@ -975,6 +975,112 @@ test('plain RPC: a response without a body stream, as fetch polyfills return, is
   expect(await call([])).toBe('Welcome Eva')
 })
 
+/** A response as `whatwg-fetch` returns: no body stream, and a `text()` that the test settles. */
+class BodylessResponse extends Response {
+  reads = 0
+  settle: { resolve: (text: string) => void; reject: (err: unknown) => void } = { resolve() {}, reject() {} }
+  constructor() {
+    super()
+    Object.defineProperty(this, 'body', { value: null })
+  }
+  override text() {
+    this.reads++
+    return new Promise<string>((resolve, reject) => (this.settle = { resolve, reject }))
+  }
+}
+
+test.each([
+  'before its text() starts',
+  'while its text() reads',
+  'while its text() reads, which then resolves',
+  'while its text() reads, which then rejects',
+] as const)(
+  'a call aborted %s, on a response without a body stream, rejects at once, telling onAbort() once',
+  async (when) => {
+    const { call, withContext } = await page()
+    const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+    const told: unknown[] = []
+    onAbort((err) => told.push(err))
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const response = new BodylessResponse()
+      const controller = new AbortController()
+      respond = () => {
+        if (when === 'before its text() starts') controller.abort()
+        return response
+      }
+      const pending = withContext(call, { signal: controller.signal })([])
+      if (when !== 'before its text() starts') {
+        await vi.waitFor(() => expect(response.reads).toBe(1))
+        controller.abort()
+      }
+      const rejected = await settledWithin(pending, 200)
+      expect(isAbort(rejected)).toBe(true)
+      expect(response.reads).toBe(when === 'before its text() starts' ? 0 : 1)
+      if (when === 'while its text() reads, which then resolves') response.settle.resolve(JSON.stringify({ ret: 1 }))
+      if (when === 'while its text() reads, which then rejects')
+        response.settle.reject(new TypeError('Failed to fetch'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(told).toHaveLength(1)
+      expect(told[0]).toBe(rejected)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+    expect(unhandled).toEqual([])
+  },
+)
+
+test('plain RPC: a response whose body an app read before rejects with TypeError, as its text() does', async () => {
+  const { call } = await page()
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(textEncoder.encode(' '))
+      controller.enqueue(textEncoder.encode(JSON.stringify({ ret: 'ok' })))
+      controller.close()
+    },
+  })
+  const response = new Response(body, { headers: { 'content-type': 'text/plain' } })
+  const reader = body.getReader()
+  await reader.read()
+  reader.releaseLock()
+  respond = () => response
+  await expect(call([])).rejects.toBeInstanceOf(TypeError)
+})
+
+test("plain RPC: a text body that fails to decode rejects with that failure and lets the body's source go", async () => {
+  const { call } = await page()
+  // As a reply past the runtime's string length limit fails.
+  const failure = new RangeError('Invalid string length')
+  const decode = vi.spyOn(TextDecoder.prototype, 'decode').mockImplementationOnce(() => {
+    throw failure
+  })
+  let cancels = 0
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        controller.enqueue(textEncoder.encode('{"ret":'))
+      },
+      pull() {
+        return new Promise(() => {})
+      },
+      cancel() {
+        cancels++
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  respond = () => new Response(body, { headers: { 'content-type': 'text/plain' } })
+  try {
+    expect(await settledWithin(call([]), 200)).toBe(failure)
+  } finally {
+    decode.mockRestore()
+  }
+  expect(cancels).toBe(1)
+  expect(body.locked).toBe(false)
+})
+
 /** An app's `config.fetch` that records, in `used`, each request it makes as `<name>:call` or `<name>:wire`. */
 function recordingFetch(name: string, used: string[]): typeof fetch {
   return async (_url, init) => {
