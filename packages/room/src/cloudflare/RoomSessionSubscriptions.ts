@@ -34,14 +34,11 @@ const REGISTER_RETRY_MAX_MS = 5_000
 /** A session DO's Room part: its subscriptions, made by the first subscribe or lane commit made in it. */
 type RoomSession = { readonly id: string; subscriptions: RoomSessionSubscriptions | null }
 
-/** The session DO whose call this is, null outside a session DO's call. */
-function currentRoomSession(): RoomSession | null {
-  return hostLocal(ROOM_SESSION, (host) => (host.id === null ? null : { id: host.id, subscriptions: null }))
-}
-
 /** The Room subscriptions of the session DO whose call this is, null outside a session DO's call. */
 function currentRoomSessionSubscriptions(driver: CloudflareRoomDriver): RoomSessionSubscriptions | null {
-  const session = currentRoomSession()
+  const session = hostLocal<RoomSession | null>(ROOM_SESSION, (host) =>
+    host.id === null ? null : { id: host.id, subscriptions: null },
+  )
   if (session === null) return null
   const member = currentCloudflareMember()
   assert(member !== undefined) // a session DO's call runs in its Cloudflare session

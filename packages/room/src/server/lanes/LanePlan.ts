@@ -210,7 +210,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
       const [before, after] = this.wants.namedPairChange(holder, pair, member)
       this.counts.set(member, count + Number(!everyMember && after) - Number(!wasEveryMember && before))
     }
-    for (const member of affected) this.queuePair(member, track)
+    for (const member of affected) toggleEntry(this.queued.pairs, member, track, true)
     // Whom the track's every-member lane serves here may have changed.
     if (everyMember || wasEveryMember) this.queued.tracks.add(track)
   }
@@ -308,10 +308,6 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private forgetCounts(): void {
     this.counts.clear()
     if (this.counting) this.counting.stale = true
-  }
-
-  private queuePair(member: string, track: string): void {
-    toggleEntry(this.queued.pairs, member, track, true)
   }
 
   private schedulePlan(): void {

@@ -2,7 +2,7 @@ export { ClientRoomHandle }
 export type { ClientRoomEvent, ClientRoomHandleOptions }
 
 import { assert, assertUsage } from '../utils/assert.js'
-import type { ChannelPublishAck, ChannelPublishInfo } from 'telefunc/__internal'
+import type { ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../shared/binary.js'
 import { normalizeJoinOptions } from '../shared/arguments.js'
 import {
@@ -26,7 +26,7 @@ import { ROOM_TRACK_WANTS_MAX } from '../shared/constants.js'
 import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomMirror } from './RoomMirror.js'
 import { ClientParticipant, reportClientCallbackError, type PageLink } from './ClientParticipant.js'
-import { deliverDm, request, type RoomChannel } from './stubChannel.js'
+import { deliverDm, request } from './stubChannel.js'
 import { addRoom } from './page.js'
 import { toggle } from '../utils/sets.js'
 import type { JoinOptions, LeaveCause, Sender } from '../types.js'
@@ -41,7 +41,7 @@ type ClientRoomEvent =
   | RoomDemandEvent
 
 type ClientRoomHandleOptions = {
-  end: RoomChannel<ClientRoomEvent, RoomDataPublish>
+  end: ClientBroadcast<ClientRoomEvent, RoomDataPublish>
   snapshot: RoomSnapshotMetadata
 }
 
@@ -51,7 +51,7 @@ class ClientRoomHandle implements RoomStateOwner, PageLink {
   readonly state: RoomState
   /** The app's participants of the room, which the user's `Room` and the handle's participants hand out. */
   readonly remotes: RoomRemotes
-  private readonly end: RoomChannel<ClientRoomEvent, RoomDataPublish>
+  private readonly end: ClientBroadcast<ClientRoomEvent, RoomDataPublish>
   private readonly mirror: RoomMirror
   private readonly localParticipants = new Map<string, ClientParticipant>()
   private readonly joins = new PendingJoins()

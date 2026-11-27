@@ -1,6 +1,6 @@
 export { LoneMember }
 
-import type { ChannelPublishAck } from 'telefunc/__internal'
+import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import {
   inboxMessageFromWire,
   leaveCauseFromWire,
@@ -13,13 +13,13 @@ import { publishAck, roomResultValue } from '../shared/errors.js'
 import { RoomState, type RoomStateOwner } from '../shared/RoomState.js'
 import { RoomRemotes } from '../shared/RoomView.js'
 import { ClientParticipant, reportClientCallbackError, type PageLink } from './ClientParticipant.js'
-import { deliverDm, request, type RoomChannel } from './stubChannel.js'
+import { deliverDm, request } from './stubChannel.js'
 import { RoomMirror } from './RoomMirror.js'
 import { roomsOf } from './page.js'
 import type { Sender } from '../types.js'
 
 /** A participant stub's channel: it relays the stub's notices, and takes no text publish (one goes as a request). */
-type LoneMemberChannel = RoomChannel<ParticipantStubNotice, never>
+type LoneMemberChannel = ClientBroadcast<ParticipantStubNotice, never>
 type LoneMemberOptions = { end: LoneMemberChannel; metadata: ParticipantStubMetadata }
 
 /** A server's `LocalParticipant` that a telefunction returned alone: the page's participant, on a channel of its own

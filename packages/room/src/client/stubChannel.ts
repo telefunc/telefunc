@@ -2,7 +2,7 @@
 // request with the reader of its answer, and the route of a DM. Every answer arrives as `unknown` and meets one reader
 // here, which builds its value as it reads; a malformed one rejects its own request.
 export { request, deliverDm }
-export type { AckedChannel, RoomChannel, PageRequest }
+export type { PageRequest }
 
 import type { ChannelPublishAck, ClientBroadcast } from 'telefunc/__internal'
 import type {
@@ -18,7 +18,7 @@ import type { ClientParticipant } from './ClientParticipant.js'
 
 /** A DM to `participant`, delivered; one whose sender awaits its answer is answered on `end`. A reply that can't be
  *  sent is reported, and the sender gets an error instead. */
-function deliverDm(end: Pick<ClientBroadcast, '_sendReply'>, participant: ClientParticipant, msg: InboxMessage): void {
+function deliverDm(end: ClientBroadcast, participant: ClientParticipant, msg: InboxMessage): void {
   const { ackId } = msg
   if (ackId === undefined) return participant._deliverMessage(msg)
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
@@ -31,30 +31,6 @@ function deliverDm(end: Pick<ClientBroadcast, '_sendReply'>, participant: Client
 /** A request a page sends on a room's or a participant's channel and awaits the answer of. A DM's reply is sent by
  *  `deliverDm()`, and nothing answers it. */
 type PageRequest = Exclude<RoomStubRequest | ParticipantStubRequest, { __r: 'dm-reply' }>
-
-/** A channel a page's requests go out on, each answered. */
-type AckedChannel = Pick<ClientBroadcast, '_sendRequest'>
-
-/** A page's channel to a Room stub, a room's or a lone participant's: it relays `Notice` on its text lane and takes
- *  `Publish` as a text publish. The stub answers a publish with a `RoomResult`, which core leaves unknown, so the
- *  answer is read with `roomResultValue()`. */
-type RoomChannel<Notice, Publish> = AckedChannel &
-  Pick<
-    ClientBroadcast<Notice, Publish>,
-    | '_publishUnreported'
-    | '_publishBinaryUnreported'
-    | '_sendReply'
-    | '_subscribeLocal'
-    | '_setSubscribed'
-    | '_setWantParts'
-    | '_confirmSoon'
-    | 'onOpen'
-    | 'onClose'
-    | 'onDisconnect'
-    | 'onReconnect'
-    | 'isConnected'
-    | 'close'
-  >
 
 /** What the server answers each kind of request with: a join's member, a meta write's update, a publish's place. */
 type RequestAnswers = {
@@ -80,7 +56,7 @@ const ANSWERS: { [Kind in PageRequest['__r']]: (value: unknown) => RequestAnswer
 
 /** An acked request, as the answer its kind gets, or the error it failed with. */
 async function request<Kind extends PageRequest['__r']>(
-  end: AckedChannel,
+  end: ClientBroadcast,
   req: PageRequest & { __r: Kind },
 ): Promise<RequestAnswers[Kind]> {
   const answer = ANSWERS[req.__r]

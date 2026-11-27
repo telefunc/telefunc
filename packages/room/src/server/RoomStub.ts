@@ -26,7 +26,6 @@ import {
   decodeStubBinaryFrame,
   pageFrameMessage,
   isRoomRequest,
-  type RoomDeclaration,
 } from './requests.js'
 import { ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './lifecycle/replay.js'
 import { TailHold, type TailEntry, type TailHoldOwner } from './lifecycle/TailHold.js'
@@ -164,18 +163,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner, TailHoldOwner {
   /** A request, sent with an ack, answers with its result; a declaration, sent without one, applies at once. */
   private receive(message: unknown): Promise<RoomResult> | undefined {
     if (isRoomRequest(message)) return roomResult(this.handleRequest(decodeRoomRequest(message)))
-    const declaration = decodeRoomDeclaration(message)
-    this.applyDeclaration(declaration)
+    const { ackId, reply } = decodeRoomDeclaration(message)
+    this.dmReplies.settle(ackId, reply)
     return undefined
   }
 
   async handleRequest(req: RoomRequest): Promise<unknown> {
     if (req.__r === 'req-join') return await this.room.joinStubMember(this, req)
     return await this.room.request(this.requireMember(req.id), req)
-  }
-
-  private applyDeclaration(declaration: RoomDeclaration): void {
-    this.dmReplies.settle(declaration.ackId, declaration.reply)
   }
 
   /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
