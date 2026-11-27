@@ -161,9 +161,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private readAt = Number.NEGATIVE_INFINITY
   /** The attempt under way, cut where the server hasn't answered it by its allowance (`attemptAllowance`). */
   private underWay: Attempt | null = null
-  /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
-  private answeredMs: number | null = null
-  private cuts = 0
+  /** How long the next attempt may go unanswered before it is cut (`attemptAllowance`): it doubles with each attempt cut
+   *  since the last one the server answered. */
+  private allowance = ATTEMPT_ALLOWANCE_MIN_MS
   /** How long the last wire took from its socket's or request's start to its RECONCILED: the room an attempt needs
    *  before the deadline. */
   private handshakeMs: number | null = null
@@ -249,7 +249,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const nextDelay = reconnectDelay(this.attempt, this.anyStalled())
     // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
     const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
-    const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
+    const allowance = Math.min(this.allowance, room)
     const cutAt = room > 0 ? now + allowance : null
     const attempt: Attempt = {
       startedAt: now,
@@ -268,7 +268,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private cutAttempt(attempt: Attempt): void {
     attempt.cutTimer = null
     if (this.closed || !this.transport.isConnecting()) return
-    this.cuts++
+    this.allowance *= ATTEMPT_ALLOWANCE_GROWTH
     this.transport.cancelAttempt()
     this.onTransportClosed(this.transport, { unopened: this.transport.type === CHANNEL_TRANSPORT.WS })
   }
@@ -292,8 +292,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (underWay === null) return
     underWay.cutAt = null
     this.stopCut()
-    this.answeredMs = performance.now() - underWay.startedAt
-    this.cuts = 0
+    this.allowance = attemptAllowance(performance.now() - underWay.startedAt)
     this.exchange.restartReconcileDeadline()
   }
 
@@ -1078,12 +1077,10 @@ function reconnectDelay(attempt: number, stalled: boolean): number {
   return stalled ? (1 + Math.random() / 2) * step : Math.random() * step
 }
 
-/** How long an attempt may go unanswered before it is cut: three times as long as the last attempt the server answered
- *  took, and never under the minimum, a first connect too; growing with each attempt cut since. */
-function attemptAllowance(answeredMs: number | null, cuts: number): number {
-  return (
-    Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * (answeredMs ?? 0)) * ATTEMPT_ALLOWANCE_GROWTH ** cuts
-  )
+/** How long an attempt may go unanswered before it is cut, after one the server answered in `answeredMs`: three times
+ *  as long, and never under the minimum, a first connect's too. */
+function attemptAllowance(answeredMs: number): number {
+  return Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * answeredMs)
 }
 
 // ── Transport registry ──
