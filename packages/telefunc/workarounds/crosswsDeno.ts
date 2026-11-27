@@ -1,8 +1,8 @@
-// Workarounds of crossws's Deno adapter; remove once Telefunc's own WebSocket adapter replaces crossws.
-// - Its peer's `terminate()` calls the `terminate()` Deno's `WebSocket` lacks, which throws, and the socket stays open
-//   (https://github.com/h3js/crossws/pull/216, closed unmerged).
+// Workarounds of crossws's Deno adapter:
+// - Its peer's `terminate()` calls the `terminate()` Deno's `WebSocket` lacks, which throws, and the socket stays open.
 // - It reports a close without its code, which tells a page that left from a dropped one: a page that left would be
-//   held for its reconnect (https://github.com/h3js/crossws/pull/213, closed unmerged).
+//   held for its reconnect.
+// TODO: remove once https://github.com/h3js/crossws/pull/216 and https://github.com/h3js/crossws/pull/213 (or their successors) are released.
 export { terminateDenoPeer, denoHooks }
 
 import type { Hooks, Peer } from 'crossws'

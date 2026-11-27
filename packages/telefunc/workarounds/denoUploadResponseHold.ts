@@ -3,8 +3,8 @@
 // its upload is over takes its client for gone at the answer: its File reads fail and its unread upload is dropped
 // (serve/deno.clientLeft.spec.ts, 12 legacy-mode rows). The hold goes to every Deno binary request with a body that
 // passes its own `request.signal`, a `node:http` framework's `Request` too, whose signal stays live after the response;
-// a raw `node:http` `serve({ readable })` passes its socket's signal, and is never held. Remove once Deno's legacy abort
-// is gone.
+// a raw `node:http` `serve({ readable })` passes its socket's signal, and is never held.
+// TODO: remove once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops legacy Deno abort mode.
 export { holdUploadResponse, heldResponseBody, unholdOnceOver }
 export type { ResponseHold }
 

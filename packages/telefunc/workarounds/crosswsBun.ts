@@ -1,6 +1,6 @@
 // Workaround: crossws's Bun peer hands out its socket as a Proxy, and Bun's `getBufferedAmount()` refuses a Proxy as
-// `this` (it throws): without the socket itself, channels can't bound what waits to be sent. Remove once crossws's Bun
-// peer exposes the buffered amount, or Telefunc's own WebSocket adapter replaces crossws.
+// `this` (it throws): without the socket itself, channels can't bound what waits to be sent.
+// TODO: remove once Telefunc updates crossws to >=0.4.7 and uses peer.bufferedAmount (https://github.com/h3js/crossws/pull/195).
 export { bunSockets }
 
 import type { Peer } from 'crossws'

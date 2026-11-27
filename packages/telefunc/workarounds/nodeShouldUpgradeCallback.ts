@@ -1,8 +1,8 @@
 // Workaround: Node 22.21, 24.9 and later upgrade a request with `Upgrade` only where `shouldUpgradeCallback` says so,
 // and the server's own default says so wherever it has an `upgrade` listener (`listenerCount('upgrade') > 0`). Without
 // Telefunc's callback in front of it, Telefunc's listener makes the server upgrade every request with `Upgrade`, and an
-// app's own route that answers them as plain HTTP breaks (serve/node.upgradeOthers.spec.ts). Remove once Node asks each
-// `upgrade` listener, or Telefunc no longer listens on the app's server.
+// app's own route that answers them as plain HTTP breaks (serve/node.upgradeOthers.spec.ts).
+// TODO: remove once Node supports per-listener upgrade negotiation (https://github.com/nodejs/node/issues/6339; see https://github.com/nodejs/node/pull/59824).
 export { upgradeOthersOnlyForTheirListeners, putBackOwnCallback, isInFront }
 export type { CallbackInFront }
 
