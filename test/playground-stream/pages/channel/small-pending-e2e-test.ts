@@ -1,7 +1,18 @@
 export { testSmallPending }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState, reconnectAtFullDelay, defined } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  reconnectAtFullDelay,
+  defined,
+  runServerAction,
+  sleep,
+} from '../../e2e-utils'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
+import { parseChannelTransports } from '../../channelTransports'
+import type { ChannelMemoryPeak } from '../../channel-memory'
 import { sendRefusedWarning } from '../../../utils'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
 
@@ -33,6 +44,9 @@ type SmallPendingState = {
     pastMemory: { seqsAhead: number[]; closeErr: string }
     across: { publish: string; received: number; closeErr: string }
   } | null
+  broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
+  unreadSends: { opened: true } | null
+  keptUpload: { next: string; read: string } | null
 }
 
 /** The channel page's state. */
@@ -271,4 +285,76 @@ function testSmallPending() {
       { timeout: 30_000 },
     )
   })
+
+  test("channel: a broadcast publish larger than the server may hold closes its own key's subscriber with ChannelOverflowError, and another key's gets its next publish", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-broadcast-keys')
+    await autoRetry(
+      async () => {
+        expect(defined((await stateOf()).broadcastKeys, 'broadcastKeys')).deep.equal({
+          publish: 'published',
+          firstClosed: 'ChannelOverflowError',
+          secondReceived: ['after the oversized publish'],
+          secondClosed: false,
+        })
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  // Each page's link carries 4 KB/s, so of 340 sends of 15 KiB to it next to nothing reaches the page: what the server
+  // sends waits in its memory, or is refused.
+  test('channel: four pages that read nothing of what the server sends them hold no more than maxMemory together on the server', async () => {
+    const proxy = await startBlackHoleProxy(getServerUrl())
+    const browser = defined(page.context().browser(), 'the browser')
+    const contexts = await Promise.all(Array.from({ length: 3 }, () => browser.newContext()))
+    const pages = [page, ...(await Promise.all(contexts.map((context) => context.newPage())))]
+    try {
+      for (const each of pages) await each.goto(`${proxy.url}/channel`)
+      for (const each of pages) await each.waitForSelector('#hydrated', { state: 'attached' })
+      proxy.pace({ downBytesPerSecond: 4096, upBytesPerSecond: 1_000_000, queueBytes: 16 * 1024 })
+      for (const each of pages) {
+        await each.click('#channel-test-unread-sends')
+        await autoRetry(
+          async () => {
+            const state = JSON.parse(defined(await each.textContent('#channel-state'), '#channel-state'))
+            expect(state.unreadSends).deep.equal({ opened: true })
+          },
+          { timeout: 30_000 },
+        )
+      }
+      await runServerAction('unreadSends')
+      await sleep(3000)
+      await runServerAction('unreadSendsPeak')
+      const { held, maxMemory, outcomes } = JSON.parse(
+        defined((await getCleanupState()).unreadSendsPeak, 'the peak'),
+      ) as ChannelMemoryPeak & { outcomes: Record<string, number>[] }
+      expect(outcomes.length).toBe(4)
+      expect(held).greaterThan(maxMemory / 2)
+      expect(held).lessThanOrEqual(maxMemory)
+      expectLog(sendRefusedWarning)
+    } finally {
+      for (const context of contexts) await context.close()
+      await page.goto('about:blank')
+      await proxy.close()
+    }
+  })
+
+  // Over SSE the call's upload is its own request. On the WebSocket lane the server ends the channel with
+  // ChannelOverflowError instead, so the late read can't answer the page.
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse')
+    test("channel: a call that returns a channel and keeps its 4 MiB upload past maxMemory: the next call is answered, and the upload's late read fails saying why", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-kept-upload')
+      await autoRetry(
+        async () => {
+          const { next, read } = defined((await stateOf()).keptUpload, 'keptUpload')
+          expect(next).toBe('hello')
+          expect(read).toContain(
+            `The telefunction returned before it read this File (${4 * 1024 * 1024} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped.`,
+          )
+        },
+        { timeout: 30_000 },
+      )
+    })
 }

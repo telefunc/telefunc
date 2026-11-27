@@ -2,6 +2,7 @@ export { ChannelsQueued, AcksWaiting, initialSendsPastMemoryState, type SendsPas
 
 import React from 'react'
 import { onChannelAcksWaiting, onChannelsQueuedBeforeReturn } from './Channel.telefunc'
+import { onUnreadSends, onKeptUpload, onHello } from './SmallPendingExtra.telefunc'
 import { openChannel } from './openChannel'
 
 type SendsPastMemoryState = {
@@ -10,11 +11,15 @@ type SendsPastMemoryState = {
     | { ended: string; started: number; settled: Record<string, number>; next: string | null }
     | { error: string }
     | null
+  unreadSends: { opened: true } | null
+  keptUpload: { next: string; read: string } | null
 }
 
 const initialSendsPastMemoryState: SendsPastMemoryState = {
   channelsQueued: null,
   acksWaiting: null,
+  unreadSends: null,
+  keptUpload: null,
 }
 
 type Show = (state: Partial<SendsPastMemoryState>) => void
@@ -76,6 +81,8 @@ function AcksWaiting({ show }: { show: Show }) {
       >
         10,000 Acknowledged Sends Wait For Their Answers
       </button>
+      <UnreadSends show={show} />
+      <KeptUpload show={show} />
     </>
   )
 }
@@ -112,4 +119,48 @@ async function acksWaitingOutcome(count: number) {
   channel.close()
   control.close()
   return { ended, started, settled, next }
+}
+
+// A channel the page reads nothing of while the server sends to it: the test runs the sends.
+function UnreadSends({ show }: { show: Show }) {
+  async function testUnreadSends() {
+    show({ unreadSends: null })
+    const channel = await openChannel(onUnreadSends)
+    channel.listen(() => {})
+    show({ unreadSends: { opened: true } })
+  }
+
+  return (
+    <button
+      id="channel-test-unread-sends"
+      type="button"
+      onClick={testUnreadSends}
+      className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+    >
+      Server Sends To A Page That Reads Nothing
+    </button>
+  )
+}
+
+// A call that returns a channel and keeps its 4 MiB Blob unread, then the next call, then the Blob's read.
+function KeptUpload({ show }: { show: Show }) {
+  async function testKeptUpload() {
+    show({ keptUpload: null })
+    const channel = await openChannel(() => onKeptUpload(new Blob([new Uint8Array(4 * 1024 * 1024).fill(120)])))
+    const next = await onHello()
+    const read = await channel.send('read', { ack: true }).catch((err: Error) => err.name)
+    channel.close()
+    show({ keptUpload: { next, read } })
+  }
+
+  return (
+    <button
+      id="channel-test-kept-upload"
+      type="button"
+      onClick={testKeptUpload}
+      className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+    >
+      Call Keeps A 4 MiB Upload Past Its Answer
+    </button>
+  )
 }

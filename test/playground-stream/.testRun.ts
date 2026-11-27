@@ -45,8 +45,9 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         // Bun's wording of the same error.
         log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
         log.logText.includes('Unexpected generator error') ||
-        log.logText.includes('[telefunc:rxjs]') ||
-        log.logText.includes('Unhandled rxjs error') ||
+        // rxjs/e2e-test.ts's errors on purpose; never a page that left, which Telefunc doesn't log.
+        ((log.logText.includes('[telefunc:rxjs]') || log.logText.includes('Unhandled rxjs error')) &&
+          !log.logText.includes('its page left')) ||
         log.logText.includes('Shield Validation Error') ||
         // Transitions between tests close the previous page's channels; the server-side
         // Subject/Observable wire waits for a reconnect within the grace period and logs this
