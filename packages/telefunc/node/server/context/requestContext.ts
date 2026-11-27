@@ -82,28 +82,28 @@ function createRequestContext(request: Request): RequestContext {
   }
 
   const abortSignal = request.signal
-  // The call holds the request until it answers or its client leaves. Streams and channels can hold it longer.
+  // The call holds the request until it answers or its client leaves (`watched`: its leaving releases the call's hold).
+  // Streams and channels can hold it longer.
   let pendingCount = 1
-  let callPending = true
-  let watchingClient = false
+  let call: 'held' | 'watched' | 'released' = 'held'
 
   const releasePending = () => {
     if (--pendingCount === 0) fireClose()
   }
   const releaseCall = () => {
-    if (!callPending) return
-    callPending = false
-    if (watchingClient) abortSignal.removeEventListener('abort', releaseCall)
+    if (call === 'released') return
+    if (call === 'watched') abortSignal.removeEventListener('abort', releaseCall)
+    call = 'released'
     releasePending()
   }
   const watchClient = () => {
-    if (!callPending || watchingClient) return
+    if (call !== 'held') return
     if (abortSignal.aborted) {
       releaseCall()
       return
     }
     abortSignal.addEventListener('abort', releaseCall, { once: true })
-    watchingClient = true
+    call = 'watched'
   }
 
   const answeredCallbacks: Array<() => void> = []
