@@ -1,5 +1,5 @@
 // A channel whose data gets no further while the page reconnects: judged at each loss once a reconnect was answered
-// after its date, as on 0.3.1 (decisions/516-sse-carrier.md, 13:08Z step 3). A REAL ClientChannel and its connection
+// after its date (decisions/516-sse-carrier.md, 13:08Z step 3). A REAL ClientChannel and its connection
 // against a scripted server (scriptedServer.fixture.ts), over SSE batch POSTs unless a test says otherwise.
 
 import { expect, test, vi } from 'vitest'

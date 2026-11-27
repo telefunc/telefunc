@@ -17,9 +17,7 @@ const upgradesTakenHere: TakesUpgrades = () => true
 
 /** Telefunc's take of a Node server, kept for the server's life: the `upgrade` listener Telefunc put on it and, where
  *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`wrapped`), as the server can't tell
- *  which of its functions are Telefunc's. `holdsRegistry`: the server is in 0.3.1's registry for Telefunc's listener.
- *  A removal of the listener that Telefunc's `removeListener` listener didn't see leaves it there, so 0.3.1's next
- *  install skips the server, until this copy's next `installWebSocket()` takes it again. */
+ *  which of its functions are Telefunc's. */
 type TakenServer = {
   server: {
     listenerCount(event: 'upgrade', listener: (...args: never[]) => void): number
@@ -27,7 +25,6 @@ type TakenServer = {
   }
   listener: (...args: never[]) => void
   wrapped: CallbackInFront | null
-  holdsRegistry: boolean
 }
 
 const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrades.ts', {

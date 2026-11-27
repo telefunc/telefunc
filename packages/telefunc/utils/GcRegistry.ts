@@ -85,8 +85,7 @@ class GcRegistry {
   }
 }
 
-/** The process's one registry, which every copy of Telefunc of this version shares. It is kept under this file's key, as
- *  this file says what `register()` returns: an older version's registry, under its own file's key, returns nothing. */
+/** The process's one registry, which every copy of Telefunc in the process shares. */
 function getGcRegistry(): GcRegistry {
   return getGlobalObject('utils/GcRegistry.ts', () => ({ gcRegistry: new GcRegistry() })).gcRegistry
 }

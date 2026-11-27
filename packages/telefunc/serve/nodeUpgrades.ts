@@ -16,11 +16,6 @@ import { assert } from '../utils/assert.js'
 import { markRequestsOfServer } from './requestServer.js'
 import { putBackOwnCallback, upgradeOthersOnlyForTheirListeners } from '../workarounds/nodeShouldUpgradeCallback.js'
 import { carryUpgradeRequest } from '../workarounds/crosswsNodeRequest.js'
-import {
-  inLegacyRegistry,
-  recordInLegacyRegistry,
-  releaseLegacyRegistry,
-} from '../workarounds/nodeLegacyUpgradeRegistry.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -65,10 +60,10 @@ function isTelefuncHandshake(req: IncomingMessage): boolean {
   return handshake.url?.pathname === handshake.config.telefuncUrl
 }
 
-/** `serve({ req, res })`'s take, of a server no copy of Telefunc took before: one whose listener the app removed, or
+/** `serve({ req, res })`'s take, of a server Telefunc didn't take before: one whose listener the app removed, or
  *  whose callback it replaced, stays as the app left it, until the app's own `installWebSocket()`. */
 function takeUpgradesOfNewServer(httpServer: HttpServer): void {
-  if (upgradeServers.has(httpServer) || inLegacyRegistry(httpServer)) return
+  if (upgradeServers.has(httpServer)) return
   takeUpgrades(httpServer)
 }
 
@@ -91,8 +86,6 @@ function takeUpgrades(httpServer: HttpServer): void {
     }
     return
   }
-  // 0.3.1's listener is there.
-  if (inLegacyRegistry(httpServer) && !before?.holdsRegistry) return
   // What a removal Telefunc didn't see left: its callback, still in front of the server's own.
   if (before !== undefined) putBackOwnCallback(httpServer, before.wrapped)
   const adapter = webSocketAdapter()
@@ -120,24 +113,15 @@ function takeUpgrades(httpServer: HttpServer): void {
     sockets.set(request, socket)
     adapter.handleUpgrade(req, socket, head, request)
   }
-  const taken: TakenServer = {
-    server: httpServer,
-    listener: onUpgrade,
-    wrapped: null,
-    holdsRegistry: true,
-  }
-  recordInLegacyRegistry(httpServer)
+  const taken: TakenServer = { server: httpServer, listener: onUpgrade, wrapped: null }
   httpServer.on('upgrade', onUpgrade)
   taken.wrapped = upgradeOthersOnlyForTheirListeners(httpServer, onUpgrade, isTelefuncHandshake)
   upgradeServers.set(httpServer, taken)
-  // The removal gives the server its own callback back and frees 0.3.1's registry; the next install covers one unseen.
+  // The removal gives the server its own callback back; the next install covers one unseen.
   const onRemoved = (event: string | symbol, removed: unknown) => {
     if (event !== 'upgrade' || removed !== onUpgrade) return
     httpServer.off('removeListener', onRemoved)
     putBackOwnCallback(httpServer, taken.wrapped)
-    taken.holdsRegistry = false
-    // An install from a `removeListener` listener that ran before this one took the server again: the registry is its.
-    if (upgradeServers.get(httpServer) === taken) releaseLegacyRegistry(httpServer)
   }
   httpServer.on('removeListener', onRemoved)
 }

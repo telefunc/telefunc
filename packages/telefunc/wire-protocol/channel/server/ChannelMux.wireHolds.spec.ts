@@ -756,7 +756,7 @@ test("a first RECONCILE without its attempt naming a session whose end is kept g
   }
 })
 
-test('a first RECONCILE that names no session, as a page of 0.3.1 sends it, goes as a loss', async () => {
+test('a first RECONCILE that names no session goes as a loss', async () => {
   const first = wire()
   try {
     const frame: unknown = Reflect.apply(encode.reconcile, encode, [{ open: [] }])

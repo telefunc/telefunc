@@ -1070,8 +1070,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
  *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, drawn at random so that pages that lost
  *  their wires together, to a proxy or a server that restarted, don't come back together, on the first attempt or at
  *  the cap: anywhere in the step, or, while a channel's data has waited since an earlier loss (`stalled`), between the
- *  step and half a step more, so what can't get through goes again no more often than on 0.3.1, which waited the step
- *  itself (its client/connection.ts:1191). */
+ *  step and half a step more, so what can't get through goes again at most once a step. */
 function reconnectDelay(attempt: number, stalled: boolean): number {
   const step = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
   return stalled ? (1 + Math.random() / 2) * step : Math.random() * step
