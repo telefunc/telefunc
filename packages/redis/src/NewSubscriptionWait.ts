@@ -33,8 +33,8 @@ type Wait = {
   sends: number
 }
 
-/** The bytes of one budget's waiting sends, and the ledger's holder for them. */
-type WaitingBytes = { bytes: number; readonly memory: QueueMemory }
+/** How many sends of one budget wait, and the ledger's holder for their bytes. */
+type WaitingBudget = { sends: number; readonly memory: QueueMemory }
 
 /** A send's place in its queue's wait: `await turn` for its own copy of the payload, send that, then `sent()`. A turn
  *  that rejects has left the wait already. */
@@ -57,7 +57,7 @@ class NewSubscriptionWait {
   /** By queue. */
   private readonly waits = new Map<string, Wait>()
   /** By budget. */
-  private readonly waitingBytes = new Map<string, WaitingBytes>()
+  private readonly budgets = new Map<string, WaitingBudget>()
 
   constructor({ subscriptions }: NewSubscriptionWaitOptions) {
     this.subscriptions = subscriptions
@@ -81,8 +81,8 @@ class NewSubscriptionWait {
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
     const bytes =
       (typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
-    const others = this.waitingBytes.get(budget)
-    const waiting = others ?? { bytes: 0, memory: queueMemory() }
+    const others = this.budgets.get(budget)
+    const waiting = others ?? { sends: 0, memory: queueMemory() }
     // The first waiting send goes whatever the ledger says, charged only where it admits it.
     const charged = waiting.memory.tryHold(bytes) ? bytes : 0
     if (charged === 0 && others !== undefined) {
@@ -94,8 +94,8 @@ class NewSubscriptionWait {
     this.waits.set(queue, wait)
     for (const channel of failsOn) wait.passed.add(channel)
     wait.sends++
-    waiting.bytes += charged
-    this.waitingBytes.set(budget, waiting)
+    waiting.sends++
+    this.budgets.set(budget, waiting)
     const owned = own(payload)
     const sent = () => this.endWait(queue, wait, budget, waiting, charged)
     return { turn: this.turnOf(wait, failsOn, owned, sent), sent }
@@ -116,12 +116,11 @@ class NewSubscriptionWait {
   }
 
   /** A waiting send went out: the last of its wait's sends unmaps it, so a send made before then still queues behind
-   *  the rest. */
-  private endWait(queue: string, wait: Wait, budget: string, waiting: WaitingBytes, bytes: number): void {
+   *  the rest, and the last of its budget's unmaps that. */
+  private endWait(queue: string, wait: Wait, budget: string, waiting: WaitingBudget, bytes: number): void {
     if (--wait.sends === 0 && this.waits.get(queue) === wait) this.waits.delete(queue)
-    waiting.bytes -= bytes
     waiting.memory.letGo(bytes)
-    if (waiting.bytes === 0) this.waitingBytes.delete(budget)
+    if (--waiting.sends === 0) this.budgets.delete(budget)
   }
 
   /** A wait for our new subscriptions on `channels`, including ones made meanwhile. Where Redis refuses one, the wait

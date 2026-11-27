@@ -1,7 +1,8 @@
 import { inspect } from 'node:util'
 import { Redis } from 'ioredis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createDeferred, type DriverAttempt } from 'telefunc/__internal'
+import { config } from 'telefunc'
+import { ChannelOverflowError, createDeferred, type DriverAttempt } from 'telefunc/__internal'
 import { assert } from './assert.js'
 import { slotOf, type FormerMaster, type RedisClient, type SubscriberSocket } from './ioredis.js'
 import { NewSubscriptionWait, type WaitingSend } from './NewSubscriptionWait.js'
@@ -13,6 +14,11 @@ const BINARY = 'binary-channel'
 /** A key's two kinds share a seq, so a text publish waits for both, and fails only on its own, as `broadcastWaitRule`
  *  has it. */
 const RULE = { queue: TEXT, channels: [TEXT, BINARY], failsOn: [TEXT], budget: TEXT }
+
+const MAX_PENDING_BYTES = 2 * 1024 * 1024
+config.channel = { maxPendingBytes: MAX_PENDING_BYTES }
+/** A payload past what the ledger holds for one channel: only a budget's first waiting send goes with it. */
+const UNHELD = 'x'.repeat(MAX_PENDING_BYTES)
 
 type ReadStarts = (on?: RedisClient) => Promise<Starts>
 
@@ -799,6 +805,33 @@ describe('a publish waiting on its key’s new subscriptions', () => {
 
       expect({ sent, state: attempt.state(), missed }).toEqual({ sent: 'hello', state: 'ready', missed: [] })
     })
+  })
+
+  it('a budget whose first send waits uncharged admits no other uncharged one until that send went out', async () => {
+    const { listen, sends } = setup()
+    const read = createDeferred<Starts>()
+    listen(TEXT, () => read.promise)
+    const later = createDeferred<Starts>()
+    const turnOf = (queue: string, payload: string) => {
+      const waiting = sends.waitTurn({ ...RULE, queue }, payload, (owned) => owned)
+      assert(waiting !== null)
+      return waiting
+    }
+    const uncharged = turnOf('track-a', UNHELD)
+    const charged = turnOf('track-b', 'hello')
+    read.resolve(none())
+    await charged.turn
+    charged.sent()
+    listen(TEXT, () => later.promise, undefined, 'later')
+
+    expect(() => turnOf('track-c', UNHELD)).toThrow(ChannelOverflowError)
+    await uncharged.turn
+    uncharged.sent()
+    const next = turnOf('track-c', UNHELD)
+    expect(() => turnOf('track-d', UNHELD)).toThrow(ChannelOverflowError)
+    later.resolve(none())
+    await next.turn
+    next.sent()
   })
 
   it('fails with the refusal when Redis refuses the subscription of its own kind it waits for', async () => {
