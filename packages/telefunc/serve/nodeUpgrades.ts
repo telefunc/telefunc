@@ -16,6 +16,11 @@ import { assert } from '../utils/assert.js'
 import { markRequestsOfServer } from './requestServer.js'
 import { putBackOwnCallback, upgradeOthersOnlyForTheirListeners } from '../workarounds/nodeShouldUpgradeCallback.js'
 import { carryUpgradeRequest } from '../workarounds/crosswsNodeRequest.js'
+import {
+  inLegacyRegistry,
+  recordInLegacyRegistry,
+  releaseLegacyRegistry,
+} from '../workarounds/nodeLegacyUpgradeRegistry.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -24,9 +29,6 @@ declare module 'crossws' {
 }
 
 type HttpServer = Server | Http2SecureServer
-
-// 0.3.1 reads this registry, key and shape before it adds its `upgrade` listener: two would take one socket.
-const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServers: new WeakSet<object>() })
 
 // Each upgrade's socket, by the request its upgrade hook gets.
 const sockets = new WeakMap<Request, Duplex>()
@@ -66,7 +68,7 @@ function isTelefuncHandshake(req: IncomingMessage): boolean {
 /** `serve({ req, res })`'s take, of a server no copy of Telefunc took before: one whose listener the app removed, or
  *  whose callback it replaced, stays as the app left it, until the app's own `installWebSocket()`. */
 function takeUpgradesOfNewServer(httpServer: HttpServer): void {
-  if (upgradeServers.has(httpServer) || registeredServers.has(httpServer)) return
+  if (upgradeServers.has(httpServer) || inLegacyRegistry(httpServer)) return
   takeUpgrades(httpServer)
 }
 
@@ -87,7 +89,7 @@ function takeUpgrades(httpServer: HttpServer): void {
     return
   }
   // 0.3.1's listener is there.
-  if (registeredServers.has(httpServer) && !before?.holdsRegistry) return
+  if (inLegacyRegistry(httpServer) && !before?.holdsRegistry) return
   // What a removal Telefunc didn't see left: its callback, still in front of the server's own.
   if (before !== undefined) putBackOwnCallback(httpServer, before)
   const adapter = webSocketAdapter()
@@ -121,7 +123,7 @@ function takeUpgrades(httpServer: HttpServer): void {
     wrapped: null,
     holdsRegistry: true,
   }
-  registeredServers.add(httpServer)
+  recordInLegacyRegistry(httpServer)
   httpServer.on('upgrade', onUpgrade)
   upgradeOthersOnlyForTheirListeners(httpServer, taken, isTelefuncHandshake)
   upgradeServers.set(httpServer, taken)
@@ -132,7 +134,7 @@ function takeUpgrades(httpServer: HttpServer): void {
     putBackOwnCallback(httpServer, taken)
     taken.holdsRegistry = false
     // An install from a `removeListener` listener that ran before this one took the server again: the registry is its.
-    if (upgradeServers.get(httpServer) === taken) registeredServers.delete(httpServer)
+    if (upgradeServers.get(httpServer) === taken) releaseLegacyRegistry(httpServer)
   }
   httpServer.on('removeListener', onRemoved)
 }
