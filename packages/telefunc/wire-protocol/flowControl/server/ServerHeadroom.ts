@@ -55,7 +55,7 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   private inPathAt = 0
   /** Looks again for copy room, which another wire's page may free, or for the window the rate drains. */
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  /** Asks for the page's word once a wire waiting for copy room has heard nothing for a while (`askSoon`). */
+  /** Asks for the page's word once a wire waiting for copy room has heard nothing for a while. */
   private askTimer: ReturnType<typeof setTimeout> | null = null
   /** The copies handed and not covered by an acknowledgement: where each ends, of all the sender handed. */
   private readonly copied = new Fifo<{ end: number; bytes: number }>()
@@ -260,11 +260,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return true
   }
 
-  /** Asks the page soon, unless it says first: copy room would otherwise wait out its acknowledgement gap. */
-  private askSoon(): void {
-    if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
-  }
-
   /** The page said what it took: the window it frees is the one to ask about, if it blocks again. */
   private heard(): void {
     if (this.askTimer !== null) clearTimeout(this.askTimer)
@@ -320,7 +315,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     const { waitingBytes, acknowledgedBytes, awaitsProbe } = this.sender
     if (waitingBytes === 0 || awaitsProbe) return
     if (this.awaitsCopyRoom) {
-      this.askSoon()
+      // Asks the page soon, unless it says first: copy room would otherwise wait out its acknowledgement gap.
+      if (this.askTimer === null) this.askTimer = unrefTimer(setTimeout(this.askNow, WIRE_ASK_AFTER_MS))
       // Another wire freeing room can't wake this one: on a Durable Object its socket is out of that wire's reach.
       if (acknowledgedBytes > 0 && this.paceTimer === null)
         this.paceTimer = unrefTimer(setTimeout(this.lookAgain, WIRE_PIECES_ACK_GAP_MS))

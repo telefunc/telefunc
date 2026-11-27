@@ -365,7 +365,7 @@ class ChannelMux implements UpgradeStagesOwner {
     }
     for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
-    if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
+    if (outcome.retiredWire !== null) this.wires.get(outcome.retiredWire)?.sender.send(encode.fin())
   }
 
   /** The wire's transport saw it close: the mux forgets it. Returns the session the wire held, if it held one. */
@@ -414,7 +414,7 @@ class ChannelMux implements UpgradeStagesOwner {
    *  transport may throw as it closes. */
   private dispose(entry: WireEntry, reason: WireClose): void {
     const { wire } = entry
-    this.clearPingTimer(entry.state)
+    entry.state.pingTimer.disarm()
     entry.state.awaited.stop()
     entry.sender.close()
     this.stages.clear(wire)
@@ -732,7 +732,8 @@ class ChannelMux implements UpgradeStagesOwner {
   private handlePing(entry: WireEntry, ended: PingEntry[]): void {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     this.resetPingTimer(entry)
-    this.acknowledgeArrivals(entry)
+    // The session's channels acknowledge what arrived, so the page's replay lets it go.
+    for (const { channel } of entry.holds?.channels.values() ?? []) channel._acknowledge()
     if (ended.length === 0 || entry.state.recvChain === null) return this.pong(entry, this.answerPing(entry, ended))
     // What it names, the page sent before it: answered once the frames ahead of it had their turn.
     this.pong(entry, [])
@@ -843,11 +844,6 @@ class ChannelMux implements UpgradeStagesOwner {
       answers.push({ ix, lastSeq: released ? null : channel._lastClientSeq })
     }
     return answers
-  }
-
-  /** On each page heartbeat, the session's channels acknowledge what arrived, so the page's replay lets it go. */
-  private acknowledgeArrivals(entry: WireEntry): void {
-    for (const { channel } of entry.holds?.channels.values() ?? []) channel._acknowledge()
   }
 
   private pong(entry: WireEntry, ended: PongEntry[]): void {
@@ -1191,12 +1187,7 @@ class ChannelMux implements UpgradeStagesOwner {
     }
   }
 
-  // ── Per-wire plumbing (send, recv chain, ping) ────────────────
-
-  /** Sole send path, sync so wire order is call order; a wire closed or past its backlog drops the frame. */
-  private send(wire: Wire, frame: Uint8Array<ArrayBuffer>): void {
-    this.wires.get(wire)?.sender.send(frame)
-  }
+  // ── Per-wire plumbing (recv chain, ping) ────────────────
 
   private chainRecv<T>(entry: WireEntry, fn: () => Promise<T>): Promise<T> {
     const prev = entry.state.recvChain ?? Promise.resolve()
@@ -1205,10 +1196,6 @@ class ChannelMux implements UpgradeStagesOwner {
     })
     entry.state.recvChain = next
     return next
-  }
-
-  private clearPingTimer(state: WireState): void {
-    state.pingTimer.disarm()
   }
 
   private pingDeadlineOf(entry: WireEntry): number {

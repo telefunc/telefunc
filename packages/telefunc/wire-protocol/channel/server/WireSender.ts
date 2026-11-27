@@ -371,7 +371,9 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
     const socket = this.bufferedAmount()
     let allowed = this.largestSent
     for (const channel of this.channels()) allowed += channel.heldBytes
-    const holds = (socket ?? 0) + this.heldBytes + this.copiedBytes()
+    // What the wire's events take as copies of their frames: SSE's base64.
+    const copied = this.wireQueue instanceof EventStream ? this.wireQueue.copiedBytes : 0
+    const holds = (socket ?? 0) + this.heldBytes + copied
     this.holdForWire(holds - allowed)
     return socket === undefined && !this.owed ? Infinity : this.memory.heldBytes + allowed - holds
   }
@@ -386,11 +388,6 @@ class WireSender implements PeerSender, SocketWaitOwner, PieceReceiverOwner, Wir
       return
     }
     if (tryHold(this.memory, need - held) && fits(this.memory, need)) hold(this.memory, need)
-  }
-
-  /** What the wire's events take as copies of their frames: SSE's base64. */
-  private copiedBytes(): number {
-    return this.wireQueue instanceof EventStream ? this.wireQueue.copiedBytes : 0
   }
 
   /** The channels the wire's send backlog counts: its session's, and those attaching in this turn. */
