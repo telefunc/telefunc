@@ -1,9 +1,9 @@
-export { onBroadcastKeys, onUnreadSends, onKeptUpload, onHello }
+export { onBroadcastKeys, onUnreadSends, onKeptUpload, onUnreadEventStream, onHello }
 
 import { Channel, BroadcastChannel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { watchChannelMemory } from '../../channel-memory'
+import { watchChannelMemory, channelMemoryHeld } from '../../channel-memory'
 
 /** Two broadcasts of keys of their own. Once the page asks, a publish on the first larger than the server may hold,
  *  then a small one on the second. */
@@ -60,16 +60,34 @@ function sendToUnread() {
   }
 }
 
-/** Returns a channel and keeps `blob` unread past the answer; the page's `'read'` reads it then. */
+/** Returns a channel and keeps `blob` unread past the answer; the page's `'answer'` gets 512 KiB back, and its `'read'`
+ *  reads `blob` then. */
 async function onKeptUpload(blob: Blob) {
-  const channel = new Channel<(msg: 'read') => string, never>()
-  channel.listen(() =>
-    blob.text().then(
+  const channel = new Channel<(msg: 'answer' | 'read') => string, never>()
+  channel.listen(async (msg) => {
+    if (msg === 'answer') return 'x'.repeat(512 * 1024)
+    return blob.text().then(
       (text) => `read ${text.length} bytes`,
       (err: Error) => err.message,
-    ),
-  )
+    )
+  })
   return channel.client
+}
+
+/** A channel for a page of the test's own, which reads nothing of its event stream. How it ends goes in
+ *  `cleanupState.unreadEventStream_<id>`; the test's `channelMemory` action puts what the server's channel memory holds,
+ *  and the most it held since this call, in `cleanupState.channelMemory`. */
+async function onUnreadEventStream() {
+  const channel = new Channel<never, never>()
+  const id = channel.id
+  const peak = watchChannelMemory()
+  channel.onClose((err) => void (cleanupState[`unreadEventStream_${id}`] = err ? err.name : 'clean'))
+  onServerAction(
+    'channelMemory',
+    () => void (cleanupState.channelMemory = JSON.stringify({ ...peak(), total: channelMemoryHeld() })),
+    { once: false },
+  )
+  return { channel: channel.client, channelId: id }
 }
 
 async function onHello() {

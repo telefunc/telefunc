@@ -10,8 +10,17 @@ import {
   runServerAction,
   sleep,
 } from '../../e2e-utils'
+import { request, type IncomingMessage } from 'node:http'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import { parseChannelTransports } from '../../channelTransports'
+import {
+  CHANNEL_TRANSPORT,
+  MAX_CHANNELS_PER_CONNECTION,
+  WIRE_VERSION,
+} from '../../../../packages/telefunc/wire-protocol/constants'
+import { encodeSseRequest } from '../../../../packages/telefunc/wire-protocol/wire/envelope'
+import { encode } from '../../../../packages/telefunc/wire-protocol/wire/frame'
+import { pingDeadline } from '../../../../packages/telefunc/wire-protocol/wire/pingDeadline'
 import type { ChannelMemoryPeak } from '../../channel-memory'
 import { sendRefusedWarning } from '../../../utils'
 import { burstOf, burstWhileOffline, memoryPeakOf } from './burst-e2e'
@@ -46,11 +55,74 @@ type SmallPendingState = {
   } | null
   broadcastKeys: { publish: string; firstClosed: string; secondReceived: string[]; secondClosed: boolean } | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; read: string } | null
+  keptUpload: { next: string; answer: string; read: string } | null
 }
 
 /** The channel page's state. */
 const stateOf = () => getResult<SmallPendingState>('#channel-state')
+
+/** The server's `config.channel.pingInterval`. */
+const PING_INTERVAL = 1000
+
+/** POSTs `body` as a page's SSE request: its status, and its answer, which it reads no further than its first chunk. */
+async function postSse(body: Blob): Promise<{ status: number; res: IncomingMessage }> {
+  const bytes = Buffer.from(await body.arrayBuffer())
+  return new Promise((resolve, reject) => {
+    const req = request(
+      `${getServerUrl()}/_telefunc?wire=${WIRE_VERSION}`,
+      { method: 'POST', headers: { 'x-telefunc-request': 'sse' } },
+      (res) => {
+        res.once('data', () => {
+          res.pause()
+          resolve({ status: res.statusCode ?? 0, res })
+        })
+        res.once('end', () => resolve({ status: res.statusCode ?? 0, res }))
+      },
+    )
+    req.on('error', reject)
+    req.end(bytes)
+  })
+}
+
+/** PINGs that list as many ended channels as a page may have: each PONG answers each. */
+const ended = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, i) => ({ ix: i + 1, lastSeq: 0 }))
+const widePings = (count: number) => Array.from({ length: count }, () => encode.ping(ended))
+
+/** A page of the test's own, whose session holds one channel of `onUnreadEventStream`, and whose event stream it stops
+ *  reading at its first chunk. */
+async function openUnreadEventStream() {
+  const call = await fetch(`${getServerUrl()}/_telefunc`, {
+    method: 'POST',
+    headers: { 'x-telefunc-request': 'txt' },
+    body: JSON.stringify({
+      file: '/pages/channel/SmallPendingExtra.telefunc.ts',
+      name: 'onUnreadEventStream',
+      args: [],
+    }),
+  })
+  const { channelId } = JSON.parse(await call.text()).ret as { channelId: string }
+  const connId = crypto.randomUUID()
+  const reconcile = encode.reconcile({
+    sessionId: crypto.randomUUID(),
+    attempt: 1,
+    open: [{ id: channelId, ix: 0, lastSeq: 0, initial: true }],
+  })
+  const { res } = await postSse(encodeSseRequest({ connId, streamResponse: true }, [reconcile]))
+  return {
+    channelId,
+    /** How the server ended the channel, or undefined while it is open. */
+    ended: async () => (await getCleanupState())[`unreadEventStream_${channelId}`],
+    /** The page reads its event stream again, to its end. */
+    catchUp: () => void res.on('data', () => {}).resume(),
+    pings: (count = 10) => postSse(encodeSseRequest({ connId }, widePings(count))),
+  }
+}
+
+/** What the server's channel memory holds, and the most it held since the last `openUnreadEventStream()`. */
+async function channelMemory(): Promise<ChannelMemoryPeak & { total: number }> {
+  await runServerAction('channelMemory')
+  return JSON.parse(defined((await getCleanupState()).channelMemory, 'channelMemory'))
+}
 
 // Run by the lanes whose server has the smallest `maxMemory`, 2 MiB.
 function testSmallPending() {
@@ -302,6 +374,66 @@ function testSmallPending() {
     )
   })
 
+  // On 2 MiB, the server keeps at most 1.75 MiB of the upload, then refuses the rest of it: the 512 KiB answer needs the
+  // room what it kept of it took.
+  test("channel: a call that returns a channel and keeps its 4 MiB upload past maxMemory: the next call is answered, the server lets go of what it kept of the upload, and the upload's late read fails saying why", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-kept-upload')
+    await autoRetry(
+      async () => {
+        const { next, answer, read } = defined((await stateOf()).keptUpload, 'keptUpload')
+        expect(next).toBe('hello')
+        expect(answer).toBe(`${512 * 1024} bytes`)
+        expect(read).toContain(
+          `The telefunction returned before it read this File (${4 * 1024 * 1024} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped.`,
+        )
+      },
+      { timeout: 30_000 },
+    )
+  })
+
+  // Over SSE what the server sends a page waits in its event stream's response once the kernel's buffers are full.
+  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse') {
+    for (const count of [1, 4])
+      test(`channel: ${count} pages that flood PINGs and read nothing of their event streams hold no more than maxMemory together, their channels end with ChannelOverflowError, and the server lets go of what they held a ping deadline later`, async () => {
+        const pages = await Promise.all(Array.from({ length: count }, openUnreadEventStream))
+        const before = (await channelMemory()).total
+        const answered = pages.map(() => true)
+        for (let round = 0; round < 300 && answered.some(Boolean); round++) {
+          for (const [i, each] of pages.entries()) if (answered[i]) answered[i] = (await each.pings()).status === 200
+        }
+        expect(answered).deep.equal(pages.map(() => false))
+        await autoRetry(async () => {
+          expect(await Promise.all(pages.map((each) => each.ended()))).deep.equal(
+            pages.map(() => 'ChannelOverflowError'),
+          )
+        })
+        const { held, maxMemory } = await channelMemory()
+        expect(held).greaterThan(maxMemory / 2)
+        expect(held).lessThanOrEqual(maxMemory)
+        await sleep(pingDeadline(PING_INTERVAL, CHANNEL_TRANSPORT.SSE) + 500)
+        await autoRetry(async () => {
+          expect((await channelMemory()).total).lessThanOrEqual(before)
+        })
+      })
+
+    test('channel: a page that stops reading its event stream and catches up: the server lets go of the PONGs its event stream held for it', async () => {
+      const each = await openUnreadEventStream()
+      const before = (await channelMemory()).total
+      let held = before
+      // One PING at a time, so that the PONGs fill the kernel's buffers and then hold past 1 MiB, short of maxMemory.
+      for (let round = 0; round < 200 && held - before <= 2 ** 20; round++) {
+        expect((await each.pings(1)).status).toBe(200)
+        held = (await channelMemory()).total
+      }
+      expect(held - before).greaterThan(2 ** 20)
+      each.catchUp()
+      await autoRetry(async () => {
+        expect((await channelMemory()).total - before).lessThan((held - before) / 4)
+      })
+    })
+  }
+
   // Each page's link carries 4 KB/s, so of 340 sends of 15 KiB to it next to nothing reaches the page: what the server
   // sends waits in its memory, or is refused.
   test('channel: four pages that read nothing of what the server sends them hold no more than maxMemory together on the server', async () => {
@@ -339,22 +471,4 @@ function testSmallPending() {
       await proxy.close()
     }
   })
-
-  // Over SSE the call's upload is its own request. On the WebSocket lane the server ends the channel with
-  // ChannelOverflowError instead, so the late read can't answer the page.
-  if (parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS).join() === 'sse')
-    test("channel: a call that returns a channel and keeps its 4 MiB upload past maxMemory: the next call is answered, and the upload's late read fails saying why", async () => {
-      await navigate(`${getServerUrl()}/channel`)
-      await page.click('#channel-test-kept-upload')
-      await autoRetry(
-        async () => {
-          const { next, read } = defined((await stateOf()).keptUpload, 'keptUpload')
-          expect(next).toBe('hello')
-          expect(read).toContain(
-            `The telefunction returned before it read this File (${4 * 1024 * 1024} bytes), and the server keeps no more of a File left unread than config.channel.maxMemory and config.channel.maxPendingBytes allow: the rest was dropped.`,
-          )
-        },
-        { timeout: 30_000 },
-      )
-    })
 }

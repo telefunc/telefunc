@@ -12,7 +12,7 @@ type SendsPastMemoryState = {
     | { error: string }
     | null
   unreadSends: { opened: true } | null
-  keptUpload: { next: string; read: string } | null
+  keptUpload: { next: string; answer: string; read: string } | null
 }
 
 const initialSendsPastMemoryState: SendsPastMemoryState = {
@@ -142,15 +142,20 @@ function UnreadSends({ show }: { show: Show }) {
   )
 }
 
-// A call that returns a channel and keeps its 4 MiB Blob unread, then the next call, then the Blob's read.
+// A call that returns a channel and keeps its 4 MiB Blob unread, then the next call, then an answer of 512 KiB, then
+// the Blob's read.
 function KeptUpload({ show }: { show: Show }) {
   async function testKeptUpload() {
     show({ keptUpload: null })
     const channel = await openChannel(() => onKeptUpload(new Blob([new Uint8Array(4 * 1024 * 1024).fill(120)])))
     const next = await onHello()
+    const answer = await channel.send('answer', { ack: true }).then(
+      (text) => `${text.length} bytes`,
+      (err: Error) => err.name,
+    )
     const read = await channel.send('read', { ack: true }).catch((err: Error) => err.name)
     channel.close()
-    show({ keptUpload: { next, read } })
+    show({ keptUpload: { next, answer, read } })
   }
 
   return (

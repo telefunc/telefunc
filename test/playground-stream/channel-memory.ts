@@ -1,4 +1,4 @@
-export { watchChannelMemory }
+export { watchChannelMemory, channelMemoryHeld }
 export type { ChannelMemoryPeak }
 
 /** The most the server's channel memory held since `watchChannelMemory()`, and held with what waits for room, as its
@@ -40,6 +40,11 @@ function recordEachWrite(ledger: Ledger): void {
       },
     })
   }
+}
+
+/** What the server's channel memory holds now, as its own ledger counts it. */
+function channelMemoryHeld(): number {
+  return channelMemoryLedger().total
 }
 
 function channelMemoryLedger(): Ledger {
