@@ -56,7 +56,10 @@ class MemoryBackend implements BroadcastDriver {
   subscribe({ kind, key }: BroadcastRoute, receiver: BackendReceiver): DriverAttempt {
     addSubscriber(this.broadcastSubs[kind], key, receiver)
     return new MemoryBroadcastAttempt(() => {
-      if (removeSubscriber(this.broadcastSubs[kind], key, receiver)) this.released(key)
+      // A key no route of either kind subscribes to forgets its order.
+      if (removeSubscriber(this.broadcastSubs[kind], key, receiver) && !this.broadcastSubscribed(key)) {
+        this.broadcastOrder.delete(key)
+      }
     })
   }
 
@@ -115,11 +118,6 @@ class MemoryBackend implements BroadcastDriver {
     if (mark.seq > highest.seq) highest.seq = mark.seq
     if (mark.timestamp > highest.timestamp) highest.timestamp = mark.timestamp
     return mark
-  }
-
-  /** A key no route of either kind subscribes to forgets its order. */
-  private released(key: string): void {
-    if (!this.broadcastSubscribed(key)) this.broadcastOrder.delete(key)
   }
 
   private broadcastSubscribed(key: string): boolean {

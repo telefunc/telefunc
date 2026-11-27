@@ -92,7 +92,7 @@ class ListenAttempt extends DriverAttempt {
     const confirming = this.confirming
     confirming.attempt = this
     void listening.opened.then(
-      () => confirming.attempt?.confirmed(),
+      () => confirming.attempt?.transition('ready'),
       (err: unknown) => confirming.attempt?.refused(err),
     )
   }
@@ -102,10 +102,6 @@ class ListenAttempt extends DriverAttempt {
     this.transition('closed')
     this.stop()
     return Promise.resolve()
-  }
-
-  private confirmed(): void {
-    this.transition('ready')
   }
 
   private refused(err: unknown): void {

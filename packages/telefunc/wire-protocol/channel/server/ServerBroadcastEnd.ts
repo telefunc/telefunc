@@ -55,10 +55,9 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   private lastPeer: IndexedPeer | null = null
   /** Why `shed` ended it, which its page has yet to learn: see `shed`. */
   private overflowed: string | null = null
-  /** Its abort, owed to its page: an overflow takes its place where its page would miss a message (`shed`). */
-  private owesAbort = false
-  /** While it owes its page that abort, the page's channel on the wire it reads, which the overflow then goes on. */
-  private endedOn: IndexedPeer | null = null
+  /** Its abort, owed to its page: an overflow takes its place where its page would miss a message (`shed`), and goes
+   *  `on` the page's channel on the wire it reads. */
+  private abortOwed: { on: IndexedPeer | null } | null = null
   /** Its lossy publishes, from the first one on. */
   private lossyPublishes: LossyDelivery<PublishBody> | null = null
   /** The publishes its page wanted before its first attach (a call of the page's brought the want): that attach sends
@@ -229,8 +228,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** Its plain publishes go ahead of its ABORT, as a channel's reliable sends do; its lossy ones no wire has taken go,
    *  as a channel's lossy sends do. */
   protected override onAbortOwed(): void {
-    this.owesAbort = true
-    this.endedOn = this.peer
+    this.abortOwed = { on: this.peer }
     this.lossyPublishes?.dispose()
     this.peer?.dropUnhandedLossy()
   }
@@ -265,7 +263,7 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   /** How many of its newest publishes no wire has: all of them while it has no wire. Ended, those of the wire its page
    *  reads its abort on. */
   private unhanded(): number {
-    return (this.peer ?? this.endedOn)?.unhanded() ?? Number.POSITIVE_INFINITY
+    return (this.peer ?? this.abortOwed?.on)?.unhanded() ?? Number.POSITIVE_INFINITY
   }
 
   /** Its newest publish, where no wire has that yet. */
@@ -287,10 +285,10 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
   shed(toBytes: number): void {
     const replay = this._replayBuffer
     const ended = this._phase === 'ended'
-    if (!replay || (ended && !this.owesAbort)) return
+    if (!replay || (ended && this.abortOwed === null)) return
     if (toBytes === 0) this.lossyPublishes?.dispose()
     const gap = this.dropBeforeAttachFromGap(toBytes) || replay.dropFromGap(toBytes, this.unhanded()) > 0
-    const peer = this.peer ?? this.endedOn
+    const peer = this.peer ?? this.abortOwed?.on
     if (gap) {
       peer?.sender.queue.dropWaitingFrom(peer.index, 'publish')
       this.dropPendingFrames()
@@ -327,14 +325,14 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
       this.endWithError(ERROR_REASON.OVERFLOW, new ChannelOverflowError(`Broadcast closed: ${this.overflowed}`))
       return
     }
-    if (!this.owesAbort) return
-    this.owesAbort = false
-    this.replaceEnd(ERROR_REASON.OVERFLOW, this.endedOn)
-    this.endedOn = null
+    const owed = this.abortOwed
+    if (owed === null) return
+    this.abortOwed = null
+    this.replaceEnd(ERROR_REASON.OVERFLOW, owed.on)
   }
 
   override _attachPeer(peer: IndexedPeer, state?: AttachState): void {
-    if (this.owesAbort && this._phase === 'ended') this.endedOn = peer
+    if (this.abortOwed !== null && this._phase === 'ended') this.abortOwed.on = peer
     this.lastPeer = peer
     super._attachPeer(peer, state)
     this.endOverflowed()
@@ -362,14 +360,13 @@ class ServerBroadcastEnd extends ServerChannel implements MemoryHolder {
 
   /** @internal Its page needs nothing more of it: no overflow can take the abort's place, and it lets go of the wire. */
   override _release(): void {
-    this.owesAbort = false
-    this.endedOn = null
+    this.abortOwed = null
     super._release()
   }
 
   /** A wire that closed has none of its publishes: once ended, its page away is cut as an open one's (`unhanded`). */
   override _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
-    if (this.endedOn?.sender === peer.sender) this.endedOn = null
+    if (this.abortOwed?.on?.sender === peer.sender) this.abortOwed.on = null
     super._onPeerDisconnect(peer, reconnectTimeout)
   }
 

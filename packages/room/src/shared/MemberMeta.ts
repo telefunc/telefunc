@@ -66,18 +66,11 @@ class MemberMeta {
   /** Whether `write` leaves the meta another value. */
   changedBy(write: MetaWrite): boolean {
     if ('meta' in write) return !sameValue(write.meta, this.object)
-    return Object.entries(write.attrs).some(([key, value]) =>
-      this.has(key) ? value === undefined || !sameValue(value, this.valueOf(key)) : value !== undefined,
-    )
-  }
-
-  private has(key: string): boolean {
-    return this.setKeys?.has(key) || (Object.hasOwn(this._object, key) && !this.removedKeys?.has(key))
-  }
-
-  /** The value of a key `has()`. */
-  private valueOf(key: string): unknown {
-    return this.setKeys?.has(key) ? this.setKeys.get(key) : this._object[key]
+    return Object.entries(write.attrs).some(([key, value]) => {
+      if (this.setKeys?.has(key)) return value === undefined || !sameValue(value, this.setKeys.get(key))
+      const held = Object.hasOwn(this._object, key) && !this.removedKeys?.has(key)
+      return held ? value === undefined || !sameValue(value, this._object[key]) : value !== undefined
+    })
   }
 
   /** Whether a sender's stamp at `seq` is newer. None is while the seq is forgotten: a stamp from before a failover may

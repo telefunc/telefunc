@@ -191,16 +191,12 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it
    *  forwarded. */
-  deliverAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
+  async deliverAck(msg: InboxMessage): Promise<RoomResult> {
+    if (this.end.isClosed) return DM_FAILURE.left
     assert(msg.ackId !== undefined)
-    const reply = this.awaitDmReply(msg.ackId)
+    const reply = this.dmReplies.await(msg.ackId)
     this.notify(dmNotice(msg))
-    return this.end.trackAck(reply)
-  }
-
-  private async awaitDmReply(ackId: string): Promise<RoomResult> {
-    return (await this.dmReplies.await(ackId)) ?? DM_FAILURE.left
+    return (await this.end.trackAck(reply)) ?? DM_FAILURE.left
   }
 
   /** Its close waits for the reply's commit, as a room stub's does (`awaitDmReply`). */

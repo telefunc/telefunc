@@ -84,7 +84,7 @@ class LossyDelivery<U> {
 
   /** Its page confirmed more, or granted more: those waiting go, or, behind with them, only each stream's newest. */
   mayGo(): void {
-    if (this.waiting.length > 1 && this.isBehind(this.waitingBytes)) this.keepNewest()
+    if (this.waiting.length > 1 && this.isBehind(this.waitingBytes)) this.waiting = this.newestOfEach(this.waiting)
     if (this.waiting.length > 0 && !this.holdsBack()) this.flush()
   }
 
@@ -119,11 +119,6 @@ class LossyDelivery<U> {
     }
     this.waiting = waiting.filter((each) => each.stream !== stream)
     return waiting.filter((each) => each.stream === stream)
-  }
-
-  /** Of each stream, only its newest keeps waiting. */
-  private keepNewest(): void {
-    this.waiting = this.newestOfEach(this.waiting)
   }
 
   /** Of `waiting`, each stream's newest, in order: the others go, unsent. */

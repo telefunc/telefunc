@@ -270,7 +270,9 @@ class RoomDemand {
   /** Queues each owned member's track the scope covers: `undefined` for every one. */
   private queueCovered(member: string | undefined, track: string | undefined): void {
     if (track !== undefined) return this.queue(track, member ?? EVERY_MEMBER)
-    for (const owned of member === undefined ? this.ownedMembers.keys() : [member]) this.queueEveryTrack(owned)
+    for (const owned of member === undefined ? this.ownedMembers.keys() : [member]) {
+      for (const ownedTrack of this.everyTrackOf(owned)) this.queue(ownedTrack, owned)
+    }
   }
 
   private takeTrack(entry: Extract<DemandEntry, { except: unknown }>, { instance, on, generation }: Report): void {
@@ -304,7 +306,10 @@ class RoomDemand {
    *  both are fetched alike, else every member. */
   private queueLease(track: string, { instance, was, now }: TrackLeaseChange): void {
     for (const [other, lease] of this.tracks.get(track) ?? []) {
-      if (other !== instance && !lease.byMember) return this.queueEach(track, lease.except)
+      if (other !== instance && !lease.byMember) {
+        for (const member of lease.except) this.queue(track, member)
+        return
+      }
     }
     if (was !== undefined && now !== undefined && was.byMember === now.byMember) {
       for (const member of was.except) if (!now.except.has(member)) this.queue(track, member)
@@ -317,14 +322,6 @@ class RoomDemand {
   /** The member, on each track `instance` fetches by member. */
   private queueFetched(instance: string, member: string): void {
     for (const [track, leases] of this.tracks) if (leases.get(instance)?.byMember) this.queue(track, member)
-  }
-
-  private queueEach(track: string, members: Iterable<string>): void {
-    for (const member of members) this.queue(track, member)
-  }
-
-  private queueEveryTrack(member: string): void {
-    for (const track of this.everyTrackOf(member)) this.queue(track, member)
   }
 
   private queue(track: string, member: string | EveryMember): void {
