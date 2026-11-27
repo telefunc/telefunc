@@ -276,7 +276,12 @@ test('an app behind a proxy that forwards upgrades on its public port offers Web
     const upstream = connect(Number(appPort), appHost)
     for (const socket of [client, upstream]) {
       sockets.add(socket)
-      socket.once('close', () => sockets.delete(socket))
+      // The tunnel ends with either of its sockets, as a proxy's does.
+      socket.once('close', () => {
+        sockets.delete(socket)
+        client.destroy()
+        upstream.destroy()
+      })
       socket.on('error', () => {
         client.destroy()
         upstream.destroy()
@@ -429,7 +434,12 @@ async function rewritingProxy(host: string, rewrite: (path: string) => string): 
     })
     for (const socket of [client, upstream]) {
       sockets.add(socket)
-      socket.once('close', () => sockets.delete(socket))
+      // The tunnel ends with either of its sockets, as a proxy's does.
+      socket.once('close', () => {
+        sockets.delete(socket)
+        client.destroy()
+        upstream.destroy()
+      })
       socket.on('error', () => {
         client.destroy()
         upstream.destroy()
