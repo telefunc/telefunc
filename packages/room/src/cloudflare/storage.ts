@@ -264,9 +264,9 @@ function hasIncarnation(sql: SqlStore, inc: string): boolean {
   return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
-/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, an
- *  expiring cell or a stored answer, the listing's next send, or when a route's session DO may be dropped, or null for
- *  none. */
+/** When the alarm's sweep next has work: `now` while an orphaned incarnation waits, else the first lapse of a head, a
+ *  close lease, an expiring cell or a stored answer, the listing's next send, or when a route's session DO may be
+ *  dropped, or null for none. */
 function nextMaintenanceDeadline(sql: SqlStore, now: number): number | null {
   if (listOrphanIncarnations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
   // Each table takes its own MIN, so the expiring_cell table's seeks its expires_at index.
@@ -274,6 +274,8 @@ function nextMaintenanceDeadline(sql: SqlStore, now: number): number | null {
     sql
       .exec(
         'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head ' +
+          // A close lease has run out once authority time passed its end.
+          "UNION ALL SELECT MIN(lease_until) + 1 FROM head WHERE state = 'closing' " +
           'UNION ALL SELECT MIN(expires_at) FROM expiring_cell UNION ALL SELECT MIN(due_at) FROM listing ' +
           'UNION ALL SELECT MIN(resume_at) FROM handoff UNION ALL SELECT MIN(kept_until) FROM stored_answer)',
       )

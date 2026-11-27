@@ -7,17 +7,24 @@ import { RoomAuthority, type OperationWire } from './RoomAuthority.js'
 
 afterEach(() => vi.useRealTimers())
 
-/** An open room's authority on the SQLite stand-in, whose hand-ons and directory calls are taken at once, and the seq
- *  of each commit it handed on. */
+/** An open room's authority on the SQLite stand-in, whose hand-ons and directory calls are taken at once: its storage,
+ *  the seq of each commit it handed on, and the method and arguments of each call to a directory. */
 async function openRoom() {
+  const directoryCalls: unknown[][] = []
   const namespace: TelefuncExtensionNamespace = {
     idFromName: (name) => name,
     idFromString: (id) => id,
-    get: () => ({ telefuncDurableObjectCall: () => Promise.resolve(undefined) }),
+    get: () => ({
+      telefuncDurableObjectCall: (_name, method, args) => {
+        directoryCalls.push([method, ...args])
+        return Promise.resolve(undefined)
+      },
+    }),
   }
   const handedOn: number[] = []
+  const { storage } = sqliteStorage()
   const room = new RoomAuthority(
-    { storage: sqliteStorage().storage },
+    { storage },
     {
       regions: { forward: async (_key, delivery) => void handedOn.push(delivery.info.seq) },
       getNamespace: () => namespace,
@@ -28,7 +35,7 @@ async function openRoom() {
     { head: { rev: 'rev', currentInc: 'inc', state: 'open', config: new Uint8Array() } },
     { roomId: 'room', bucket: 'weur' },
   )
-  return { room, handedOn }
+  return { room, storage, handedOn, directoryCalls }
 }
 
 /** Alice's join, which carries her inbox's lease. */
@@ -68,5 +75,52 @@ describe.runIf(hasNodeSqlite)("RoomAuthority: a member's join, sent again", () =
     await vi.advanceTimersByTimeAsync(1_000)
     await room.alarm()
     expect({ within, past: await send(), handedOn }).toEqual({ within: 'joined', past: 'overtaken', handedOn: [1] })
+  })
+})
+
+describe.runIf(hasNodeSqlite)('RoomAuthority: a closing head whose closer stopped', () => {
+  it("is closed on the alarm at its close lease's end: its closed frame handed on, its data dropped, its listing gone", async () => {
+    vi.useFakeTimers()
+    const { room, storage, handedOn, directoryCalls } = await openRoom()
+    await room.commitLane('room', 'inc', { kind: 'semantic' }, new Uint8Array([1]))
+    const closing = await room.compareExchangeHead(
+      { form: 'rev', rev: 'rev' },
+      {
+        head: {
+          rev: 'closing',
+          currentInc: 'inc',
+          state: 'closing',
+          config: new Uint8Array(),
+          closeLease: { id: 'lease', durationMs: 15_000 },
+        },
+      },
+      { roomId: 'room', bucket: 'weur' },
+    )
+    if (closing.kind !== 'committed' || closing.head.closeLease === undefined) throw new Error("the room didn't close")
+    // Its directory shows its listing, which then waits for nothing.
+    await room.directoryShow()
+    const alarm = await storage.getAlarm()
+    const leaseEnd = closing.head.closeLease.until
+    handedOn.length = 0
+    directoryCalls.length = 0
+    vi.setSystemTime(leaseEnd + 1)
+    await room.alarm()
+    expect({
+      alarmPastLease: alarm !== null && alarm > leaseEnd && alarm <= leaseEnd + 1,
+      state: (await room.readHead())?.state,
+      control: (await room.readLaneOrder('inc', { kind: 'control' }))?.seq ?? null,
+      semantic: (await room.readLaneOrder('inc', { kind: 'semantic' }))?.seq ?? null,
+      handedOn,
+      listed: await room.directoryGet(),
+      shown: directoryCalls.map(([method, roomId, incTag]) => [method, roomId, incTag]),
+    }).toEqual({
+      alarmPastLease: true,
+      state: 'closed',
+      control: null,
+      semantic: null,
+      handedOn: [1],
+      listed: undefined,
+      shown: [['show', 'room', null]],
+    })
   })
 })

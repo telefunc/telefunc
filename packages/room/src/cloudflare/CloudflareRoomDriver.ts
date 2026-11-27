@@ -214,7 +214,7 @@ class CloudflareRoomDriver implements RoomDriver {
     return mergeRegionPages(pages)
   }
 
-  /** Never any: each room's authority settles its own listing on its alarm. */
+  /** Never any: each room's authority settles its own listing, and finishes a close its closer stopped, on its alarm. */
   async directoryDue(): Promise<DirectoryEntry[]> {
     return []
   }

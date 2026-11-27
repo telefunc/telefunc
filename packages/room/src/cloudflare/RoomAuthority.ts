@@ -52,6 +52,7 @@ import {
   type RoomOperationRequest,
 } from '../server/store/roomOperations.js'
 import { decodeRoomRecord, encodeRoomRecord, lostReason } from '../server/lanes/lanes.js'
+import { ROOM_TOMBSTONE_TTL_MS } from '../server/constants.js'
 import { fieldsOf, numberOf, textOf } from '../shared/readers.js'
 import { reportLaneLost } from '../server/config.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/laneKey.js'
@@ -179,6 +180,7 @@ const ANSWER_KEPT_MS = ROOM_JOIN_DEADLINE_MS
 /** When the alarm hands on a stored commit whose hand-on this run of the object hasn't settled. */
 const ROOM_HANDOFF_RESUME_MS = 10_000
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
+const CONTROL_LANE: LaneId = { kind: 'control' }
 
 /** Room's part of a Durable Object that is a room's authority, fanning out through Broadcast's `regions`. Its tables are
  *  created on first use. */
@@ -509,12 +511,43 @@ class RoomAuthority {
     this.alarmAt = null
     try {
       this.resumeHandoffs(true)
-      this.runSweep(Date.now())
+      const now = Date.now()
+      this.finishStoppedClose(now)
+      this.runSweep(now)
       await this.scheduleMaintenanceIfNeeded()
       await this.showInDirectory().catch(() => {})
     } finally {
       await this.scheduleMaintenanceIfNeeded()
     }
+  }
+
+  /** Finishes the close of a closing head whose close lease ran out, as its closer would have (`finishClose()`): in one
+   *  transaction its `closed` frame, stored until handed on, and its closed tombstone, which unlists the room. The
+   *  frame is handed on to the routes of its incarnation, which the sweep then drops as orphaned. */
+  private finishStoppedClose(now: number): void {
+    const handoff = this.transaction((sql): Handoff | null => {
+      const head = readLiveHead(sql, now)
+      if (head?.state !== 'closing' || head.closeLease === undefined || head.closeLease.until >= now) return null
+      const inc = head.currentInc
+      assert(inc !== null) // a closing head names its incarnation
+      const laneKey = encodeLaneKey(CONTROL_LANE)
+      const { seq, timestamp } = advanceOrder(sql, inc, laneKey, now)
+      const handoff = { inc, laneKey, seq, timestamp, payload: encodeRoomRecord({ __r: 'closed' }) }
+      storeHandoff(sql, handoff, now + ROOM_HANDOFF_RESUME_MS)
+      const closed = compareExchangeHead(
+        sql,
+        { form: 'finalize', rev: head.rev, lease: head.closeLease.id },
+        {
+          head: { rev: crypto.randomUUID(), currentInc: null, state: 'closed', config: head.config },
+          ttlMs: ROOM_TOMBSTONE_TTL_MS,
+        },
+        now,
+      )
+      assert(closed.kind === 'committed') // the closing head just read, under its own lease
+      listWithHead(sql, closed.head, now)
+      return handoff
+    })
+    if (handoff !== null) this.handOn(handoff)
   }
 
   /** Storage only: a session whose route lapsed or whose incarnation went learns it at its next renewal, and the
