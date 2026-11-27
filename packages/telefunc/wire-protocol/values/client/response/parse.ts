@@ -65,7 +65,7 @@ async function parseResponse(
     }
 
     // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
-    const body = response.body ? await readText(response.body, callContext) : ''
+    const body = await readText(response, callContext)
     return await reviveResponse(body, callContext, connection, null)
   } catch (err) {
     for (const close of callContext.requestCloseHandlers) void closeOnFailure(close)
@@ -104,8 +104,18 @@ async function parseStreamedResponse(
 
 /** A text body, read as `response.text()` reads it, but that the call's abort cancels: an app's `config.fetch` may
  *  return a body the call's signal doesn't end. */
-async function readText(body: ReadableStream<Uint8Array>, callContext: CallContext): Promise<string> {
+async function readText(response: Response, callContext: CallContext): Promise<string> {
   const { signal } = callContext.abortController
+  const { body } = response
+  // Fetch polyfills (`whatwg-fetch`, React Native) give no body stream.
+  if (!body) {
+    const text = await response.text().catch((err: unknown) => {
+      if (!signal.aborted) throw err
+      return ''
+    })
+    throwIfAborted(callContext)
+    return text
+  }
   const reader = body.getReader()
   const cancel = () => {
     reader.cancel().catch(() => {})
@@ -117,18 +127,19 @@ async function readText(body: ReadableStream<Uint8Array>, callContext: CallConte
   try {
     for (;;) {
       const { done, value } = await reader.read()
-      throwIfAborted(callContext)
+      if (signal.aborted) break
       if (done) return text + decoder.decode()
       text += decoder.decode(value, { stream: true })
     }
   } catch (err) {
     // A body that the abort errored, as a fetch's own does, ends the call as aborted.
-    throwIfAborted(callContext)
-    throw err
+    if (!signal.aborted) throw err
   } finally {
     signal.removeEventListener('abort', cancel)
     reader.releaseLock()
   }
+  // The read ends early only on the call's abort.
+  throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
 }
 
 // ===== Response revival =====

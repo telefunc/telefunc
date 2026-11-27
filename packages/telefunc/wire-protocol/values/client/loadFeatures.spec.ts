@@ -379,6 +379,42 @@ test("a call aborted while its text response's body stalls, channels' code loade
   expect(used).toEqual(['page:call'])
 })
 
+test.each(["the call's cancel ends it", 'the abort errors it, as a fetch does'] as const)(
+  "a call aborted while its text response's body stalls tells onAbort() once, the error it rejects with (%s)",
+  async (ending) => {
+    const { call, withContext } = await page()
+    const { onAbort } = await import('../../../client/remoteTelefunctionCall/onAbort.js')
+    const told: unknown[] = []
+    onAbort((err) => told.push(err))
+    let pulled = false
+    respond = (signal) => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          start(controller) {
+            if (ending === 'the abort errors it, as a fetch does') {
+              signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')))
+            }
+          },
+          pull() {
+            pulled = true
+            return new Promise(() => {})
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      return new Response(body, { headers: { 'content-type': 'text/plain' } })
+    }
+    const controller = new AbortController()
+    const pending = withContext(call, { signal: controller.signal })([])
+    await vi.waitFor(() => expect(pulled).toBe(true))
+    controller.abort()
+    const rejected = await settledWithin(pending, 200)
+    expect(isAbort(rejected)).toBe(true)
+    expect(told).toHaveLength(1)
+    expect(told[0]).toBe(rejected)
+  },
+)
+
 test('a cold upload aborted as its channel opens sends nothing and cancels the upload once', async () => {
   const controller = new AbortController()
   vi.doMock('../../channel/client/ClientChannel.js', async (importOriginal: () => Promise<ClientChannelModule>) => {
@@ -928,6 +964,15 @@ test('plain RPC: sent at once, an app string that looks like a value loads nothi
   assert(Array.isArray(ret))
   expect([...ret]).toEqual(value)
   expect(imported).toEqual([])
+})
+
+test('plain RPC: a response without a body stream, as fetch polyfills return, is read by its text()', async () => {
+  const { call } = await page()
+  const response = new Response(JSON.stringify({ ret: 'Welcome Eva' }), { headers: { 'content-type': 'text/plain' } })
+  // `whatwg-fetch`, React Native's fetch: the response has no `body`, its `text()` reads it.
+  Object.defineProperty(response, 'body', { value: null })
+  respond = () => response
+  expect(await call([])).toBe('Welcome Eva')
 })
 
 /** An app's `config.fetch` that records, in `used`, each request it makes as `<name>:call` or `<name>:wire`. */
