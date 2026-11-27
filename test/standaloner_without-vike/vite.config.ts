@@ -9,5 +9,7 @@ if (process.env.TELEFUNC_URL) config.telefuncUrl = process.env.TELEFUNC_URL
 
 export default defineConfig({
   plugins: [telefunc(), standaloner()],
+  // Only the SSR build uses server.ts as an entry.
+  optimizeDeps: { entries: [] },
   build: { ssr: true, outDir: 'dist/server', rollupOptions: { input: { index: 'server.ts' } } },
 })
