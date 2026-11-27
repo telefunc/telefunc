@@ -77,8 +77,8 @@ async function sweepLapsedRooms(plane: RoomPlane): Promise<void> {
 }
 
 /** A due room whose head no longer names it is repaired. A closing one is due at its close lease's end: once the lease
- *  ran out, its closer stopped, and the sweep takes the close over; a replica drops the second `closed` frame a
- *  takeover commits after a closer that committed its own. Any other is due again. */
+ *  ran out by the store's clock, its closer stopped, and the sweep takes the close over; a replica drops the second
+ *  `closed` frame a takeover commits after a closer that committed its own. Any other is due again. */
 async function sweepDueRoom(plane: RoomPlane, due: DirectoryEntry): Promise<void> {
   const { roomId, incTag } = due
   const head = await plane.direct.reads.readHead(roomId)
@@ -88,7 +88,7 @@ async function sweepDueRoom(plane: RoomPlane, due: DirectoryEntry): Promise<void
   }
   const lease = head.closeLease
   assert(lease !== undefined) // a closing head carries its close lease
-  if (lease.until < Date.now() && (await plane.call((store) => takeOverClose(store, roomId, head)))) return
-  // Its lease holds, by this process's clock or the store's, or a closer took it over since: due at the lease's end.
-  await plane.direct.directoryPut(roomId, incTag, lease.until, 0)
+  if (await plane.call((store) => takeOverClose(store, roomId, head))) return
+  // Its lease holds by the store's clock, or a closer took it over since: due at the lease's end, and not in this sweep.
+  await plane.direct.directoryPut(roomId, incTag, lease.until, ROOM_HEARTBEAT_INTERVAL_MS)
 }

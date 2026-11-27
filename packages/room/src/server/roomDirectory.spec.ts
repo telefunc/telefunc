@@ -546,6 +546,77 @@ describe('a closing head whose closer stopped', () => {
       state: 'closed',
     })
   })
+
+  /** Runs the store's calls a sweep makes with its clock `aheadMs` ahead of this process's: each reads it before it first
+   *  awaits. The sweep's due reads, counted, start it with this process's clock at `startAt`; from the eleventh on they
+   *  are told nothing is due. */
+  function storeClockAhead(aheadMs: number, startAt: number) {
+    const underStoreClock = <T>(call: () => T): T => {
+      vi.setSystemTime(Date.now() + aheadMs)
+      try {
+        return call()
+      } finally {
+        vi.setSystemTime(Date.now() - aheadMs)
+      }
+    }
+    const exchange = MemoryRoomDriver.prototype.compareExchangeHead
+    vi.spyOn(MemoryRoomDriver.prototype, 'compareExchangeHead').mockImplementation(function (
+      this: MemoryRoomDriver,
+      roomId,
+      expected,
+      next,
+    ) {
+      return underStoreClock(() => exchange.call(this, roomId, expected, next))
+    })
+    const put = MemoryRoomDriver.prototype.directoryPut
+    vi.spyOn(MemoryRoomDriver.prototype, 'directoryPut').mockImplementation(function (
+      this: MemoryRoomDriver,
+      roomId,
+      incTag,
+      checkAt,
+      minDelayMs,
+    ) {
+      return underStoreClock(() => put.call(this, roomId, incTag, checkAt, minDelayMs))
+    })
+    const due = MemoryRoomDriver.prototype.directoryDue
+    const sweep = { dueReads: 0, ended: deferred() }
+    vi.spyOn(MemoryRoomDriver.prototype, 'directoryDue').mockImplementation(async function (this: MemoryRoomDriver) {
+      if (++sweep.dueReads === 1) vi.setSystemTime(startAt)
+      const entries = sweep.dueReads > 10 ? [] : await underStoreClock(() => due.call(this))
+      if (entries.length === 0) sweep.ended.open()
+      return entries
+    })
+    return sweep
+  }
+
+  for (const [label, behindMs, aheadMs, state] of [
+    [
+      "is taken over at once by a sweep whose clock is behind the store's, past the lease by the store's",
+      500,
+      1_000,
+      'closed',
+    ],
+    ["is left to a later sweep by one that reads it at the lease's end, by both clocks", 0, 0, 'closing'],
+  ] as const) {
+    it(`${label}, which reads it as due once`, async () => {
+      vi.useFakeTimers({ toFake: ['Date', 'performance'] })
+      const id = fresh('skewed-sweep')
+      await Room.create(id, noHold)
+      const inc = await currentInc(id)
+      if (inc === null) throw new Error(`room ${id} has no head`)
+      await stoppedClose(id, 'commit')
+      const { reads } = getRoomPlane().direct
+      const lease = (await reads.readHead(id))?.closeLease
+      if (lease === undefined) throw new Error(`room ${id} isn't closing`)
+      const sweep = storeClockAhead(aheadMs, lease.until - behindMs)
+      await startSweep(() => sweep.dueReads > 0)
+      await sweep.ended.done
+      await turns()
+      const dueReads = sweep.dueReads
+      vi.restoreAllMocks()
+      expect({ dueReads, state: (await reads.readHead(id))?.state }).toEqual({ dueReads: 2, state })
+    })
+  }
 })
 
 describe("a head's lapse", () => {
