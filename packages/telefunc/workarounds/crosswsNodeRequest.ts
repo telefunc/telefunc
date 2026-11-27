@@ -1,6 +1,5 @@
-// Workaround: crossws's Node adapter gives `open` a peer whose `request` is another `Request` than the one its
-// `upgrade` hook got, built anew from `Host`. Without the upgrade's own object carried in the peer's context, `open`
-// finds nothing of what the upgrade hook decided by that request, and every Node WebSocket ends as it opens.
+// Workaround: crossws's Node adapter gives `open` a `NodeReqProxy` built from `http://${host}${req.url}` instead of
+// reusing the `Request` passed to `handleUpgrade`, breaking absolute-form request targets when `Host` includes a port.
 // TODO: remove once https://github.com/h3js/crossws/commit/442ba0b23a204e8ce8d1445f3fb3b5fcb9768561 is released and Telefunc updates crossws.
 export { carryUpgradeRequest }
 
