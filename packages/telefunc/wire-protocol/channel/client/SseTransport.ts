@@ -64,6 +64,11 @@ type StreamUpload = {
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
 
+/** The attempt under way, till its wire opens. `deferred`: its `timer` waits one reconcile window, so that startup code
+ *  can register channels before the initial batch. `opening`: its open is out. */
+type Connecting = { tag: 'deferred'; timer: ReturnType<typeof setTimeout> } | { readonly tag: 'opening' }
+const OPENING: Connecting = { tag: 'opening' }
+
 /** A batch POST: the outbox entries it carried, its body's size, when it started, and whether it carried a RECONCILE. */
 type BatchPost = { queued: OutboxEntry[]; bytes: number; startedAt: number; reconcile: boolean }
 
@@ -95,10 +100,9 @@ class SseTransport implements UpgradeSource {
     return this.streamRequest.tag === 'idle' || this.streamRequest.tag === 'failed'
   }
   heartbeat: Heartbeat | null = null
-  private connecting = false
+  private connecting: Connecting | null = null
   /** The wire's open POST is unanswered: the server holds a POST on the wire until it has the open. */
   private openPending = false
-  private startTimer: ReturnType<typeof setTimeout> | null = null
   /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
@@ -232,22 +236,21 @@ class SseTransport implements UpgradeSource {
   }
 
   start(): void {
-    if (this.connecting || this.hasWire()) return
-    this.connecting = true
-    // Defer one reconcile window so startup code can register channels before the initial batch.
-    this.startTimer = setTimeout(() => {
-      this.startTimer = null
-      if (!this.connecting || this.hasWire()) return
+    if (this.connecting !== null || this.hasWire()) return
+    const timer = setTimeout(() => {
+      this.connecting = OPENING
       void this.openStream()
     }, SSE_RECONCILE_DEADLINE_MS)
+    this.connecting = { tag: 'deferred', timer }
+  }
+
+  private stopConnecting(): void {
+    if (this.connecting?.tag === 'deferred') clearTimeout(this.connecting.timer)
+    this.connecting = null
   }
 
   cancelAttempt(): void {
-    this.connecting = false
-    if (this.startTimer) {
-      clearTimeout(this.startTimer)
-      this.startTimer = null
-    }
+    this.stopConnecting()
     const abortController = this.transportAbort
     if (!abortController) return
     this.transportAbort = null
@@ -269,7 +272,7 @@ class SseTransport implements UpgradeSource {
   }
 
   isConnecting(): boolean {
-    return this.connecting
+    return this.connecting !== null
   }
 
   sendFrame(frame: OutboundFrame): void {
@@ -384,7 +387,7 @@ class SseTransport implements UpgradeSource {
     void this.readEvents(reader, abortController, () => {
       if (upload) this.acknowledgeUpload(upload, abortController)
     })
-    this.connecting = false
+    this.connecting = null
     this.owner.onTransportOpen(this, startedAt)
     if (this.outbox.length > 0) void this.flushOutbox()
   }
@@ -511,7 +514,7 @@ class SseTransport implements UpgradeSource {
     this.closeStreamRequest()
     abortController.abort()
     this.transportAbort = null
-    this.connecting = false
+    this.connecting = null
     this.owner.onTransportClosed(this, answer)
   }
 
@@ -539,7 +542,7 @@ class SseTransport implements UpgradeSource {
         this.closeStreamRequest()
         this.transportAbort = null
         // Also where it ended while its upload still waited for an acknowledgement: no open is under way any more.
-        this.connecting = false
+        this.connecting = null
         // Its batch POST still in flight settles now rather than hold the next wire's outbox.
         abortController.abort()
       }
@@ -1009,7 +1012,7 @@ class SseTransport implements UpgradeSource {
     if (!abortController) return
     this.transportAbort = null
     // An open still unanswered goes with its wire: the next `start()` opens another.
-    this.connecting = false
+    this.connecting = null
     this.openPending = false
     // Its upload goes with it, aborted with its controller (`openUpload`).
     if (this.streamRequest.tag === 'active' || this.streamRequest.tag === 'probing')
@@ -1060,11 +1063,7 @@ class SseTransport implements UpgradeSource {
 
   dispose(): void {
     if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide)
-    this.connecting = false
-    if (this.startTimer) {
-      clearTimeout(this.startTimer)
-      this.startTimer = null
-    }
+    this.stopConnecting()
     this.flushScheduler.cancel()
     this.takeOutbox()
     this.dropHeld()
