@@ -185,11 +185,6 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
     return 0
   }
 
-  /** What the sender handed that the page hasn't said it took. */
-  private unconfirmed(): number {
-    return this.sender.transmittedBytes - this.sender.confirmedBytes
-  }
-
   /** Takes a heartbeat (see `PieceSender.heartbeat`), which an acknowledgement's lost tail waits for. */
   heartbeat(bytes: number, at: number): boolean {
     if (!this.sender.heartbeat(bytes, at)) return false

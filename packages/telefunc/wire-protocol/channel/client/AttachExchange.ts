@@ -423,10 +423,6 @@ class AttachExchange {
     wait.timer = setTimeout(() => this.onReconcileTimeout(), ms)
   }
 
-  private reconcileDeadlineIn(ms: number): ReturnType<typeof setTimeout> {
-    return setTimeout(() => this.onReconcileTimeout(), ms)
-  }
-
   /** Closes the wait: the RECONCILED settled, the wire was lost, or the connection was disposed. */
   private exitReconciling(): void {
     if (this.reconciledWait !== null) {
