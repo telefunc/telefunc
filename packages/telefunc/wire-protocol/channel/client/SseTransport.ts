@@ -108,10 +108,10 @@ class SseTransport implements UpgradeSource {
   private outbox: OutboxEntry[] = []
   private readonly windows = new Map<number, OutboxEntry>()
   private readonly lastWindowByChannel = new Map<number, OutboxEntry>()
-  /** Data whose POST failed or was refused, waiting out `heldTimer` till `heldUntil` (`hold`). */
+  /** Data whose POST failed or was refused, waiting out `heldWait` (`hold`). */
   private held: OutboxEntry[] = []
-  private heldTimer: ReturnType<typeof setTimeout> | null = null
-  private heldUntil = 0
+  /** The one wait of the held data, for the whole wire: its timer releases it at `until`. */
+  private heldWait: { timer: ReturnType<typeof setTimeout>; until: number } | null = null
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
@@ -797,15 +797,20 @@ class SseTransport implements UpgradeSource {
     }
     this.held = held.concat(this.held, later)
     const until = performance.now() + wait
-    if (this.held.length === 0 || (this.heldTimer !== null && until <= this.heldUntil)) return
-    if (this.heldTimer) clearTimeout(this.heldTimer)
-    this.heldUntil = until
-    this.heldTimer = setTimeout(() => this.releaseHeld(), wait)
+    if (this.held.length === 0 || (this.heldWait !== null && until <= this.heldWait.until)) return
+    this.stopHeldWait()
+    this.heldWait = { timer: setTimeout(() => this.releaseHeld(), wait), until }
+  }
+
+  private stopHeldWait(): void {
+    if (this.heldWait === null) return
+    clearTimeout(this.heldWait.timer)
+    this.heldWait = null
   }
 
   /** The wait ended: what the server still lacks goes back to the head of the outbox. */
   private releaseHeld(): void {
-    this.heldTimer = null
+    this.heldWait = null
     const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.held = []
     this.requeue(held)
@@ -818,8 +823,7 @@ class SseTransport implements UpgradeSource {
   /** The held data goes with its wire, as the next one opens, or with the barrier that leaves it: the next wire's replay
    *  sends what the server lacks. */
   private dropHeld(): void {
-    if (this.heldTimer) clearTimeout(this.heldTimer)
-    this.heldTimer = null
+    this.stopHeldWait()
     this.held = []
   }
 
