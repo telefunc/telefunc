@@ -28,7 +28,7 @@ function producerOfStream(
       while (true) {
         const { done, value: chunk } = await reader.read()
         if (done) {
-          phase = 'ended'
+          if (phase === 'reading') phase = 'ended'
           break
         }
         checkChunk?.(chunk)
