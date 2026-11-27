@@ -20,8 +20,6 @@ import { HEADER } from '../../wire/header.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type { FrameAt } from './SendGate.js'
 import type { ChannelAttach } from './ChannelAttach.js'
-import type { SendCredit } from '../../flowControl/SendCredit.js'
-import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
@@ -53,16 +51,7 @@ interface MuxChannel {
   /** Its connection is gone for good. */
   _onConnectionLost(err: Error): void
   /** Its credits as the connection drives them across wires. */
-  readonly _attach: MuxChannelAttach
-}
-
-/** What the connection drives of a channel's `ChannelAttach`. */
-type MuxChannelAttach = Pick<
-  ChannelAttach,
-  'state' | 'capWindows' | 'onBatched' | 'onUpgradeJoined' | 'unconfirmedWant'
-> & {
-  readonly sendCredit: Pick<SendCredit, 'leavesCredit'>
-  readonly receiveCredit: Pick<ReceiveCredit, 'acknowledge' | 'answered' | 'onProbeAnswered'>
+  readonly _attach: ChannelAttach
 }
 
 interface MuxConnection {
