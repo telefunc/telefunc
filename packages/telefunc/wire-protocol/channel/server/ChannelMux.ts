@@ -343,21 +343,23 @@ class ChannelMux implements UpgradeStagesOwner {
 
   sendReconciled(outcome: ReconcileOutcome): void {
     const entry = this.wires.get(outcome.deliverTo)
-    entry?.sender.sendReconciled(
-      encode.reconciled({
-        upgradeId: outcome.upgradeId,
-        sessionId: outcome.sessionId,
-        open: outcome.attached.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq })),
-        reconnectTimeout: this.options.reconnectTimeout,
-        idleTimeout: this.options.idleTimeout,
-        pingInterval: this.options.pingInterval,
-        maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        creditWindow: this.options.creditWindow,
-        sseFlushThrottle: this.options.sseFlushThrottle,
-        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-        transports: entry?.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
-      }),
-    )
+    if (entry) {
+      entry.sender.sendReconciled(
+        encode.reconciled({
+          upgradeId: outcome.upgradeId,
+          sessionId: outcome.sessionId,
+          open: outcome.attached.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq })),
+          reconnectTimeout: this.options.reconnectTimeout,
+          idleTimeout: this.options.idleTimeout,
+          pingInterval: this.options.pingInterval,
+          maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
+          creditWindow: this.options.creditWindow,
+          sseFlushThrottle: this.options.sseFlushThrottle,
+          ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
+          transports: entry.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
+        }),
+      )
+    }
     for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
     if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
