@@ -66,6 +66,10 @@ function wire(
     if (decoded.tag === TAG.CLOSE) page.read.push('CLOSE')
   }
   const sender: PeerSender = {
+    sendPublish(index, seq, body) {
+      this.send(encode.publishTo(index, seq))
+      this.send(body)
+    },
     send(frame) {
       if (closed) return
       if (stalled) waiting.push(frame)

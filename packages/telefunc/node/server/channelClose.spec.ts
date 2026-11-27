@@ -39,6 +39,10 @@ config.channel = { maxPendingBytes: MAX_PENDING_BYTES }
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({
     sender: {
+      sendPublish(index, seq, body) {
+        this.send(encode.publishTo(index, seq))
+        this.send(body)
+      },
       send(frame) {
         frames.push(frame)
       },

@@ -21,6 +21,7 @@ const ledgerTotal = () => channelLedger().total
 
 /** A page's wire that takes nothing off its queue: every publish waits there, so its broadcast may shed them. */
 const stalledSender: PeerSender = {
+  sendPublish() {},
   send() {},
   carry() {},
   bufferedAmount: () => 0,

@@ -155,6 +155,7 @@ const telefunctions: Record<string, (...args: never[]) => Promise<unknown>> = {
 function pageThatStopsReading(channel: ServerChannel, index: number) {
   return new IndexedPeer({
     sender: {
+      sendPublish() {},
       send() {},
       carry() {},
       bufferedAmount: () => 0,

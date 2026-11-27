@@ -158,6 +158,10 @@ function overWebSocket(channels: ServerChannel[]) {
   }
   const headroom = new ServerHeadroom({ socket, pingInterval: 5_000 })
   const sender: PeerSender = {
+    sendPublish(index, seq, body) {
+      this.send(encode.publishTo(index, seq))
+      this.send(body)
+    },
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
       headroom.send(frame)

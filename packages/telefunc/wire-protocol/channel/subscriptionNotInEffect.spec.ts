@@ -114,6 +114,10 @@ async function errorSentToPage(
     getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW, 'page')
     const frames: Uint8Array<ArrayBuffer>[] = []
     const sender: PeerSender = {
+      sendPublish(index, seq, body) {
+        this.send(encode.publishTo(index, seq))
+        this.send(body)
+      },
       send: (frame) => frames.push(new Uint8Array(frame)),
       carry() {},
       bufferedAmount: () => 0,

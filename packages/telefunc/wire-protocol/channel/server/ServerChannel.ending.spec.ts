@@ -230,6 +230,10 @@ function overWebSocket(
   // Its copies count on the ledger every wire shares, so they go with the row.
   onTestFinished(() => headroom.close())
   const sender: PeerSender = {
+    sendPublish(index, seq, body) {
+      this.send(encode.publishTo(index, seq))
+      this.send(body)
+    },
     queue: headroom,
     send(frame: Uint8Array<ArrayBuffer>) {
       headroom.send(frame)

@@ -1108,6 +1108,10 @@ describe('Broadcast shield validation', () => {
     broadcast._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish(index, seq, body) {
+            this.send(encode.publishTo(index, seq))
+            this.send(body)
+          },
           send: (frame) => {
             frames.push(frame)
           },
@@ -1153,6 +1157,7 @@ describe('Broadcast shield validation', () => {
     sender._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish() {},
           send: () => {},
           carry() {},
           bufferedAmount: () => 0,
@@ -1184,6 +1189,7 @@ describe('lossy broadcast under memory pressure', () => {
     broadcast._attachPeer(
       new IndexedPeer({
         sender: {
+          sendPublish() {},
           send() {},
           carry() {},
           bufferedAmount: () => 0,

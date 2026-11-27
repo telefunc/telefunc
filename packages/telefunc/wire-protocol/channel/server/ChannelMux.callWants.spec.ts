@@ -7,7 +7,7 @@ import { expect, test, vi } from 'vitest'
 import { getChannelMux } from './ChannelMux.js'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { decode } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
 import {
   DefaultBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -37,6 +37,10 @@ function returnedBroadcast(session: string, lossy = false) {
   getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW, session)
   const frames: Uint8Array[] = []
   const sender: PeerSender = {
+    sendPublish(index, seq, body) {
+      this.send(encode.publishTo(index, seq))
+      this.send(body)
+    },
     send: (frame) => frames.push(frame),
     carry() {},
     bufferedAmount: () => 0,
