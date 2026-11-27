@@ -48,6 +48,7 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade; # WebSocket
     proxy_set_header Connection $connection_upgrade;
+    proxy_set_header X-Forwarded-Host $http_host; # WebSocket origin check
     proxy_buffering off; # SSE
     proxy_read_timeout 1h;
   }
