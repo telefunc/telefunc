@@ -65,9 +65,14 @@ type StreamUpload = {
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
 
 /** The attempt under way, till its wire opens. `deferred`: its `timer` waits one reconcile window, so that startup code
- *  can register channels before the initial batch. `opening`: its open is out. */
-type Connecting = { tag: 'deferred'; timer: ReturnType<typeof setTimeout> } | { readonly tag: 'opening' }
+ *  can register channels before the initial batch. `opening`: its open is out. `awaitingHeaders`: its open POST is
+ *  unanswered, and the server holds a POST on the wire until it has the open. */
+type Connecting =
+  | { tag: 'deferred'; timer: ReturnType<typeof setTimeout> }
+  | { readonly tag: 'opening' }
+  | { readonly tag: 'awaitingHeaders' }
 const OPENING: Connecting = { tag: 'opening' }
+const AWAITING_HEADERS: Connecting = { tag: 'awaitingHeaders' }
 
 /** A batch POST: the outbox entries it carried, its body's size, when it started, and whether it carried a RECONCILE. */
 type BatchPost = { queued: OutboxEntry[]; bytes: number; startedAt: number; reconcile: boolean }
@@ -101,8 +106,6 @@ class SseTransport implements UpgradeSource {
   }
   heartbeat: Heartbeat | null = null
   private connecting: Connecting | null = null
-  /** The wire's open POST is unanswered: the server holds a POST on the wire until it has the open. */
-  private openPending = false
   /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
@@ -254,7 +257,6 @@ class SseTransport implements UpgradeSource {
     const abortController = this.transportAbort
     if (!abortController) return
     this.transportAbort = null
-    this.openPending = false
     // Its open, upload and reader end with it, and say nothing: the open's frames go back to the outbox.
     this.abandonedControllers.add(abortController)
     this.closeStreamRequest()
@@ -399,7 +401,7 @@ class SseTransport implements UpgradeSource {
     abortController: AbortController,
   ): Promise<ReadableStream<Uint8Array> | null> {
     let response: Response
-    this.openPending = true
+    if (this.transportAbort === abortController) this.connecting = AWAITING_HEADERS
     try {
       response = await ssePromise
     } catch {
@@ -408,7 +410,7 @@ class SseTransport implements UpgradeSource {
       else this.failOpen(stage, abortController, {})
       return null
     } finally {
-      if (this.transportAbort === abortController) this.openPending = false
+      if (this.transportAbort === abortController) this.connecting = OPENING
     }
     // Its wire was dropped while the open went unanswered: the answer is ignored, as a successor may be opening.
     if (this.transportAbort !== abortController) {
@@ -684,7 +686,7 @@ class SseTransport implements UpgradeSource {
 
   private async flushOutbox(): Promise<void> {
     // Each POST held for the open would take one of the browser's connections to the host, which the open may need.
-    if (!this.hasWire() || this.openPending || this.flushing || this.outbox.length === 0) return
+    if (!this.hasWire() || this.connecting === AWAITING_HEADERS || this.flushing || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.postOutBytes = 0
@@ -1013,7 +1015,6 @@ class SseTransport implements UpgradeSource {
     this.transportAbort = null
     // An open still unanswered goes with its wire: the next `start()` opens another.
     this.connecting = null
-    this.openPending = false
     // Its upload goes with it, aborted with its controller (`openUpload`).
     if (this.streamRequest.tag === 'active' || this.streamRequest.tag === 'probing')
       this.streamRequest = { tag: 'idle' }
