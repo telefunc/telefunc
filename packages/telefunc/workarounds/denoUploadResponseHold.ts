@@ -1,10 +1,14 @@
-// Workaround: `Deno.serve`, unless Deno runs with `--unstable-no-legacy-abort`, aborts `request.signal` at the
-// response's end, and that signal is then the only sign its client left. Without the hold, a call that answers before
-// its upload is over takes its client for gone at the answer: its File reads fail and its unread upload is dropped
-// (serve/deno.clientLeft.spec.ts, 12 legacy-mode rows). The hold goes to every Deno binary request with a body that
-// passes its own `request.signal`, a `node:http` framework's `Request` too, whose signal stays live after the response;
-// a raw `node:http` `serve({ readable })` passes its socket's signal, and is never held.
-// TODO: remove once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops legacy Deno abort mode.
+// Workaround: two `Deno.serve` behaviors lose the upload of a call that answers before its upload is over. The hold
+// goes to each binary request on Deno whose `clientGone` is its own `request.signal`, a `node:http` framework's
+// `Request` too, whose response then ends only once its upload is over, as a browser's answer does anyway; a raw
+// `node:http` `serve({ readable })` passes its socket's signal, and is never held.
+// - In both signal modes, a read of the body pending as a streamed response ends never settles, nor does any later
+//   read: a held streamed response ends only once the upload is over.
+// - Unless Deno runs with `--unstable-no-legacy-abort`, `request.signal`, the only sign its client left, also aborts at
+//   the response's end: once the upload is over, or a string answer went out, its aborts stop counting, and a failed
+//   read of the body says the client left.
+// TODO: remove the signal's unhook once https://github.com/denoland/deno/pull/35733 is released and Telefunc drops
+// legacy abort mode, and the held body once a fix of https://github.com/denoland/deno/issues/36966 is released.
 export { holdUploadResponse, heldResponseBody, unholdOnceOver }
 export type { ResponseHold }
 
