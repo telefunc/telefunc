@@ -79,8 +79,9 @@ class NewSubscriptionWait {
     const { queue, channels, failsOn, budget } = rule
     let wait = this.waits.get(queue)
     if (wait === undefined && this.subscriptions.establishingOn(channels).length === 0) return null
-    const bytes =
-      (typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength) + HELD_SEND_OVERHEAD_BYTES
+    // Copied before the send takes a place in the wait: a payload it can't copy (a detached buffer) throws with none.
+    const owned = own(payload)
+    const bytes = (typeof owned === 'string' ? Buffer.byteLength(owned) : owned.byteLength) + HELD_SEND_OVERHEAD_BYTES
     const others = this.budgets.get(budget)
     const waiting = others ?? { sends: 0, memory: queueMemory() }
     // The first waiting send goes whatever the ledger says, charged only where it admits it.
@@ -96,7 +97,6 @@ class NewSubscriptionWait {
     wait.sends++
     waiting.sends++
     this.budgets.set(budget, waiting)
-    const owned = own(payload)
     return {
       run: async (send) => {
         try {

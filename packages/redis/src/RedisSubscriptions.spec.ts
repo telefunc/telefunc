@@ -831,6 +831,21 @@ describe('a publish waiting on its key’s new subscriptions', () => {
     await sendOf(next)
   })
 
+  it('a send whose payload copy throws takes no place in the wait, and the next one waits as the first', async () => {
+    const { listen, sends } = setup()
+    const read = createDeferred<Starts>()
+    listen(TEXT, () => read.promise)
+    const detached = new Uint8Array([42])
+    structuredClone(detached.buffer, { transfer: [detached.buffer] })
+
+    expect(() => sends.waitTurn<Uint8Array>(RULE, detached, (payload) => new Uint8Array(payload))).toThrow(TypeError)
+    const first = sends.waitTurn(RULE, UNHELD, (payload) => payload)
+    assert(first !== null)
+    read.resolve(none())
+    expect(await sendOf(first)).toBe(UNHELD)
+    expect(sends.sendsMayWait).toBe(false)
+  })
+
   it('fails with the refusal when Redis refuses the subscription of its own kind it waits for', async () => {
     const { listen, sends } = setup(async (...channels) => {
       if (channels.includes(TEXT)) throw refusal()
