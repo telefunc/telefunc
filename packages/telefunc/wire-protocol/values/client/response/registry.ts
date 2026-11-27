@@ -1,4 +1,5 @@
 export { ResponseValues }
+export type { FeatureResponseTypes }
 
 import { parse } from '@brillout/json-serializer/parse'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
@@ -20,21 +21,31 @@ import {
   SERIALIZER_PREFIX_BROADCAST,
 } from '../../../constants.js'
 
-const FEATURE_OF_PREFIX = new Map<string, Feature>([
-  [SERIALIZER_PREFIX_GENERATOR, 'streams'],
-  [SERIALIZER_PREFIX_STREAM, 'streams'],
-  [SERIALIZER_PREFIX_FILE, 'streams'],
-  [SERIALIZER_PREFIX_BLOB, 'streams'],
-  [SERIALIZER_PREFIX_FILE_DOWNLOAD, 'streams'],
-  [SERIALIZER_PREFIX_BLOB_DOWNLOAD, 'streams'],
-  [SERIALIZER_PREFIX_PROMISE, 'streams'],
-  [SERIALIZER_PREFIX_CHANNEL, 'channels'],
-  [SERIALIZER_PREFIX_FUNCTION, 'channels'],
-  [SERIALIZER_PREFIX_BROADCAST, 'broadcasts'],
-])
+/** The feature of each built-in tag: a feature's module revives each of its tags, and no other
+ *  (`FeatureResponseTypes`). */
+const FEATURE_OF_PREFIX = {
+  [SERIALIZER_PREFIX_GENERATOR]: 'streams',
+  [SERIALIZER_PREFIX_STREAM]: 'streams',
+  [SERIALIZER_PREFIX_FILE]: 'streams',
+  [SERIALIZER_PREFIX_BLOB]: 'streams',
+  [SERIALIZER_PREFIX_FILE_DOWNLOAD]: 'streams',
+  [SERIALIZER_PREFIX_BLOB_DOWNLOAD]: 'streams',
+  [SERIALIZER_PREFIX_PROMISE]: 'streams',
+  [SERIALIZER_PREFIX_CHANNEL]: 'channels',
+  [SERIALIZER_PREFIX_FUNCTION]: 'channels',
+  [SERIALIZER_PREFIX_BROADCAST]: 'broadcasts',
+} as const satisfies Record<string, Feature>
+type BuiltInPrefix = keyof typeof FEATURE_OF_PREFIX
+type PrefixOf<F extends Feature> = {
+  [P in BuiltInPrefix]: (typeof FEATURE_OF_PREFIX)[P] extends F ? P : never
+}[BuiltInPrefix]
+
+/** The revivers of a feature's module, by the tags `FEATURE_OF_PREFIX` gives the feature. */
+type FeatureResponseTypes<F extends Feature> = Record<PrefixOf<F>, ClientResponseType>
+type LoadedResponseTypes = { [F in Feature]?: { responseTypes: FeatureResponseTypes<F> } }
 
 type ClientResponseType = ReviverType<TypeContract, ClientReviverContext>
-type TagType = { prefix: string; feature: Feature } | { prefix: string; extension: ClientResponseType }
+type TagType = { prefix: BuiltInPrefix; feature: Feature } | { prefix: string; extension: ClientResponseType }
 type ResponseTag = { type: TagType; metadata: unknown }
 
 /** The serializer visits value strings, including those inside tag metadata, before any live value is created. */
@@ -81,10 +92,7 @@ class ResponseValues {
     // A tag is stored after its metadata, so nested values revive first and repeated wire tags share one value.
     for (const tag of this.tags.values()) {
       const { type } = tag
-      const reviver =
-        'feature' in type
-          ? loaded[type.feature]?.responseTypes.find((entry) => entry.prefix === type.prefix)
-          : type.extension
+      const reviver = 'feature' in type ? builtInReviver(loaded, type.feature, type.prefix) : type.extension
       assert(reviver)
       const metadata = replaceParsedValues(tag.metadata, replacements)
       assert(isObject(metadata))
@@ -97,10 +105,22 @@ class ResponseValues {
 function responseType(wire: string, extensions: ClientResponseType[]): TagType | undefined {
   if (wire.startsWith(SERIALIZER_PREFIX_STEM)) {
     const prefix = wire.slice(0, wire.indexOf(':') + 1)
-    const feature = FEATURE_OF_PREFIX.get(prefix)
-    if (feature) return { prefix, feature }
+    if (isBuiltInPrefix(prefix)) return { prefix, feature: FEATURE_OF_PREFIX[prefix] }
   }
   for (const extension of extensions) {
     if (wire.startsWith(extension.prefix)) return { prefix: extension.prefix, extension }
   }
+}
+
+/** `prefix` starts with the stem, as no name `Object.prototype` has does. */
+function isBuiltInPrefix(prefix: string): prefix is BuiltInPrefix {
+  return prefix in FEATURE_OF_PREFIX
+}
+
+function builtInReviver<F extends Feature>(
+  loaded: LoadedResponseTypes,
+  feature: F,
+  prefix: PrefixOf<F>,
+): ClientResponseType | undefined {
+  return loaded[feature]?.responseTypes[prefix]
 }
