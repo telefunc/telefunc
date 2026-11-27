@@ -456,13 +456,16 @@ class PendingProbe implements ProbeWire {
       if (!receiveMessage(pieces.receiver, new Uint8Array(data as ArrayBuffer), performance.now(), this.take))
         ws.close()
     }
-    ws.onclose = () => {
-      const wasReporting = this.phase === 'reporting'
-      this.end()
-      if (wasReporting) owner.onProbeClosed()
+    onUnopenedEnd(ws, () => this.end())
+    ws.onopen = () => {
+      ws.onclose = () => {
+        const wasReporting = this.phase === 'reporting'
+        this.end()
+        if (wasReporting) owner.onProbeClosed()
+      }
+      ws.onerror = () => {}
+      pieces.sender.send(encode.ping(), 0)
     }
-    ws.onerror = () => {}
-    ws.onopen = () => pieces.sender.send(encode.ping(), 0)
   }
 
   /** Whether its PONG came in time; from then on it reports to its owner. If not, it ended. */
