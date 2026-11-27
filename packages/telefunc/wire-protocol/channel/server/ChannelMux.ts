@@ -202,6 +202,8 @@ function getChannelMux(): ChannelMux {
  *  sessions at its load balancer. */
 class ChannelMux implements UpgradeStagesOwner {
   private readonly channels = new Map<string, ServerChannel>()
+  /** The session of the call that carried a channel, by its id: only that session's calls change what its page wants. */
+  private readonly callSessions = new Map<string, string>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
   private readonly sessions = new SessionRegistry({
@@ -243,11 +245,12 @@ class ChannelMux implements UpgradeStagesOwner {
 
   /** Callers must not invoke `channel._registerChannel()` directly. `page`: the page the channel's connect window
    *  waits for, which shows it is on its way while it sends the call's body (`ATTACHABLE_NOW` where nothing is on its
-   *  way). */
-  registerChannel(channel: ServerChannel<any, any>, page: CallPage): void {
+   *  way). `session`: the session of the call that carried it. */
+  registerChannel(channel: ServerChannel<any, any>, page: CallPage, session?: string): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(page, this)
     this.channels.set(channel.id, channel)
+    if (session !== undefined) this.callSessions.set(channel.id, session)
     // A channel that ended before a response carried it waits for its page, as any ended channel does.
     if (channel._phase === 'ended') this.ended.keep(channel, this.options.reconnectTimeout)
     for (const awaited of this.registrationWaits.take(channel.id)) {
@@ -264,7 +267,7 @@ class ChannelMux implements UpgradeStagesOwner {
     const pending: Promise<void>[] = []
     for (const want of wants) {
       const channel = this.channels.get(want.channel)
-      if (session === undefined || !channel?._callRequest || getSessionToken(channel._callRequest) !== session) continue
+      if (!channel || session === undefined || this.callSessions.get(want.channel) !== session) continue
       const inEffect = channel._applyCallWant(want, call.signal, this.options.connectTtl)
       if (inEffect) pending.push(inEffect)
     }
@@ -273,6 +276,7 @@ class ChannelMux implements UpgradeStagesOwner {
 
   private unregisterChannel(channelId: string): void {
     this.channels.delete(channelId)
+    this.callSessions.delete(channelId)
     this.sessions.removeChannel(channelId)
   }
 

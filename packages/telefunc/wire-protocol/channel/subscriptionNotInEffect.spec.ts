@@ -109,9 +109,9 @@ async function errorSentToPage(
     if (pastLimit) vi.useFakeTimers()
     const broadcast = new ServerBroadcast<string>({ key: crypto.randomUUID() })
     const call = new Request('https://example.test/_telefunc?session=page', { method: 'POST' })
-    // As `carryChannel` stamps the broadcast a call returns.
-    broadcast._callRequest = call
-    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
+    // As `carryChannel` registers the broadcast a call returns.
+    broadcast._carriedBy = call
+    getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW, 'page')
     const frames: Uint8Array<ArrayBuffer>[] = []
     const sender: PeerSender = {
       send: (frame) => frames.push(new Uint8Array(frame)),

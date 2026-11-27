@@ -74,6 +74,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
   private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   private adapter: BroadcastAdapter | null = null
+  /** @internal The request of the call that carried it, whose server its page is on till it attaches. */
+  _carriedBy: Request | undefined = undefined
   /** Its subscription to the key's publishes on its backend, while its page or a subscriber of it wants them. */
   private textListening: Listening | null = null
   private binaryListening: Listening | null = null
@@ -400,7 +402,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel implements MemoryHolder
 
   /** The request whose server its page is on: its wire's, else, till its page attaches, the call's that carried it. */
   private get ownerRequest(): Request | undefined {
-    return this.wireRequest ?? this._callRequest
+    return this.wireRequest ?? this._carriedBy
   }
 
   private get owner(): string | undefined {

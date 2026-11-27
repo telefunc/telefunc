@@ -32,9 +32,9 @@ function attachedBroadcast(session: string) {
 function returnedBroadcast(session: string, lossy = false) {
   const key = crypto.randomUUID()
   const broadcast = new ServerBroadcast<string>({ key, lossy })
-  // As `carryChannel` stamps it.
-  broadcast._callRequest = callOf(session)
-  getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW)
+  // As `carryChannel` registers it.
+  broadcast._carriedBy = callOf(session)
+  getChannelMux().registerChannel(broadcast, ATTACHABLE_NOW, session)
   const frames: Uint8Array[] = []
   const sender: PeerSender = {
     send: (frame) => frames.push(frame),
