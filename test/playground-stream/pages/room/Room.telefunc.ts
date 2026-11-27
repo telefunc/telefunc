@@ -126,7 +126,7 @@ export {
 
 import { Buffer } from 'node:buffer'
 import { Abort, Broadcast, config, onBug } from 'telefunc'
-import { createDeferred } from 'telefunc/__internal'
+import { createDeferred, handleCallbackBug } from 'telefunc/__internal'
 import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { sendPrivate } from '@telefunc/room/__internal'
 import { anyoneCanJoin } from '../../anyone-can-join'
@@ -752,7 +752,7 @@ const releaseKeepers = new Map<string, LocalParticipant>()
 /**
  * Server action roomRelease_<roomId> sets cleanupState roomRelease_<roomId> to what the server still holds.
  * It stays after it runs, so the test can run it after each GC round: it holds only weak references. Once all is
- * released, it goes, and so does the keeper.
+ * released, it goes, and so does the keeper: a leave the backend refuses is reported to `onBug()`.
  */
 async function onRoomRelease(roomId: string) {
   const key = `roomRelease_${roomId}`
@@ -766,7 +766,7 @@ async function onRoomRelease(roomId: string) {
       forgetServerAction(key)
       const keeper = present(releaseKeepers.get(roomId), 'the keeper')
       releaseKeepers.delete(roomId)
-      await keeper.leave()
+      await keeper.leave().catch(handleCallbackBug)
     },
     { once: false },
   )
