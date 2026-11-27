@@ -3175,15 +3175,20 @@ function Room() {
 
       {scenario('lossy-near-budget', null, 'Offline with only lossy frames near maxMemory', async () => {
         const [roomId, view] = await createRoom('lossy-near-budget')
+        const [backlogRoomId, backlog] = await createRoom('lossy-near-budget-backlog')
         const got = new Set<string>()
         view.subscribeBinary((_data, info) => got.add(info.track))
+        backlog.subscribe(() => {})
         let closed = false
         view.onClose(() => (closed = true))
+        let backlogClosed = false
+        backlog.onClose(() => (backlogClosed = true))
         await view.join({ meta: { name: 'Me' } })
-        await onRoomLossyNearBudget(roomId)
+        await backlog.join({ meta: { name: 'Me' } })
+        await onRoomLossyNearBudget(roomId, backlogRoomId)
         setResult(JSON.stringify({ roomId }))
-        await pollUntil(() => ({ done: got.size === 3 || closed }), 150)
-        setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed }))
+        await pollUntil(() => ({ done: (got.size === 3 && backlogClosed) || closed }), 150)
+        setResult(JSON.stringify({ roomId, tracks: [...got].sort(), closed, backlogClosed }))
       })}
 
       {scenario('lossy-uplink', null, "Lossy frames waiting for the page's uplink", async () => {

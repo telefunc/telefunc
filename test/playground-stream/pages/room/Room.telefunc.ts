@@ -727,15 +727,17 @@ async function publishPlain(speaker: LocalParticipant, message: unknown): Promis
   }
 }
 
-/** A speaker sends, run by the test while the page is offline, one lossy 600 KiB frame on each of three tracks: past 7/8 of
- *  its lane's 2 MiB, so the server tries to free what it holds, and within it, so it needn't let the page go. */
-async function onRoomLossyNearBudget(roomId: string) {
-  const room = await Room.get(roomId)
-  const speaker = await room.join({ meta: { name: 'Speaker' } })
-  awayMembers.set(roomId, [speaker])
+/** A speaker sends, run by the test while the page is offline, 400 KiB to the page's second room, then one lossy 500 KiB
+ *  frame on each of three tracks: past 7/8 of its lane's 2 MiB, so the server frees what it holds for the page, and
+ *  within it, so it lets go of the second room and needn't let go of the first. */
+async function onRoomLossyNearBudget(roomId: string, backlogRoomId: string) {
+  const speaker = await (await Room.get(roomId)).join({ meta: { name: 'Speaker' } })
+  const backlogSpeaker = await (await Room.get(backlogRoomId)).join({ meta: { name: 'Speaker' } })
+  awayMembers.set(roomId, [speaker, backlogSpeaker])
   onServerAction(`roomLossyNearBudget_${roomId}`, async () => {
+    await backlogSpeaker.publish('x'.repeat(400 * 1024))
     for (const track of ['a', 'b', 'c']) {
-      await speaker.publishBinary(new Uint8Array(600 * 1024), { track, lossy: true })
+      await speaker.publishBinary(new Uint8Array(500 * 1024), { track, lossy: true })
     }
     cleanupState[`roomLossyNearBudget_${roomId}`] = 'done'
   })

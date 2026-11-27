@@ -2076,9 +2076,14 @@ function testRoomSmallMemory() {
     if (!canCutWire()) return
     await runServerActionOffline('lossy-near-budget', 'roomLossyNearBudget')
     await autoRetry(async () => {
-      const { tracks, closed } = await getResult<{ tracks?: string[]; closed?: boolean }>('#room-result')
+      const { tracks, closed, backlogClosed } = await getResult<{
+        tracks?: string[]
+        closed?: boolean
+        backlogClosed?: boolean
+      }>('#room-result')
       expect(closed).toBe(false)
       expect(tracks).deep.equal(['a', 'b', 'c'])
+      expect(backlogClosed).toBe(true)
     })
   })
 }
