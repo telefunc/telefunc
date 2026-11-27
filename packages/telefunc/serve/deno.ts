@@ -41,6 +41,7 @@ function telefunc(): TelefuncServe {
   const ws = crossws({
     getNamespace,
     hooks: {
+      upgrade: hooks.upgrade,
       open(peer) {
         // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/213, closed unmerged).
         // crossws's Deno adapter reports a close without its code, and the code tells a page that left from a dropped one.
