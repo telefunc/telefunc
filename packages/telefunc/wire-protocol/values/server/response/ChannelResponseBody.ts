@@ -74,7 +74,7 @@ function pumpProducerToChannel(
     const stop = Promise.race([runContext.requestContext.responseAbort.errorPromise, cancelledPromise])
     try {
       if ((await Promise.race([channel.opened, stop])) === null) return
-      await restoreContext(runContext.context, () => sendChunks(channel, producer, stop))
+      await restoreContext(runContext.context, () => sendChunks(channel, producer, stop, { preserveEmptyChunks: true }))
     } catch (err) {
       if (err instanceof ChannelClosedError) return
       // A reason JSON can't hold goes to none of the response's values: the error frame reports it.

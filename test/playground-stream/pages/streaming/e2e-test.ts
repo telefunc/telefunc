@@ -510,7 +510,7 @@ function testStreaming(inDocker = false) {
   })
 
   if (process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
-    test('streaming: values larger than the 1 MiB parts a channel sends them in arrive whole, and an empty chunk arrives as nothing', async () => {
+    test('streaming: channel values arrive whole across parts and preserve empty response chunks', async () => {
       await navigate(`${getServerUrl()}/streaming`)
       await page.click('#test-values-larger-than-a-part')
       await autoRetry(
@@ -518,7 +518,7 @@ function testStreaming(inDocker = false) {
           expect(await getResult('#streaming-result')).deep.equal({
             yielded: ['x * 3e6', 'done'],
             resolved: 'y * 3e6',
-            chunks: ['aaa', 'bb'],
+            chunks: [[1], [], [2]],
           })
         },
         { timeout: 20_000 },

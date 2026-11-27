@@ -900,8 +900,8 @@ function Streaming() {
           for await (const value of onYieldLargeString()) yielded.push(value)
           const { promise } = await onReturnPromiseOfLargeString()
           const resolved = await promise
-          const chunks: string[] = []
-          for await (const chunk of await onReturnStreamWithEmptyChunk()) chunks.push(new TextDecoder().decode(chunk))
+          const chunks: number[][] = []
+          for await (const chunk of await onReturnStreamWithEmptyChunk()) chunks.push(Array.from(chunk))
           setResult(
             JSON.stringify({
               yielded: yielded.map((value) => (value === 'x'.repeat(3_000_000) ? 'x * 3e6' : value)),

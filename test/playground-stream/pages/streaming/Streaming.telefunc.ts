@@ -530,7 +530,7 @@ const onReturnPromiseOfLargeString = async () => {
 const onReturnStreamWithEmptyChunk = async () => {
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      for (const text of ['aaa', '', 'bb']) controller.enqueue(new TextEncoder().encode(text))
+      for (const chunk of [[1], [], [2]]) controller.enqueue(new Uint8Array(chunk))
       controller.close()
     },
   })
