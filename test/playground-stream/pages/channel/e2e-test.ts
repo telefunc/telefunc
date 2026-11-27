@@ -1725,7 +1725,7 @@ function testSseRefusals(isDev: boolean, inDocker = false) {
     })
 }
 
-/** A recovery whose every SSE reopen a proxy answers with 502. Needs a short `reconnectTimeout`. */
+/** A recovery whose SSE reopens a proxy refuses. Needs a short `reconnectTimeout`. */
 function testSseRecoveryRefused() {
   test("channel: during a recovery, the page retries an SSE reopen a proxy answers with 502, and ends the channel with the 502's words once it gives up", async () => {
     await navigate(`${getServerUrl()}/channel`)
@@ -1743,6 +1743,34 @@ function testSseRecoveryRefused() {
       expect(refused).greaterThanOrEqual(2)
     })
     expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+  })
+
+  test("channel: during a recovery, an SSE reopen a proxy answers with 502, then one a server on another wire version refuses, ends the channel as a server that was updated, not with the 502's words", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await openCounted(['sse'])
+    expect(await sendCounted('before')).toBe('ack:before')
+    const answers: number[] = []
+    const badGatewayThenUpdated: Parameters<Page['route']>[1] = async (route) => {
+      if (!isSseRequest(route.request(), 'opens')) return route.fallback()
+      if (answers.length === 0) {
+        answers.push(502)
+        return route.fulfill({ status: 502, contentType: 'text/html', body: '<!doctype html><p>Bad Gateway</p>' })
+      }
+      answers.push(409)
+      await route.fulfill({
+        status: 409,
+        contentType:
+          'text/vnd.telefunc.refusal; kind=reload; reason="The server runs another wire version: reload the page."',
+        body: 'The server runs another wire version: reload the page.',
+      })
+    }
+    await withRoute(isSseUrl, badGatewayThenUpdated, async () => {
+      await cutWire()
+      expect(await page.evaluate(() => window.countedEnd!())).toMatch(/server was updated since this page loaded/)
+      expect(answers.slice(0, 2)).deep.equal([502, 409])
+    })
+    expectLog('the server responded with a status of 502', { filter: (log) => log.logSource === 'Browser Error' })
+    expectLog('the server responded with a status of 409', { filter: (log) => log.logSource === 'Browser Error' })
   })
 }
 
