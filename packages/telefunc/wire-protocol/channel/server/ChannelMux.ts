@@ -1,12 +1,21 @@
 export { ChannelMux, getChannelMux }
-export type { Fault, WireEntry, ReconcileOutcome, ServerEnd, ServerTransport, SessionHold, Wire, WireClose }
+export type {
+  Fault,
+  WireEntry,
+  ReconcileOutcome,
+  ServerEnd,
+  ServerTransport,
+  SessionHold,
+  TakesUpgrades,
+  Wire,
+  WireClose,
+}
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getAdapterMaxFrameBytes, getChannelConfig } from '../../../node/server/serverConfig.js'
 import { DeadlineTimer } from '../DeadlineTimer.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import type { TakesUpgrades } from '../../../node/server/runTelefunc/takesUpgrades.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
@@ -146,6 +155,11 @@ function endedSession(how: WireClose): how is SessionCause {
 
 /** A session as one wire held it: its id, and the page's number for that wire. */
 type SessionHold = { sessionId: string; attempt: number }
+
+/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
+ *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
+ *  handed the request can say, as for `ClientLeft`. */
+type TakesUpgrades = () => boolean
 
 type DetachReason = WireClose | 'recoveryFailed'
 

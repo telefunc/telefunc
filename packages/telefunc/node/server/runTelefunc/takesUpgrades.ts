@@ -5,11 +5,7 @@ import type { IncomingMessage } from 'node:http'
 import type { Readable } from 'node:stream'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { hasProp } from '../../../utils/hasProp.js'
-
-/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
- *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
- *  handed the request can say, as for `ClientLeft`. */
-type TakesUpgrades = () => boolean
+import type { TakesUpgrades } from '../../../wire-protocol/channel/server/ChannelMux.js'
 
 /** A `Request` handed over without its server, as Bun's and Deno's generic `serve({ request })` and the primitives form
  *  get it: its page is offered SSE, which works, and never an upgrade that fails. */
