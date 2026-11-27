@@ -227,7 +227,10 @@ describe('a command sent without a script, read or write as ioredis tells it', (
 
 /** A server that answers the handshake (CLIENT SETINFO, then INFO as a ready server) and holds the reply to the first
  *  other command, and so to every command after it. */
-async function holdingServer(): Promise<{ port: number; server: Server }> {
+/** A server that answers a connection's handshake and holds every reply after it; `held` tells, by each connection that
+ *  holds a reply, whether that connection is still open. */
+async function holdingServer(): Promise<{ port: number; server: Server; held: Map<object, boolean> }> {
+  const held = new Map<object, boolean>()
   const server = createServer((socket) => {
     socket.on('error', () => {})
     let holding = false
@@ -236,13 +239,17 @@ async function holdingServer(): Promise<{ port: number; server: Server }> {
         const command = name?.toLowerCase()
         holding ||= command !== 'client' && command !== 'info'
         if (!holding) socket.write(command === 'info' ? '$9\r\nloading:0\r\n' : '+OK\r\n')
+        else if (!held.has(socket)) held.set(socket, true)
       }
+    })
+    socket.on('close', () => {
+      if (held.has(socket)) held.set(socket, false)
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('the holding server has no port')
-  return { port: address.port, server }
+  return { port: address.port, server, held }
 }
 
 const settled = (call: Promise<unknown>) =>
@@ -256,7 +263,7 @@ describe('a command whose reply Redis holds', () => {
     vi.useRealTimers()
   })
 
-  it('fails after 15 s, the command queued behind it too: a write may have run, a read changed nothing', async () => {
+  it('fails after 15 s, and the command queued behind it fails with its connection: a write may have run, a read changed nothing', async () => {
     const { port, server } = await holdingServer()
     const connection = installed(client({ port }))
     await connection.client.connect()
@@ -273,7 +280,12 @@ describe('a command whose reply Redis holds', () => {
     const message = `Redis at 127.0.0.1:${port} didn't answer a command of Telefunc's Redis backend within 15000 ms: a later call may succeed once it answers`
     expect(told).toMatchObject({
       write: { name: 'BackendError', code: 'unreachable', outcome: 'may-have-run', message },
-      read: { name: 'BackendError', code: 'unreachable', outcome: 'not-run', message },
+      read: {
+        name: 'BackendError',
+        code: 'unreachable',
+        outcome: 'not-run',
+        message: `Telefunc's Redis backend can't reach Redis at 127.0.0.1:${port}`,
+      },
     })
   })
 
@@ -299,6 +311,17 @@ describe('a command whose reply Redis holds', () => {
       { options: { commandTimeout: undefined } },
       { options: { commandTimeout: undefined } },
     ])
+  })
+
+  // ioredis keeps each command it wrote, payload included, until its reply comes, and every later reply waits behind it.
+  it('ends the connection that holds the reply, with what was written on it', async () => {
+    const { port, server, held } = await holdingServer()
+    const connection = installed(client({ port, commandTimeout: 200 }))
+    const failure = await settled(connection.send(RAW_COMMANDS.unlink, Buffer.alloc(1024 * 1024)))
+    await vi.waitFor(() => expect([...held.values()]).toEqual([false]))
+    server.close()
+
+    expect(failure).toMatchObject({ code: 'unreachable', outcome: 'may-have-run' })
   })
 
   it("a Cluster's nodes wait 15 s, or as long as the redisOptions of the app's Cluster say", () => {

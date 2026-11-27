@@ -91,6 +91,12 @@ class StoreRequest extends Command {
     return true
   }
 
+  /** Ends the socket it was written to, whose reply didn't come in time: every later reply on it waits behind that
+   *  one, and ioredis keeps each request it wrote there, payload included, until its reply comes. */
+  endStalledSocket(): void {
+    if (this.socket instanceof Writable) this.socket.destroy()
+  }
+
   override toWritable(socket: object): string | Buffer {
     this.socket = socket
     if (this.script !== undefined) {
@@ -167,9 +173,14 @@ function slicesOf(pieces: readonly (string | Buffer)[], bytes: number): Buffer[]
 }
 
 /** Sends `request` on `client`: its reply, as its `bytes` says. */
-function sendRequest(client: RedisClient, request: StoreRequest): Promise<unknown> {
+async function sendRequest(client: RedisClient, request: StoreRequest): Promise<unknown> {
   void client.sendCommand(request)
-  return request.promise
+  try {
+    return await request.promise
+  } catch (error) {
+    if (isTimedOut(error)) request.endStalledSocket()
+    throw error
+  }
 }
 
 /** What `RedisSubscriptions` needs of its connection. */
