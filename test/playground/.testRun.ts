@@ -2,6 +2,7 @@ export { testRun }
 
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
+import { readFileSync } from 'node:fs'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
@@ -81,6 +82,27 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
 
   if (!isDev) {
+    test("a plain call's page loads no code for channels, broadcasts or streams, and the call loads no script", async () => {
+      const onDemand = onDemandCode('/pages/index')
+      // The page's code requests the call once it runs: each script it requests from then on is the call's.
+      const requested: string[] = []
+      const onRequest = (request: { url(): string }) => {
+        const { pathname } = new URL(request.url())
+        if (pathname.endsWith('.js') || pathname === '/_telefunc') requested.push(pathname)
+      }
+      page.on('request', onRequest)
+      try {
+        await page.goto(`${getServerUrl()}/`)
+        await autoRetry(async () => {
+          expect(await page.textContent('body')).toContain('Welcome Eva')
+        })
+      } finally {
+        page.off('request', onRequest)
+      }
+      expect(requested.filter((script) => onDemand.has(script)).join(' ')).toBe('')
+      expect(requested.slice(requested.indexOf('/_telefunc')).join(' ')).toBe('/_telefunc')
+    })
+
     test('shield() generation', async () => {
       {
         const resp = await makeTelefuncHttpRequest('Jon')
@@ -113,4 +135,36 @@ async function makeTelefuncHttpRequest(name: string | number) {
     }),
   })
   return resp
+}
+
+type Chunk = { file: string; imports?: string[]; dynamicImports?: string[] }
+
+/** The scripts of channels, broadcasts and streams that Telefunc's client imports when a call needs them, by the page's
+ *  client build (Vike's manifest): the page's own code imports none of them. */
+function onDemandCode(pageId: string): Set<string> {
+  const manifest: Record<string, Chunk> = JSON.parse(
+    readFileSync(new URL('./dist/nested/assets.json', import.meta.url), 'utf8'),
+  )
+  const chunk = (key: string) => {
+    const found = manifest[key]
+    if (!found) throw new Error(`The manifest has no chunk ${key}`)
+    return found
+  }
+  const closure = (keys: string[], into = new Set<string>()) => {
+    for (const key of keys) {
+      const { file, imports = [] } = chunk(key)
+      if (into.has(`/${file}`)) continue
+      into.add(`/${file}`)
+      closure(imports, into)
+    }
+    return into
+  }
+  const entry = `virtual:vike:page-entry:client:${pageId}`
+  const scripts = closure([entry])
+  const features = chunk(entry).dynamicImports ?? []
+  expect(features.map((key) => key.replace(/.*\/wire-protocol\/values\/client\//, '')).join(' ')).toBe(
+    'streams.js channels.js broadcasts.js',
+  )
+  for (const feature of features) expect(scripts.has(`/${chunk(feature).file}`)).toBe(false)
+  return new Set([...closure(features)].filter((script) => !scripts.has(script)))
 }
