@@ -38,7 +38,7 @@ import { createRequestContext, type RequestContext } from './context/requestCont
 import type { ClientLeft } from './runTelefunc/clientLeft.js'
 import type { TakesUpgrades } from './runTelefunc/takesUpgrades.js'
 import { getChannelMux } from '../../wire-protocol/channel/server/ChannelMux.js'
-import { heldResponseBody, type ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
+import type { ResponseHold } from '../../workarounds/denoUploadResponseHold.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -88,14 +88,13 @@ type HttpResponseParts = {
   err?: unknown
 }
 
-/** The response. Where it is `hold`'s, what its accessors send ends only once `hold.over` settles, but for `body`, the
- *  string as it is, which `hold.unheld` is told of. */
+/** The response. With a Deno upload's `hold`, a streamed body ends only once the upload is over; a string `body` tells
+ *  the hold it went out. */
 function createHttpResponse(
   { statusCode, contentType, headers, body: responseBody, err }: HttpResponseParts,
   hold: ResponseHold | null,
 ): HttpResponse {
-  const sent = (): ResponseBody =>
-    hold === null ? responseBody : heldResponseBody(getStreamReadableWeb(responseBody), hold)
+  const sent = (): ResponseBody => (hold === null ? responseBody : hold.heldBody(getStreamReadableWeb(responseBody)))
   return {
     statusCode,
     headers: [...headers, ['Content-Type', contentType]],
@@ -120,7 +119,7 @@ function createHttpResponse(
         typeof responseBody === 'string',
         "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
       )
-      hold?.unheld()
+      hold?.answeredAsString()
       return responseBody
     },
     pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
