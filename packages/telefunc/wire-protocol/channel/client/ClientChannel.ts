@@ -196,7 +196,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const serialized = stringifyValue(data, 'send')
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.text, serialized, keepText)
+      return this.sendNewest(encode.text, serialized, (text) => text)
     }
     this.flushLossy()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
@@ -227,7 +227,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.stopped) throw this.lifecycle.sendRefusal()
     if (opts?.lossy) {
       assertUsage(opts.ack !== true, LOSSY_WITH_ACK_TEXT)
-      return this.sendNewest(encode.binary, data, copyBytes)
+      // A held send keeps a copy: the caller may write into its bytes once `sendBinary` returned.
+      return this.sendNewest(encode.binary, data, (bytes) => new Uint8Array(bytes))
     }
     this.flushLossy()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
@@ -248,7 +249,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return unsubscribeOf(this.binaryListeners.add(callback, options))
   }
 
-  /** What it ended with, as its `closed` rejects. */
+  /** What it ended with, or `ChannelClosedError` for a graceful close (used to reject `opened` and waiting sends). */
   protected endError(): Error {
     return this.lifecycle.closeError ?? new ChannelClosedError()
   }
@@ -612,14 +613,4 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
-}
-
-/** What a held lossy send keeps of its text: the string itself. */
-function keepText(text: string): string {
-  return text
-}
-
-/** What a held lossy send keeps of its bytes: a copy, as the caller may write into them once `sendBinary` returned. */
-function copyBytes(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(bytes)
 }

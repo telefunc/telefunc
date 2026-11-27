@@ -36,7 +36,7 @@ describe('after a batch POST is refused for its size', () => {
     const after = world.posts.slice(world.posts.indexOf(refused) + 1).filter(({ data }) => data)
     expect(after.length).toBeGreaterThan(1)
     expect(after.filter(({ bytes }) => bytes > learned)).toEqual([])
-    // Split, and packed: each POST but the last carries what fits, never a frame at a time (msg16 R1.8).
+    // Split, and packed: each POST but the last carries what fits, never a frame at a time.
     expect(after.slice(0, -1).filter(({ bytes }) => bytes <= learned / 2)).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 0)).toHaveLength(400)
   })
@@ -61,7 +61,7 @@ describe('after a batch POST is refused for its size', () => {
     const refusedBatches = world.posts.slice(loneAt).filter(({ status, bytes }) => status === 413 && bytes < 100_000)
     expect(refusedBatches).toEqual([])
     expect(world.server.got.filter(({ ix }) => ix === 1)).toHaveLength(40)
-    // The lone message is never dropped unsaid: refused again after a reconnect, its channel ends (msg16 R1.8).
+    // The lone message is never dropped unsaid: refused again after a reconnect, its channel ends.
     expect(alone.ended).toHaveLength(1)
   })
 
@@ -96,7 +96,7 @@ test("a batch of the connection's own frames refused again after a reconnect end
 test("a PONG the wire left behind carried after its own frames' refusal doesn't keep the connection from ending", async () => {
   const page = (await openOverSse(1))(0)
   // As the row above, and each refused wire carries a PONG already on its way 70 ms after the refusal, while the page
-  // waits to reconnect (msg16 R1.1).
+  // waits to reconnect.
   world.controlAnswers = Array.from(
     { length: 100 },
     (): PostAnswer => ({ tag: 'refused', status: 400, pongAfterMs: 70 }),
@@ -109,7 +109,7 @@ test("a PONG the wire left behind carried after its own frames' refusal doesn't 
 
 test('a PING that goes past a data POST the gateway holds, refused again after a reconnect, ends the connection', async () => {
   const page = (await openOverSse(1))(0)
-  // The gateway holds the one data POST for 12 s and refuses every POST of the connection's own frames (msg16 R1.7).
+  // The gateway holds the one data POST for 12 s and refuses every POST of the connection's own frames.
   world.postAnswers = [{ tag: 'slow', ms: 12_000 }]
   world.controlAnswers = Array.from({ length: 30 }, (): PostAnswer => ({ tag: 'refused', status: 403 }))
   void page.channel.send('data held by the gateway').catch(() => {})
@@ -203,8 +203,7 @@ test('the request that marks the move to WebSocket stays within the size the pag
   )
   const learned = Math.floor(refused.bytes / 2)
   const from = world.posts.length
-  // A small POST is still out when the WebSocket is ready, and a text that fits the learned size alone waits behind it
-  // (msg16 R1.5).
+  // A small POST is still out when the WebSocket is ready, and a text that fits the learned size alone waits behind it.
   world.postAnswers = [{ tag: 'slow', ms: 500 }]
   void page.channel.send('held').catch(() => {})
   await advance(120)

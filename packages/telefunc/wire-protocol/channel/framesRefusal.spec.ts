@@ -1,8 +1,7 @@
 // A frame the server can't take ends only its own channel: on the real Node server and the real page, over SSE, a
 // request that carries data of two channels and one bad frame of the first. The first ends on both sides with the
-// server's reason; the second keeps its session, and each of its messages arrives once (decisions/516-sse-carrier.md,
-// the ruling on step 6's check, R1.1). The bad frame stands for a page that breaks the protocol: a fetch wrapper puts
-// it into the page's request, after the first channel's text.
+// server's reason; the second keeps its session, and each of its messages arrives once. The bad frame stands for a page
+// that breaks the protocol: a fetch wrapper puts it into the page's request, after the first channel's text.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'

@@ -319,7 +319,7 @@ channel.onClose(() => window.removeEventListener('pointermove', onMove))
 
 ## `Broadcast`
 
-`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` goes out to the subscribers of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -408,7 +408,7 @@ On the server, `getContext()` throws inside a `subscribe()` or `subscribeBinary(
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
-> Return it from a telefunction and the receiving client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client-side and server-side).
+> Return it from a telefunction and the receiving client can `publish()` / `subscribe()` on the key — the server fans each message out to the members subscribed to the key, client-side and server-side. For a client that falls behind, see `lossy` and <Link href="#errors" /> below.
 
 
 <Warning>
@@ -574,7 +574,7 @@ price.subscribe((value, info) => showPrice(value, info.seq))
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `publish(data, { lossy: true })` | Publish where only the newest matters. A client that falls behind skips to the newest. |
 | `publishBinary(data, { lossy: true })` | Publish binary where only the newest matters. |
-| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function with the same `opened` promise as `subscribe(cb)`'s. |
 | `messages({ signal })` | Receive text and binary messages, each with its `info`, in a `for await` loop. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
@@ -600,7 +600,7 @@ The difference is what a message is addressed to: a channel message is addressed
 
 A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, ending when either side hangs up.
 
-A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it, members come and go, and the `key` belongs to no one.
+A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` hears what is published to it, members come and go, and the `key` belongs to no one.
 
 Only the two ends of a channel can use it, while anything that knows a broadcast's `key` can join it. A channel ends when either side closes it, while a broadcast outlives any single member.
 
@@ -638,7 +638,7 @@ Channels and broadcasts signal failure through five errors:
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, replay evicted while offline, or, on the server, the user left the page | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelClosedError` (broadcast) | On the client, where a `BroadcastChannel`'s subscription didn't take effect on the server, or ended there after it took effect | Closed | In both cases, call its telefunction again and subscribe to the broadcast it returns |
-| `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost | `await` each `send()` before the next. Split a message past the per-channel limit: awaiting doesn't help it, and neither does `maxMemory`. Raise `maxMemory` only where all channels together hold too much |
+| `ChannelOverflowError` (`send()`) | The message would pass the default per-channel limit of 320 MiB, or `maxMemory`. For a client's `send(data, { ack: true })`, also where the server can't hold the answer | **Open**; only that message is lost, or for `{ ack: true }` its answer: the server's listener may have run, so a retry can repeat it | `await` each `send()` before the next. Split a message past the per-channel limit: awaiting doesn't help it, and neither does `maxMemory`. Raise `maxMemory` only where all channels together hold too much |
 | `ChannelOverflowError` (closed) | A `BroadcastChannel`'s client fell behind what the server holds for it; for lossy publishes, the server couldn't hold even the newest one. For any channel, its client sent more than the server holds while your `listen()` callbacks or a stream's reader work on what it sent, or had so many `send(data, { ack: true })` or `publish()` calls waiting for their answers at once that the server couldn't hold even their refusals | Closed | Call its telefunction again, then publish with `lossy: true`, `await` each send and acknowledged call before the next, or raise `maxMemory` |
 | `ChannelOverflowError` (`messages()`) | Its loop fell over 2 MiB behind the publishes, past its next message, or `maxMemory` is held and it's behind | The loop ends, the broadcast stays open | Handle each message faster, or use `subscribe()` |
 | `ChannelOverflowError` (`publish()`) | With no Redis or other transport installed, a `subscribe()` callback published more than 320 MiB before its first `await` | Open | Publish less from the callback |

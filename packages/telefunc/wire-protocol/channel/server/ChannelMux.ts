@@ -66,16 +66,11 @@ import { UpgradeStages, type UpgradeStagesOwner } from './UpgradeStages.js'
 import { SessionRegistry, type ChannelHandle, type Session } from './SessionRegistry.js'
 import { AwaitedChannels, expireAwaited, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits } from './RegistrationWaits.js'
-import type { CallPage, MuxChannel } from './ServerChannel.js'
+import type { CallPage, ServerChannel } from './ServerChannel.js'
 
 /** A transport-owned wire handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
 type Wire = unknown
-
-/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
- *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
- *  handed the request can say, as for `ClientLeft`. */
-type TakesUpgrades = () => boolean
 
 type ServerTransport<TWire> = {
   /** Stable per-wire id, or `null` for transports that don't multiplex client→server
@@ -156,13 +151,13 @@ type MuxServerOptions = {
  *  session cause, which each channel of the session ends with. */
 type WireClose = 'transient' | 'pageLeft' | SessionCause
 
-/** Whether a wire closed `how` ended its session for good, with that cause. */
-function endedSession(how: WireClose): how is SessionCause {
-  return how !== 'transient' && how !== 'pageLeft'
-}
-
 /** A session as one wire held it: its id, and the page's number for that wire. */
 type SessionHold = { sessionId: string; attempt: number }
+
+/** Whether the server a request arrived on takes WebSocket upgrades, asked each time the page that the request connected
+ *  is offered its transports: a Node server may get its upgrade listener, or lose it, later. Only the adapter that was
+ *  handed the request can say, as for `ClientLeft`. */
+type TakesUpgrades = () => boolean
 
 type DetachReason = WireClose | 'recoveryFailed'
 
@@ -180,7 +175,7 @@ type WireState = {
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
   /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
-  attaching: Set<MuxChannel>
+  attaching: Set<ServerChannel>
 }
 
 type WireEntry = {
@@ -223,13 +218,16 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   /** Its session Durable Object's id on Cloudflare, else null. */
   readonly hostId: string | null
   readonly hostLocals = new Map<symbol, unknown>()
-  private readonly channels = new Map<string, MuxChannel>()
+  private readonly channels = new Map<string, ServerChannel>()
   /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
    *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
   readonly gcRegistry = new GcRegistry()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
-  private readonly sessions = new SessionRegistry({ retiredLeavesAt: () => performance.now() + this.keptEndWindow() })
+  private readonly sessions = new SessionRegistry({
+    retiredLeavesAt: () =>
+      performance.now() + keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout),
+  })
   private readonly wires = new Map<unknown, WireEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
@@ -270,7 +268,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   /** Callers must not invoke `channel._registerChannel()` directly. `page`: the page the channel's connect window
    *  waits for, which shows it is on its way while it sends the call's body (`ATTACHABLE_NOW` where nothing is on its
    *  way). */
-  registerChannel(channel: MuxChannel, page: CallPage): void {
+  registerChannel(channel: ServerChannel<any, any>, page: CallPage): void {
     // Registered before any waiter attaches it: its `onOpen` may end it, and it tells this mux when it does.
     channel._registerChannel(page, this)
     this.channels.set(channel.id, channel)
@@ -303,7 +301,10 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   }
 
   /** An ended channel its page may still need (`keep`) stays attachable; the mux forgets any other. */
-  onChannelEnded(channel: MuxChannel, { keep, pageAttached }: { keep: boolean; pageAttached: boolean }): void {
+  onChannelEnded(
+    channel: ServerChannel<any, any>,
+    { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
+  ): void {
     // Kept until its page needs nothing more from it, leaves, or stays away for `reconnectTimeout`.
     if (keep) this.ended.keep(channel, pageAttached ? null : this.options.reconnectTimeout)
     else this.unregisterChannel(channel.id)
@@ -321,7 +322,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   onWireOpen<TWire>(wire: TWire, transport: ServerTransport<TWire>, takesUpgrades: TakesUpgrades): void {
     const recvBacklog = { bytes: 0, frames: 0 }
     const deliveries = new Deliveries()
-    const attaching = new Set<MuxChannel>()
+    const attaching = new Set<ServerChannel>()
     const entry: WireEntry = {
       wire,
       state: {
@@ -364,24 +365,26 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
 
   sendReconciled(outcome: ReconcileOutcome): void {
     const entry = this.wires.get(outcome.deliverTo)
-    entry?.sender.sendReconciled(
-      encode.reconciled({
-        upgradeId: outcome.upgradeId,
-        sessionId: outcome.sessionId,
-        open: outcome.attached.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq })),
-        reconnectTimeout: this.options.reconnectTimeout,
-        idleTimeout: this.options.idleTimeout,
-        pingInterval: this.options.pingInterval,
-        maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
-        creditWindow: this.options.creditWindow,
-        sseFlushThrottle: this.options.sseFlushThrottle,
-        ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
-        transports: entry?.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
-      }),
-    )
+    if (entry) {
+      entry.sender.sendReconciled(
+        encode.reconciled({
+          upgradeId: outcome.upgradeId,
+          sessionId: outcome.sessionId,
+          open: outcome.attached.map((h) => ({ ix: h.ix, lastSeq: h.channel._lastClientSeq })),
+          reconnectTimeout: this.options.reconnectTimeout,
+          idleTimeout: this.options.idleTimeout,
+          pingInterval: this.options.pingInterval,
+          maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
+          creditWindow: this.options.creditWindow,
+          sseFlushThrottle: this.options.sseFlushThrottle,
+          ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
+          transports: entry.takesUpgrades() ? this.options.transports : this.options.transportsWithoutWs,
+        }),
+      )
+    }
     for (const { channel } of outcome.attached) channel._confirmWant()
     // Sends are sync, so the FIN can't pass anything on the new wire.
-    if (outcome.retiredWire !== null) this.send(outcome.retiredWire, encode.fin())
+    if (outcome.retiredWire !== null) this.wires.get(outcome.retiredWire)?.sender.send(encode.fin())
   }
 
   /** The wire's transport saw it close: the mux forgets it. Returns the session the wire held, if it held one. */
@@ -430,7 +433,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
    *  transport may throw as it closes. */
   private dispose(entry: WireEntry, reason: WireClose): void {
     const { wire } = entry
-    this.clearPingTimer(entry.state)
+    entry.state.pingTimer.disarm()
     entry.state.awaited.stop()
     entry.sender.close()
     this.stages.clear(wire)
@@ -621,7 +624,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       // frame names the page names again on its next wire. Once the wire ended its session, the page names its channels
       // on no other wire, and those a RECONCILE queued behind that end names end with its cause.
       if (entry.closed !== null) {
-        if (endedSession(entry.closed)) this.refuseReconciled(entry, rawFrame, entry.closed)
+        if (entry.closed !== 'transient' && entry.closed !== 'pageLeft')
+          this.refuseReconciled(entry, rawFrame, entry.closed)
         return null
       }
       return (await this.handleFrame(entry, rawFrame)) ?? null
@@ -664,7 +668,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       return this.closeWire(entry, { how: 'transient', refusal: null })
     }
     // The instant a session's end, where this is one, is kept until: counted from the decision, before its teardown.
-    const keptUntil = performance.now() + this.keptEndWindow()
+    const keptUntil = performance.now() + keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout)
     // A wire the end closes says it as its last word: what its channels send on it from here goes no more, kept in
     // their replay for their next attach.
     if (fault.scope !== 'channel' || fault.wire !== 'kept') entry.sender.close('first')
@@ -687,21 +691,11 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     this.closeWire(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
-  /** How long a session's record is kept from the time the server decided it. */
-  private keptEndWindow(): number {
-    return keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout)
-  }
-
-  /** The channels of the session `entry`'s wire holds, by index; undefined while it holds none. */
-  private sessionOf(entry: WireEntry): ReadonlyMap<number, ChannelHandle> | undefined {
-    return entry.holds?.channels
-  }
-
   /** Ends the channel at `ix` with `cause` where the session holds it, or keeps the cause for its registration where
    *  the wire awaits it; false where neither, as for a frame that names no channel. */
   private endChannelAt(entry: WireEntry, ix: number | undefined, cause: FrameRefusalCause): boolean {
     if (ix === undefined) return false
-    const handle = this.sessionOf(entry)?.get(ix)
+    const handle = entry.holds?.channels.get(ix)
     if (handle) {
       handle.channel._onServerEnd(cause)
       return true
@@ -763,7 +757,8 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   private handlePing(entry: WireEntry, ended: PingEntry[]): void {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     this.resetPingTimer(entry)
-    this.acknowledgeArrivals(entry)
+    // The session's channels acknowledge what arrived, so the page's replay lets it go.
+    for (const { channel } of entry.holds?.channels.values() ?? []) channel._acknowledge()
     if (ended.length === 0 || entry.state.recvChain === null) return this.pong(entry, this.answerPing(entry, ended))
     // What it names, the page sent before it: answered once the frames ahead of it had their turn.
     this.pong(entry, [])
@@ -874,11 +869,6 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
       answers.push({ ix, lastSeq: released ? null : channel._lastClientSeq })
     }
     return answers
-  }
-
-  /** On each page heartbeat, the session's channels acknowledge what arrived, so the page's replay lets it go. */
-  private acknowledgeArrivals(entry: WireEntry): void {
-    for (const { channel } of entry.holds?.channels.values() ?? []) channel._acknowledge()
   }
 
   private pong(entry: WireEntry, ended: PongEntry[]): void {
@@ -1107,7 +1097,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
 
   /** Runs in `registerChannel`, between two reconciles. Waiters attach in the order they began; the latest one keeps
    *  the channel. */
-  private attachAwaited(awaited: AwaitedChannel, channel: MuxChannel): void {
+  private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
     // Its page sent it a frame the server can't take while it was awaited: it ends with that cause, unattached.
     if (awaited.refused !== null) return channel._onServerEnd(awaited.refused)
     const { entry } = awaited
@@ -1171,7 +1161,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
   /** Attaches `channel` to the wire. With `replay`, first sends what the page missed. Null once the channel keeps
    *  nothing for a page (its replay was released). */
   private attachChannel(
-    channel: MuxChannel,
+    channel: ServerChannel,
     open: ReconcileOpenEntry,
     { sender }: WireEntry,
     replay: boolean,
@@ -1222,12 +1212,7 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     }
   }
 
-  // ── Per-wire plumbing (send, recv chain, ping) ────────────────
-
-  /** Sole send path, sync so wire order is call order; a wire closed or past its backlog drops the frame. */
-  private send(wire: Wire, frame: Uint8Array<ArrayBuffer>): void {
-    this.wires.get(wire)?.sender.send(frame)
-  }
+  // ── Per-wire plumbing (recv chain, ping) ────────────────
 
   private chainRecv<T>(entry: WireEntry, fn: () => Promise<T>): Promise<T> {
     const prev = entry.state.recvChain ?? Promise.resolve()
@@ -1236,10 +1221,6 @@ class ChannelMux implements WireSenderOwner, UpgradeStagesOwner {
     })
     entry.state.recvChain = next
     return next
-  }
-
-  private clearPingTimer(state: WireState): void {
-    state.pingTimer.disarm()
   }
 
   private pingDeadlineOf(entry: WireEntry): number {

@@ -1,6 +1,6 @@
 // The twins, on the real Node server, of ClientConnection.marked.spec.ts's rows of a `route` refusal of the open: the
-// server serves channels over WebSocket only, so it refuses the page's SSE open `route` (decisions/516-sse-carrier.md,
-// the ruling on step 6's check). A proxy that rewrites the refusal's kind stands for one the page does not know.
+// server serves channels over WebSocket only, so it refuses the page's SSE open `route`. A proxy that rewrites the
+// refusal's kind stands for one the page does not know.
 
 import { expect, test } from 'vitest'
 import { delay, opens, pair, sends, until, useRealServer, world } from './realServer.fixture.js'

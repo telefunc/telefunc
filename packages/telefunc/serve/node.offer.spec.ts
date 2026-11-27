@@ -6,7 +6,6 @@ import { serve as honoServe } from '@hono/node-server'
 import { Hono } from 'hono'
 import type { Duplex } from 'node:stream'
 import { Telefunc } from './node.js'
-import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { hasProp } from '../utils/hasProp.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { decode, isOneFrame, messageFrames } from '../wire-protocol/wire/frame.js'
@@ -277,7 +276,12 @@ test('an app behind a proxy that forwards upgrades on its public port offers Web
     const upstream = connect(Number(appPort), appHost)
     for (const socket of [client, upstream]) {
       sockets.add(socket)
-      socket.once('close', () => sockets.delete(socket))
+      // The tunnel ends with either of its sockets, as a proxy's does.
+      socket.once('close', () => {
+        sockets.delete(socket)
+        client.destroy()
+        upstream.destroy()
+      })
       socket.on('error', () => {
         client.destroy()
         upstream.destroy()
@@ -384,75 +388,13 @@ test('an app whose server closed and listens again offers WebSocket, and the tok
   expect(await openPage({ ...app, host: hostOf(app.server) })).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
 
-/** 0.3.1's `installWebSocket()` on a server, as its dist/serve/node.js does it: its registry under `'serve/node.ts'`
- *  (lines 9-10), the server skipped where the registry has it and added where not (27-29), then its own `upgrade`
- *  listener (30), which hands the socket to its own crossws. Here the listener drops it: no row's page upgrades to it. */
-function install031(server: Server): void {
-  const { registeredServers } = getGlobalObject('serve/node.ts', { registeredServers: new WeakSet<object>() })
-  if (registeredServers.has(server)) return
-  registeredServers.add(server)
-  server.on('upgrade', (_req, socket: Duplex) => socket.destroy())
-}
-
-test('an app whose server 0.3.1 took first: the head adds no second upgrade listener, and offers its pages SSE alone', async () => {
-  const app = await fetchApp()
-  install031(app.server)
-  app.telefunc.installWebSocket(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
-})
-
-test("an app whose server the head took first: 0.3.1's install adds no second upgrade listener, and the head's pages move to WebSocket", async () => {
-  const app = await fetchApp()
-  app.telefunc.installWebSocket(app.server)
-  install031(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
-})
-
-test("an app that installs Telefunc's WebSocket again from its own `removeListener` listener when Telefunc's upgrade listener is removed keeps one upgrade listener: 0.3.1's install after it adds none, and the head's pages move to WebSocket", async () => {
+test("an app that installs Telefunc's WebSocket again from its own `removeListener` listener when Telefunc's upgrade listener is removed keeps one upgrade listener, and its pages move to WebSocket", async () => {
   const app = await fetchApp()
   app.server.on('removeListener', (event: string | symbol) => {
     if (event === 'upgrade' && app.server.listenerCount('upgrade') === 0) app.telefunc.installWebSocket(app.server)
   })
   app.telefunc.installWebSocket(app.server)
   app.server.removeAllListeners('upgrade')
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  install031(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
-})
-
-test("removing the head's upgrade listener frees the server for either copy's next install, and only one listens", async () => {
-  const app = await fetchApp()
-  app.telefunc.installWebSocket(app.server)
-  app.server.removeAllListeners('upgrade')
-  install031(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  app.telefunc.installWebSocket(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  expect(await openPage(app)).toEqual({ offer: ['sse'], webSocketOpened: false })
-})
-
-test("after a removal of the head's upgrade listener that no `removeListener` listener saw, 0.3.1's install skips the server, and the head's next install takes it: one listens, and the head's pages move to WebSocket", async () => {
-  const app = await fetchApp()
-  app.telefunc.installWebSocket(app.server)
-  app.server.removeAllListeners('removeListener')
-  app.server.removeAllListeners('upgrade')
-  install031(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(0)
-  app.telefunc.installWebSocket(app.server)
-  expect(app.server.listenerCount('upgrade')).toBe(1)
-  expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
-})
-
-test("after a removal of the head's upgrade listener that no `removeListener` listener saw, the head's next install takes the server, and 0.3.1's install after it adds no second listener", async () => {
-  const app = await fetchApp()
-  app.telefunc.installWebSocket(app.server)
-  app.server.removeAllListeners('removeListener')
-  app.server.removeAllListeners('upgrade')
-  app.telefunc.installWebSocket(app.server)
-  install031(app.server)
   expect(app.server.listenerCount('upgrade')).toBe(1)
   expect(await openPage(app)).toEqual({ offer: ['sse', 'ws'], webSocketOpened: true })
 })
@@ -492,7 +434,12 @@ async function rewritingProxy(host: string, rewrite: (path: string) => string): 
     })
     for (const socket of [client, upstream]) {
       sockets.add(socket)
-      socket.once('close', () => sockets.delete(socket))
+      // The tunnel ends with either of its sockets, as a proxy's does.
+      socket.once('close', () => {
+        sockets.delete(socket)
+        client.destroy()
+        upstream.destroy()
+      })
       socket.on('error', () => {
         client.destroy()
         upstream.destroy()

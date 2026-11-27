@@ -35,6 +35,7 @@ import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 import { getWireUrl } from './getSessionUrl.js'
 import { endOfWire } from './readAnswer.js'
+import { onUnopenedEnd } from '../../../workarounds/node22UndiciWebSocketError.js'
 
 /** What a WebSocket's frames go through, each way; the server's `WirePieces` holds its headroom and receiver. */
 type WirePieces = {
@@ -146,8 +147,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.connecting = socket
     this.pieces = socket.pieces
     ws.onopen = () => this.adopt(socket)
-    // Its first `error` or `close`: Node 22's undici 6 fires no `close` before the upgrade (nodejs/undici#3506).
-    ws.onclose = ws.onerror = () => this.connectFailed(socket)
+    onUnopenedEnd(ws, () => this.connectFailed(socket))
   }
 
   private adopt(socket: Connecting): void {
@@ -456,13 +456,16 @@ class PendingProbe implements ProbeWire {
       if (!receiveMessage(pieces.receiver, new Uint8Array(data as ArrayBuffer), performance.now(), this.take))
         ws.close()
     }
-    ws.onclose = () => {
-      const wasReporting = this.phase === 'reporting'
-      this.end()
-      if (wasReporting) owner.onProbeClosed()
+    onUnopenedEnd(ws, () => this.end())
+    ws.onopen = () => {
+      ws.onclose = () => {
+        const wasReporting = this.phase === 'reporting'
+        this.end()
+        if (wasReporting) owner.onProbeClosed()
+      }
+      ws.onerror = () => {}
+      pieces.sender.send(encode.ping(), 0)
     }
-    ws.onerror = () => {}
-    ws.onopen = () => pieces.sender.send(encode.ping(), 0)
   }
 
   /** Whether its PONG came in time; from then on it reports to its owner. If not, it ended. */

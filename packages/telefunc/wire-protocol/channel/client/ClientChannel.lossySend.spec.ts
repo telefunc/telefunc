@@ -1,5 +1,5 @@
-// A page's `send(data, { lossy: true })`: the REAL ClientChannel on the REAL ClientConnection and SendGate, over an SSE
-// wire whose stream's head came and that never reconciles, so the gate holds every frame the page sends and the test
+// A page's `send(data, { lossy: true })`: the REAL ClientChannel on the REAL ClientConnection and SendQueue, over an SSE
+// wire whose stream's head came and that never reconciles, so the send queue holds every frame the page sends and the test
 // reads them in order. The clock is faked, and the wire measured a 50 ms round trip: a frame held past its
 // `behindAfter`, 650 ms, is behind, and a newer lossy send may take its place. Its channel is open, as after its first
 // attach, unless a test says otherwise. The reconnect, with what the server then reads, is in
@@ -35,10 +35,10 @@ afterEach(() => {
 })
 
 /** A channel whose wire opened, was answered and measured its round trip, and which a RECONCILED opened: what it sends
- *  from then on waits in the gate for the next RECONCILED. */
+ *  from then on waits in the send queue for the next RECONCILED. */
 async function newChannel(ack = false) {
   const channel = unopenedChannel(ack)
-  // The wire opens one reconcile window after the first channel, carrying what the gate held till then, and its
+  // The wire opens one reconcile window after the first channel, carrying what the send queue held till then, and its
   // stream's head answers it.
   await vi.advanceTimersByTimeAsync(200)
   const connection = connectionOf(channel)
@@ -79,13 +79,14 @@ function unopenedChannel(ack = false) {
   return channel
 }
 
-/** The frames the gate holds of the page's sends, in order. */
+/** The frames the send queue holds of the page's sends, in order. */
 function heldFrames(channel: ClientChannel<unknown, never>): Uint8Array[] {
-  const { gate } = connectionOf(channel)['lifecycle']
-  return gate['settleQueue']().map(({ frame }) => frame)
+  return connectionOf(channel)
+    ['sendQueue']['settleQueue']()
+    .map(({ frame }) => frame)
 }
 
-/** What the gate holds of the page's sends, in order: a text its value, a binary `[bytes]`, a close `CLOSE`. */
+/** What the send queue holds of the page's sends, in order: a text its value, a binary `[bytes]`, a close `CLOSE`. */
 function held(channel: ClientChannel<unknown, never>): string[] {
   return heldFrames(channel).map((frame) => {
     const decoded = decode(frame)
@@ -96,7 +97,7 @@ function held(channel: ClientChannel<unknown, never>): string[] {
   })
 }
 
-/** The bytes the page counted against the server's credit, less those of its frames the gate holds: 0 when it counted
+/** The bytes the page counted against the server's credit, less those of its frames the send queue holds: 0 when it counted
  *  each frame as it is. */
 function miscounted(channel: ClientChannel<unknown, never>): number {
   const sent = heldFrames(channel).reduce((sum, frame) => sum + frame.byteLength, 0)
@@ -129,9 +130,9 @@ function grant(channel: ClientChannel<unknown, never>, limit: { count: number } 
 /** Past the wire's `behindAfter`, short of its reconcile timeout. */
 const behind = () => vi.advanceTimersByTime(1_000)
 
-describe('a lossy send from the page, while the gate holds it', () => {
+describe('a lossy send from the page, while the send queue holds it', () => {
   test('before the first attach, only the newest waits, up to a plain send', () => {
-    // Before its wire opens, which sends what the gate holds: no round trip is measured yet.
+    // Before its wire opens, which sends what the send queue holds: no round trip is measured yet.
     const channel = unopenedChannel()
     send(channel, 'L1 L2 R1 L3 L4')
     expect(held(channel)).toEqual(['L2', 'R1', 'L4'])

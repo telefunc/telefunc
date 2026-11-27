@@ -1639,7 +1639,7 @@ test("on a WebSocket, a stream argument's reader reads the chunks queued before 
 })
 
 // A channel whose data its page never confirms while the page keeps coming back: dated at a detach, judged at the next
-// detach once the page attached after the date, as the page judges its own (decisions/516-sse-carrier.md, msg41 D1).
+// detach once the page attached after the date, as the page judges its own.
 
 /** The cause a channel ends with once its page hasn't confirmed its data for `reconnectTimeout`. */
 const unconfirmedFor = (reconnectTimeout: number) =>

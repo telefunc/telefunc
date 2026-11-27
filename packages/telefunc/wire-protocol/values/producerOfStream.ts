@@ -10,16 +10,17 @@ function producerOfStream(
   checkChunk?: (chunk: unknown) => void,
 ): StreamingProducer {
   const reader = stream.getReader()
-  let released = false
-  let finished = false
+  /** `ended`: its last read found the stream's end, so no `cancel()` is due. */
+  let phase: 'reading' | 'ended' | 'released' = 'reading'
   // The stream is the app's: at its end or on `cancel()`, whichever comes first, it is let go of at once for the app's
   // own `cancel()` or another read, while its source may still clean up. A `cancel()` before the first read ends
   // `chunks` without running its `finally`.
   const letGo = (reason?: unknown): void => {
-    if (released) return
-    released = true
+    if (phase === 'released') return
+    const reading = phase === 'reading'
+    phase = 'released'
     // Nothing awaits it: a read that failed already threw its error.
-    if (!finished) reader.cancel(reason).catch(() => {})
+    if (reading) reader.cancel(reason).catch(() => {})
     reader.releaseLock()
   }
   const chunks = (async function* () {
@@ -27,7 +28,7 @@ function producerOfStream(
       while (true) {
         const { done, value: chunk } = await reader.read()
         if (done) {
-          finished = true
+          if (phase === 'reading') phase = 'ended'
           break
         }
         checkChunk?.(chunk)

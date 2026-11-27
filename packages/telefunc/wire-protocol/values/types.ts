@@ -41,7 +41,7 @@ export type {
   DownloadProgress,
 }
 
-import type { ResponseChannel, ServerChannel } from '../channel/server/ServerChannel.js'
+import type { ServerChannel } from '../channel/server/ServerChannel.js'
 import type { ServerBroadcast } from '../channel/server/ServerBroadcast.js'
 import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel } from '../channel/client/ClientChannel.js'
@@ -192,7 +192,7 @@ type ServerReplacerContext = {
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
-  registerChannel(channel: ResponseChannel): void
+  registerChannel(channel: ServerChannel<any, any>): void
   /** Creates and registers the server end of a page's `ClientBroadcast`. */
   createBroadcastChannel(): ServerBroadcastEnd
   sendStream(createProducer: () => StreamingProducer): {

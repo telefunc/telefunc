@@ -25,8 +25,8 @@ interface EndingPort {
   send(frame: EndingFrame): void
   /** It takes no more sends, as it begins or follows a close: called once, before its first frame of the close. */
   stop(): void
-  /** Runs the `onClose()` cleanup with `err`, `undefined` for a graceful close; the end calls `cleanupSettled()` once
-   *  the promises it returned settled. At the end it isn't awaited. */
+  /** Runs the `onClose()` cleanup with `err`, `undefined` for a graceful close (which `onClose` receives as `null`); the
+   *  end calls `cleanupSettled()` once the promises it returned settled. At the end it isn't awaited. */
   startCleanup(err: Error | undefined): void
   /** The channel ended: with `err`, or gracefully. Called once. */
   end(err: Error | undefined): void
@@ -42,31 +42,34 @@ interface EndingPort {
   reconnectWindowMs(): number
 }
 
-type Role =
+/** Its close, once it began or follows one. `timerAt`: the deadline, or the follower's bound. */
+type Closing =
   /** Sent its CLOSE and hasn't heard the other end yet. */
-  | 'initiator'
-  /** Owns the deadline and alone sends a graceful verdict: the end whose CLOSE went first, or the server on a cross. */
-  | 'decider'
-  /** Waits for the decider's verdict, at most the close's timeout and the reconnect window past the CLOSE. */
-  | 'follower'
+  | { role: 'initiator'; timerAt: number }
+  /** Owns the deadline and alone sends a graceful verdict: the end whose CLOSE went first, or the server on a cross.
+   *  The other end stopped sending; `peerDone`: its CLOSE_DONE arrived. */
+  | { role: 'decider'; timerAt: number; peerDone: boolean }
+  /** Waits for the decider's verdict, at most the close's timeout and the reconnect window past the CLOSE. The other end
+   *  stopped sending; `sentDone`: this end sent its CLOSE_DONE. */
+  | { role: 'follower'; timerAt: number; sentDone: boolean }
+
+type Terminal =
+  /** `endWith()` sends its own end, as an abort does. */
+  | { ended: false }
+  /** It ended: with `error`, or gracefully. */
+  | { ended: true; error: Error | undefined }
+
+const SENDING_OWN_END: Terminal = { ended: false }
 
 /** How one end of a channel ends: the first terminal word, sent or received, ends it, and a graceful close has one
  *  decider. Holds no transport and no callback: its port does. */
 class ChannelEnding {
   private readonly side: EndingSide
   private readonly port: EndingPort
-  private role: Role | null = null
-  private peerStopped = false
-  private peerDone = false
-  private sentDone = false
+  private closing: Closing | null = null
+  private terminal: Terminal | null = null
   private owed = 0
   private cleanup: 'idle' | 'running' | 'settled' = 'idle'
-  /** The decider's deadline, or the follower's bound. */
-  private timerAt = Number.POSITIVE_INFINITY
-  private didEnd = false
-  /** `endWith()` sends its own end, as an abort does. */
-  private sendsOwnEnd = false
-  private endError: Error | undefined
 
   constructor({ side, port }: { side: EndingSide; port: EndingPort }) {
     this.side = side
@@ -75,16 +78,16 @@ class ChannelEnding {
 
   /** It sends nothing more: it began or follows a close, it sends its own end, or it ended. */
   get stopped(): boolean {
-    return this.role !== null || this.sendsOwnEnd || this.didEnd
+    return this.closing !== null || this.terminal !== null
   }
 
   get ended(): boolean {
-    return this.didEnd
+    return this.terminal?.ended === true
   }
 
   /** What it ended with, where it didn't close gracefully. */
   get error(): Error | undefined {
-    return this.endError
+    return this.terminal?.ended ? this.terminal.error : undefined
   }
 
   /** Its `onClose()` cleanup has begun. */
@@ -95,25 +98,24 @@ class ChannelEnding {
   /** The app closes this end within `timeoutMs`. `peerAbsent`: no other end is there to wait for, so it decides alone;
    *  its frames still go, for one that attaches later. */
   localClose(timeoutMs: number, { peerAbsent = false } = {}): void {
-    if (this.didEnd) return
+    if (this.ended) return
     const at = this.port.now() + timeoutMs
-    switch (this.role) {
-      case null:
-        this.role = peerAbsent ? 'decider' : 'initiator'
-        this.peerStopped = this.peerDone = peerAbsent
-        this.port.stop()
-        this.port.send({ kind: 'close', timeoutMs })
-        this.setTimer(at)
-        break
-      case 'follower':
-        // Only the decider's deadline ends the close: this end asks it for a shorter one.
-        if (at + this.port.reconnectWindowMs() >= this.timerAt) return
-        this.port.send({ kind: 'close', timeoutMs })
-        this.setTimer(at + this.port.reconnectWindowMs())
-        return
-      default:
-        if (at < this.timerAt) this.setTimer(at)
-    }
+    const { closing } = this
+    if (closing === null) {
+      const begun: Closing = peerAbsent
+        ? { role: 'decider', timerAt: Number.POSITIVE_INFINITY, peerDone: true }
+        : { role: 'initiator', timerAt: Number.POSITIVE_INFINITY }
+      this.closing = begun
+      this.port.stop()
+      this.port.send({ kind: 'close', timeoutMs })
+      this.setTimer(begun, at)
+    } else if (closing.role === 'follower') {
+      // Only the decider's deadline ends the close: this end asks it for a shorter one.
+      if (at + this.port.reconnectWindowMs() >= closing.timerAt) return
+      this.port.send({ kind: 'close', timeoutMs })
+      this.setTimer(closing, at + this.port.reconnectWindowMs())
+      return
+    } else if (at < closing.timerAt) this.setTimer(closing, at)
     this.progress()
   }
 
@@ -121,28 +123,31 @@ class ChannelEnding {
    *  no frame of the other end's. */
   peerClose(timeoutMs: number): void {
     const at = this.port.now() + timeoutMs
-    switch (this.role) {
-      case null:
-        this.role = 'follower'
-        this.peerStopped = true
-        this.port.stop()
-        this.port.send({ kind: 'closeAck' })
-        this.setTimer(at + this.port.reconnectWindowMs())
-        break
+    const { closing } = this
+    if (closing === null) {
+      const follower: Closing = { role: 'follower', timerAt: Number.POSITIVE_INFINITY, sentDone: false }
+      this.closing = follower
+      this.port.stop()
+      this.port.send({ kind: 'closeAck' })
+      this.setTimer(follower, at + this.port.reconnectWindowMs())
+      return this.progress()
+    }
+    switch (closing.role) {
       case 'initiator':
         // A cross: each end sent its CLOSE before it had the other's, and each CLOSE is its end's stop boundary.
-        this.peerStopped = true
         if (this.side === 'server') {
-          this.role = 'decider'
-          if (at < this.timerAt) this.setTimer(at)
+          const decider: Closing = { role: 'decider', timerAt: closing.timerAt, peerDone: false }
+          this.closing = decider
+          if (at < decider.timerAt) this.setTimer(decider, at)
         } else {
-          this.role = 'follower'
-          this.setTimer(Math.min(this.timerAt, at) + this.port.reconnectWindowMs())
+          const follower: Closing = { role: 'follower', timerAt: closing.timerAt, sentDone: false }
+          this.closing = follower
+          this.setTimer(follower, Math.min(follower.timerAt, at) + this.port.reconnectWindowMs())
         }
         break
       case 'decider':
         // The follower asks for a shorter deadline: its CLOSE_ACK, or its crossing CLOSE, came first.
-        if (at < this.timerAt) this.setTimer(at)
+        if (at < closing.timerAt) this.setTimer(closing, at)
         break
       case 'follower':
         assertProtocol(false, 'a second CLOSE from the deciding end')
@@ -151,27 +156,28 @@ class ChannelEnding {
   }
 
   peerCloseAck(): void {
-    assertProtocol(this.role === 'initiator', 'CLOSE_ACK without a CLOSE')
-    this.role = 'decider'
-    this.peerStopped = true
+    const { closing } = this
+    assertProtocol(closing?.role === 'initiator', 'CLOSE_ACK without a CLOSE')
+    this.closing = { role: 'decider', timerAt: closing.timerAt, peerDone: false }
     this.progress()
   }
 
   peerCloseDone(): void {
-    assertProtocol(this.role === 'decider' || this.role === 'follower', 'CLOSE_DONE before its boundary')
-    if (this.role === 'follower') {
+    const { closing } = this
+    assertProtocol(closing !== null && closing.role !== 'initiator', 'CLOSE_DONE before its boundary')
+    if (closing.role === 'follower') {
       this.port.otherEnded()
       return this.finish(undefined)
     }
-    this.peerDone = true
+    closing.peerDone = true
     this.progress()
   }
 
   /** Ends it with `err` once `send` sent its terminal word, unless it ended already: the first terminal word, its own or
    *  one that arrived (no `send`), wins. It ends also where `send` throws. True where it ended it. */
   endWith(err: Error | undefined, send?: () => void): boolean {
-    if (this.didEnd) return false
-    this.sendsOwnEnd = send !== undefined
+    if (this.ended) return false
+    if (send) this.terminal = SENDING_OWN_END
     try {
       send?.()
     } finally {
@@ -184,8 +190,9 @@ class ChannelEnding {
    *  with that unknown, `err` its cause. A decider that has the other end's CLOSE_DONE still chooses the verdict, once
    *  its own side is done. */
   connectionLost(err: Error): void {
-    if (this.role === 'decider' && this.peerDone) return
-    this.endWith(this.role === null ? err : new ChannelCloseUnknownError({ cause: err }))
+    const { closing } = this
+    if (closing?.role === 'decider' && closing.peerDone) return
+    this.endWith(closing === null ? err : new ChannelCloseUnknownError({ cause: err }))
   }
 
   /** An acknowledged send, or the answer to one, the close waits for. */
@@ -204,46 +211,47 @@ class ChannelEnding {
   }
 
   timerFired(): void {
-    if (this.didEnd) return
-    if (this.role === 'follower') return this.finish(new ChannelCloseUnknownError())
+    if (this.ended) return
+    if (this.closing?.role === 'follower') return this.finish(new ChannelCloseUnknownError())
     this.progress()
   }
 
-  private setTimer(at: number): void {
-    this.timerAt = at
+  private setTimer(closing: Closing, at: number): void {
+    closing.timerAt = at
     if (at !== Number.POSITIVE_INFINITY) this.port.armTimer(at)
   }
 
   private progress(): void {
-    if (this.didEnd || this.role === null) return
-    if (this.cleanup === 'idle' && this.peerStopped && this.owed === 0) {
+    const { closing } = this
+    if (this.ended || closing === null) return
+    // Past the initiator, the other end's CLOSE or CLOSE_ACK arrived: it sends nothing more.
+    if (this.cleanup === 'idle' && closing.role !== 'initiator' && this.owed === 0) {
       this.cleanup = 'running'
       this.port.startCleanup(undefined)
-      if (this.didEnd) return
+      if (this.ended) return
     }
-    if (this.role === 'follower') {
-      if (this.cleanup === 'settled' && !this.sentDone) {
-        this.sentDone = true
+    if (closing.role === 'follower') {
+      if (this.cleanup === 'settled' && !closing.sentDone) {
+        closing.sentDone = true
         this.port.send({ kind: 'closeDone' })
       }
       return
     }
     // The deadline is checked where the verdict is chosen: a timer that fires late never turns into a graceful close.
-    if (this.port.now() >= this.timerAt) {
+    if (this.port.now() >= closing.timerAt) {
       this.port.send({ kind: 'timedOut' })
       // Its port may end it with a terminal word of its own in the timeout's place.
-      if (this.didEnd) return
+      if (this.ended) return
       return this.finish(END_CAUSE.closeTimedOut.error())
     }
-    if (this.role === 'decider' && this.peerDone && this.cleanup === 'settled') {
+    if (closing.role === 'decider' && closing.peerDone && this.cleanup === 'settled') {
       this.port.send({ kind: 'closeDone' })
       this.finish(undefined)
     }
   }
 
   private finish(err: Error | undefined): void {
-    this.didEnd = true
-    this.endError = err
+    this.terminal = { ended: true, error: err }
     this.port.disarmTimer()
     const runCleanup = this.cleanup === 'idle'
     if (runCleanup) this.cleanup = 'settled'

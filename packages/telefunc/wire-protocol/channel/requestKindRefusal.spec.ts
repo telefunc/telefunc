@@ -1,6 +1,6 @@
 // Telefunc's refusal of a request whose `x-telefunc-request` header is missing, as behind a proxy that drops it, is
 // marked `route` on the Node adapter as on Cloudflare's, so a page leaves SSE rather than retry: the real Node server
-// and the real page (decisions/516-sse-carrier.md, the ruling on step 6's check, R1.3).
+// and the real page.
 
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { createServer, type Server } from 'node:http'

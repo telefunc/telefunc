@@ -8,6 +8,7 @@ import { handleCallbackBug } from '../runTelefunc/validateTelefunctionError.js'
 import { invokeChannelListener } from '../../../wire-protocol/channel/channel.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { ATTACHABLE_NOW, type CallPage } from '../../../wire-protocol/channel/server/ServerChannel.js'
+import type { ResponseHold } from '../../../workarounds/denoUploadResponseHold.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -44,7 +45,7 @@ type RequestContext = {
    *  is left, and onClose callbacks once no item of trackPending is pending. */
   markComplete: () => void
   /** On Deno, keeps the response open until the call's binary upload ends. */
-  responseHold: { over: Promise<void>; unheld: () => void } | null
+  responseHold: ResponseHold | null
   /** The page this call answers, as a channel the call returned waits for it to attach: each byte of its upload shows it
    *  is on its way, as a browser attaches only once it has sent the whole body. Set by the binary call's reader. */
   page: CallPage
@@ -81,28 +82,28 @@ function createRequestContext(request: Request): RequestContext {
   }
 
   const abortSignal = request.signal
-  // The call holds the request until it answers or its client leaves. Streams and channels can hold it longer.
+  // The call holds the request until it answers or its client leaves (`watched`: its leaving releases the call's hold).
+  // Streams and channels can hold it longer.
   let pendingCount = 1
-  let callPending = true
-  let watchingClient = false
+  let call: 'held' | 'watched' | 'released' = 'held'
 
   const releasePending = () => {
     if (--pendingCount === 0) fireClose()
   }
   const releaseCall = () => {
-    if (!callPending) return
-    callPending = false
-    if (watchingClient) abortSignal.removeEventListener('abort', releaseCall)
+    if (call === 'released') return
+    if (call === 'watched') abortSignal.removeEventListener('abort', releaseCall)
+    call = 'released'
     releasePending()
   }
   const watchClient = () => {
-    if (!callPending || watchingClient) return
+    if (call !== 'held') return
     if (abortSignal.aborted) {
       releaseCall()
       return
     }
     abortSignal.addEventListener('abort', releaseCall, { once: true })
-    watchingClient = true
+    call = 'watched'
   }
 
   const answeredCallbacks: Array<() => void> = []

@@ -18,11 +18,9 @@ import type { Heartbeat } from './Heartbeat.js'
 import type { AbortReasonLimit } from '../channel.js'
 import { HEADER } from '../../wire/header.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import type { FrameAt } from './SendGate.js'
+import type { FrameAt, SendQueue } from './SendQueue.js'
 import { OWN_STREAM } from '../ownStream.js'
 import type { ChannelAttach } from './ChannelAttach.js'
-import type { SendCredit } from '../../flowControl/SendCredit.js'
-import type { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WireLifecycle, type WireLifecycleOwner } from './WireLifecycle.js'
@@ -56,16 +54,7 @@ interface MuxChannel {
   /** Its connection is gone for good. */
   _onConnectionLost(err: Error): void
   /** Its credits as the connection drives them across wires. */
-  readonly _attach: MuxChannelAttach
-}
-
-/** What the connection drives of a channel's `ChannelAttach`. */
-type MuxChannelAttach = Pick<
-  ChannelAttach,
-  'state' | 'capWindows' | 'onBatched' | 'onUpgradeJoined' | 'unconfirmedWant'
-> & {
-  readonly sendCredit: Pick<SendCredit, 'leavesCredit'>
-  readonly receiveCredit: Pick<ReceiveCredit, 'acknowledge' | 'answered' | 'onProbeAnswered'>
+  readonly _attach: ChannelAttach
 }
 
 interface MuxConnection {
@@ -204,7 +193,7 @@ function declareWantsDue(telefuncUrl: string): void {
 }
 
 /** What a page's channels send through, one connection per server and set of transports: it encodes each channel's
- *  frames and hands them to its send gate; the wire lifecycle carries them. */
+ *  frames and hands them to its send queue; the wire lifecycle carries them. */
 class ClientConnection implements MuxConnection, WireLifecycleOwner {
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
     // `connectionKey` opts callers out of the shared connection without the server seeing it.
@@ -221,6 +210,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   private readonly cacheKey: string
   private readonly telefuncUrl: string
   private readonly lifecycle: WireLifecycle
+  private readonly sendQueue: SendQueue
   /** The transport its wire runs on now: the lifecycle replaces it on an upgrade, or a fallback to SSE. */
   private get transport(): ClientChannelTransport {
     return this.lifecycle.transport
@@ -234,6 +224,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
     this.lifecycle = new WireLifecycle({ owner: this, telefuncUrl, options })
+    this.sendQueue = this.lifecycle.sendQueue
   }
 
   /** The wants of the page's broadcasts on `telefuncUrl` that the server hasn't confirmed: a call to it carries them, so
@@ -283,7 +274,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   ): number {
     declareWantsDue(this.telefuncUrl)
     const frameAt: FrameAt = ({ ix }, seq) => encodeFrame(ix, data, seq)
-    return this.lifecycle.gate.sendSequenced(channel, kind, frameAt, onQueued, { stream })?.byteLength ?? 0
+    return this.sendQueue.sendSequenced(channel, kind, frameAt, onQueued, { stream })?.byteLength ?? 0
   }
 
   sendReplaceable<T>(
@@ -297,8 +288,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     declareWantsDue(this.telefuncUrl)
     const frameAt: FrameAt = ({ ix }, seq) => encodeFrame(ix, data, seq)
     return (
-      this.lifecycle.gate.sendSequenced(channel, kind, frameAt, onQueued, { stream, replaceable: true })?.byteLength ??
-      0
+      this.sendQueue.sendSequenced(channel, kind, frameAt, onQueued, { stream, replaceable: true })?.byteLength ?? 0
     )
   }
 
@@ -308,16 +298,16 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
     encodeFrame: SequencedEncoder<T>,
     data: T,
   ): { seq: number; added: number } | null {
-    return this.lifecycle.gate.replaceWaiting(channel, stream, ({ ix }, at) => encodeFrame(ix, data, at))
+    return this.sendQueue.replaceWaiting(channel, stream, ({ ix }, at) => encodeFrame(ix, data, at))
   }
 
   assertFits<T>(channel: MuxChannel, encodeFrame: SequencedEncoder<T>, data: T): void {
-    this.lifecycle.gate.assertFits(channel, ({ ix }, seq) => encodeFrame(ix, data, seq))
+    this.sendQueue.assertFits(channel, ({ ix }, seq) => encodeFrame(ix, data, seq))
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     let answersNewest = false
-    this.lifecycle.gate.sendSequenced(channel, 'ack', ({ ix, lastSeq }, seq) => {
+    this.sendQueue.sendSequenced(channel, 'ack', ({ ix, lastSeq }, seq) => {
       answersNewest = ackedSeq === lastSeq
       const frame = encode.ackRes(ix, seq, ackedSeq, result, status)
       const maxFrameBytes = this.lifecycle.maxFrameBytesOf(channel)
@@ -340,50 +330,48 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   /** Sequenced like data, as CLOSE and CLOSE_ACK are, so a closing frame lost with a dead wire is replayed. */
   sendAbort(channel: MuxChannel, abortValue: string): void {
     const abortAt: FrameAt = ({ ix }, seq) => encode.abort(ix, abortValue, seq)
-    if (this.lifecycle.gate.replaceHeld(channel, OWN_STREAM, abortAt)) return
-    this.lifecycle.gate.sendSequenced(channel, 'control', abortAt)
+    if (this.sendQueue.replaceHeld(channel, OWN_STREAM, abortAt)) return
+    this.sendQueue.sendSequenced(channel, 'control', abortAt)
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
-    this.lifecycle.gate.sendSequenced(channel, 'control', ({ ix }, seq) => encode.close(ix, timeoutMs, seq))
+    this.sendQueue.sendSequenced(channel, 'control', ({ ix }, seq) => encode.close(ix, timeoutMs, seq))
   }
 
   sendCloseAck(channel: MuxChannel): void {
-    this.lifecycle.gate.sendSequenced(channel, 'control', ({ ix, lastSeq }, seq) => encode.closeAck(ix, lastSeq, seq))
+    this.sendQueue.sendSequenced(channel, 'control', ({ ix, lastSeq }, seq) => encode.closeAck(ix, lastSeq, seq))
   }
 
   sendCloseDone(channel: MuxChannel): void {
-    this.lifecycle.gate.sendSequenced(channel, 'control', ({ ix, lastSeq }, seq) => encode.closeDone(ix, lastSeq, seq))
+    this.sendQueue.sendSequenced(channel, 'control', ({ ix, lastSeq }, seq) => encode.closeDone(ix, lastSeq, seq))
   }
 
   sendCloseTimedOut(channel: MuxChannel): void {
-    this.lifecycle.gate.sendSequenced(channel, 'control', ({ ix }, seq) =>
+    this.sendQueue.sendSequenced(channel, 'control', ({ ix }, seq) =>
       encode.error(ix, ERROR_REASON.CLOSE_TIMED_OUT, seq),
     )
   }
 
   sendByteLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.lifecycle.gate.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
+    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
   }
 
   sendMessageLimit(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.lifecycle.gate.sendUnsequenced(channel, urgency, ({ ix }) => encode.msgWindow(ix, limit))
+    this.sendQueue.sendUnsequenced(channel, urgency, ({ ix }) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
-    this.lifecycle.gate.sendUnsequenced(channel, 'flow-control', ({ ix }) => encode.bdpPing(ix, probe))
+    this.sendQueue.sendUnsequenced(channel, 'flow-control', ({ ix }) => encode.bdpPing(ix, probe))
   }
 
   sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
     // On batch POSTs the page's measured round trip leaves out the wait for its POST, so it reports no path RTT.
     const reported = this.transport.batched ? Infinity : pathRtt
-    this.lifecycle.gate.sendUnsequenced(channel, 'flow-control', ({ ix }) =>
-      encode.bdpPingAck(ix, probe, backlog, reported),
-    )
+    this.sendQueue.sendUnsequenced(channel, 'flow-control', ({ ix }) => encode.bdpPingAck(ix, probe, backlog, reported))
   }
 
   bufferedAmount(): number {
-    return this.transport.bufferedAmount() + this.lifecycle.gate.waitingBytes
+    return this.transport.bufferedAmount() + this.sendQueue.waitingBytes
   }
 
   deliveredBefore(ms: number): number {
@@ -391,7 +379,7 @@ class ClientConnection implements MuxConnection, WireLifecycleOwner {
   }
 
   sendWant(channel: MuxChannel, want: Want): void {
-    if (!this.lifecycle.gate.sendUnsequenced(channel, 'control', ({ ix }) => encode.want(ix, want))) return
+    if (!this.sendQueue.sendUnsequenced(channel, 'control', ({ ix }) => encode.want(ix, want))) return
     let wanting = globalObject.wanting.get(this.telefuncUrl)
     if (wanting === undefined) globalObject.wanting.set(this.telefuncUrl, (wanting = new Set()))
     wanting.add(channel)

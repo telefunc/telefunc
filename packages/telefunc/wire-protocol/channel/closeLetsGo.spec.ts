@@ -175,7 +175,7 @@ for (const transport of ['sse', 'ws'] as const) {
     if (record === undefined) throw new Error('not registered')
     const send = (frame: (seq: number) => Uint8Array<ArrayBuffer>) => {
       const seq = record.replay.nextSeq()
-      lifecycle.gate.send(record, seq, frame(seq), 'control')
+      lifecycle.sendQueue.send(record, seq, frame(seq), 'control')
     }
     await channel.opened
     // Less than a quarter of its credit window, which the server would grant again in a WINDOW that says it read it.

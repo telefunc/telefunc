@@ -29,7 +29,7 @@ import type { ChannelFrame, DecodedFrame, PongEntry } from '../../wire/frame.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 
 import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
-import { SendGate, type SendGateOwner } from './SendGate.js'
+import { SendQueue, type SendQueueOwner } from './SendQueue.js'
 import { Liveness, type LivenessOwner } from './Liveness.js'
 import { Upgrade, type JoinRelease, type UpgradeOwner, type UpgradeSource, type UpgradeTarget } from './Upgrade.js'
 import { AttachExchange, type AttachExchangeOwner, type ReconcileBatch } from './AttachExchange.js'
@@ -113,6 +113,26 @@ type ConnectionState =
 
 type Recovery = { tries: number; deadline: number; lost: Error | null; timer: ReturnType<typeof setTimeout> }
 
+/** The idle timer, from when no channel is open and nothing is queued. `confirming`: it expired, and its PING asked the
+ *  server for what the closed channels sent (`disposeOnceDrained`). */
+type IdleTimer = { timer: ReturnType<typeof setTimeout>; confirming: boolean }
+
+/** The attempt under way, from its start till its RECONCILED or its loss. */
+type Attempt = {
+  /** When it started: its allowance runs from here. */
+  readonly startedAt: number
+  /** When the socket or request that opened started: the handshake's sample. */
+  openStartedAt: number
+  /** The backoff its end waits, drawn as it starts. */
+  readonly nextDelay: number
+  /** When it is cut unanswered: null where it runs to the deadline, or once the server answered it. */
+  cutAt: number | null
+  /** The latest cut that leaves the next attempt its room (`startWire`). */
+  readonly latestCut: number
+  /** Cuts it at `cutAt`, till it ran, the server answered or the wire closed. */
+  cutTimer: ReturnType<typeof setTimeout> | null
+}
+
 /** The connection, which a disposed wire lifecycle's next `getOrCreate` replaces. */
 interface WireLifecycleOwner {
   onDisposed(): void
@@ -126,7 +146,7 @@ type WireLifecycleOptions = {
 
 /** The wire a connection's channels ride, from its first open to its idle close: the transports, the reconnects and the
  *  upgrade, the liveness and the attach exchange, and the frames the wire delivers to the channels. */
-class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
+class WireLifecycle implements TransportOwner, SendQueueOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
   private readonly owner: WireLifecycleOwner
   private readonly telefuncUrl: string
   private readonly connectionOptions: ClientConnectionOptions
@@ -143,18 +163,11 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** When the page last read a frame from the server, a PONG or a RECONCILED included: a channel's date is judged only
    *  once one came after it, whatever the transport. */
   private readAt = Number.NEGATIVE_INFINITY
-  /** When the wire being opened started, until its RECONCILED. */
-  private attemptStartedAt: number | null = null
-  /** Cuts the attempt under way that the server hasn't answered by its allowance (`attemptAllowance`). */
-  private allowanceTimer: ReturnType<typeof setTimeout> | null = null
-  /** The attempt under way: the backoff its end waits, drawn as it starts, when it is cut unanswered (null: it runs to
-   *  the deadline, or was answered), and the latest cut that leaves the next attempt its room (`startWire`). */
-  private underWay: { nextDelay: number; cutAt: number | null; latestCut: number } | null = null
-  /** When the attempt under way started, till the server answered it. */
-  private allowanceFrom = 0
-  /** How long the last attempt the server answered took to be answered, and the attempts cut since. */
-  private answeredMs: number | null = null
-  private cuts = 0
+  /** The attempt under way, cut where the server hasn't answered it by its allowance (`attemptAllowance`). */
+  private underWay: Attempt | null = null
+  /** How long the next attempt may go unanswered before it is cut (`attemptAllowance`): it doubles with each attempt cut
+   *  since the last one the server answered. */
+  private allowance = ATTEMPT_ALLOWANCE_MIN_MS
   /** How long the last wire took from its socket's or request's start to its RECONCILED: the room an attempt needs
    *  before the deadline. */
   private handshakeMs: number | null = null
@@ -163,9 +176,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Half of the least batch POST a 413 refused. The connection's, not a transport's: an upgrade to WebSocket and the
    *  fallback after it make new transports, behind the same proxy. */
   private postLimit = Infinity
-  private ttl: ReturnType<typeof setTimeout> | null = null
-  /** The expired idle timer whose PING asked the server for what the closed channels sent (`disposeOnceDrained`). */
-  private confirming: ReturnType<typeof setTimeout> | null = null
+  private idle: IdleTimer | null = null
   get closed(): boolean {
     return this.state.tag === 'closed'
   }
@@ -178,15 +189,15 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   wire = 0
   private nextIndex = 0
   readonly channels = new ChannelTable()
-  readonly gate = new SendGate({ owner: this, channels: this.channels })
-  private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
-  private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, gate: this.gate })
+  readonly sendQueue = new SendQueue({ owner: this, channels: this.channels })
+  private readonly liveness = new Liveness({ owner: this, channels: this.channels, sendQueue: this.sendQueue })
+  private readonly exchange = new AttachExchange({ owner: this, channels: this.channels, sendQueue: this.sendQueue })
   private readonly upgrade: Upgrade
   /** The page's transports include a WebSocket. */
   private readonly allowsWebSocket: boolean
-  /** Whether a WebSocket opened on this connection, and how many WebSockets ended unopened in a row since. */
-  private openedWebSocket = false
-  private unopenedInARow = 0
+  /** How many WebSockets ended unopened in a row, a wire that opens breaking the row: null till a WebSocket opened on
+   *  this connection. */
+  private unopenedInARow: number | null = null
   /** The transports the server allows, from the last settled RECONCILED: an upgrade may start once it came, whether
    *  before or after the SSE wire opened. */
   private serverTransports: ReconciledPayload['transports'] | null = null
@@ -236,23 +247,30 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const now = performance.now()
     const recovery = this.recoveryFrom()
     if (now >= recovery.deadline) return this.onRecoveryDeadline()
-    this.attemptStartedAt = now
-    this.allowanceFrom = now
-    this.clearAllowance()
+    this.stopCut()
     const nextDelay = reconnectDelay(this.attempt, this.anyStalled())
     // A cut leaves the next attempt its room; where none is left, this attempt runs to the deadline.
     const room = this.latestEnd(nextDelay, recovery.deadline, this.handshakeMs ?? ATTEMPT_ALLOWANCE_MIN_MS) - now
-    const allowance = Math.min(attemptAllowance(this.answeredMs, this.cuts), room)
-    this.underWay = { nextDelay, cutAt: room > 0 ? now + allowance : null, latestCut: now + room }
-    if (room > 0) this.allowanceTimer = setTimeout(() => this.cutAttempt(), allowance)
+    const allowance = Math.min(this.allowance, room)
+    const cutAt = room > 0 ? now + allowance : null
+    const attempt: Attempt = {
+      startedAt: now,
+      openStartedAt: now,
+      nextDelay,
+      cutAt,
+      latestCut: now + room,
+      cutTimer: null,
+    }
+    if (cutAt !== null) attempt.cutTimer = setTimeout(() => this.cutAttempt(attempt), allowance)
+    this.underWay = attempt
     this.transport.start()
   }
 
   /** The attempt under way wasn't answered in time: it goes, and counts as failed. A page that left let it go. */
-  private cutAttempt(): void {
-    this.allowanceTimer = null
+  private cutAttempt(attempt: Attempt): void {
+    attempt.cutTimer = null
     if (this.closed || !this.transport.isConnecting()) return
-    this.cuts++
+    this.allowance *= ATTEMPT_ALLOWANCE_GROWTH
     this.transport.cancelAttempt()
     this.onTransportClosed(this.transport, { unopened: this.transport.type === CHANNEL_TRANSPORT.WS })
   }
@@ -263,26 +281,36 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const underWay = this.underWay
     if (underWay === null || underWay.cutAt === null) return
     // `fetch` shows no upload's progress: behind a proxy that holds the body, a silent server looks the same till then.
-    const cutAt = Math.min(this.allowanceFrom + (2 * bytes) / RECONCILE_FLOOR_BYTES_PER_MS, underWay.latestCut)
+    const cutAt = Math.min(underWay.startedAt + (2 * bytes) / RECONCILE_FLOOR_BYTES_PER_MS, underWay.latestCut)
     if (cutAt <= underWay.cutAt) return
-    this.clearAllowance()
+    this.stopCut()
     underWay.cutAt = cutAt
-    this.allowanceTimer = setTimeout(() => this.cutAttempt(), cutAt - performance.now())
+    underWay.cutTimer = setTimeout(() => this.cutAttempt(underWay), cutAt - performance.now())
   }
 
   /** The server answered the attempt under way; from here its RECONCILE's deadline bounds it. */
   private attemptAnswered(): void {
-    if (this.underWay === null) return
-    this.underWay.cutAt = null
-    this.clearAllowance()
-    this.answeredMs = performance.now() - this.allowanceFrom
-    this.cuts = 0
+    const underWay = this.underWay
+    if (underWay === null) return
+    underWay.cutAt = null
+    this.stopCut()
+    this.allowance = attemptAllowance(performance.now() - underWay.startedAt)
     this.exchange.restartReconcileDeadline()
   }
 
-  private clearAllowance(): void {
-    if (this.allowanceTimer) clearTimeout(this.allowanceTimer)
-    this.allowanceTimer = null
+  private stopCut(): void {
+    const underWay = this.underWay
+    if (underWay === null || underWay.cutTimer === null) return
+    clearTimeout(underWay.cutTimer)
+    underWay.cutTimer = null
+  }
+
+  /** The attempt under way ended, with its RECONCILED or its loss: what it was, if one was. */
+  private endAttempt(): Attempt | null {
+    const underWay = this.underWay
+    this.stopCut()
+    this.underWay = null
+    return underWay
   }
 
   private enterClosed(): void {
@@ -332,7 +360,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const record of this.channels.values()) {
         if (record.state.tag !== 'closed' || !record.state.delivered) continue
-        this.gate.release(record)
+        this.sendQueue.release(record)
         break
       }
     }
@@ -340,10 +368,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
       this.channels.size < MAX_CHANNELS_PER_CONNECTION,
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
     this.channels.add(this.nextIndex++, channel, new ReplayBuffer(CHANNEL_CLIENT_REPLAY_BUFFER_BYTES))
     if (this.creditWindow !== null) channel._attach.capWindows(this.creditWindow)
 
@@ -358,7 +383,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportHeadroom(transport: ClientChannelTransport): void {
     if (transport !== this.transport || (!this.sendsOpen && !this.liveWire)) return
-    this.gate.sendRunnable()
+    this.sendQueue.sendRunnable()
     this.startTtlIfIdle()
   }
 
@@ -383,11 +408,10 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onTransportOpen(transport: ClientChannelTransport, startedAt: number): void {
     if (transport !== this.transport) return
-    if (transport.type === CHANNEL_TRANSPORT.WS) this.openedWebSocket = true
-    this.unopenedInARow = 0
+    if (transport.type === CHANNEL_TRANSPORT.WS || this.unopenedInARow !== null) this.unopenedInARow = 0
     // The handshake's sample is the opened socket's own: one that hung beside it adds nothing. SSE's RECONCILED may
     // have come first, and taken it.
-    if (this.attemptStartedAt !== null) this.attemptStartedAt = startedAt
+    if (this.underWay !== null) this.underWay.openStartedAt = startedAt
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
       this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
@@ -511,7 +535,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.readAt = performance.now()
     this.ownFramesRefusedOn = null
     this.liveness.onPong(ended)
-    if (this.confirming !== null) this.startTtlIfIdle()
+    if (this.idle?.confirming) this.startTtlIfIdle()
   }
 
   onTransportReconciledPiece(transport: ClientChannelTransport): void {
@@ -520,7 +544,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   onReconcileLate(transport: ClientChannelTransport): void {
     // Till the server answered the request that carries it, the attempt's allowance bounds it.
-    if (this.allowanceTimer !== null) return
+    if (this.underWay !== null && this.underWay.cutTimer !== null) return
     this.dropWire(transport)
   }
 
@@ -568,17 +592,19 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     // No reconnect reaches a server that speaks this page's wire.
     if (otherWireVersion) {
-      this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      const err = new NetworkError('The server was updated since this page loaded: reload the page.', true)
+      for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
+      this.dispose()
       return
     }
     if (route !== undefined) {
       this.leaveSse(new NetworkError(`The server refused the page's SSE requests: ${route}`, true))
       return
     }
-    this.clearAllowance()
+    this.stopCut()
     this.upgrade.abortAttempt()
     // One that never opened takes the page to SSE, unless a WebSocket opened before: then only a second in a row does.
-    if (unopened && (++this.unopenedInARow > 1 || !this.openedWebSocket)) this.leaveWsWhereSse()
+    if (unopened && (this.unopenedInARow === null || ++this.unopenedInARow > 1)) this.leaveWsWhereSse()
     const why = refused === undefined ? (lost ?? refusal) : `The server refused what the page sent with ${refused}`
     this.handleTransportLoss(
       why === undefined ? null : new NetworkError(why, true),
@@ -592,7 +618,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   private endRefusedChannel({ channel, cause }: { channel: number; cause: number }): void {
     const record = this.channels.get(channel)
     if (record === undefined) return
-    this.gate.release(record)
+    this.sendQueue.release(record)
     this.exchange.scheduleRegisterReconcile()
     record.channel._onEnded(channelErrorFor(cause, this.reconnectTimeoutMs))
   }
@@ -615,7 +641,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Where the page's transports list SSE, the next attempt goes over it, and upgrades once a WebSocket opens. */
   private leaveWsWhereSse(): void {
     if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.SSE)) return
-    this.unopenedInARow = 0
+    if (this.unopenedInARow !== null) this.unopenedInARow = 0
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
   }
@@ -645,7 +671,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // Released, which a RECONCILE tells the server, ending it there: one on this wire, or the next wire's.
     if (refusedAgain.size > 0) this.exchange.scheduleRegisterReconcile()
     for (const record of refusedAgain) {
-      this.gate.release(record)
+      this.sendQueue.release(record)
       record.channel._onEnded(
         new NetworkError(
           `Channel closed: what the page sent on it was refused with ${answer}, again after a reconnect. Something between the page and the server refuses it, such as a proxy's limit on the size of a request.`,
@@ -675,12 +701,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     if (!this.upgrade.onReconciled(ctrl)) return
-    this.underWay = null
+    const attempt = this.endAttempt()
     this.endRecovery()
-    if (this.attemptStartedAt !== null) {
-      this.handshakeMs = performance.now() - this.attemptStartedAt
-      this.attemptStartedAt = null
-    }
+    if (attempt !== null) this.handshakeMs = performance.now() - attempt.openStartedAt
     this.transport.applyReconciledSettings(ctrl)
     this.takeServerSettings(ctrl)
     const outcome = this.exchange.applyReconciled(ctrl, {
@@ -704,7 +727,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   private adoptTransport(transport: UpgradeTarget): void {
-    this.openedWebSocket = true
     this.unopenedInARow = 0
     this.transport = transport
     this.wire++
@@ -808,7 +830,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
+    for (const frame of this.sendQueue.drainSendable()) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
@@ -824,10 +846,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     // The wire is dying: the queued RECONCILE is not sent, since the reconnect's RECONCILE lists every channel.
     this.exchange.cancelRegisterReconcile()
     this.exchange.forgetWire()
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
 
     const now = performance.now()
     // At once with the recovery's timer, its end wins: every channel is told its cause.
@@ -841,7 +860,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     if (rejected && tries === 0) return this.giveUp()
     // A closed channel whose frames the server all has needs nothing from another wire.
     for (const record of this.channels.values()) {
-      if (record.state.tag === 'closed' && record.state.delivered) this.gate.release(record)
+      if (record.state.tag === 'closed' && record.state.delivered) this.sendQueue.release(record)
       else record.replay.dateStall(now)
     }
     this.endStalled(now, lost ?? new NetworkError('Connection dropped', true))
@@ -853,9 +872,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     const attempt = this.attempt++
     // An attempt that couldn't reconcile before the deadline doesn't start, and the deadline ends the channels. A loss
     // counts no later than its cut was due, which a late timer passed.
-    const delay = Math.max(this.underWay?.nextDelay ?? reconnectDelay(attempt, stalled), retryAfterMs)
-    const at = Math.min(now, this.underWay?.cutAt ?? Infinity)
-    this.underWay = null
+    const ended = this.endAttempt()
+    const delay = Math.max(ended?.nextDelay ?? reconnectDelay(attempt, stalled), retryAfterMs)
+    const at = Math.min(now, ended?.cutAt ?? Infinity)
     this.enterReconnecting(at <= this.latestEnd(delay, recovery.deadline, this.handshakeMs ?? 0) ? delay : null)
     // Told once the wire is reconnecting, so what an `onDisconnect` callback sends (a `close()`) waits for the next wire.
     if (tries === 0) {
@@ -906,7 +925,7 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     for (const record of [...this.channels.values()]) {
       const { stall } = record.replay
       if (stall === null || this.readAt <= stall.since || now - stall.since <= this.reconnectTimeoutMs) continue
-      this.gate.release(record)
+      this.sendQueue.release(record)
       record.channel._onEnded(
         new NetworkError(
           `Channel closed: the server hasn't confirmed what the page sent on it for over ${Math.round(this.reconnectTimeoutMs / 1000)} s of reconnects. The last try: ${lost.message}`,
@@ -954,40 +973,46 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
   /** Starts the idle timer on a live wire with no channel open and nothing queued; the transport drains first. */
   private startTtlIfIdle(): void {
     // The expired timer whose PING asked for the closed channels' frames holds till the server has them all.
-    if (this.ttl !== null && this.ttl === this.confirming && this.channels.delivered) return this.dispose()
-    if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
+    if (this.idle?.confirming && this.channels.delivered) return this.dispose()
+    if (!this.connected || this.idle || !this.sendQueue.idle || !this.channels.idle) {
       return
     }
-    const ttl = setTimeout(() => void this.disposeOnceDrained(ttl), this.idleTimeoutMs)
-    this.ttl = ttl
+    const idle: IdleTimer = {
+      timer: setTimeout(() => void this.disposeOnceDrained(idle), this.idleTimeoutMs),
+      confirming: false,
+    }
+    this.idle = idle
   }
 
   /** Waits for queued frames to go. If the server still owes confirmation, keep the expired timer and ask with a PING. */
-  private async disposeOnceDrained(ttl: ReturnType<typeof setTimeout>): Promise<void> {
+  private async disposeOnceDrained(idle: IdleTimer): Promise<void> {
     await this.transport.drained()
-    if (this.ttl !== ttl || !this.channels.idle) return
+    if (this.idle !== idle || !this.channels.idle) return
     if (this.channels.delivered) return this.dispose()
-    this.confirming = ttl
+    idle.confirming = true
     this.liveness.pingNow(this.transport)
+  }
+
+  private stopIdle(): void {
+    if (this.idle === null) return
+    clearTimeout(this.idle.timer)
+    this.idle = null
   }
 
   private dispose(): void {
     if (this.closed) return
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = this.confirming = null
-    }
+    this.stopIdle()
     this.exchange.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     this.clearReconnectTimer()
-    this.clearAllowance()
+    this.stopCut()
     this.endRecovery()
     this.upgrade.abandon()
     this.enterClosed()
     this.transport.detachHeartbeat()
     this.transport.dispose()
     this.channels.clear()
-    this.gate.clear()
+    this.sendQueue.clear()
     this.exchange.forgetWire()
     this.owner.onDisposed()
   }
@@ -1029,15 +1054,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.unregister(record.channel)
     assert(record.state.tag === 'closed')
     this.channels.serverEnded(record, record.state)
-    this.gate.dropQueue(record.ix)
+    this.sendQueue.dropQueue(record.ix)
     // What its frames held back may go.
-    this.gate.sendRunnable()
-  }
-
-  /** No wire can reach the server again: its channels' connection is lost for good. */
-  private loseConnection(err: Error): void {
-    for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
-    this.dispose()
+    this.sendQueue.sendRunnable()
   }
 
   private closeAll(err: Error): void {
@@ -1052,19 +1071,16 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
  *  `CHANNEL_RECONNECT_INITIAL_DELAY_MS` to `CHANNEL_RECONNECT_MAX_DELAY_MS`, drawn at random so that pages that lost
  *  their wires together, to a proxy or a server that restarted, don't come back together, on the first attempt or at
  *  the cap: anywhere in the step, or, while a channel's data has waited since an earlier loss (`stalled`), between the
- *  step and half a step more, so what can't get through goes again no more often than on 0.3.1, which waited the step
- *  itself (its client/connection.ts:1191). */
+ *  step and half a step more, so what can't get through goes again at most once a step. */
 function reconnectDelay(attempt: number, stalled: boolean): number {
   const step = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
   return stalled ? (1 + Math.random() / 2) * step : Math.random() * step
 }
 
-/** How long an attempt may go unanswered before it is cut: three times as long as the last attempt the server answered
- *  took, and never under the minimum, a first connect too; growing with each attempt cut since. */
-function attemptAllowance(answeredMs: number | null, cuts: number): number {
-  return (
-    Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * (answeredMs ?? 0)) * ATTEMPT_ALLOWANCE_GROWTH ** cuts
-  )
+/** How long an attempt may go unanswered before it is cut, after one the server answered in `answeredMs`: three times
+ *  as long, and never under the minimum, a first connect's too. */
+function attemptAllowance(answeredMs: number): number {
+  return Math.max(ATTEMPT_ALLOWANCE_MIN_MS, ATTEMPT_ALLOWANCE_OPENS * answeredMs)
 }
 
 // ── Transport registry ──

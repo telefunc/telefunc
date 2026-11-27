@@ -1,6 +1,6 @@
-// A page's lossy publishes: the REAL ClientBroadcast on the REAL ClientConnection and SendGate, over an SSE wire that
-// never reconciles, as ClientChannel.lossySend.spec.ts runs a channel's lossy sends: the gate holds every frame, and one
-// held past the wire's `behindAfter` is behind, so a newer lossy one of its stream may take its place.
+// A page's lossy publishes: the REAL ClientBroadcast on the REAL ClientConnection and SendQueue, over an SSE wire that
+// never reconciles, as ClientChannel.lossySend.spec.ts runs a channel's lossy sends: the send queue holds every frame,
+// and one held past the wire's `behindAfter` is behind, so a newer lossy one of its stream may take its place.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHook } from 'node:async_hooks'
@@ -375,7 +375,7 @@ function channelOptions(telefuncUrl = 'http://test.local/_telefunc') {
 }
 
 /** A page's broadcast whose wire opened and measured its round trip, and which a RECONCILED opened: what it publishes
- *  from then on waits in the gate. */
+ *  from then on waits in the send queue. */
 function behindUplink() {
   const page = new ClientBroadcast({
     channelId: crypto.randomUUID(),
@@ -416,10 +416,10 @@ function received(frame: Uint8Array<ArrayBuffer>): ChannelFrame {
   return decoded
 }
 
-/** Each publish the gate holds, in the order they go: its text, or its bytes. */
+/** Each publish the send queue holds, in the order they go: its text, or its bytes. */
 function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
   return connectionOf(page)
-    ['lifecycle'].gate['settleQueue']()
+    ['sendQueue']['settleQueue']()
     .map(({ frame }) => decode(frame))
     .flatMap((decoded): (string | number[])[] => {
       if (decoded.tag === TAG.PUBLISH_ACK_REQ) return [decoded.text]
@@ -427,7 +427,7 @@ function waitingPublishes(page: ClientBroadcast): (string | number[])[] {
     })
 }
 
-/** The first byte of each binary publish the gate holds, in the order they go. */
+/** The first byte of each binary publish the send queue holds, in the order they go. */
 function waiting(page: ClientBroadcast): (number | undefined)[] {
   return waitingPublishes(page).flatMap((publish) => (typeof publish === 'string' ? [] : [publish[0]]))
 }

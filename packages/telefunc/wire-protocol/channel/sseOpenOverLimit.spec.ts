@@ -1,7 +1,6 @@
 // An abort whose reason is over the server's frame limit, made before the page's first open, whose body would carry it:
 // a real server and a real page, in one process, over SSE. The page holds the reason to the frame limit, so the abort
-// goes without it and `abort()` throws a `ChannelOverflowError`; the other channel of the open is untouched
-// (decisions/516-sse-carrier.md, the ruling of 22:17Z on the open's body).
+// goes without it and `abort()` throws a `ChannelOverflowError`; the other channel of the open is untouched.
 
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import { createServer, type Server } from 'node:http'

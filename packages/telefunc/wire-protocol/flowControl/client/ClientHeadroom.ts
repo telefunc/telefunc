@@ -36,8 +36,8 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
   private readonly owner: ClientHeadroomOwner
   private lateMs = 0
   private lateAt = 0
-  private paceTimer: ReturnType<typeof setTimeout> | null = null
-  private paceDue = 0
+  /** The pacing timer, and when it is due. */
+  private paceWait: { timer: ReturnType<typeof setTimeout>; due: number } | null = null
 
   constructor({ socket, pingInterval, uplink, downlink, owner }: ClientHeadroomOptions) {
     this.uplink = uplink
@@ -98,15 +98,16 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
 
   /** The socket closed: pacing stops, and nothing more is handed to it. */
   close(): void {
-    if (this.paceTimer !== null) clearTimeout(this.paceTimer)
-    this.paceTimer = null
+    if (this.paceWait !== null) clearTimeout(this.paceWait.timer)
+    this.paceWait = null
     this.sender.close()
   }
 
   /** A message arrived. If the pacing timer is overdue, it looks now: a hidden tab throttles timers, not messages. */
   received(): void {
-    if (this.paceTimer === null || performance.now() < this.paceDue) return
-    clearTimeout(this.paceTimer)
+    const { paceWait } = this
+    if (paceWait === null || performance.now() < paceWait.due) return
+    clearTimeout(paceWait.timer)
     this.lookAgain()
   }
 
@@ -143,16 +144,16 @@ class ClientHeadroom implements PieceSenderOwner, PieceReceiverOwner {
    *  acknowledges at once (`WIRE_PIECES_ACK_BYTES`), or all it holds. */
   private pace(): void {
     const drainRate = this.uplink.drain.rate
-    if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceWait !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
-    this.paceDue = performance.now() + ms
-    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
+    const due = performance.now() + ms
+    this.paceWait = { timer: unrefTimer(setTimeout(this.lookAgain, ms)), due }
   }
 
   private readonly lookAgain = (): void => {
-    this.paceTimer = null
+    this.paceWait = null
     this.owner.onHeadroom(this)
     this.pace()
   }

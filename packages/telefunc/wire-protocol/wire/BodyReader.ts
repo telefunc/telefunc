@@ -8,6 +8,7 @@ import { ProtocolViolationError } from './protocolViolation.js'
 import { Fifo } from '../../utils/Fifo.js'
 import type { QueueMemory } from '../channel/channelMessages.js'
 import type { RequestFile } from '../values/types.js'
+import { releaseOrCancel } from '../../workarounds/workerdReaderReleaseLock.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -102,22 +103,13 @@ class BodyReader {
   private reading: Promise<IteratorResult<Uint8Array<ArrayBuffer>>> | null = null
   /** The read-off of the rest of the body, once it began: from then on it alone reads the source. */
   private readOff: Promise<void> | null = null
-  private readOffDone = false
-  /** Where the reader counts what it keeps of the body for the file reads: what the read-off keeps (`keeping`), and what
-   *  a file's reads read ahead for an earlier file the app began and left without a reader. */
+  /** Where the reader counts what it keeps of the body for the file reads: what the read-off keeps (`kept`), and what a
+   *  file's reads read ahead for an earlier file the app began and left without a reader. */
   private readonly memory: () => QueueMemory
   /** What the read-off keeps for the file reads, from the call's answer or end on (`keepRest`), while a file is left to
-   *  read: the chunks it read, in order, each held on `keeping` until a file read takes it. Null where it drops what it
-   *  reads. */
-  private keeping: QueueMemory | null = null
-  private kept: Uint8Array<ArrayBuffer>[] = []
-  /** Whether `keeping` refused a chunk: that chunk and every one after it were dropped. */
-  private dropped = false
-  /** What a file read that waits for the read-off's next chunk awaits. */
-  private keptMore: Deferred<void> | null = null
+   *  read. Null where it drops what it reads. */
+  private kept: Kept | null = null
   private readonly readOffEnd = createDeferred<void>()
-  /** Settles once the read-off has read the body to its end, or its client left: the client's upload is over. */
-  readonly restRead: Promise<void> = this.readOffEnd.promise
   /** Whether a read's failure is the client leaving, or null where nothing says, on the evidence of the server that
    *  received the request, passed by the caller. */
   private clientLeft: (err: unknown) => boolean | null
@@ -125,6 +117,11 @@ class BodyReader {
   onChunk?: () => void
   /** Called once the source ends, read to its end. */
   onEnd?: () => void
+
+  /** Settles once the read-off stops, however it does: at the body's end, at its client's leaving, or at a failed read. */
+  get restRead(): Promise<void> {
+    return this.readOffEnd.promise
+  }
 
   constructor(
     source: ReadableStream<Uint8Array<ArrayBuffer>> | Readable,
@@ -137,15 +134,7 @@ class BodyReader {
       const reader = source.getReader()
       this.source = {
         next: () => reader.read(),
-        // Node, Deno and Bun fail the read under way. workerd throws instead and keeps the lock, as the streams standard
-        // did before 2022, so that read would end only at the body's next chunk: the cancel ends it now.
-        letGo: () => {
-          try {
-            reader.releaseLock()
-          } catch {
-            reader.cancel().catch(() => {})
-          }
-        },
+        letGo: () => releaseOrCancel(reader),
       }
     } else {
       // Read as a Node `Readable` is, which bypasses Node's webstreams `dequeueValue` overhead: that is why we accept
@@ -206,7 +195,7 @@ class BodyReader {
    *  reaches them fails, saying why. What is kept goes once no file is left to read. */
   keepRest(): void {
     if (this.readOff !== null || this.filesEndedBy !== null) return
-    if (this.unread.size > 0) this.keeping = this.memory()
+    if (this.unread.size > 0) this.kept = { memory: this.memory(), chunks: [], phase: 'reading', more: null }
     this.readOff = this.readRest()
     // A failure, the app's own error, goes to `endCall` or `discardRest`, which await the same read-off.
     this.readOff.catch(() => {})
@@ -225,53 +214,51 @@ class BodyReader {
   private async readRest(): Promise<void> {
     try {
       if (this.reading !== null) await this.reading.catch(() => {})
-      if (this.keeping === null) this.buffer = EMPTY
+      if (this.kept === null) this.buffer = EMPTY
       if (this.stop) return
       for (let chunk = await this.readChunk(); chunk !== null; chunk = await this.readChunk()) this.keep(chunk)
     } finally {
-      this.readOffDone = true
-      this.wakeKept()
+      if (this.kept !== null) {
+        if (this.kept.phase === 'reading') this.kept.phase = 'finished'
+        wakeKept(this.kept)
+      }
       this.readOffEnd.resolve()
     }
   }
 
   private keep(chunk: Uint8Array<ArrayBuffer>): void {
-    if (this.keeping === null || this.dropped) return
-    if (this.keeping.tryHold(chunk.length)) this.kept.push(chunk)
-    else this.dropped = true
-    this.wakeKept()
+    const kept = this.kept
+    if (kept === null || kept.phase !== 'reading') return
+    if (kept.memory.tryHold(chunk.length)) kept.chunks.push(chunk)
+    else kept.phase = 'refused'
+    wakeKept(kept)
   }
 
   /** The read-off's next chunk, for `by`'s read: null where it drops what it reads, as at the body's end; at the end of
    *  what it read, the source's, as `readChunk` says it. */
   private async takeKept(by: FileRead | null): Promise<Uint8Array<ArrayBuffer> | null> {
     for (;;) {
-      if (this.keeping === null) return null
-      const chunk = this.kept.shift()
+      const kept = this.kept
+      if (kept === null) return null
+      const chunk = kept.chunks.shift()
       if (chunk !== undefined) {
-        this.keeping.letGo(chunk.length)
+        kept.memory.letGo(chunk.length)
         return chunk
       }
-      if (this.dropped) throw this.droppedError(by)
-      if (this.readOffDone) return this.readChunk()
-      this.keptMore ??= createDeferred()
-      await this.keptMore.promise
+      if (kept.phase === 'refused') throw this.droppedError(by)
+      if (kept.phase === 'finished') return this.readChunk()
+      kept.more ??= createDeferred()
+      await kept.more.promise
     }
   }
 
   /** Lets go of what the read-off keeps: no file is left to read it. From then on it drops what it reads. */
   private dropKept(): void {
-    this.keeping?.release()
-    this.keeping = null
-    this.kept = []
-    this.wakeKept()
-  }
-
-  private wakeKept(): void {
-    const keptMore = this.keptMore
-    if (keptMore === null) return
-    this.keptMore = null
-    keptMore.resolve()
+    const kept = this.kept
+    if (kept === null) return
+    kept.memory.release()
+    this.kept = null
+    wakeKept(kept)
   }
 
   /** A file read reached what the read-off dropped. Only a file read takes kept chunks: the call's metadata is read
@@ -345,7 +332,7 @@ class BodyReader {
   /** One chunk of `file`: a piece read ahead for it, or once it holds the position, the buffer's or the source's. */
   private readonly pullFile = async (file: FileRead): Promise<void> => {
     if (file.over) return
-    file.started = true
+    file.start()
     const turn =
       !file.hasAhead && this.holder === null && this.next === file.index
         ? this.hold(file)
@@ -648,14 +635,12 @@ class BodyReader {
   }
 }
 
-/** A file's stream, as the reader serves it. `over`: it reads no more, ended, cancelled or failed (`markOver`), which
- *  `onOver` is told. */
+/** A file's stream, as the reader serves it: unread, read (its stream was pulled), or over, as it reads no more, ended,
+ *  cancelled or failed (`markOver`), which `onOver` is told. */
 class FileRead {
   readonly index: number
   readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>
-  over = false
-  /** Whether the app read it: its stream was pulled. */
-  started = false
+  private phase: 'unread' | 'started' | 'over' = 'unread'
   /** The pieces of it later files' reads read ahead for it (`readAheadFor`), oldest first, and whether the newest is its
    *  last. The oldest is the one piece the reader keeps for any file; each behind it is held on `aheadMemory`. */
   private ahead = new Fifo<Uint8Array<ArrayBuffer>>()
@@ -700,6 +685,20 @@ class FileRead {
     })
   }
 
+  get over(): boolean {
+    return this.phase === 'over'
+  }
+
+  /** Whether it is in its started phase: its stream was pulled, and it isn't over yet. */
+  get started(): boolean {
+    return this.phase === 'started'
+  }
+
+  /** Its stream was pulled. */
+  start(): void {
+    if (this.phase === 'unread') this.phase = 'started'
+  }
+
   enqueue(chunk: Uint8Array<ArrayBuffer>): void {
     this.controller?.enqueue(chunk)
   }
@@ -742,7 +741,7 @@ class FileRead {
 
   markOver(): void {
     if (this.over) return
-    this.over = true
+    this.phase = 'over'
     this.dropAhead()
     this.onOver(this)
   }
@@ -760,6 +759,25 @@ class FileRead {
   }
 }
 
+/** What the read-off keeps for the file reads: the chunks it read, in order, each held on `memory` until a file read
+ *  takes it; its `phase` (`refused`: `memory` refused a chunk, and that one and every one after it were dropped, for
+ *  good; `finished`: the read-off stopped, however it did, with every chunk it read kept); and what a file read that
+ *  waits for its next chunk awaits (`more`). */
+type Kept = {
+  readonly memory: QueueMemory
+  readonly chunks: Uint8Array<ArrayBuffer>[]
+  phase: 'reading' | 'refused' | 'finished'
+  more: Deferred<void> | null
+}
+
+/** Wakes the file read that waits for the read-off's next chunk. */
+function wakeKept(kept: Kept): void {
+  const more = kept.more
+  if (more === null) return
+  kept.more = null
+  more.resolve()
+}
+
 /** A file the app began and left without a reader, whose rest a later file's read read for it past what its memory
  *  allows. */
 function leftBehindError(index: number): Error {
@@ -769,6 +787,7 @@ function leftBehindError(index: number): Error {
 }
 
 const DONE: IteratorReturnResult<undefined> = { done: true, value: undefined }
+const ENDED = { failed: false } as const
 
 /** A Node `Readable`'s chunks: what `read()` gives at each `'readable'`, to `'end'`, or failing at `'error'` or at a
  *  close before the end. It listens from its construction on, so the stream asks its source for data before the first
@@ -782,14 +801,14 @@ class ReadableChunks implements ChunkSource {
     resolve: (result: IteratorResult<Uint8Array<ArrayBuffer>>) => void
     reject: (error: unknown) => void
   } | null = null
-  private ended: boolean
-  private failed: { error: unknown } | null = null
+  /** How the stream ended: at its end, or failing (a failure after its end wins); null while it goes on. */
+  private over: { failed: false } | { failed: true; error: unknown } | null = null
 
   constructor(stream: Readable) {
     this.stream = stream
-    this.ended = stream.readableEnded
-    if (stream.errored) this.failed = { error: stream.errored }
-    else if (stream.destroyed && !this.ended) this.failed = { error: prematureClose() }
+    if (stream.errored) this.over = { failed: true, error: stream.errored }
+    else if (stream.readableEnded) this.over = ENDED
+    else if (stream.destroyed) this.over = { failed: true, error: prematureClose() }
     stream.on('readable', this.wake)
     stream.on('end', this.end)
     stream.on('error', this.fail)
@@ -800,8 +819,8 @@ class ReadableChunks implements ChunkSource {
     assert(this.waiting === null)
     const value: Uint8Array<ArrayBuffer> | null = this.stream.destroyed ? null : this.stream.read()
     if (value !== null) return Promise.resolve({ value, done: false })
-    if (this.failed) return Promise.reject(this.failed.error)
-    if (this.ended) return Promise.resolve(DONE)
+    if (this.over?.failed) return Promise.reject(this.over.error)
+    if (this.over) return Promise.resolve(DONE)
     return new Promise((resolve, reject) => (this.waiting = { resolve, reject }))
   }
 
@@ -822,19 +841,19 @@ class ReadableChunks implements ChunkSource {
   }
 
   private readonly end = (): void => {
-    this.ended = true
+    this.over ??= ENDED
     this.settle(DONE)
   }
 
   private readonly fail = (error: unknown): void => {
-    this.failed ??= { error }
+    if (!this.over?.failed) this.over = { failed: true, error }
     const waiting = this.waiting
     this.waiting = null
-    waiting?.reject(this.failed.error)
+    waiting?.reject(this.over.error)
   }
 
   private readonly close = (): void => {
-    if (!this.ended && this.failed === null) this.fail(prematureClose())
+    if (this.over === null) this.fail(prematureClose())
   }
 
   private settle(result: IteratorResult<Uint8Array<ArrayBuffer>>): void {

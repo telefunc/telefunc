@@ -64,6 +64,16 @@ type StreamUpload = {
 
 type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
 
+/** The attempt under way, till its wire opens. `deferred`: its `timer` waits one reconcile window, so that startup code
+ *  can register channels before the initial batch. `opening`: its open is out. `awaitingHeaders`: its open POST is
+ *  unanswered, and the server holds a POST on the wire until it has the open. */
+type Connecting =
+  | { tag: 'deferred'; timer: ReturnType<typeof setTimeout> }
+  | { readonly tag: 'opening' }
+  | { readonly tag: 'awaitingHeaders' }
+const OPENING: Connecting = { tag: 'opening' }
+const AWAITING_HEADERS: Connecting = { tag: 'awaitingHeaders' }
+
 /** A batch POST: the outbox entries it carried, its body's size, when it started, and whether it carried a RECONCILE. */
 type BatchPost = { queued: OutboxEntry[]; bytes: number; startedAt: number; reconcile: boolean }
 
@@ -95,10 +105,7 @@ class SseTransport implements UpgradeSource {
     return this.streamRequest.tag === 'idle' || this.streamRequest.tag === 'failed'
   }
   heartbeat: Heartbeat | null = null
-  private connecting = false
-  /** The wire's open POST is unanswered: the server holds a POST on the wire until it has the open. */
-  private openPending = false
-  private startTimer: ReturnType<typeof setTimeout> | null = null
+  private connecting: Connecting | null = null
   /** Aborts the active transport's fetches; null when no transport is active. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
@@ -108,14 +115,13 @@ class SseTransport implements UpgradeSource {
   private outbox: OutboxEntry[] = []
   private readonly windows = new Map<number, OutboxEntry>()
   private readonly lastWindowByChannel = new Map<number, OutboxEntry>()
-  /** Data whose POST failed or was refused, waiting out `heldTimer` till `heldUntil` (`hold`). */
+  /** Data whose POST failed or was refused, waiting out `heldWait` (`hold`). */
   private held: OutboxEntry[] = []
-  private heldTimer: ReturnType<typeof setTimeout> | null = null
-  private heldUntil = 0
+  /** The one wait of the held data, for the whole wire: its timer releases it at `until`. */
+  private heldWait: { timer: ReturnType<typeof setTimeout>; until: number } | null = null
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
-  private flushing = false
   /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
   private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
@@ -123,8 +129,12 @@ class SseTransport implements UpgradeSource {
   private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
-  /** The body of the batch POST out, 0 with none. */
-  private postOutBytes = 0
+  /** The body of the batch POST out, 0 till it is encoded; null with none out. */
+  private postOutBytes: number | null = null
+  /** A batch POST is out. */
+  private get flushing(): boolean {
+    return this.postOutBytes !== null
+  }
   /** The frames in `outbox`. */
   private outboxBytes = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
@@ -229,26 +239,24 @@ class SseTransport implements UpgradeSource {
   }
 
   start(): void {
-    if (this.connecting || this.hasWire()) return
-    this.connecting = true
-    // Defer one reconcile window so startup code can register channels before the initial batch.
-    this.startTimer = setTimeout(() => {
-      this.startTimer = null
-      if (!this.connecting || this.hasWire()) return
+    if (this.connecting !== null || this.hasWire()) return
+    const timer = setTimeout(() => {
+      this.connecting = OPENING
       void this.openStream()
     }, SSE_RECONCILE_DEADLINE_MS)
+    this.connecting = { tag: 'deferred', timer }
+  }
+
+  private stopConnecting(): void {
+    if (this.connecting?.tag === 'deferred') clearTimeout(this.connecting.timer)
+    this.connecting = null
   }
 
   cancelAttempt(): void {
-    this.connecting = false
-    if (this.startTimer) {
-      clearTimeout(this.startTimer)
-      this.startTimer = null
-    }
+    this.stopConnecting()
     const abortController = this.transportAbort
     if (!abortController) return
     this.transportAbort = null
-    this.openPending = false
     // Its open, upload and reader end with it, and say nothing: the open's frames go back to the outbox.
     this.abandonedControllers.add(abortController)
     this.closeStreamRequest()
@@ -266,7 +274,7 @@ class SseTransport implements UpgradeSource {
   }
 
   isConnecting(): boolean {
-    return this.connecting
+    return this.connecting !== null
   }
 
   sendFrame(frame: OutboundFrame): void {
@@ -371,7 +379,8 @@ class SseTransport implements UpgradeSource {
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
       (bytes, partway) => {
-        const heartbeat = this.heartbeatOf(abortController)
+        // Once the page left this wire, its stream says nothing of the wire in use.
+        const heartbeat = this.transportAbort === abortController ? this.heartbeat : null
         if (heartbeat === null) return
         const now = performance.now()
         heartbeat.noteReceived(bytes, now)
@@ -381,7 +390,7 @@ class SseTransport implements UpgradeSource {
     void this.readEvents(reader, abortController, () => {
       if (upload) this.acknowledgeUpload(upload, abortController)
     })
-    this.connecting = false
+    this.connecting = null
     this.owner.onTransportOpen(this, startedAt)
     if (this.outbox.length > 0) void this.flushOutbox()
   }
@@ -393,7 +402,7 @@ class SseTransport implements UpgradeSource {
     abortController: AbortController,
   ): Promise<ReadableStream<Uint8Array> | null> {
     let response: Response
-    this.openPending = true
+    if (this.transportAbort === abortController) this.connecting = AWAITING_HEADERS
     try {
       response = await ssePromise
     } catch {
@@ -402,7 +411,7 @@ class SseTransport implements UpgradeSource {
       else this.failOpen(stage, abortController, {})
       return null
     } finally {
-      if (this.transportAbort === abortController) this.openPending = false
+      if (this.transportAbort === abortController) this.connecting = OPENING
     }
     // Its wire was dropped while the open went unanswered: the answer is ignored, as a successor may be opening.
     if (this.transportAbort !== abortController) {
@@ -508,7 +517,7 @@ class SseTransport implements UpgradeSource {
     this.closeStreamRequest()
     abortController.abort()
     this.transportAbort = null
-    this.connecting = false
+    this.connecting = null
     this.owner.onTransportClosed(this, answer)
   }
 
@@ -536,7 +545,7 @@ class SseTransport implements UpgradeSource {
         this.closeStreamRequest()
         this.transportAbort = null
         // Also where it ended while its upload still waited for an acknowledgement: no open is under way any more.
-        this.connecting = false
+        this.connecting = null
         // Its batch POST still in flight settles now rather than hold the next wire's outbox.
         abortController.abort()
       }
@@ -572,12 +581,6 @@ class SseTransport implements UpgradeSource {
         this.owner.onTransportFrame(paired, this, each.byteLength, this.abandonedControllers.has(abortController))
     }
     return null
-  }
-
-  /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
-   *  nothing of the wire in use. */
-  private heartbeatOf(abortController: AbortController): Heartbeat | null {
-    return this.transportAbort === abortController ? this.heartbeat : null
   }
 
   /** What the open carries: the RECONCILE and the control frames buffered behind it, never split. The open's answer
@@ -678,10 +681,10 @@ class SseTransport implements UpgradeSource {
 
   private async flushOutbox(): Promise<void> {
     // Each POST held for the open would take one of the browser's connections to the host, which the open may need.
-    if (!this.hasWire() || this.openPending || this.flushing || this.outbox.length === 0) return
+    if (!this.hasWire() || this.connecting === AWAITING_HEADERS || this.flushing || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
-    this.flushing = true
+    this.postOutBytes = 0
     const now = performance.now()
     // Every POST starts the throttle, whatever made it go: the next waits for it.
     this.lastPostStartedAt = now
@@ -692,13 +695,12 @@ class SseTransport implements UpgradeSource {
     try {
       const body = encodeSseRequest({ connId: this.connId }, queued.slice(head?.count ?? 0).map(atSend), head?.blob)
       this.postOutBytes = body.size
-      const reconcile = queued.some(isReconcile)
+      const reconcile = queued.some(({ frame }) => frame[0] === TAG.RECONCILE)
       if (reconcile) this.owner.onTransportReconcileSent(this, body.size)
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
       this.settlePost(answer, { queued, bytes: body.size, startedAt: now, reconcile })
     } finally {
-      this.flushing = false
-      this.postOutBytes = 0
+      this.postOutBytes = null
       if (this.barrierTurn) this.barrierTurn()
       else {
         this.moveToUpload()
@@ -733,7 +735,11 @@ class SseTransport implements UpgradeSource {
       this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
       // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
       // wait the answer asked for is out.
-      if (queued.length > 1) return this.resendLater(queued, answer.retryAfterMs)
+      if (queued.length > 1) {
+        if (answer.retryAfterMs > 0) this.hold(queued, answer.retryAfterMs)
+        else this.requeue(queued)
+        return
+      }
     }
     this.settleRefused(answer, queued)
   }
@@ -770,12 +776,6 @@ class SseTransport implements UpgradeSource {
     this.owner.onTransportClosed(this, endOf(answer))
   }
 
-  /** `queued` goes again once `wait` ms are out, or at once without one. */
-  private resendLater(queued: OutboxEntry[], wait: number): void {
-    if (wait > 0) this.hold(queued, wait)
-    else this.requeue(queued)
-  }
-
   /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */
   private carriesStalledOnly(queued: OutboxEntry[]): boolean {
     const stalled = this.owner.stalledChannels
@@ -797,15 +797,20 @@ class SseTransport implements UpgradeSource {
     }
     this.held = held.concat(this.held, later)
     const until = performance.now() + wait
-    if (this.held.length === 0 || (this.heldTimer !== null && until <= this.heldUntil)) return
-    if (this.heldTimer) clearTimeout(this.heldTimer)
-    this.heldUntil = until
-    this.heldTimer = setTimeout(() => this.releaseHeld(), wait)
+    if (this.held.length === 0 || (this.heldWait !== null && until <= this.heldWait.until)) return
+    this.stopHeldWait()
+    this.heldWait = { timer: setTimeout(() => this.releaseHeld(), wait), until }
+  }
+
+  private stopHeldWait(): void {
+    if (this.heldWait === null) return
+    clearTimeout(this.heldWait.timer)
+    this.heldWait = null
   }
 
   /** The wait ended: what the server still lacks goes back to the head of the outbox. */
   private releaseHeld(): void {
-    this.heldTimer = null
+    this.heldWait = null
     const held = this.held.filter((entry) => this.owner.stillOwed(entry.frame))
     this.held = []
     this.requeue(held)
@@ -818,8 +823,7 @@ class SseTransport implements UpgradeSource {
   /** The held data goes with its wire, as the next one opens, or with the barrier that leaves it: the next wire's replay
    *  sends what the server lacks. */
   private dropHeld(): void {
-    if (this.heldTimer) clearTimeout(this.heldTimer)
-    this.heldTimer = null
+    this.stopHeldWait()
     this.held = []
   }
 
@@ -840,7 +844,7 @@ class SseTransport implements UpgradeSource {
   }
 
   headroom(): number {
-    return this.streamRequest.tag === 'active' ? Infinity : this.postBytes - this.postOutBytes - this.outboxBytes
+    return this.streamRequest.tag === 'active' ? Infinity : this.postBytes - (this.postOutBytes ?? 0) - this.outboxBytes
   }
 
   /** A batch POST out past its deadline is given up, as a wire that missed its pong: its wire reconnects, resending what
@@ -1003,8 +1007,7 @@ class SseTransport implements UpgradeSource {
     if (!abortController) return
     this.transportAbort = null
     // An open still unanswered goes with its wire: the next `start()` opens another.
-    this.connecting = false
-    this.openPending = false
+    this.connecting = null
     // Its upload goes with it, aborted with its controller (`openUpload`).
     if (this.streamRequest.tag === 'active' || this.streamRequest.tag === 'probing')
       this.streamRequest = { tag: 'idle' }
@@ -1054,11 +1057,7 @@ class SseTransport implements UpgradeSource {
 
   dispose(): void {
     if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide)
-    this.connecting = false
-    if (this.startTimer) {
-      clearTimeout(this.startTimer)
-      this.startTimer = null
-    }
+    this.stopConnecting()
     this.flushScheduler.cancel()
     this.takeOutbox()
     this.dropHeld()
@@ -1105,10 +1104,6 @@ function isDataOf(entry: OutboxEntry, ix: number): boolean {
 function isSequenced({ frame }: OutboxEntry): boolean {
   const tag = frame[0]
   return tag !== undefined && isSequencedTag(tag)
-}
-
-function isReconcile({ frame }: OutboxEntry): boolean {
-  return frame[0] === TAG.RECONCILE
 }
 
 /** Credit refreshes are keyed by channel, timed reports by channel and lastSeq. */

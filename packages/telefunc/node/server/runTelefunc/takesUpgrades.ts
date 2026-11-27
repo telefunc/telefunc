@@ -1,11 +1,11 @@
 export { noUpgrades, telefuncsUpgradesOn, upgradesTakenHere, upgradeServers, upgradesOfServer, upgradesOfSocketServer }
 export type { TakenServer, TakesUpgrades }
 
-import type { IncomingMessage } from 'node:http'
 import type { Readable } from 'node:stream'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import type { TakesUpgrades } from '../../../wire-protocol/channel/server/ChannelMux.js'
+import type { CallbackInFront } from '../../../workarounds/nodeShouldUpgradeCallback.js'
 
 /** A `Request` handed over without its server, as Bun's and Deno's generic `serve({ request })` and the primitives form
  *  get it: its page is offered SSE, which works, and never an upgrade that fails. */
@@ -16,19 +16,15 @@ const noUpgrades: TakesUpgrades = () => false
 const upgradesTakenHere: TakesUpgrades = () => true
 
 /** Telefunc's take of a Node server, kept for the server's life: the `upgrade` listener Telefunc put on it and, where
- *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`own`), as the server can't tell
- *  which of its functions are Telefunc's. `holdsRegistry`: the server is in 0.3.1's registry for Telefunc's listener.
- *  A removal of the listener that Telefunc's `removeListener` listener didn't see leaves it there, so 0.3.1's next
- *  install skips the server, until this copy's next `installWebSocket()` takes it again. */
+ *  Node reads one, the `shouldUpgradeCallback` it put in front of the server's own (`wrapped`), as the server can't tell
+ *  which of its functions are Telefunc's. */
 type TakenServer = {
   server: {
     listenerCount(event: 'upgrade', listener: (...args: never[]) => void): number
     shouldUpgradeCallback?: unknown
   }
   listener: (...args: never[]) => void
-  callback: ((req: IncomingMessage) => boolean) | undefined
-  own: ((req: IncomingMessage) => unknown) | undefined
-  holdsRegistry: boolean
+  wrapped: CallbackInFront | null
 }
 
 const { upgradeServers } = getGlobalObject('node/server/runTelefunc/takesUpgrades.ts', {
@@ -48,7 +44,7 @@ function upgradesOfServer(server: object): TakesUpgrades {
 function telefuncsUpgradesOn(server: object): 'nothing' | 'listener' | 'listener and callback' {
   const taken = upgradeServers.get(server)
   if (taken === undefined || taken.server.listenerCount('upgrade', taken.listener) === 0) return 'nothing'
-  if (taken.callback !== undefined && taken.server.shouldUpgradeCallback !== taken.callback) return 'listener'
+  if (taken.wrapped !== null && taken.server.shouldUpgradeCallback !== taken.wrapped.callback) return 'listener'
   return 'listener and callback'
 }
 
