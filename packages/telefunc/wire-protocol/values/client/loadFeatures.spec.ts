@@ -148,8 +148,6 @@ async function warmStreams(call: (args: unknown[]) => Promise<unknown>) {
   await call([])
 }
 
-// Failures first: a chunk that loaded once stays loaded in this process.
-
 test('a failed chunk load rejects the call with ConnectionError, cancels its body, and the next call loads it', async () => {
   const { call, ConnectionError } = await page()
   respond = streamed({ gen: GENERATOR })

@@ -187,7 +187,7 @@ class FrameDemuxer {
     pending.push(payload)
     const newBytes = (this.pendingBytes.get(index) ?? 0) + payload.byteLength
     this.pendingBytes.set(index, newBytes)
-    // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
+    // Per-index backpressure: once the call's values are handed out, stop reading when this index's buffer reaches 1 MiB.
     if (!this.canStopReading || newBytes < FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) return false
     this.pausedByIndex = index
     return true

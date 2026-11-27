@@ -6,7 +6,8 @@ import { assertUsage } from '../../../utils/assert.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ConnectionError } from '../../../client/ConnectionError.js'
 
-/** The client code a call needs only for the values it carries, each loaded by the first call that carries one. */
+/** The client code a call needs only for the values it carries, each loaded by the first call that carries one, unless
+ *  an extension's import of `telefunc/__internal` loaded it with the page. */
 type Features = {
   /** Streams, files and promises a response's own body carries. */
   streams?: typeof import('./streams.js')
@@ -25,7 +26,8 @@ function loadedFeatures(): Features {
   return globalObject.loaded
 }
 
-/** Loads `features` for a call (see `callWaitsFor()`), each once per page, and again after a load that failed. */
+/** Loads `features` for a call (see `callWaitsFor()`), each once per page; after a load that failed, the next call that
+ *  needs it calls `import()` again. */
 async function loadFeatures(features: Feature[], call: WaitingCall): Promise<Features> {
   await callWaitsFor(call, () => Promise.all(features.map(loadFeature)))
   return globalObject.loaded
@@ -85,7 +87,7 @@ async function importFeature(feature: Feature): Promise<void> {
     if (feature === 'channels') loaded.channels = await import('./channels.js')
     if (feature === 'broadcasts') loaded.broadcasts = await import('./broadcasts.js')
   } catch (err) {
-    // The next call that needs it tries again: the chunk may be back (a deploy, a network that recovered).
+    // The next call that needs it calls import() again, which loads the chunk in browsers that retry a failed module fetch (whatwg/html#10327).
     delete globalObject.loading[feature]
     throw err
   }

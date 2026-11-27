@@ -94,7 +94,7 @@ async function parseStreamedResponse(
     return await reviveResponse(metaText, callContext, connection, streamReader)
   } catch (err) {
     if (streamReader) streamReader.cancel()
-    // An errored body rejects its cancel; that error already reached the call.
+    // An errored body rejects its cancel: ignoring that keeps the call's original failure, the body's or the import's.
     else body.cancel().catch(() => {})
     throw err
   }
