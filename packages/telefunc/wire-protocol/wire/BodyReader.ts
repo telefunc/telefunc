@@ -56,24 +56,8 @@ class StreamTruncatedError extends Error {
   }
 }
 
-/**
- * Pull-based byte-counting reader of a request body in the binary frame protocol.
- *
- * Wire format: [u32 metadata length][metadata bytes][file0 bytes][file1 bytes]...
- * File sizes are known from the metadata — no boundary scanning needed,
- * just read exact byte counts sequentially.
- *
- * Accepts either a Web `ReadableStream` or a Node `Readable`. The caller picks —
- * the Node `serve()` adapter passes `IncomingMessage` directly to skip the
- * `Readable.toWeb` round-trip (whose pure-JS `dequeueValue` dominates CPU on hot
- * SSE / binary-RPC paths); other adapters pass `request.body`. Both shapes
- * collapse to one `ChunkSource` so the rest of the class is
- * source-agnostic, and both can be let go of with a read under way (`letGo`).
- *
- * Fields use TS `private` rather than JS `#private`: the inner read loop touches
- * `buffer`/`source` per chunk, and `#fields` compile to per-access `WeakMap.get/set`
- * which dominates CPU on hot streaming paths. Plain property access is cheap.
- */
+/** Reads [u32 metadata length][metadata bytes][file0 bytes][file1 bytes]... from a Web or Node stream, using the file
+ *  sizes declared in the metadata. */
 class BodyReader {
   private readonly source: ChunkSource
   private buffer: Uint8Array<ArrayBuffer> = EMPTY
