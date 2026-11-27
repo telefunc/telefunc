@@ -72,23 +72,17 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const telefunctionReturnPromise = sendCall(callContext)
+  // The arguments are serialized at the call's invocation, where a serialization error throws.
+  const request = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, request)
+  const telefunctionReturnPromise = request.prepareChannels
+    ? sendOnceChannelsPrepared(request.prepareChannels, callContext)
+    : makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
-}
-
-type CallContext = Parameters<typeof serializeTelefunctionArguments>[0] &
-  Omit<Parameters<typeof makeHttpRequest>[0], 'httpRequestBody' | 'requestCloseHandlers'>
-
-/** Sends the call. Its arguments are serialized now, at its invocation, where a serialization error throws. */
-function sendCall(callContext: CallContext): Promise<unknown> {
-  const request = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, request)
-  if (request.prepareChannels) return sendOnceChannelsPrepared(request.prepareChannels, callContext)
-  return makeHttpRequest(callContext)
 }
 
 /** A cold call sends what its invocation serialized once its claimed values' channels are prepared. */
