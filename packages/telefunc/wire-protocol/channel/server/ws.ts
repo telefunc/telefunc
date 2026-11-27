@@ -13,8 +13,8 @@ import { upgradeRefusal } from './upgradeOrigin.js'
 import { guardCrosswsHook, getCrosswsNamespace } from '../../../workarounds/crosswsHooks.js'
 
 /** crossws's options for Telefunc's channels. `bufferedAmount` reads the socket's, which crossws reads as 0 where the
- *  socket has none: workerd's, whose adapter passes `() => undefined`. `wireRequest` is the request the upgrade hook
- *  got, which crossws's peer carries as `peer.request` on every runtime but Node. */
+ *  socket has none: workerd's, whose adapter passes `() => undefined`. For `wireRequest`, crossws carries the upgrade
+ *  request's URL and headers as `peer.request` on every runtime but Node. */
 function getTelefuncChannelOptions({
   upgrade,
   send = (peer, frame) => peer.send(frame),
