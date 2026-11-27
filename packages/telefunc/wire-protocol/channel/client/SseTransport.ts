@@ -379,7 +379,8 @@ class SseTransport implements UpgradeSource {
       body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
       (bytes, partway) => {
-        const heartbeat = this.heartbeatOf(abortController)
+        // Once the page left this wire, its stream says nothing of the wire in use.
+        const heartbeat = this.transportAbort === abortController ? this.heartbeat : null
         if (heartbeat === null) return
         const now = performance.now()
         heartbeat.noteReceived(bytes, now)
@@ -582,12 +583,6 @@ class SseTransport implements UpgradeSource {
     return null
   }
 
-  /** The heartbeat of the wire `abortController` aborts; none once the page left that wire, whose stream then says
-   *  nothing of the wire in use. */
-  private heartbeatOf(abortController: AbortController): Heartbeat | null {
-    return this.transportAbort === abortController ? this.heartbeat : null
-  }
-
   /** What the open carries: the RECONCILE and the control frames buffered behind it, never split. The open's answer
    *  owns them: refused, the open fails (`failOpen`) and they go back to the outbox for the next wire. */
   private stageInitialBatch(): SseInitialBatchStage {
@@ -700,7 +695,7 @@ class SseTransport implements UpgradeSource {
     try {
       const body = encodeSseRequest({ connId: this.connId }, queued.slice(head?.count ?? 0).map(atSend), head?.blob)
       this.postOutBytes = body.size
-      const reconcile = queued.some(isReconcile)
+      const reconcile = queued.some(({ frame }) => frame[0] === TAG.RECONCILE)
       if (reconcile) this.owner.onTransportReconcileSent(this, body.size)
       const answer = await this.answerOn(this.postWithDeadline(body, wire.signal), wire)
       this.settlePost(answer, { queued, bytes: body.size, startedAt: now, reconcile })
@@ -740,7 +735,11 @@ class SseTransport implements UpgradeSource {
       this.postBytes = Math.min(this.postBytes, this.owner.ssePostLimit)
       // Refused whole, for its size: the server has none of it, and its frames go again in smaller POSTs, once the
       // wait the answer asked for is out.
-      if (queued.length > 1) return this.resendLater(queued, answer.retryAfterMs)
+      if (queued.length > 1) {
+        if (answer.retryAfterMs > 0) this.hold(queued, answer.retryAfterMs)
+        else this.requeue(queued)
+        return
+      }
     }
     this.settleRefused(answer, queued)
   }
@@ -775,12 +774,6 @@ class SseTransport implements UpgradeSource {
     this.requeue(queued)
     this.abandonActiveTransport()
     this.owner.onTransportClosed(this, endOf(answer))
-  }
-
-  /** `queued` goes again once `wait` ms are out, or at once without one. */
-  private resendLater(queued: OutboxEntry[], wait: number): void {
-    if (wait > 0) this.hold(queued, wait)
-    else this.requeue(queued)
   }
 
   /** Whether `queued` carries sequenced data, all of channels whose data the server hasn't confirmed since a loss. */
@@ -1111,10 +1104,6 @@ function isDataOf(entry: OutboxEntry, ix: number): boolean {
 function isSequenced({ frame }: OutboxEntry): boolean {
   const tag = frame[0]
   return tag !== undefined && isSequencedTag(tag)
-}
-
-function isReconcile({ frame }: OutboxEntry): boolean {
-  return frame[0] === TAG.RECONCILE
 }
 
 /** Credit refreshes are keyed by channel, timed reports by channel and lastSeq. */

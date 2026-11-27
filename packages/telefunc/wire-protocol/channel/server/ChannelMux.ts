@@ -148,11 +148,6 @@ type MuxServerOptions = {
  *  session cause, which each channel of the session ends with. */
 type WireClose = 'transient' | 'pageLeft' | SessionCause
 
-/** Whether a wire closed `how` ended its session for good, with that cause. */
-function endedSession(how: WireClose): how is SessionCause {
-  return how !== 'transient' && how !== 'pageLeft'
-}
-
 /** A session as one wire held it: its id, and the page's number for that wire. */
 type SessionHold = { sessionId: string; attempt: number }
 
@@ -209,7 +204,10 @@ class ChannelMux implements UpgradeStagesOwner {
   private readonly channels = new Map<string, MuxChannel>()
   /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
   private readonly registrationWaits = new RegistrationWaits()
-  private readonly sessions = new SessionRegistry({ retiredLeavesAt: () => performance.now() + this.keptEndWindow() })
+  private readonly sessions = new SessionRegistry({
+    retiredLeavesAt: () =>
+      performance.now() + keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout),
+  })
   private readonly wires = new Map<unknown, WireEntry>()
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream wire, and catches a duplicate-connId reconnect racing teardown. */
@@ -602,7 +600,8 @@ class ChannelMux implements UpgradeStagesOwner {
       // frame names the page names again on its next wire. Once the wire ended its session, the page names its channels
       // on no other wire, and those a RECONCILE queued behind that end names end with its cause.
       if (entry.closed !== null) {
-        if (endedSession(entry.closed)) this.refuseReconciled(entry, rawFrame, entry.closed)
+        if (entry.closed !== 'transient' && entry.closed !== 'pageLeft')
+          this.refuseReconciled(entry, rawFrame, entry.closed)
         return null
       }
       return (await this.handleFrame(entry, rawFrame)) ?? null
@@ -639,7 +638,7 @@ class ChannelMux implements UpgradeStagesOwner {
       return this.closeWire(entry, { how: 'transient', refusal: null })
     }
     // The instant a session's end, where this is one, is kept until: counted from the decision, before its teardown.
-    const keptUntil = performance.now() + this.keptEndWindow()
+    const keptUntil = performance.now() + keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout)
     // A wire the end closes says it as its last word: what its channels send on it from here goes no more, kept in
     // their replay for their next attach.
     if (fault.scope !== 'channel' || fault.wire !== 'kept') entry.sender.close('first')
@@ -662,21 +661,11 @@ class ChannelMux implements UpgradeStagesOwner {
     this.closeWire(entry, { how: cause, refusal: frameRefusal(cause, undefined) })
   }
 
-  /** How long a session's record is kept from the time the server decided it. */
-  private keptEndWindow(): number {
-    return keptEndWindowOf(this.options.pingInterval, this.options.reconnectTimeout)
-  }
-
-  /** The channels of the session `entry`'s wire holds, by index; undefined while it holds none. */
-  private sessionOf(entry: WireEntry): ReadonlyMap<number, ChannelHandle> | undefined {
-    return entry.holds?.channels
-  }
-
   /** Ends the channel at `ix` with `cause` where the session holds it, or keeps the cause for its registration where
    *  the wire awaits it; false where neither, as for a frame that names no channel. */
   private endChannelAt(entry: WireEntry, ix: number | undefined, cause: FrameRefusalCause): boolean {
     if (ix === undefined) return false
-    const handle = this.sessionOf(entry)?.get(ix)
+    const handle = entry.holds?.channels.get(ix)
     if (handle) {
       handle.channel._onServerEnd(cause)
       return true

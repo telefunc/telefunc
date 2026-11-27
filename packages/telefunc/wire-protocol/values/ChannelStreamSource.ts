@@ -120,19 +120,13 @@ class ChannelStreamSource {
       for (let frame: Uint8Array<ArrayBuffer> | null = first; frame !== null; frame = await this.readNextFrame()) {
         parts.push(frame.subarray(1))
         if (frame[0] !== CHANNEL_PUMP_TAG_PART) return concatAll(parts)
-        this.holdPart(frame.byteLength)
+        if (this.memory && !this.memory.tryHold(frame.byteLength)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
         held += frame.byteLength
       }
       return null
     } finally {
       this.memory?.letGo(held)
     }
-  }
-
-  /** Counts a part of `bytes` that this reader keeps, and throws where the server can't hold it. */
-  private holdPart(bytes: number): void {
-    if (!this.memory) return
-    if (!this.memory.tryHold(bytes)) throw new ChannelOverflowError(CHUNK_OVERFLOW_TEXT)
   }
 
   /** The stream's next data frame, a chunk or a part of one: null at its end, and an error frame throws. */

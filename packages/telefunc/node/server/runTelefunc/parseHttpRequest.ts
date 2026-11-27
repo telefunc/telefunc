@@ -206,7 +206,11 @@ async function readBody(
 > {
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
-    if (!source) return refuseEndedEnvelope(runContext)
+    // No Telefunc client sends a binary request without a body.
+    if (!source) {
+      logParseError('The binary request ends before its envelope is complete.', runContext)
+      return { isMalformedRequest: true }
+    }
     const reader = new BodyReader(source, clientLeft, queueMemory)
     reader.onEnd = runContext.onBodyRead
     // A browser delivers the answer only once it has sent the whole body: where a returned value holds the request on,
@@ -256,7 +260,8 @@ async function readBody(
     if (envelope instanceof StreamTruncatedError) {
       // A client that left, or a read nothing explains: the call's truncation.
       if (envelope.by !== 'body') throw envelope
-      return refuseEndedEnvelope(runContext)
+      logParseError('The binary request ends before its envelope is complete.', runContext)
+      return { isMalformedRequest: true }
     }
     return {
       isMalformedRequest: false,
@@ -286,13 +291,6 @@ async function readBody(
 async function giveUpOnceReadSettled(reader: BodyReader): Promise<void> {
   await reader.readSettled()
   reader.clientGaveUp()
-}
-
-/** A binary request whose body ends before its envelope is complete: no body (a Web `Request`'s `null`), an empty one, or
- *  one whose own end cuts its metadata. No Telefunc client sends one, so it is malformed. */
-function refuseEndedEnvelope(runContext: RunContext): { isMalformedRequest: true } {
-  logParseError('The binary request ends before its envelope is complete.', runContext)
-  return { isMalformedRequest: true }
 }
 
 /** At the call's end, reads the rest of its body, kept for each File the app can still read and else dropped: a

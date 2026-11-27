@@ -1283,7 +1283,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this.offlineBuffer.rejectAcks(ackErr)
     }
     this.pendingAcks.clear()
-    this.letAnsweringGo()
+    // Nothing answers its requests once it ends, so what they held goes.
+    for (const held of this.answering.values()) letGo(this, held)
+    this.answering.clear()
   }
 
   /** Its send that waited for room is never made: an end that sends its own word made it first (`sendWaitingNow`), so
@@ -1294,12 +1296,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.roomWait = null
     waiting.wait.cancel()
     waiting.reject(this.lifecycle.waitingSendOutcome ?? err ?? this.endError())
-  }
-
-  /** Nothing answers its requests once it ends, so what they held goes. */
-  private letAnsweringGo(): void {
-    for (const held of this.answering.values()) letGo(this, held)
-    this.answering.clear()
   }
 
   /** @internal `MemoryHolder`: ended with its page in the close, which confirmed reading what the server sent of it up to

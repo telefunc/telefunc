@@ -20,17 +20,12 @@ function denoHooks(hooks: Pick<Hooks, 'upgrade' | 'open' | 'message' | 'close' |
   return {
     upgrade: hooks.upgrade,
     open(peer) {
-      onDenoPeerClose(peer, hooks.close)
+      assert(peer.websocket.addEventListener)
+      peer.websocket.addEventListener('close', (event) => hooks.close(peer, { code: event.code, reason: event.reason }))
       return hooks.open(peer)
     },
     message: hooks.message,
     close() {},
     error: hooks.error,
   }
-}
-
-/** Calls `close` at `peer`'s close, with its code and reason. */
-function onDenoPeerClose(peer: Peer, close: (peer: Peer, details: { code: number; reason: string }) => void): void {
-  assert(peer.websocket.addEventListener)
-  peer.websocket.addEventListener('close', (event) => close(peer, { code: event.code, reason: event.reason }))
 }

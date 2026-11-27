@@ -176,7 +176,8 @@ class ServerHeadroom implements PieceSenderOwner, WireQueue {
   copyRoom(): number {
     if (hasCopyRoom()) return Number.POSITIVE_INFINITY
     // What this task gathered goes with its message, so it takes copy room as handed bytes do.
-    const room = WIRE_SEND_AHEAD_MIN_BYTES - this.unconfirmed() - this.sender.ungivenBytes
+    const unconfirmed = this.sender.transmittedBytes - this.sender.confirmedBytes
+    const room = WIRE_SEND_AHEAD_MIN_BYTES - unconfirmed - this.sender.ungivenBytes
     // Where copy room and not the window holds what waits, its end frees it with no word from the page: look again.
     if (room < this.headroom()) this.awaitsCopyRoom = true
     if (room >= WIRE_PIECES_ACK_BYTES) return room

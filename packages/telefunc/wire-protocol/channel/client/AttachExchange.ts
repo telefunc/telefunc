@@ -371,7 +371,7 @@ class AttachExchange {
     this.reconciledWait = {
       receipt: receipted ? 'awaited' : 'none',
       timeoutMs: RECONCILE_TIMEOUT_MS,
-      timer: this.reconcileDeadlineIn(RECONCILE_TIMEOUT_MS),
+      timer: setTimeout(() => this.onReconcileTimeout(), RECONCILE_TIMEOUT_MS),
       carrierOut: false,
       inFlight,
     }
@@ -420,7 +420,7 @@ class AttachExchange {
 
   private armReconcileDeadline(wait: ReconciledWait, ms: number): void {
     clearTimeout(wait.timer)
-    wait.timer = this.reconcileDeadlineIn(ms)
+    wait.timer = setTimeout(() => this.onReconcileTimeout(), ms)
   }
 
   private reconcileDeadlineIn(ms: number): ReturnType<typeof setTimeout> {

@@ -592,7 +592,9 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     }
     // No reconnect reaches a server that speaks this page's wire.
     if (otherWireVersion) {
-      this.loseConnection(new NetworkError('The server was updated since this page loaded: reload the page.', true))
+      const err = new NetworkError('The server was updated since this page loaded: reload the page.', true)
+      for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
+      this.dispose()
       return
     }
     if (route !== undefined) {
@@ -1050,12 +1052,6 @@ class WireLifecycle implements TransportOwner, SendGateOwner, LivenessOwner, Upg
     this.gate.dropQueue(record.ix)
     // What its frames held back may go.
     this.gate.sendRunnable()
-  }
-
-  /** No wire can reach the server again: its channels' connection is lost for good. */
-  private loseConnection(err: Error): void {
-    for (const { channel } of this.channels.values()) channel._onConnectionLost(err)
-    this.dispose()
   }
 
   private closeAll(err: Error): void {

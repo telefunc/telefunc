@@ -52,7 +52,7 @@ function telefunc(): TelefuncServe {
       // where the signal stops counting (`runTelefunc`), so that abort is never taken for the client leaving. A read
       // under way may fail only once the response ends.
       const httpResponse = await serveRuntimeRequest(context ? { request, context } : { request }, {
-        clientLeft,
+        clientLeft: (err) => isDenoConnectionError(err, globalThis),
         clientGone: request.signal,
         takesUpgrades: upgradesTakenHere,
       })
@@ -62,12 +62,7 @@ function telefunc(): TelefuncServe {
 }
 
 /** Deno.serve fails the read of a request it made with its own `BadResource` (the client closed) or `Http` (the client
- *  reset) error. */
-function clientLeft(err: unknown): boolean {
-  return isDenoConnectionError(err, globalThis)
-}
-
-/** `global` is `globalThis`, whose `Deno` isn't typed here. */
+ *  reset) error. `global` is `globalThis`, whose `Deno` isn't typed here. */
 function isDenoConnectionError(err: unknown, global: object): boolean {
   if (!hasProp(global, 'Deno', 'object') || !hasProp(global.Deno, 'errors', 'object')) return false
   const { errors } = global.Deno
