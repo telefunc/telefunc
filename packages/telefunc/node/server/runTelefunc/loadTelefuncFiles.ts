@@ -14,12 +14,24 @@ async function loadTelefuncFiles(runContext: {
   telefuncFilesManuallyProvidedByUser: string[] | null
   telefuncFilePath: string
 }): Promise<{ telefuncFilesLoaded: TelefuncFiles; telefuncFilesAll: string[] }> {
+  const registered = loadTelefuncFilesUsingRegistration()
+
+  // Standalone telefunctions defined via defineTelefunctions()
+  if (runContext.telefuncFilePath === '' && registered && registered['']) {
+    const telefuncFilesAll = Object.keys(registered)
+    return { telefuncFilesLoaded: registered, telefuncFilesAll }
+  }
+
   // - The user can manually provide the list of `.telefunc.js` files using `config.telefuncFiles`
   {
     if (runContext.telefuncFilesManuallyProvidedByUser) {
       assert(hasProp(runContext, 'telefuncFilesManuallyProvidedByUser', 'string[]')) // Help TS narrow `runContext`
-      const { telefuncFilesLoaded, telefuncFilesAll } = await loadTelefuncFilesFromConfig(runContext)
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('manually provided by user'))
+      const res = await loadTelefuncFilesFromConfig(runContext)
+      const telefuncFilesLoaded: TelefuncFiles = { ...registered, ...res.telefuncFilesLoaded }
+      const telefuncFilesAll = Array.from(
+        new Set([...(registered ? Object.keys(registered) : []), ...res.telefuncFilesAll]),
+      )
+      assertUsage(telefuncFilesAll.length > 0, getNothingFoundErr('manually provided by user'))
       return { telefuncFilesLoaded, telefuncFilesAll }
     }
   }
@@ -34,25 +46,20 @@ async function loadTelefuncFiles(runContext: {
   {
     const res = await loadTelefuncFilesUsingVite(runContext, false)
     if (res) {
-      const { telefuncFilesLoaded, viteProvider, telefuncFilesAll } = res
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr(viteProvider))
+      const telefuncFilesLoaded: TelefuncFiles = { ...registered, ...res.telefuncFilesLoaded }
+      const telefuncFilesAll = Array.from(
+        new Set([...(registered ? Object.keys(registered) : []), ...res.telefuncFilesAll]),
+      )
+      assertUsage(telefuncFilesAll.length > 0, getNothingFoundErr(res.viteProvider))
       return { telefuncFilesLoaded, telefuncFilesAll }
     }
   }
 
-  // - Next.js
-  // - Nuxt 2
-  // - Vite in production if @brillout/vite-plugin-server-entry fails (see comment above)
-  {
-    const telefuncFilesLoaded = loadTelefuncFilesUsingRegistration()
-    if (telefuncFilesLoaded) {
-      const telefuncFilesAll = Object.keys(telefuncFilesLoaded)
-      assertUsage(Object.keys(telefuncFilesAll).length > 0, getNothingFoundErr('automatic registration'))
-      return { telefuncFilesLoaded, telefuncFilesAll }
-    }
+  if (registered && Object.keys(registered).length > 0) {
+    return { telefuncFilesLoaded: registered, telefuncFilesAll: Object.keys(registered) }
   }
 
-  if (isVikeApp() || !isWebpack()) {
+  if (isVikeApp()) {
     // Show [manual import error](https://github.com/brillout/vite-plugin-server-entry#manual-import):
     // ```
     // [@brillout/vite-plugin-server-entry][Wrong Usage] The server production entry is missing.
@@ -65,7 +72,12 @@ async function loadTelefuncFiles(runContext: {
     assert(false) // loadTelefuncFilesUsingVite() should have thrown the assertUsage() error above
   } else {
     // Generic message
-    assertUsage(false, `Couldn't find method for retrieving ${pc.cyan('.telefunc.js')} files. Is your stack supported?`)
+    assertUsage(
+      false,
+      `No telefunction registered. Did you define telefunctions with ${pc.cyan(
+        'defineTelefunctions()',
+      )} or create ${pc.cyan('.telefunc.{js|ts|...}')} files?`,
+    )
   }
 }
 

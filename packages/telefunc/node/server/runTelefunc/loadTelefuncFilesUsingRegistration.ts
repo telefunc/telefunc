@@ -2,6 +2,7 @@
 
 export { loadTelefuncFilesUsingRegistration }
 export { registerTelefunction }
+export { clearRegistration }
 
 import { TelefuncFiles, Telefunction } from '../types.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -20,4 +21,8 @@ function registerTelefunction(telefunction: Telefunction, exportName: string, te
     ...g.telefuncFilesLoaded[telefuncFilePath],
     [exportName]: telefunction,
   }
+}
+
+function clearRegistration() {
+  g.telefuncFilesLoaded = null
 }

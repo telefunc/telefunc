@@ -7,22 +7,43 @@ Telefunc can be used in any JavaScript environment without using a transformer b
 
 ## Without transformer
 
+You can use Telefunc without a transformer (e.g. in NestJS, Express, Fastify, Bun, or standalone backend repos) using `defineTelefunctions()` on the server and `createClient()` on the client:
+
 ```ts
-// TodoList.ts
-// Environment: client
+// server/api.ts
+// Environment: server (NestJS, Express, Fastify, Hono, Bun: no Vite, no transform)
+import { defineTelefunctions, shield, Channel } from 'telefunc'
 
-import { defineTelefunction } from 'telefunc/client'
-import type { onNewTodo as onNewTodoType } from './TodoList.telefunc.ts'
-const onNewTodo = defineTelefunction<typeof onNewTodoType>('TodoList.telefunc.ts', 'onNewTodo')
-
-async function onClick(form) {
-  const text = form.input.value
-  // Exactly as usual, including TypeScript support
-  await onNewTodo({ text })
-}
+export const api = defineTelefunctions({
+  watchOrders: async () => {
+    const channel = new Channel<never, (event: OrderEvent) => void>()
+    const unsubscribe = orders.subscribe((event) => channel.send(event))
+    channel.onClose(unsubscribe)
+    return channel.client
+  },
+  createOrder: shield(
+    [shield.type.string, shield.type.number],
+    async (sku: string, qty: number) => orders.create(sku, qty),
+  ),
+})
+export type Api = typeof api
 ```
 
-> This feature is not implemented yet, reach out on GitHub if you need this.
+```ts
+// client/api.ts
+// Environment: client (any bundler, or none)
+import { createClient } from 'telefunc/client'
+import type { Api } from '../server/api'
+
+const server = createClient<Api>({ url: 'https://api.example.com/_telefunc' })
+
+const orders = await server.watchOrders()
+orders.listen((event) => render(event))
+
+await server.createOrder('product-1', 2)
+```
+
+> Standalone telefunctions defined without `shield()` accept zero arguments by default (calls carrying arguments receive a 422 `ShieldValidationError`). To accept an argument of any type, declare `shield([shield.type.any], ...)` (or provide a validator for each parameter).
 
 ## Vite plugin
 

@@ -97,7 +97,7 @@ async function loadViteGlobbedFiles(telefuncFilesGlob: GlobFiles, runContext: { 
       Object.entries(telefuncFilesGlob)
         .filter(([telefuncFilePath]) => {
           assert(isTelefuncFilePath(telefuncFilePath))
-          assert(isTelefuncFilePath(runContext.telefuncFilePath))
+          if (!runContext.telefuncFilePath || !isTelefuncFilePath(runContext.telefuncFilePath)) return false
           return telefuncFilePath === runContext.telefuncFilePath
         })
         .map(async ([telefuncFilePath, loadModuleExports]) => [telefuncFilePath, await loadModuleExports()]),
