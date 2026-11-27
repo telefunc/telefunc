@@ -484,7 +484,8 @@ encodeCamera((frame, isKeyframe) =>
   me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe, lossy: true }),
 )
 
-// The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
+// The participants who watch; showVideo(): your decoder wrapper, e.g. around WebCodecs' VideoDecoder,
+// which waits for a keyframe per member
 const watch = (member) =>
   member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.meta.isKeyframe), { track: 'camera' })
 for (const member of room.getParticipants()) watch(member)
@@ -554,7 +555,7 @@ me.onChange(showWatching)
 
 ## Give late joiners the current state
 
-Publish with `retain: true`, and a room that starts listening later receives that message first:
+Use `retain: true` to give late subscribers the latest state.
 
 ```js
 // Environment: client
