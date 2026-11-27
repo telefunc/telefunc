@@ -749,13 +749,20 @@ async function onGetWatchedCount(roomId: string) {
 
 const releaseKeepers = new Map<string, LocalParticipant>()
 
-/** Server action roomRelease_<roomId> sets cleanupState roomRelease_<roomId> to what the server still holds. */
+/**
+ * Server action roomRelease_<roomId> sets cleanupState roomRelease_<roomId> to what the server still holds.
+ * It stays after it runs, so the test can run it after each GC round: it holds only weak references.
+ */
 async function onRoomRelease(roomId: string) {
   const refs = await releaseRefs(roomId)
-  onServerAction(`roomRelease_${roomId}`, () => {
-    const held = Object.entries(refs).map(([name, ref]) => `${name}:${ref.deref() ? 'held' : 'released'}`)
-    cleanupState[`roomRelease_${roomId}`] = held.join()
-  })
+  onServerAction(
+    `roomRelease_${roomId}`,
+    () => {
+      const held = Object.entries(refs).map(([name, ref]) => `${name}:${ref.deref() ? 'held' : 'released'}`)
+      cleanupState[`roomRelease_${roomId}`] = held.join()
+    },
+    { once: false },
+  )
 }
 
 // Apart from onRoomRelease: a closure made there would share the scope that holds them.
