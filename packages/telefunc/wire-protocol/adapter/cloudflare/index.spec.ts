@@ -247,6 +247,19 @@ describe('cloudflare adapter entrypoint', () => {
     )
   })
 
+  it('shares the backend between an omitted locationFallback and its default', () => {
+    new Telefunc()
+    new Telefunc({ locationFallback: 'weur' })
+
+    expect(mocks.transportInstances).toHaveLength(1)
+  })
+
+  it('refuses a second install whose locationFallback differs', () => {
+    new Telefunc()
+
+    expect(() => new Telefunc({ locationFallback: 'enam' })).toThrow('Install one backend per process')
+  })
+
   it('wires the durable object runtime and delegates fetch, websocket, and broadcast methods', async () => {
     const { binding, env } = createBinding()
     const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
